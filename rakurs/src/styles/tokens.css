@@ -1,0 +1,129 @@
+/*
+ * Дизайн-токены «Ракурс». Значения перенесены из прототипа один в один.
+ * Тёмная тема объявлена на :root, светлая — на :root[data-theme="light"].
+ * Светлая тема считается темой по умолчанию, выбор пишется в localStorage['rakurs-theme'].
+ */
+
+:root {
+  /* поверхности */
+  --page: #0a0c0b;
+  --panel: #0c100f;
+  --card: #101413;
+  --sunken: #0f1413;
+  --sunken-2: #0b0f0e;
+  --seg: #131817;
+  --seg-on: #1d2523;
+  --raise: #151a19;
+  --avatar-bg: #1b2422;
+  --heat0: #121716;
+  --heat0-bd: #181e1d;
+  --track: #1a201f;
+
+  /* границы */
+  --line: #1c2321;
+  --line-soft: #171d1b;
+  --line-2: #1e2624;
+  --line-3: #232b29;
+  --line-strong: #2a3230;
+
+  /* текст */
+  --text: #e8edeb;
+  --text-2: #d5dedb;
+  --text-3: #b9c4c1;
+  --text-4: #96a29e;
+  --text-muted: #7e8b87;
+  --text-dim: #6f7c78;
+  --text-faint: #5f6d69;
+
+  /* акценты и статусы */
+  --accent: #12b37d;
+  --accent-2: #0d9668;
+  --accent-3: #0fa874;
+  --accent-4: #0b7a55;
+  --accent-hover: #3ed39b;
+  --on-accent: #04150f;
+  --danger: #e5776c;
+  --danger-2: #d8574c;
+  --warn: #d9a13c;
+
+  /*
+   * Полупрозрачные наложения одинаковы в обеих темах — они заданы напрямую,
+   * а не через прозрачность токена, чтобы не зависеть от фона под ними.
+   */
+  --accent-a05: rgba(13, 150, 104, 0.05);
+  --accent-a06: rgba(13, 150, 104, 0.06);
+  --accent-a07: rgba(13, 150, 104, 0.07);
+  --accent-a08: rgba(13, 150, 104, 0.08);
+  --accent-a10: rgba(13, 150, 104, 0.1);
+  --accent-a14: rgba(13, 150, 104, 0.14);
+  --accent-a16: rgba(13, 150, 104, 0.16);
+  --accent-a22: rgba(13, 150, 104, 0.22);
+  --accent-a30: rgba(13, 150, 104, 0.3);
+  --accent-a35: rgba(13, 150, 104, 0.35);
+  --accent-a36: rgba(13, 150, 104, 0.36);
+  --accent-a45: rgba(13, 150, 104, 0.45);
+  --accent-a46: rgba(13, 150, 104, 0.46);
+  --accent-a55: rgba(13, 150, 104, 0.55);
+  --accent-a60: rgba(13, 150, 104, 0.6);
+  --accent-a72: rgba(13, 150, 104, 0.72);
+  --accent-a85: rgba(13, 150, 104, 0.85);
+
+  --danger-a06: rgba(216, 87, 76, 0.06);
+  --danger-a08: rgba(216, 87, 76, 0.08);
+  --danger-a10: rgba(216, 87, 76, 0.1);
+  --danger-a14: rgba(216, 87, 76, 0.14);
+  --danger-a16: rgba(216, 87, 76, 0.16);
+  --danger-a26: rgba(216, 87, 76, 0.26);
+  --danger-a28: rgba(216, 87, 76, 0.28);
+  --danger-a30: rgba(216, 87, 76, 0.3);
+  --danger-a35: rgba(216, 87, 76, 0.35);
+  --danger-a40: rgba(216, 87, 76, 0.4);
+  --danger-a50: rgba(216, 87, 76, 0.5);
+  --danger-a70: rgba(216, 87, 76, 0.7);
+
+  --warn-a07: rgba(217, 161, 60, 0.07);
+  --warn-a14: rgba(217, 161, 60, 0.14);
+  --warn-a16: rgba(217, 161, 60, 0.16);
+  --warn-a26: rgba(217, 161, 60, 0.26);
+  --warn-a55: rgba(217, 161, 60, 0.55);
+  --warn-a70: rgba(217, 161, 60, 0.7);
+}
+
+:root[data-theme='light'] {
+  --page: #f4f6f5;
+  --panel: #ffffff;
+  --card: #ffffff;
+  --sunken: #fafbfa;
+  --sunken-2: #f3f5f4;
+  --seg: #eff2f0;
+  --seg-on: #ffffff;
+  --raise: #f2f5f3;
+  --avatar-bg: #eef2f0;
+  --heat0: #eef1ef;
+  --heat0-bd: #e5eae7;
+  --track: #e8ecea;
+
+  --line: #e1e6e3;
+  --line-soft: #ecefed;
+  --line-2: #e5eae7;
+  --line-3: #dbe1de;
+  --line-strong: #c7d0cb;
+
+  --text: #0f1413;
+  --text-2: #232a28;
+  --text-3: #3e4946;
+  --text-4: #5a6663;
+  --text-muted: #6b7773;
+  --text-dim: #7a857f;
+  --text-faint: #96a09b;
+
+  --accent: #0a8a5f;
+  --accent-2: #0d9668;
+  --accent-3: #0fa874;
+  --accent-4: #0b7a55;
+  --accent-hover: #077c55;
+  --on-accent: #ffffff;
+  --danger: #c0453a;
+  --danger-2: #b23f34;
+  --warn: #8f6210;
+}

@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Ракурс — AI-разбор продаж</title>
+    <!-- Шрифты лежат в public/fonts и подключаются из src/styles/fonts.css:
+         без запроса к стороннему CDN и без мигания текста при загрузке. -->
+    <link
+      rel="preload"
+      as="font"
+      type="font/woff2"
+      href="/fonts/golos-text-cyrillic.woff2"
+      crossorigin
+    />
+    <link
+      rel="preload"
+      as="font"
+      type="font/woff2"
+      href="/fonts/jetbrains-mono-cyrillic.woff2"
+      crossorigin
+    />
+    <script>
+      // Тема читается синхронно до первой отрисовки — иначе видно вспышку светлой темы.
+      (function () {
+        try {
+          document.documentElement.setAttribute(
+            'data-theme',
+            localStorage.getItem('rakurs-theme') || 'light'
+          );
+        } catch (e) {
+          document.documentElement.setAttribute('data-theme', 'light');
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

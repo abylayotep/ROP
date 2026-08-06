@@ -1,0 +1,21 @@
+node_modules/
+dist/
+build/
+standalone/
+
+.env
+.env.local
+.env.*.local
+
+# Baileys session credentials — never commit, they are a live login to WhatsApp.
+server/.wa-auth/
+*.session.json
+
+# Build artifact produced by `npm run build:standalone`.
+rakurs-standalone.html
+
+# Scratch folder kept from earlier iterations of the prototype.
+_to_delete/
+
+.DS_Store
+*.log

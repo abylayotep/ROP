@@ -12,7 +12,14 @@
 
 ## Запуск локально
 
-Нужен Docker. Первый раз:
+Нужен Docker. **Все команды ниже — из корня проекта.** `--prefix` отсчитывается от текущего
+каталога, поэтому из домашней папки npm пойдёт искать `~/server/package.json` и не найдёт:
+
+```bash
+cd /Users/admin/Documents/ProjectsVibeCoding/ROP
+```
+
+Первый раз:
 
 ```bash
 npm install

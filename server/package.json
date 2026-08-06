@@ -1,0 +1,33 @@
+{
+  "name": "@rakurs/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Rakurs backend: Meta ads, WhatsApp bridge, conversation analysis, Conversions API",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "migrate": "drizzle-kit migrate",
+    "generate": "drizzle-kit generate"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.1.2",
+    "@fastify/rate-limit": "^11.2.0",
+    "argon2": "^0.45.1",
+    "drizzle-orm": "^0.45.2",
+    "fastify": "^5.11.2",
+    "postgres": "^3.4.9",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "drizzle-kit": "^0.31.10",
+    "tsx": "^4.23.9",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  }
+}

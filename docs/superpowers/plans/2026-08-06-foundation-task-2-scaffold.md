@@ -28,7 +28,7 @@ Edit `server/package.json` so it has `"type": "module"`, `"private": true`, and 
 ```json
 {
   "dev": "tsx watch src/index.ts",
-  "build": "tsc -b",
+  "build": "tsc -p tsconfig.build.json",
   "start": "node dist/index.js",
   "typecheck": "tsc --noEmit",
   "test": "vitest run",
@@ -39,8 +39,13 @@ Edit `server/package.json` so it has `"type": "module"`, `"private": true`, and 
 
 - [ ] **Step 3: Configure TypeScript**
 
-`server/tsconfig.json`. `noUncheckedIndexedAccess` is on deliberately: array and record access
-returns `T | undefined`, which is what forces the null-handling this product depends on.
+Two configs. One cannot do both jobs: `rootDir: "src"` and `include: ["src", "test"]` contradict
+each other and `tsc` fails with TS6059, but dropping `rootDir` makes the emitted tree `dist/src/`
+and breaks `dist/index.js`.
+
+`server/tsconfig.json` — typecheck and editor, covers tests. `noUncheckedIndexedAccess` is on
+deliberately: indexed access returns `T | undefined`, which forces the null-handling this
+product depends on.
 
 ```json
 {
@@ -54,11 +59,20 @@ returns `T | undefined`, which is what forces the null-handling this product dep
     "verbatimModuleSyntax": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "outDir": "dist",
-    "rootDir": "src",
+    "noEmit": true,
     "types": ["node"]
   },
   "include": ["src", "test"]
+}
+```
+
+`server/tsconfig.build.json` — emit only, source only:
+
+```json
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "noEmit": false, "rootDir": "src", "outDir": "dist" },
+  "include": ["src"]
 }
 ```
 

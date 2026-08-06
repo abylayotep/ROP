@@ -1,0 +1,9 @@
+{
+  "name": "rakurs-monorepo",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "rakurs",
+    "server"
+  ]
+}

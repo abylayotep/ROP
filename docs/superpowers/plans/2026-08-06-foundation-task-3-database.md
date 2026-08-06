@@ -139,6 +139,20 @@ export async function withDb(): Promise<Db> {
 }
 ```
 
+- [ ] **Step 7b: Stop test files running in parallel**
+
+`server/vitest.config.ts`. Without this the suite is flaky in a way that reads as a foreign key
+bug: Vitest runs files in parallel, every file calls `withDb()`, and one file's `truncate`
+deletes another file's fixtures mid-test.
+
+```ts
+import { defineConfig } from 'vitest/config';
+
+export default defineConfig({
+  test: { fileParallelism: false },
+});
+```
+
 - [ ] **Step 8: Write the failing test**
 
 `server/test/db.test.ts`:

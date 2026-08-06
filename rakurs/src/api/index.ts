@@ -249,3 +249,19 @@ export const getAgent = (signal?: AbortSignal) => request<AgentConfig>('/agent',
 /** PATCH /api/agent — режим работы и отдельные правила. */
 export const updateAgent = (patch: { enabled?: boolean; rule?: { id: string; enabled: boolean } }) =>
   request<AgentConfig>('/agent', { method: 'PATCH', body: patch });
+
+// ── Авторизация ──────────────────────────────────────────────────────────────
+
+export interface AuthUser {
+  name: string;
+  initials: string;
+  email: string;
+}
+
+/** GET /api/auth/me — кто вошёл. 401, если сессии нет. */
+export const getMe = (signal?: AbortSignal) => request<AuthUser>('/auth/me', { signal });
+
+export const login = (email: string, password: string) =>
+  request<AuthUser>('/auth/login', { method: 'POST', body: { email, password } });
+
+export const logout = () => request<{ ok: true }>('/auth/logout', { method: 'POST' });

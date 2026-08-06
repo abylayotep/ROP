@@ -80,6 +80,10 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
   clearTimeout(timer);
 
   if (!res.ok) {
+    // Просроченная сессия: пусть приложение покажет вход, а не каждая панель
+    // по отдельности — «нет доступа».
+    if (res.status === 401) window.dispatchEvent(new Event('rakurs:unauthorized'));
+
     let payload: unknown;
     try {
       payload = await res.json();

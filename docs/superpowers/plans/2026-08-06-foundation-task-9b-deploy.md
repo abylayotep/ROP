@@ -182,9 +182,11 @@ Expected: `{"ok":true}`, and the `postgres` row shows no published port. If it l
     docker compose -f deploy/compose.yml --env-file deploy/.env up -d --build
     docker compose -f deploy/compose.yml --env-file deploy/.env run --rm api npm run migrate
 
-Create the first user, once:
+Create the first user, once. The runtime image ships compiled `dist/` only, so this is
+`node dist/scripts/…` and not the `npm run create-user` script, which runs `tsx src/…`:
 
-    docker compose -f deploy/compose.yml --env-file deploy/.env run --rm api npm run create-user
+    docker compose -f deploy/compose.yml --env-file deploy/.env run --rm api \
+      node dist/scripts/create-user.js
 
 nginx serves `/var/www/rakurs` and proxies `/api` to `127.0.0.1:3000`; the config is
 `deploy/nginx.conf`. `try_files … /index.html` is required — the router is client-side.

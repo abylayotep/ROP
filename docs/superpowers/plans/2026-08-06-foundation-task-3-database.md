@@ -195,6 +195,15 @@ npm --prefix server test
 Expected: PASS. A connection failure on the very first run means the container is still
 starting — wait a few seconds and rerun.
 
+If the image cannot be pulled at all (`dial tcp … i/o timeout` against `registry-1.docker.io`),
+Docker Hub is unreachable from this network. Point the daemon at a mirror rather than switching
+to a locally installed Postgres, because the deploy in task 9b needs image pulls too:
+
+```bash
+colima ssh -- sudo sh -c 'printf "{\"registry-mirrors\":[\"https://mirror.gcr.io\"]}\n" > /etc/docker/daemon.json'
+colima restart
+```
+
 - [ ] **Step 10: Commit**
 
 ```bash

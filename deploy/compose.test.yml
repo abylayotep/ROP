@@ -1,0 +1,19 @@
+# Throwaway Postgres for the test suite.
+#
+#   docker compose -f deploy/compose.test.yml up -d
+#
+# Non-default port so it cannot collide with a real Postgres on the machine, and
+# tmpfs storage so a restarted container starts empty and nothing leaks between runs.
+services:
+  postgres-test:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: rakurs
+      POSTGRES_PASSWORD: rakurs
+      POSTGRES_DB: rakurs_test
+    ports: ['55432:5432']
+    tmpfs: ['/var/lib/postgresql/data']
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U rakurs']
+      interval: 2s
+      retries: 15

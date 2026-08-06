@@ -1,0 +1,24 @@
+# Postgres for local development.
+#
+#   docker compose -f deploy/compose.dev.yml up -d
+#
+# Separate from compose.test.yml on purpose: that one is tmpfs and gets truncated by
+# every test run, so a user created there disappears. This one keeps a named volume,
+# and a different port so both can run at once.
+services:
+  postgres-dev:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: rakurs
+      POSTGRES_PASSWORD: rakurs
+      POSTGRES_DB: rakurs_dev
+    ports: ['55433:5432']
+    volumes: ['rakurs-dev-db:/var/lib/postgresql/data']
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U rakurs']
+      interval: 2s
+      retries: 15
+    restart: unless-stopped
+
+volumes:
+  rakurs-dev-db:

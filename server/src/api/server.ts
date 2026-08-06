@@ -4,6 +4,8 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import type { Db } from '../db/client.js';
 import type { Env } from '../env.js';
 import { ApiError } from '../lib/errors.js';
+import { registerAuthRoutes } from './auth.js';
+import { requireSession } from './require-session.js';
 
 /**
  * Builds the Fastify instance without listening, so tests can drive it through
@@ -26,9 +28,11 @@ export function buildServer(env: Env, db: Db): FastifyInstance {
     return reply.code(500).send({ message: 'Внутренняя ошибка сервера' });
   });
 
-  app.get('/api/health', async () => ({ ok: true }));
+  const guard = requireSession(db);
 
-  void db; // routes arrive in the next task
+  app.get('/api/health', async () => ({ ok: true }));
+  registerAuthRoutes(app, db, env, guard);
+  // Later plans register their routes here, reusing the same guard.
 
   return app;
 }

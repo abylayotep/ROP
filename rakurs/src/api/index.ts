@@ -18,6 +18,7 @@ import type {
   Profile,
   Seller,
   SellersSummary,
+  Settings,
   WhatsAppNumber,
 } from '@/types';
 import { periodDays, request } from './client';
@@ -34,11 +35,7 @@ export { API_URL, ApiError, humanError, request } from './client';
 /** GET /api/profile — название проекта, тариф, валюта отчётов. */
 export const getProfile = (signal?: AbortSignal) => request<Profile>('/profile', { signal });
 
-export interface Settings {
-  /** Выбранные рекламные аккаунты — из них берутся кампании и креативы. */
-  selectedAccounts: string[];
-  syncMode: string;
-}
+export type { Settings };
 
 export const getSettings = (signal?: AbortSignal) => request<Settings>('/settings', { signal });
 

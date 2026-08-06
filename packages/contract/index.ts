@@ -320,3 +320,11 @@ export interface AgentConfig {
   testChat: AgentMessage[];
   rejected: { text: string; reason: string }[];
 }
+
+// ── Settings ───────────────────────────────────────────────────────────────
+
+export interface Settings {
+  /** Selected ad accounts — campaigns and creatives come from these. */
+  selectedAccounts: string[];
+  syncMode: string;
+}

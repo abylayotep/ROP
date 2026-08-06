@@ -129,3 +129,8 @@ those events would weaken optimisation for no gain.
 API — it lives in Events Manager. The reconciliation panel can show accepted, sent, confirmed,
 pending and failed from our own tables, all of which are exact. EMQ has to be entered manually
 in settings or left blank; the screen must not invent a number for it.
+
+**Restore the sidebar indicator here.** The foundation removed a panel from `Sidebar.tsx` that
+read "Meta CAPI · активно — последнее событие Purchase ушло 2 минуты назад" with no request
+behind either line. Bring it back driven by `/api/capi/reconciliation`, showing the real last
+event and its real age, and rendering nothing when no event has been sent.

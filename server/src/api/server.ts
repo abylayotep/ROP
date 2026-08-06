@@ -5,7 +5,9 @@ import type { Db } from '../db/client.js';
 import type { Env } from '../env.js';
 import { ApiError } from '../lib/errors.js';
 import { registerAuthRoutes } from './auth.js';
+import { registerProfileRoutes } from './profile.js';
 import { requireSession } from './require-session.js';
+import { registerSettingsRoutes } from './settings.js';
 
 /**
  * Builds the Fastify instance without listening, so tests can drive it through
@@ -32,6 +34,8 @@ export function buildServer(env: Env, db: Db): FastifyInstance {
 
   app.get('/api/health', async () => ({ ok: true }));
   registerAuthRoutes(app, db, env, guard);
+  registerProfileRoutes(app, db, guard);
+  registerSettingsRoutes(app, db, guard);
   // Later plans register their routes here, reusing the same guard.
 
   return app;

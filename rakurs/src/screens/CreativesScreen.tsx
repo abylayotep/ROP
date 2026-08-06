@@ -5,7 +5,7 @@ import { Kpi, LiveDot } from '@/components/ui/primitives';
 import { EmptyState, ErrorState, KpiSkeleton, Skeleton } from '@/components/ui/states';
 import * as api from '@/api';
 import { useApi } from '@/hooks/useApi';
-import { comma, mln, num, plural } from '@/lib/format';
+import { comma, freshness, mln, num, plural } from '@/lib/format';
 import { useContextNavigation } from '@/lib/navigation';
 import { useAppState } from '@/store/app-state';
 import { useData } from '@/store/data';
@@ -33,7 +33,7 @@ export function CreativesScreen() {
     .reduce((acc, a) => acc + a.creatives, 0);
 
   const syncMeta = core
-    ? `${selectedIds.length} ${plural(selectedIds.length, 'аккаунт', 'аккаунта', 'аккаунтов')} из ${core.accounts.length} · ${onCreatives} ${plural(onCreatives, 'креатив', 'креатива', 'креативов')} · обновлено 12 минут назад`
+    ? `${selectedIds.length} ${plural(selectedIds.length, 'аккаунт', 'аккаунта', 'аккаунтов')} из ${core.accounts.length} · ${onCreatives} ${plural(onCreatives, 'креатив', 'креатива', 'креативов')} · ${freshness(core.profile.updatedMinutesAgo)}`
     : 'загружаем список аккаунтов…';
 
   const kpis =

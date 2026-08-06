@@ -19,6 +19,14 @@ export function buildServer(env: Env, db: Db): FastifyInstance {
   app.register(cookie, { secret: env.SESSION_SECRET });
   app.register(rateLimit, { global: false });
 
+  // Fastify's built-in 404 body is English developer text ("Route GET:/api/… not
+  // found"), and the frontend renders `message` verbatim. Routes that genuinely
+  // cannot find a record raise their own ApiError with their own wording; this only
+  // catches paths no route claims at all.
+  app.setNotFoundHandler((_req, reply) =>
+    reply.code(404).send({ message: 'Раздел ещё не подключён' }),
+  );
+
   app.setErrorHandler((error, _req, reply) => {
     if (error instanceof ApiError) {
       return reply.code(error.statusCode).send({ message: error.message });

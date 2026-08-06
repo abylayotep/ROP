@@ -2,6 +2,7 @@ import { Segmented } from '@/components/ui/primitives';
 import { Skeleton } from '@/components/ui/states';
 import { plural } from '@/lib/format';
 import { useAppState } from '@/store/app-state';
+import { useAuth } from '@/store/auth';
 import { useData } from '@/store/data';
 import type { Period } from '@/types';
 
@@ -14,6 +15,7 @@ const periods: { id: Period; label: string }[] = [
 export function Header() {
   const { state, set, toggleTheme } = useAppState();
   const { core } = useData();
+  const { signOut } = useAuth();
   const light = state.theme === 'light';
   const profile = core?.profile;
 
@@ -79,6 +81,24 @@ export function Header() {
         <div className="avatar" style={{ width: 30, height: 30, fontSize: 11.5 }}>
           {profile?.user.initials ?? ''}
         </div>
+        <button
+          type="button"
+          onClick={() => void signOut()}
+          title="Выйти из кабинета"
+          style={{
+            border: '1px solid var(--line-2)',
+            background: 'var(--seg)',
+            color: 'var(--text-3)',
+            fontFamily: 'inherit',
+            fontSize: 11.5,
+            fontWeight: 600,
+            padding: '6px 11px',
+            borderRadius: 9,
+            cursor: 'pointer',
+          }}
+        >
+          Выйти
+        </button>
       </div>
     </header>
   );

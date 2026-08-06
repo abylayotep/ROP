@@ -17,6 +17,24 @@ export function num(n: number): string {
   return n.toLocaleString('ru-RU');
 }
 
+/**
+ * Давность данных словами: freshness(12) → 'обновлено 12 минут назад'.
+ *
+ * Считается от Profile.updatedMinutesAgo — единственного источника свежести.
+ * Раньше экраны писали «обновлено 12 минут назад» жёстко в строке, и подпись
+ * врала тем убедительнее, чем дольше не обновлялись данные.
+ */
+export function freshness(minutes: number): string {
+  if (minutes < 1) return 'обновлено только что';
+  if (minutes < 60) return `обновлено ${minutes} ${plural(minutes, 'минуту', 'минуты', 'минут')} назад`;
+
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `обновлено ${hours} ${plural(hours, 'час', 'часа', 'часов')} назад`;
+
+  const days = Math.floor(hours / 24);
+  return `обновлено ${days} ${plural(days, 'день', 'дня', 'дней')} назад`;
+}
+
 export function money(n: number, currency: string): string {
   return `${num(n)} ${currency}`;
 }

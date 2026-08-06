@@ -1,5 +1,4 @@
 import { NavLink } from 'react-router-dom';
-import { LiveDot } from '@/components/ui/primitives';
 import { num } from '@/lib/format';
 import { useData } from '@/store/data';
 
@@ -104,27 +103,12 @@ export function Sidebar() {
         ))}
       </nav>
 
-      <div style={{ marginTop: 'auto', padding: '0 14px' }}>
-        <div
-          style={{
-            border: '1px solid var(--line-2)',
-            borderRadius: 12,
-            padding: 12,
-            background: 'var(--sunken)',
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 7 }}>
-            <LiveDot />
-            <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-3)' }}>
-              Meta CAPI · активно
-            </span>
-          </div>
-          <div style={{ fontSize: 11, lineHeight: 1.45, color: 'var(--text-dim)' }}>
-            Последнее событие <span style={{ color: 'var(--text-3)' }}>Purchase</span> ушло 2 минуты
-            назад
-          </div>
-        </div>
-      </div>
+      {/*
+        Здесь была плашка «Meta CAPI · активно · последнее событие Purchase ушло
+        2 минуты назад» — с зашитыми словами, без единого запроса за ними. Она
+        утверждала, что Conversions API работает, когда его ещё нет вовсе.
+        Вернём вместе с самим CAPI, на данных из /api/capi/reconciliation.
+      */}
     </aside>
   );
 }

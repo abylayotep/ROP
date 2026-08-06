@@ -8,7 +8,7 @@ import { Async, EmptyState, ErrorState, RowsSkeleton } from '@/components/ui/sta
 import { useToast } from '@/components/ui/Toast';
 import { useApi } from '@/hooks/useApi';
 import { SYNC_MODES, WHATSAPP_STEPS } from '@/lib/constants';
-import { mln, plural } from '@/lib/format';
+import { freshness, mln, plural } from '@/lib/format';
 import { spendByAccount } from '@/lib/selectors';
 import { toneColor } from '@/lib/tone';
 import { useData } from '@/store/data';
@@ -102,7 +102,7 @@ export function SettingsScreen() {
     .reduce((acc, a) => acc + a.creatives, 0);
 
   const syncMeta = core
-    ? `${selected.length} ${plural(selected.length, 'аккаунт', 'аккаунта', 'аккаунтов')} из ${accounts.length} · ${onCreatives} ${plural(onCreatives, 'креатив', 'креатива', 'креативов')} · обновлено 12 минут назад`
+    ? `${selected.length} ${plural(selected.length, 'аккаунт', 'аккаунта', 'аккаунтов')} из ${accounts.length} · ${onCreatives} ${plural(onCreatives, 'креатив', 'креатива', 'креативов')} · ${freshness(core.profile.updatedMinutesAgo)}`
     : '';
 
   async function toggleAccount(id: string) {

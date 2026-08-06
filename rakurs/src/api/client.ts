@@ -27,11 +27,13 @@ export class ApiError extends Error {
 export function humanError(error: unknown): string {
   if (error instanceof ApiError) {
     if (error.status === 0) return 'Сервер не отвечает. Проверьте соединение.';
-    if (error.status === 401 || error.status === 403) return 'Нет доступа. Войдите заново.';
-    if (error.status === 404) return 'Данные не найдены.';
+    // Сообщение сервера точнее любого нашего: на форме входа неверный пароль
+    // должен читаться как неверный пароль, а не как «войдите заново».
     if (typeof error.body === 'object' && error.body && 'message' in error.body) {
       return String((error.body as { message: unknown }).message);
     }
+    if (error.status === 401 || error.status === 403) return 'Нет доступа. Войдите заново.';
+    if (error.status === 404) return 'Данные не найдены.';
     if (error.status >= 500) return 'Ошибка на сервере. Попробуйте ещё раз.';
     return 'Запрос не прошёл.';
   }

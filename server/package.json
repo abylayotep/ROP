@@ -11,7 +11,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "create-user": "tsx src/scripts/create-user.ts",
+    "create-account": "tsx src/scripts/create-account.ts",
+    "add-member": "tsx src/scripts/add-member.ts",
     "migrate": "drizzle-kit migrate",
     "generate": "drizzle-kit generate"
   },

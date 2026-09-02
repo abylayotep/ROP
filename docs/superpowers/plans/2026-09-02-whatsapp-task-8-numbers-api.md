@@ -55,7 +55,7 @@ The access token is deliberately absent: it goes in, it never comes out.
 - [ ] **Step 2: Write the failing test**
 
 Create `server/test/whatsapp-numbers.test.ts` with the contents given in
-[task 8, step 2](2026-09-02-whatsapp-task-8-numbers-test.md) — fifteen cases covering the
+[task 8, step 2](2026-09-02-whatsapp-task-8-numbers-test.md) — fourteen cases covering the
 connection, the encrypted token, both Meta failures, a number already taken, the role check,
 listing, switching off, disconnecting, and what to paste into Meta. Copy it verbatim.
 
@@ -120,8 +120,13 @@ const toApi = (row: typeof whatsappNumbers.$inferSelect): WhatsappNumber => ({
 });
 
 /** Postgres reports a unique violation with this code; Drizzle passes it through. */
-const isDuplicate = (error: unknown): boolean =>
-  typeof error === 'object' && error !== null && (error as { code?: string }).code === '23505';
+const isDuplicate = (error: unknown): boolean => {
+  // Drizzle wraps the driver's error, so the Postgres code sits on `cause`, not on the
+  // error itself. Narrow to 23505 alone: anything else must keep falling through to the
+  // generic handler rather than being reported as a duplicate.
+  const cause = (error as { cause?: { code?: string } } | null)?.cause;
+  return cause?.code === '23505';
+};
 
 export function registerWhatsappNumberRoutes(
   app: FastifyInstance,
@@ -273,7 +278,7 @@ npm --prefix server test
 npm --prefix server run typecheck
 ```
 
-Expected: PASS, fifteen new cases.
+Expected: PASS, fourteen new cases.
 
 - [ ] **Step 8: Commit**
 

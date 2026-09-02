@@ -7,6 +7,7 @@ import { ApiError } from '../lib/errors.js';
 import { registerAgentRoutes } from './agents.js';
 import { registerAuthRoutes } from './auth.js';
 import { requireSession } from './require-session.js';
+import { registerWhatsappWebhook } from './whatsapp-webhook.js';
 
 /**
  * Builds the Fastify instance without listening, so tests can drive it through
@@ -42,6 +43,9 @@ export function buildServer(env: Env, db: Db): FastifyInstance {
   app.get('/api/health', async () => ({ ok: true }));
   registerAuthRoutes(app, db, env, guard);
   registerAgentRoutes(app, db, guard);
+  // Meta calls the webhook directly with no session of its own, so it takes no guard —
+  // the request signature is the check instead.
+  registerWhatsappWebhook(app, db, env);
   // Later plans register their routes here, reusing the same guard.
 
   return app;

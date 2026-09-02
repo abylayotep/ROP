@@ -309,7 +309,7 @@ npm --prefix server test
 npm --prefix server run typecheck
 ```
 
-Expected: PASS, ten new cases. The last one matters most: it proves the scoped parser did not
+Expected: PASS, nine new cases. The last one matters most: it proves the scoped parser did not
 change how the rest of the API reads JSON.
 
 - [ ] **Step 7: Commit**

@@ -51,3 +51,37 @@ export interface WebhookSetup {
   url: string;
   verifyToken: string;
 }
+
+export interface Message {
+  id: string;
+  /** 'in' | 'out' */
+  direction: string;
+  /** 'client' | 'operator' | 'ai' */
+  author: string;
+  /** WhatsApp's own type: text, image, audio, video, document, sticker, location, … */
+  kind: string;
+  body: string | null;
+  /** True when a file is stored for this message and can be fetched. */
+  hasMedia: boolean;
+  mediaMime: string | null;
+  /** Outbound only: sent, delivered, read, failed. */
+  status: string | null;
+  sentAt: string;
+}
+
+export interface ConversationSummary {
+  id: string;
+  contactName: string | null;
+  contactPhone: string;
+  lastMessageAt: string | null;
+  /** The last line, for the list. */
+  preview: string | null;
+  /** Whether a free-form reply is still allowed. */
+  windowOpen: boolean;
+  /** Null when the conversation did not come from an ad. */
+  adHeadline: string | null;
+}
+
+export interface ConversationThread extends ConversationSummary {
+  messages: Message[];
+}

@@ -8,6 +8,7 @@ import { credentialsKey } from '../lib/secret-box.js';
 import { createGraphClient, type GraphClient } from '../lib/whatsapp/graph.js';
 import { registerAgentRoutes } from './agents.js';
 import { registerAuthRoutes } from './auth.js';
+import { registerConversationRoutes } from './conversations.js';
 import { requireSession } from './require-session.js';
 import { registerWhatsappNumberRoutes } from './whatsapp-numbers.js';
 import { registerWhatsappWebhook } from './whatsapp-webhook.js';
@@ -53,6 +54,7 @@ export function buildServer(env: Env, db: Db, deps: ServerDeps = {}): FastifyIns
   registerAuthRoutes(app, db, env, guard);
   registerAgentRoutes(app, db, guard);
   registerWhatsappNumberRoutes(app, db, env, guard, graph);
+  registerConversationRoutes(app, db, env, guard, graph);
   // Meta calls the webhook directly with no session of its own, so it takes no guard —
   // the request signature is the check instead.
   registerWhatsappWebhook(app, db, env, {

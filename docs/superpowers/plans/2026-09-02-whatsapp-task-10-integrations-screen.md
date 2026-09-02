@@ -8,7 +8,7 @@ that Meta accepted without subscribing our application looks perfectly fine and 
 a message.
 
 **Files:**
-- Create: `rakurs/src/screens/sections/IntegrationsScreen.tsx`
+- Create: `rakurs/src/screens/IntegrationsScreen.tsx`
 - Modify: `rakurs/src/api/index.ts`, `rakurs/src/App.tsx`, `rakurs/src/lib/sections.ts`
 
 **Interfaces:**
@@ -50,7 +50,8 @@ Extend the type import at the top to `import type { Agent, Me, WebhookSetup, Wha
 
 - [ ] **Step 2: Write the screen**
 
-Create `rakurs/src/screens/sections/IntegrationsScreen.tsx`:
+Create `rakurs/src/screens/IntegrationsScreen.tsx` — the screens directory is flat, there is
+no `sections/` subdirectory, and the other screens live beside each other:
 
 ```tsx
 import { useState, type CSSProperties, type FormEvent } from 'react';
@@ -97,6 +98,10 @@ export function IntegrationsScreen() {
     [agent.id, owner],
   );
 
+  // The three cards below are declared at module scope, not inside this component. A
+  // component defined during render gets a new identity every time, so React unmounts and
+  // remounts it — and a reload after toggling a number would wipe whatever the owner had
+  // typed into the connect form.
   return (
     <Async state={query} skeleton={<Skeleton height={200} />}>
       {({ numbers, setup }) => (

@@ -76,8 +76,22 @@ describe('whatsapp schema', () => {
 
   it('refuses the same phone_number_id twice, whichever agent claims it', async () => {
     await seedNumber();
+    const [other] = await db
+      .insert(agents)
+      .values({ accountId: (await db.select().from(agents))[0]!.accountId, name: 'Второй' })
+      .returning();
 
-    await expect(seedNumber()).rejects.toThrow();
+    // A different agent, the same number. The uniqueness has to be global: an incoming
+    // webhook carries only the phone_number_id, so two owners would make routing a guess.
+    await expect(
+      db.insert(whatsappNumbers).values({
+        agentId: other!.id,
+        phoneNumberId: '1367497639773085',
+        wabaId: '932647766535299',
+        displayPhone: '+7 708 580 79 32',
+        accessToken: 'encrypted',
+      }),
+    ).rejects.toThrow();
   });
 
   it('refuses the same client twice inside one agent', async () => {
@@ -147,6 +161,7 @@ describe('whatsapp schema', () => {
 
     expect(await db.select().from(messages)).toEqual([]);
     expect(await db.select().from(conversations)).toEqual([]);
+    expect(await db.select().from(contacts)).toEqual([]);
     expect(await db.select().from(whatsappNumbers)).toEqual([]);
   });
 

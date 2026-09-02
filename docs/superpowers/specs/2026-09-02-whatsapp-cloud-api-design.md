@@ -18,8 +18,12 @@ messages but drops that field would have to be redone before stage 6 could work 
 ## Starting point
 
 Stage 1 left an account owning agents, a `requireAgent` guard, and a cabinet whose Диалоги and
-Интеграции sections say which stage will fill them. Every table added here carries `agent_id`
-and reaches the account through it.
+Интеграции sections say which stage will fill them.
+
+Every table added here belongs to an agent, though not all of them say so in a column:
+`messages` reaches its agent through its conversation, and `whatsapp_events` holds a payload
+nobody has parsed yet, so at the moment it is written there is no agent to record. Every query
+that serves a request still filters by the agent the guard proved.
 
 The client for this build has a dedicated SIM, separate from the number their pleep trial
 still uses. Development happens locally; the VPS comes later.

@@ -91,9 +91,9 @@ describe('connecting a number', () => {
 
     const [stored] = await db.select().from(whatsappNumbers);
     expect(stored!.accessToken).not.toContain('EAAG-token');
-    expect(decryptSecret(stored!.accessToken, Buffer.from(env.CREDENTIALS_KEY, 'base64'))).toBe(
-      'EAAG-token',
-    );
+    expect(
+      decryptSecret(stored!.accessToken, Buffer.from(env.CREDENTIALS_KEY, 'base64'), '136'),
+    ).toBe('EAAG-token');
   });
 
   it('refuses a token Meta rejects, and stores nothing', async () => {

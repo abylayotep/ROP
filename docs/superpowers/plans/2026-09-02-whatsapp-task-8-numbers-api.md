@@ -188,7 +188,9 @@ export function registerWhatsappNumberRoutes(
             phoneNumberId,
             wabaId,
             displayPhone,
-            accessToken: encryptSecret(accessToken, credentialsKey(env)),
+            // Bound to the phone number id: a token copied into another number's row
+            // will not decrypt there.
+            accessToken: encryptSecret(accessToken, credentialsKey(env), phoneNumberId),
             subscribedAt: new Date(),
           })
           .returning();

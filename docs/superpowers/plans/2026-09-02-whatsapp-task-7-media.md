@@ -90,7 +90,7 @@ beforeEach(async () => {
     phoneNumberId: '136',
     wabaId: '932',
     displayPhone: '+7 708 580 79 32',
-    accessToken: encryptSecret('EAAG-token', key),
+    accessToken: encryptSecret('EAAG-token', key, '136'),
   });
   await db.insert(whatsappEvents).values({ payload: photo });
 });
@@ -282,7 +282,7 @@ In `applyChange`, before storing, fetch when there is something to fetch:
     const media = mediaId
       ? await downloadInboundMedia(deps, {
           mediaId,
-          token: decryptSecret(number.accessToken, deps.key),
+          token: decryptSecret(number.accessToken, deps.key, number.phoneNumberId),
           agentId: number.agentId,
           waMessageId: incoming.id,
         })
@@ -300,7 +300,7 @@ is recorded on the event:
       try {
         media = await downloadInboundMedia(deps, {
           mediaId,
-          token: decryptSecret(number.accessToken, deps.key),
+          token: decryptSecret(number.accessToken, deps.key, number.phoneNumberId),
           agentId: number.agentId,
           waMessageId: incoming.id,
         });

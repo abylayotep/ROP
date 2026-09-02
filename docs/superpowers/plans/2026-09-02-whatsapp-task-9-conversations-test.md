@@ -98,7 +98,7 @@ beforeEach(async () => {
       phoneNumberId: '136',
       wabaId: '932',
       displayPhone: '+7 708 580 79 32',
-      accessToken: encryptSecret('EAAG-token', key),
+      accessToken: encryptSecret('EAAG-token', key, '136'),
     })
     .returning();
   numberId = number!.id;
@@ -253,7 +253,7 @@ describe('reading conversations', () => {
         phoneNumberId: '999',
         wabaId: '999',
         displayPhone: '+7 700 000 00 00',
-        accessToken: encryptSecret('other', key),
+        accessToken: encryptSecret('other', key, '999'),
       })
       .returning();
     const [foreign] = await db

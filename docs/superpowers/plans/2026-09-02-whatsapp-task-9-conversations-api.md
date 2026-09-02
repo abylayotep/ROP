@@ -224,7 +224,7 @@ export function registerConversationRoutes(
       try {
         ({ messageId } = await graph.sendText(
           number.phoneNumberId,
-          decryptSecret(number.accessToken, credentialsKey(env)),
+          decryptSecret(number.accessToken, credentialsKey(env), number.phoneNumberId),
           contact.phone,
           body,
         ));

@@ -18,6 +18,8 @@ export async function withDb(): Promise<Db> {
     db = createDb(URL);
     await migrate(db, { migrationsFolder: 'drizzle' });
   }
-  await db.execute(sql`truncate table sessions, users, settings restart identity cascade`);
+  await db.execute(
+    sql`truncate table sessions, account_members, agents, accounts, users restart identity cascade`,
+  );
   return db;
 }

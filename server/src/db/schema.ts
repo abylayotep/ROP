@@ -1,8 +1,8 @@
-import { boolean, index, numeric, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { index, pgTable, primaryKey, text, timestamp, uuid } from 'drizzle-orm/pg-core';
 
 /**
- * Only the tables the foundation needs. Advertising, WhatsApp, analysis and money
- * tables arrive in their own plans, each with its own migration.
+ * Tenancy plus authentication. Conversations, orders, knowledge and Meta credentials
+ * arrive in their own plans, each with its own migration, and each keyed by agent_id.
  */
 
 export const users = pgTable('users', {
@@ -13,7 +13,6 @@ export const users = pgTable('users', {
   passwordHash: text('password_hash').notNull(),
   name: text('name').notNull(),
   initials: text('initials').notNull(),
-  role: text('role').notNull().default('owner'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -30,17 +29,52 @@ export const sessions = pgTable(
   (t) => [index('sessions_expires_at_idx').on(t.expiresAt)],
 );
 
-/** Single row, pinned by a boolean primary key that defaults to true. */
-export const settings = pgTable('settings', {
-  id: boolean('id').primaryKey().default(true),
-  projectName: text('project_name').notNull(),
-  planLine: text('plan_line').notNull(),
-  currency: text('currency').notNull(),
-  usdRate: numeric('usd_rate', { precision: 12, scale: 4 }).notNull(),
-  timezone: text('timezone').notNull(),
-  selectedAccountIds: text('selected_account_ids').array().notNull().default([]),
-  syncMode: text('sync_mode').notNull(),
-  metaBusinessId: text('meta_business_id'),
-  metaPixelId: text('meta_pixel_id'),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+/** A company. Everything else in the product hangs off one of these. */
+export const accounts = pgTable('accounts', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  name: text('name').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
+
+/**
+ * Who may see an account, and with which powers. Role lives here rather than on the
+ * user: the same person can own one company and answer chats in another.
+ */
+export const accountMembers = pgTable(
+  'account_members',
+  {
+    accountId: uuid('account_id')
+      .notNull()
+      .references(() => accounts.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    // 'owner' | 'member'. Text rather than a Postgres enum: adding a third role later
+    // would otherwise need a migration that rewrites the type.
+    role: text('role').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.accountId, t.userId] }),
+    index('account_members_user_id_idx').on(t.userId),
+  ],
+);
+
+/**
+ * One AI sales rep: its own knowledge, script, funnel and channels. Every table from
+ * the next stages carries `agent_id` and reaches the account through this row.
+ */
+export const agents = pgTable(
+  'agents',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    accountId: uuid('account_id')
+      .notNull()
+      .references(() => accounts.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    description: text('description').notNull().default(''),
+    timezone: text('timezone').notNull().default('Asia/Almaty'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('agents_account_id_idx').on(t.accountId)],
+);

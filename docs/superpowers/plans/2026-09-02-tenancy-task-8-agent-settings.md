@@ -325,8 +325,12 @@ Under «Что уже работает», replace the paragraph about connected 
 поломка: экран без эндпоинта честно об этом говорит.
 ```
 
-Fix `rakurs/README.md` the same way wherever it lists the seven prototype screens: the cabinet
-now has Заказы, Диалоги, База знаний, Агент, Интеграции, Статистика, Настройки.
+`rakurs/README.md` needs more than a section rename: Task 5 deleted the fixture server and the
+prototype API surface it documents. Rewrite it so that every statement is true of the cabinet as
+it stands — the seven sections are Заказы, Диалоги, База знаний, Агент, Интеграции, Статистика,
+Настройки; there is no `mock-server/` and no `npm run mock`; the endpoints it describes are the
+ones `rakurs/src/api/index.ts` actually calls. Delete whatever describes screens that no longer
+exist rather than rewording it.
 
 - [ ] **Step 7: Run everything one last time**
 

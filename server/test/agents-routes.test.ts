@@ -117,6 +117,38 @@ describe('agent routes', () => {
     expect(res.json().message).toBe('Компания не найдена');
   });
 
+  it('answers 404 for a malformed account id instead of raising', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/accounts/not-a-uuid/agents',
+      cookies: jar,
+    });
+
+    expect(res.statusCode).toBe(404);
+    expect(res.json().message).toBe('Компания не найдена');
+  });
+
+  it('answers 404, not 403, when a stranger tries to create an agent', async () => {
+    const stranger = await createAccountWithOwner(db, {
+      company: 'Чужая',
+      email: 'stranger@example.com',
+      name: 'Чужой',
+      initials: 'ЧУ',
+      password: PASSWORD,
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/accounts/${stranger.accountId}/agents`,
+      cookies: jar,
+      payload: { name: 'Подсадной' },
+    });
+
+    // 403 would confirm the company exists to someone who has no business knowing it.
+    expect(res.statusCode).toBe(404);
+    expect(res.json().message).toBe('Компания не найдена');
+  });
+
   it('refuses to let a member create an agent', async () => {
     await db
       .update(accountMembers)

@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, type ReactNode } from 'react';
-import { Navigate, useParams } from 'react-router-dom';
+import { Link, Navigate, useParams } from 'react-router-dom';
 import * as api from '@/api';
 import { ErrorState } from '@/components/ui/states';
 import { useApi } from '@/hooks/useApi';
@@ -36,8 +36,18 @@ export function AgentProvider({ children }: { children: ReactNode }) {
   // query hasn't resolved, undefined once the request has failed with nothing cached.
   if (query.error !== undefined && agent == null) {
     // A stranger's agent answers 404 with «Агент не найден», which is exactly what the
-    // person should read: not "forbidden", which would confirm it exists.
-    return <ErrorState error={query.error} onRetry={query.reload} />;
+    // person should read: not "forbidden", which would confirm it exists. Retrying that
+    // will never succeed, so the way out of the subtree is offered next to the button.
+    return (
+      <div style={{ minHeight: '100vh', background: 'var(--page)' }}>
+        <ErrorState error={query.error} onRetry={query.reload} />
+        <div style={{ textAlign: 'center', fontSize: 12.5 }}>
+          <Link to="/" style={{ color: 'var(--text-dim)' }}>
+            Вернуться к списку агентов
+          </Link>
+        </div>
+      </div>
+    );
   }
   if (agent == null) {
     return <div style={{ minHeight: '100vh', background: 'var(--page)' }} />;

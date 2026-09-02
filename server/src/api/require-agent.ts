@@ -6,9 +6,9 @@ import { accountMembers, agents } from '../db/schema.js';
 declare module 'fastify' {
   interface FastifyRequest {
     agent?: typeof agents.$inferSelect;
-    role?: 'owner' | 'member';
   }
 }
+// `membershipRole` is declared once, in require-account.ts, and both guards attach it.
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -47,6 +47,6 @@ export function requireAgent(
     }
 
     req.agent = row.agent;
-    req.role = row.role === 'owner' ? 'owner' : 'member';
+    req.membershipRole = row.role === 'owner' ? 'owner' : 'member';
   };
 }

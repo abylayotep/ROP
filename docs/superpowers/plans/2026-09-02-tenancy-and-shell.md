@@ -37,7 +37,8 @@
 | `rakurs/src/api/index.ts` | The four calls this stage needs. |
 | `rakurs/src/store/agent.tsx` | The agent the URL points at, loaded once per `/a/:agentId` subtree. |
 | `rakurs/src/screens/AgentsScreen.tsx` | Agent picker with the create dialog. |
-| `rakurs/src/screens/sections/*.tsx` | Seven section shells. |
+| `rakurs/src/lib/sections.ts` | The seven sections in menu order: path, label, and what is still missing. One list feeds the routes, the sidebar and the header. |
+| `rakurs/src/screens/SectionScreen.tsx` | One shell for all seven, rendering the pending note the list carries. Seven near-identical files would have said the same thing seven times. |
 | `rakurs/src/components/layout/{Sidebar,Header,Layout}.tsx` | The shell chrome. |
 
 ## Tasks

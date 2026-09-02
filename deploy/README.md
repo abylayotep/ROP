@@ -31,9 +31,10 @@ The runtime image ships compiled `dist/` only, so this is `node dist/scripts/…
 `npm run create-account` / `npm run add-member` scripts — those run `tsx src/…` and only
 work in a checkout.
 
-Copy `deploy/nginx.conf` to the host's nginx, replacing `rakurs.example.com` in all four
-places. `try_files … /index.html` is required: the router is client-side, and without it a
-refresh on `/a/:agentId/dialogs` returns 404.
+Copy `deploy/nginx.conf` to the host's nginx, replacing `rakurs.example.com` with the real
+domain. It occurs five times: two `server_name`, the two certificate paths, and the reminder
+on the first line. `try_files … /index.html` is required: the router is client-side, and
+without it a refresh on `/a/:agentId/dialogs` returns 404.
 
 ## Updating
 
@@ -63,9 +64,6 @@ database is on the internet.
 docker compose -f deploy/compose.yml --env-file deploy/.env exec postgres \
   pg_dump -U rakurs rakurs > rakurs-$(date +%F).sql
 ```
-
-From plan 3 onward, exclude `wa_sessions.creds` from any dump that leaves the VPS — it is a
-live WhatsApp login for a real person's number.
 
 ## Registry access
 

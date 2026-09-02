@@ -71,6 +71,57 @@ describe('provisioning', () => {
     expect(await db.select().from(accountMembers)).toHaveLength(2);
   });
 
+  it('attaches a person who already exists to a second account', async () => {
+    const first = await createAccountWithOwner(db, owner);
+    const [second] = await db.insert(accounts).values({ name: 'Вторая' }).returning();
+
+    const [before] = await db.select().from(users).where(eq(users.email, 'owner@example.com'));
+
+    const added = await addMember(db, {
+      company: 'Вторая',
+      email: 'owner@example.com',
+      // A different name, initials and password: none of them may touch the stored row.
+      name: 'Кто-то другой',
+      initials: 'КД',
+      password: 'x',
+      role: 'member',
+    });
+
+    expect(added.accountId).toBe(second!.id);
+    expect(added.userId).toBe(before!.id);
+
+    const [after] = await db.select().from(users).where(eq(users.email, 'owner@example.com'));
+    expect(await db.select().from(users)).toHaveLength(1);
+    expect(after!.passwordHash).toBe(before!.passwordHash);
+    expect(after!.name).toBe('Владелец');
+
+    const memberships = await db
+      .select()
+      .from(accountMembers)
+      .where(eq(accountMembers.userId, before!.id));
+    expect(memberships).toHaveLength(2);
+    expect(memberships.map((m) => m.accountId).sort()).toEqual(
+      [first.accountId, second!.id].sort(),
+    );
+  });
+
+  it('refuses to add the same person to the same company twice', async () => {
+    await createAccountWithOwner(db, owner);
+
+    await expect(
+      addMember(db, {
+        company: 'Сафина',
+        email: 'owner@example.com',
+        name: 'Владелец',
+        initials: 'ВЛ',
+        password: 'correct-horse-battery',
+        role: 'member',
+      }),
+    ).rejects.toThrow('Этот человек уже в компании');
+
+    expect(await db.select().from(accountMembers)).toHaveLength(1);
+  });
+
   it('refuses to guess when two accounts share a name', async () => {
     await createAccountWithOwner(db, owner);
     await db.insert(accounts).values({ name: 'Сафина' });

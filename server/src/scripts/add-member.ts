@@ -3,7 +3,12 @@ import { createDb } from '../db/client.js';
 import { loadEnv } from '../env.js';
 import { addMember, ProvisionError, type Role } from '../lib/provision.js';
 
-/** Adds a person to an existing company. See create-account.ts for why stdin, not argv. */
+/**
+ * Adds a person to an existing company. See create-account.ts for why stdin, not argv.
+ *
+ * The password is asked for unconditionally but used only when the email is new: an
+ * already-registered person is attached to this company with the password they already have.
+ */
 
 const FIELDS = [
   'Company',

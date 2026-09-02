@@ -3,6 +3,7 @@ import * as api from '@/api';
 import { Card } from '@/components/ui/primitives';
 import { useToast } from '@/components/ui/Toast';
 import { useAgent } from '@/store/agent';
+import type { Agent, Role } from '@/types';
 
 const field: CSSProperties = {
   width: '100%',
@@ -24,6 +25,22 @@ const ZONES = ['Asia/Almaty', 'Asia/Tashkent', 'Europe/Moscow', 'UTC'];
 
 export function AgentSettingsScreen() {
   const { agent, role, replace } = useAgent();
+
+  // The three fields are seeded from the agent on mount. Keying the form on the agent's id
+  // remounts it when the URL moves to another agent under a provider that stays alive, so
+  // the form can never show one agent's name and save it onto another.
+  return <SettingsForm key={agent.id} agent={agent} role={role} replace={replace} />;
+}
+
+function SettingsForm({
+  agent,
+  role,
+  replace,
+}: {
+  agent: Agent;
+  role: Role;
+  replace: (agent: Agent) => void;
+}) {
   const toast = useToast();
 
   const [name, setName] = useState(agent.name);
@@ -41,7 +58,13 @@ export function AgentSettingsScreen() {
 
     setSaving(true);
     try {
-      replace(await api.updateAgent(agent.id, { name, description, timezone }));
+      // Re-seed from the row the server stored, not from what was typed: it trims, so
+      // leaving the typed text in place would keep the form dirty and Save enabled.
+      const saved = await api.updateAgent(agent.id, { name, description, timezone });
+      replace(saved);
+      setName(saved.name);
+      setDescription(saved.description);
+      setTimezone(saved.timezone);
       toast.ok('Сохранено');
     } catch (error) {
       // The saved values stay on screen: retyping them after a failed save is the

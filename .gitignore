@@ -7,10 +7,6 @@ standalone/
 .env.local
 .env.*.local
 
-# Baileys session credentials — never commit, they are a live login to WhatsApp.
-server/.wa-auth/
-*.session.json
-
 # Build artifact produced by `npm run build:standalone`.
 rakurs-standalone.html
 

@@ -41,7 +41,7 @@ beforeEach(async () => {
   app.get(
     '/api/agents/:agentId/probe',
     { preHandler: [guard, requireAgent(db)] },
-    async (req) => ({ name: req.agent!.name, role: req.role }),
+    async (req) => ({ name: req.agent!.name, role: req.membershipRole }),
   );
   app.get(
     '/api/agents/:agentId/owner-probe',

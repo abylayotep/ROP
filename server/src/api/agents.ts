@@ -1,13 +1,12 @@
 import type { Agent } from '@rakurs/contract';
-import { and, eq } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
-import { accountMembers, agents } from '../db/schema.js';
+import { agents } from '../db/schema.js';
 import { ApiError } from '../lib/errors.js';
+import { requireAccount } from './require-account.js';
 import { requireAgent } from './require-agent.js';
-
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const create = z.object({
   name: z.string().trim().min(1),
@@ -29,22 +28,6 @@ const toApi = (row: typeof agents.$inferSelect): Agent => ({
   timezone: row.timezone,
 });
 
-/**
- * Membership in an account, by the same rule the agent guard uses: a company you do not
- * belong to is answered 404, so the API never confirms that it exists.
- */
-async function roleIn(db: Db, accountId: string, userId: string): Promise<string> {
-  if (!UUID.test(accountId)) throw new ApiError(404, 'Компания не найдена');
-
-  const [row] = await db
-    .select({ role: accountMembers.role })
-    .from(accountMembers)
-    .where(and(eq(accountMembers.accountId, accountId), eq(accountMembers.userId, userId)));
-
-  if (!row) throw new ApiError(404, 'Компания не найдена');
-  return row.role;
-}
-
 export function registerAgentRoutes(
   app: FastifyInstance,
   db: Db,
@@ -52,10 +35,9 @@ export function registerAgentRoutes(
 ): void {
   app.get(
     '/api/accounts/:accountId/agents',
-    { preHandler: guard },
+    { preHandler: [guard, requireAccount(db)] },
     async (req): Promise<Agent[]> => {
       const { accountId } = req.params as { accountId: string };
-      await roleIn(db, accountId, req.user!.id);
 
       const rows = await db
         .select()
@@ -68,12 +50,9 @@ export function registerAgentRoutes(
 
   app.post(
     '/api/accounts/:accountId/agents',
-    { preHandler: guard },
+    { preHandler: [guard, requireAccount(db, { role: 'owner' })] },
     async (req): Promise<Agent> => {
       const { accountId } = req.params as { accountId: string };
-      if ((await roleIn(db, accountId, req.user!.id)) !== 'owner') {
-        throw new ApiError(403, 'Недостаточно прав');
-      }
 
       const parsed = create.safeParse(req.body);
       if (!parsed.success) throw new ApiError(400, 'Укажите название агента');

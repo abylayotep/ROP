@@ -1,14 +1,12 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { buildServer } from '../src/api/server.js';
 import { users } from '../src/db/schema.js';
-import { loadEnv } from '../src/env.js';
 import { hashPassword } from '../src/lib/password.js';
 import { SESSION_COOKIE } from '../src/lib/session.js';
 import { withDb } from './helpers/db.js';
+import { testEnv } from './helpers/env.js';
 
-const env = loadEnv({
-  NODE_ENV: 'test', DATABASE_URL: 'postgres://x', SESSION_SECRET: 'x'.repeat(32),
-} as NodeJS.ProcessEnv);
+const env = testEnv();
 
 let app: ReturnType<typeof buildServer>;
 

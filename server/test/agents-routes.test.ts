@@ -3,15 +3,11 @@ import type { FastifyInstance } from 'fastify';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { buildServer } from '../src/api/server.js';
 import { accountMembers } from '../src/db/schema.js';
-import { loadEnv } from '../src/env.js';
 import { createAccountWithOwner } from '../src/lib/provision.js';
 import { withDb } from './helpers/db.js';
+import { testEnv } from './helpers/env.js';
 
-const env = loadEnv({
-  NODE_ENV: 'test',
-  DATABASE_URL: 'postgres://x',
-  SESSION_SECRET: 'x'.repeat(32),
-} as NodeJS.ProcessEnv);
+const env = testEnv();
 
 const PASSWORD = 'correct-horse-battery';
 

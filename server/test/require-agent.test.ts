@@ -5,15 +5,11 @@ import { requireAgent } from '../src/api/require-agent.js';
 import { requireSession } from '../src/api/require-session.js';
 import { buildServer } from '../src/api/server.js';
 import { accountMembers, accounts, agents } from '../src/db/schema.js';
-import { loadEnv } from '../src/env.js';
 import { createAccountWithOwner } from '../src/lib/provision.js';
 import { withDb } from './helpers/db.js';
+import { testEnv } from './helpers/env.js';
 
-const env = loadEnv({
-  NODE_ENV: 'test',
-  DATABASE_URL: 'postgres://x',
-  SESSION_SECRET: 'x'.repeat(32),
-} as NodeJS.ProcessEnv);
+const env = testEnv();
 
 let app: FastifyInstance;
 let db: Awaited<ReturnType<typeof withDb>>;

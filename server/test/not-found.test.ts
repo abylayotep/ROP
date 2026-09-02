@@ -1,11 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { buildServer } from '../src/api/server.js';
 import { createDb } from '../src/db/client.js';
-import { loadEnv } from '../src/env.js';
+import { testEnv } from './helpers/env.js';
 
-const env = loadEnv({
-  NODE_ENV: 'test', DATABASE_URL: 'postgres://x', SESSION_SECRET: 'x'.repeat(32),
-} as NodeJS.ProcessEnv);
+const env = testEnv();
 
 describe('unknown routes', () => {
   it('answers in the product language, not Fastify default English', async () => {

@@ -15,3 +15,6 @@ _to_delete/
 
 .DS_Store
 *.log
+
+# Файлы из WhatsApp: приходят от клиентов, в репозитории им не место.
+var/media/

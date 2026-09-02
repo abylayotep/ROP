@@ -15,6 +15,13 @@
       "when": 1788346258114,
       "tag": "0001_smiling_morlocks",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1788364787776,
+      "tag": "0002_sleepy_scarlet_spider",
+      "breakpoints": true
     }
   ]
 }

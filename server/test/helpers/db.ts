@@ -19,7 +19,7 @@ export async function withDb(): Promise<Db> {
     await migrate(db, { migrationsFolder: 'drizzle' });
   }
   await db.execute(
-    sql`truncate table sessions, account_members, agents, accounts, users restart identity cascade`,
+    sql`truncate table sessions, account_members, whatsapp_events, messages, conversations, contacts, whatsapp_numbers, agents, accounts, users restart identity cascade`,
   );
   return db;
 }

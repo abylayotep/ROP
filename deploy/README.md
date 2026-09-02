@@ -13,19 +13,27 @@ docker compose -f deploy/compose.yml --env-file deploy/.env up -d --build
 docker compose -f deploy/compose.yml --env-file deploy/.env run --rm api npm run migrate
 ```
 
-Create the first user — once. There is no sign-up route by design:
+Create the first company and its owner — once. There is no sign-up route by design:
 
 ```bash
 docker compose -f deploy/compose.yml --env-file deploy/.env run --rm api \
-  node dist/scripts/create-user.js
+  node dist/scripts/create-account.js
+```
+
+Add someone to an existing company:
+
+```bash
+docker compose -f deploy/compose.yml --env-file deploy/.env run --rm api \
+  node dist/scripts/add-member.js
 ```
 
 The runtime image ships compiled `dist/` only, so this is `node dist/scripts/…`, not the
-`npm run create-user` script — that one runs `tsx src/…` and only works in a checkout.
+`npm run create-account` / `npm run add-member` scripts — those run `tsx src/…` and only
+work in a checkout.
 
 Copy `deploy/nginx.conf` to the host's nginx, replacing `rakurs.example.com` in all four
 places. `try_files … /index.html` is required: the router is client-side, and without it a
-refresh on `/dialogs` returns 404.
+refresh on `/a/:agentId/dialogs` returns 404.
 
 ## Updating
 

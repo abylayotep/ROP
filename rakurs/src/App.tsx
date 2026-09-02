@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { Layout } from '@/components/layout/Layout';
 import { SECTIONS } from '@/lib/sections';
+import { AgentSettingsScreen } from '@/screens/AgentSettingsScreen';
 import { AgentsScreen } from '@/screens/AgentsScreen';
 import { LoginScreen } from '@/screens/LoginScreen';
 import { SectionScreen } from '@/screens/SectionScreen';
@@ -41,7 +42,13 @@ function AuthGate() {
           <Route
             key={section.path}
             path={section.path}
-            element={<SectionScreen section={section} />}
+            element={
+              section.path === 'settings' ? (
+                <AgentSettingsScreen />
+              ) : (
+                <SectionScreen section={section} />
+              )
+            }
           />
         ))}
       </Route>

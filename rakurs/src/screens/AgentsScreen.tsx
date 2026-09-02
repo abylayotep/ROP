@@ -1,7 +1,9 @@
-import { Link, Navigate } from 'react-router-dom';
+import { useState } from 'react';
+import { Link, Navigate, useNavigate } from 'react-router-dom';
 import * as api from '@/api';
 import { Card } from '@/components/ui/primitives';
 import { Async, EmptyState, Skeleton } from '@/components/ui/states';
+import { useToast } from '@/components/ui/Toast';
 import { useApi } from '@/hooks/useApi';
 import { useAuth } from '@/store/auth';
 import type { Account, Agent } from '@/types';
@@ -26,6 +28,27 @@ export function AgentsScreen() {
       ),
     [key],
   );
+
+  const navigate = useNavigate();
+  const [creating, setCreating] = useState<string | null>(null);
+  const [newName, setNewName] = useState('');
+  const toast = useToast();
+
+  async function create(accountId: string) {
+    if (!newName.trim()) return toast.fail(undefined, 'Укажите название агента');
+    try {
+      const agent = await api.createAgent(accountId, {
+        name: newName,
+        description: '',
+        timezone: 'Asia/Almaty',
+      });
+      setCreating(null);
+      setNewName('');
+      navigate(`/a/${agent.id}/settings`);
+    } catch (error) {
+      toast.fail(error);
+    }
+  }
 
   // One company, one agent: the picker would be a page with a single button on it.
   const only = query.data?.length === 1 && query.data[0]!.agents.length === 1;
@@ -66,14 +89,62 @@ export function AgentsScreen() {
                 <section key={account.id}>
                   <div
                     style={{
-                      fontSize: 11,
-                      letterSpacing: '0.4px',
-                      textTransform: 'uppercase',
-                      color: 'var(--text-dim)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 10,
                       marginBottom: 10,
                     }}
                   >
-                    {account.name}
+                    <div
+                      style={{
+                        fontSize: 11,
+                        letterSpacing: '0.4px',
+                        textTransform: 'uppercase',
+                        color: 'var(--text-dim)',
+                      }}
+                    >
+                      {account.name}
+                    </div>
+
+                    {account.role === 'owner' &&
+                      (creating === account.id ? (
+                        <>
+                          <input
+                            autoFocus
+                            value={newName}
+                            placeholder="Название агента"
+                            onChange={(e) => setNewName(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') void create(account.id);
+                              if (e.key === 'Escape') setCreating(null);
+                            }}
+                            style={{
+                              padding: '5px 9px',
+                              background: 'var(--sunken)',
+                              color: 'var(--text)',
+                              border: '1px solid var(--line)',
+                              borderRadius: 7,
+                              font: 'inherit',
+                              fontSize: 12.5,
+                            }}
+                          />
+                          <button
+                            type="button"
+                            className="btn"
+                            onClick={() => void create(account.id)}
+                          >
+                            Создать
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          type="button"
+                          className="btn"
+                          onClick={() => setCreating(account.id)}
+                        >
+                          Создать агента
+                        </button>
+                      ))}
                   </div>
 
                   {agents.length === 0 ? (

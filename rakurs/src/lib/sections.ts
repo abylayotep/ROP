@@ -22,7 +22,7 @@ export const SECTIONS: SectionDef[] = [
   {
     path: 'dialogs',
     label: 'Диалоги',
-    pending: 'Переписка появится на этапе 2, вместе с подключением WhatsApp.',
+    pending: '',
   },
   {
     path: 'knowledge',

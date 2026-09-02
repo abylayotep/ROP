@@ -1,5 +1,13 @@
-import type { Agent, Me, WebhookSetup, WhatsappNumber } from '@/types';
-import { request } from './client';
+import type {
+  Agent,
+  ConversationSummary,
+  ConversationThread,
+  Me,
+  Message,
+  WebhookSetup,
+  WhatsappNumber,
+} from '@/types';
+import { API_URL, request } from './client';
 
 export { API_URL, ApiError, humanError, request } from './client';
 
@@ -56,3 +64,21 @@ export const disconnectWhatsappNumber = (agentId: string, numberId: string) =>
 
 export const getWebhookSetup = (agentId: string, signal?: AbortSignal) =>
   request<WebhookSetup>(`/agents/${agentId}/whatsapp/setup`, { signal });
+
+// ── Диалоги ──────────────────────────────────────────────────────────────────
+
+export const listConversations = (agentId: string, signal?: AbortSignal) =>
+  request<ConversationSummary[]>(`/agents/${agentId}/conversations`, { signal });
+
+export const getConversation = (agentId: string, conversationId: string, signal?: AbortSignal) =>
+  request<ConversationThread>(`/agents/${agentId}/conversations/${conversationId}`, { signal });
+
+export const sendMessage = (agentId: string, conversationId: string, body: string) =>
+  request<Message>(`/agents/${agentId}/conversations/${conversationId}/messages`, {
+    method: 'POST',
+    body: { body },
+  });
+
+/** The address of a file inside a message. Access is checked by the session cookie. */
+export const mediaUrl = (agentId: string, messageId: string) =>
+  `${API_URL}/agents/${agentId}/messages/${messageId}/media`;

@@ -3,6 +3,7 @@ import { Layout } from '@/components/layout/Layout';
 import { SECTIONS } from '@/lib/sections';
 import { AgentSettingsScreen } from '@/screens/AgentSettingsScreen';
 import { AgentsScreen } from '@/screens/AgentsScreen';
+import { DialogsScreen } from '@/screens/DialogsScreen';
 import { IntegrationsScreen } from '@/screens/IntegrationsScreen';
 import { LoginScreen } from '@/screens/LoginScreen';
 import { SectionScreen } from '@/screens/SectionScreen';
@@ -48,6 +49,8 @@ function AuthGate() {
                 <AgentSettingsScreen />
               ) : section.path === 'integrations' ? (
                 <IntegrationsScreen />
+              ) : section.path === 'dialogs' ? (
+                <DialogsScreen />
               ) : (
                 <SectionScreen section={section} />
               )

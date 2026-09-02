@@ -115,7 +115,7 @@ describe('inbound processing', () => {
     expect(contact).toMatchObject({ agentId, phone: '77771234567', name: 'Айгерім' });
 
     const [conversation] = await db.select().from(conversations);
-    expect(conversation!.lastInboundAt?.toISOString()).toBe('2026-08-24T02:26:40.000Z');
+    expect(conversation!.lastInboundAt?.toISOString()).toBe('2025-08-24T01:46:40.000Z');
     expect(conversation!.lastMessageAt).toEqual(conversation!.lastInboundAt);
 
     const [message] = await db.select().from(messages);

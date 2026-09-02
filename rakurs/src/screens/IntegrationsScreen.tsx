@@ -30,7 +30,6 @@ interface Loaded {
 
 export function IntegrationsScreen() {
   const { agent, role } = useAgent();
-  const toast = useToast();
   const owner = role === 'owner';
 
   const query = useApi<Loaded>(
@@ -63,185 +62,188 @@ export function IntegrationsScreen() {
       )}
     </Async>
   );
+}
 
-  function ConnectedNumbers({
-    numbers,
-    owner,
-    agentId,
-    onChanged,
-  }: {
-    numbers: WhatsappNumber[];
-    owner: boolean;
-    agentId: string;
-    onChanged: () => void;
-  }) {
-    if (numbers.length === 0) return null;
+// Module scope, not nested inside IntegrationsScreen: a function declared inside a
+// component's body gets a new identity every render, so React would treat each render as a
+// different component type and unmount/remount it — wiping ConnectForm's typed fields and
+// input focus every time query.reload() runs after a toggle or a disconnect.
 
-    return (
-      <Card>
-        <div style={{ fontSize: 13.5, fontWeight: 650, marginBottom: 12 }}>
-          Подключённые номера
-        </div>
-        {numbers.map((number) => (
-          <div
-            key={number.id}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 12,
-              padding: '10px 0',
-              borderTop: '1px solid var(--line-soft)',
-            }}
-          >
-            <div style={{ minWidth: 0 }}>
-              <div style={{ fontSize: 13.5 }}>{number.displayPhone}</div>
-              <div style={hint}>ID номера {number.phoneNumberId}</div>
-              {/* The failure this line exists for: Meta took the number and delivers
-                  nothing, which looks identical to working until a client writes. */}
-              {!number.subscribed && (
-                <div style={{ ...hint, color: 'var(--danger)' }}>
-                  Приложение не подписано на WABA — сообщения приходить не будут.
-                </div>
-              )}
-            </div>
-            <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
-              <span style={{ ...hint, marginTop: 0 }}>
-                {number.enabled ? 'Включён' : 'Выключен'}
-              </span>
-              {owner && (
-                <>
-                  <button
-                    type="button"
-                    className="btn"
-                    onClick={async () => {
-                      try {
-                        await api.setWhatsappNumberEnabled(agentId, number.id, !number.enabled);
-                        onChanged();
-                      } catch (error) {
-                        toast.fail(error);
-                      }
-                    }}
-                  >
-                    {number.enabled ? 'Выключить' : 'Включить'}
-                  </button>
-                  <button
-                    type="button"
-                    className="btn"
-                    onClick={async () => {
-                      try {
-                        await api.disconnectWhatsappNumber(agentId, number.id);
-                        toast.ok('Номер отключён');
-                        onChanged();
-                      } catch (error) {
-                        toast.fail(error);
-                      }
-                    }}
-                  >
-                    Отключить
-                  </button>
-                </>
-              )}
-            </div>
+function ConnectedNumbers({
+  numbers,
+  owner,
+  agentId,
+  onChanged,
+}: {
+  numbers: WhatsappNumber[];
+  owner: boolean;
+  agentId: string;
+  onChanged: () => void;
+}) {
+  const toast = useToast();
+
+  if (numbers.length === 0) return null;
+
+  return (
+    <Card>
+      <div style={{ fontSize: 13.5, fontWeight: 650, marginBottom: 12 }}>
+        Подключённые номера
+      </div>
+      {numbers.map((number) => (
+        <div
+          key={number.id}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 12,
+            padding: '10px 0',
+            borderTop: '1px solid var(--line-soft)',
+          }}
+        >
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 13.5 }}>{number.displayPhone}</div>
+            <div style={hint}>ID номера {number.phoneNumberId}</div>
+            {/* The failure this line exists for: Meta took the number and delivers
+                nothing, which looks identical to working until a client writes. */}
+            {!number.subscribed && (
+              <div style={{ ...hint, color: 'var(--danger)' }}>
+                Приложение не подписано на WABA — сообщения приходить не будут.
+              </div>
+            )}
           </div>
-        ))}
-      </Card>
-    );
-  }
-
-  function WebhookCard({ setup }: { setup: WebhookSetup }) {
-    return (
-      <Card>
-        <div style={{ fontSize: 13.5, fontWeight: 650, marginBottom: 8 }}>Вебхук в Meta</div>
-        <div style={hint}>
-          Вставьте это в настройках приложения Meta: WhatsApp → Configuration → Webhook. Затем
-          подпишитесь на поле messages.
-        </div>
-        <div style={{ marginTop: 10 }}>
-          <div style={label}>Callback URL</div>
-          <div className="mono" style={{ ...field, marginTop: 6 }}>
-            {setup.url}
+          <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+            <span style={{ ...hint, marginTop: 0 }}>
+              {number.enabled ? 'Включён' : 'Выключен'}
+            </span>
+            {owner && (
+              <>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={async () => {
+                    try {
+                      await api.setWhatsappNumberEnabled(agentId, number.id, !number.enabled);
+                      onChanged();
+                    } catch (error) {
+                      toast.fail(error);
+                    }
+                  }}
+                >
+                  {number.enabled ? 'Выключить' : 'Включить'}
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={async () => {
+                    try {
+                      await api.disconnectWhatsappNumber(agentId, number.id);
+                      toast.ok('Номер отключён');
+                      onChanged();
+                    } catch (error) {
+                      toast.fail(error);
+                    }
+                  }}
+                >
+                  Отключить
+                </button>
+              </>
+            )}
           </div>
         </div>
-        <div style={{ marginTop: 10 }}>
-          <div style={label}>Verify token</div>
-          <div className="mono" style={{ ...field, marginTop: 6 }}>
-            {setup.verifyToken}
-          </div>
+      ))}
+    </Card>
+  );
+}
+
+function WebhookCard({ setup }: { setup: WebhookSetup }) {
+  return (
+    <Card>
+      <div style={{ fontSize: 13.5, fontWeight: 650, marginBottom: 8 }}>Вебхук в Meta</div>
+      <div style={hint}>
+        Вставьте это в настройках приложения Meta: WhatsApp → Configuration → Webhook. Затем
+        подпишитесь на поле messages.
+      </div>
+      <div style={{ marginTop: 10 }}>
+        <div style={label}>Callback URL</div>
+        <div className="mono" style={{ ...field, marginTop: 6 }}>
+          {setup.url}
         </div>
-      </Card>
-    );
-  }
+      </div>
+      <div style={{ marginTop: 10 }}>
+        <div style={label}>Verify token</div>
+        <div className="mono" style={{ ...field, marginTop: 6 }}>
+          {setup.verifyToken}
+        </div>
+      </div>
+    </Card>
+  );
+}
 
-  function ConnectForm({
-    agentId,
-    onConnected,
-  }: {
-    agentId: string;
-    onConnected: () => void;
-  }) {
-    const [phoneNumberId, setPhoneNumberId] = useState('');
-    const [wabaId, setWabaId] = useState('');
-    const [accessToken, setAccessToken] = useState('');
-    const [saving, setSaving] = useState(false);
+function ConnectForm({ agentId, onConnected }: { agentId: string; onConnected: () => void }) {
+  const toast = useToast();
 
-    async function submit(event: FormEvent) {
-      event.preventDefault();
-      setSaving(true);
-      try {
-        await api.connectWhatsappNumber(agentId, { phoneNumberId, wabaId, accessToken });
-        // Cleared on success only: a token that Meta rejected is worth keeping on screen
-        // so it can be corrected rather than pasted again.
-        setPhoneNumberId('');
-        setWabaId('');
-        setAccessToken('');
-        toast.ok('Номер подключён');
-        onConnected();
-      } catch (error) {
-        toast.fail(error);
-      } finally {
-        setSaving(false);
-      }
+  const [phoneNumberId, setPhoneNumberId] = useState('');
+  const [wabaId, setWabaId] = useState('');
+  const [accessToken, setAccessToken] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setSaving(true);
+    try {
+      await api.connectWhatsappNumber(agentId, { phoneNumberId, wabaId, accessToken });
+      // Cleared on success only: a token that Meta rejected is worth keeping on screen
+      // so it can be corrected rather than pasted again.
+      setPhoneNumberId('');
+      setWabaId('');
+      setAccessToken('');
+      toast.ok('Номер подключён');
+      onConnected();
+    } catch (error) {
+      toast.fail(error);
+    } finally {
+      setSaving(false);
     }
-
-    return (
-      <Card>
-        <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-          <div style={{ fontSize: 13.5, fontWeight: 650 }}>Подключить номер WhatsApp</div>
-          <div style={hint}>
-            Значения берутся в Meta: WhatsApp → API Setup. Токен — постоянный, от системного
-            пользователя.
-          </div>
-
-          <div>
-            <div style={label}>Phone number ID</div>
-            <input
-              style={field}
-              value={phoneNumberId}
-              onChange={(e) => setPhoneNumberId(e.target.value)}
-            />
-          </div>
-          <div>
-            <div style={label}>WhatsApp Business Account ID</div>
-            <input style={field} value={wabaId} onChange={(e) => setWabaId(e.target.value)} />
-          </div>
-          <div>
-            <div style={label}>Токен доступа</div>
-            <input
-              style={field}
-              type="password"
-              value={accessToken}
-              onChange={(e) => setAccessToken(e.target.value)}
-            />
-            <div style={hint}>Хранится в зашифрованном виде и обратно не показывается.</div>
-          </div>
-
-          <div>
-            <button type="submit" className="btn" disabled={saving}>
-              {saving ? 'Проверяем…' : 'Подключить'}
-            </button>
-          </div>
-        </form>
-      </Card>
-    );
   }
+
+  return (
+    <Card>
+      <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <div style={{ fontSize: 13.5, fontWeight: 650 }}>Подключить номер WhatsApp</div>
+        <div style={hint}>
+          Значения берутся в Meta: WhatsApp → API Setup. Токен — постоянный, от системного
+          пользователя.
+        </div>
+
+        <div>
+          <div style={label}>Phone number ID</div>
+          <input
+            style={field}
+            value={phoneNumberId}
+            onChange={(e) => setPhoneNumberId(e.target.value)}
+          />
+        </div>
+        <div>
+          <div style={label}>WhatsApp Business Account ID</div>
+          <input style={field} value={wabaId} onChange={(e) => setWabaId(e.target.value)} />
+        </div>
+        <div>
+          <div style={label}>Токен доступа</div>
+          <input
+            style={field}
+            type="password"
+            value={accessToken}
+            onChange={(e) => setAccessToken(e.target.value)}
+          />
+          <div style={hint}>Хранится в зашифрованном виде и обратно не показывается.</div>
+        </div>
+
+        <div>
+          <button type="submit" className="btn" disabled={saving}>
+            {saving ? 'Проверяем…' : 'Подключить'}
+          </button>
+        </div>
+      </form>
+    </Card>
+  );
 }

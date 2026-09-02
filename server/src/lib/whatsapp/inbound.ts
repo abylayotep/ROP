@@ -8,7 +8,7 @@ import {
   whatsappNumbers,
 } from '../../db/schema.js';
 import { decryptSecret } from '../secret-box.js';
-import type { GraphClient } from './graph.js';
+import { withoutSecret, type GraphClient } from './graph.js';
 import { downloadInboundMedia } from './media.js';
 
 /**
@@ -284,17 +284,23 @@ async function applyChange(db: Db, deps: InboundDeps, value: ChangeValue): Promi
     let media: { path: string; mime: string } | null = null;
     const mediaId = mediaIdOf(incoming);
     if (mediaId && !known) {
+      // Bound to a local rather than decrypted inline: the catch below needs it in scope
+      // to scrub Meta's echo of it, and this error lands in a column that never gets
+      // deleted, unlike a response shown once and forgotten.
+      const token = decryptSecret(number.accessToken, deps.key, number.phoneNumberId);
       try {
         media = await downloadInboundMedia(deps, {
           mediaId,
-          token: decryptSecret(number.accessToken, deps.key, number.phoneNumberId),
+          token,
           agentId: number.agentId,
           waMessageId: incoming.id,
         });
       } catch (error) {
         // The message is still worth having: its caption, its sender and its place in the
         // thread are all real. Only the file is missing, and the event says why.
-        errors.push(error instanceof Error ? error.message : String(error));
+        errors.push(
+          withoutSecret(error instanceof Error ? error.message : String(error), token),
+        );
       }
     }
 

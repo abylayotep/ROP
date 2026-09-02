@@ -113,6 +113,20 @@ describe('inbound media', () => {
     expect(event!.processedAt).toBeInstanceOf(Date);
   });
 
+  it('does not store the decrypted token when a media download fails', async () => {
+    const graph = fakeGraph({
+      getMediaUrl: async () => {
+        throw new GraphError('Malformed access token EAAG-token', 401, 190);
+      },
+    });
+
+    await processPendingEvents(db, deps(graph));
+
+    const [event] = await db.select().from(whatsappEvents);
+    expect(event!.error).not.toContain('EAAG-token');
+    expect(event!.error).toContain('<токен скрыт>');
+  });
+
   it('refuses a file larger than the cap without downloading it', async () => {
     const graph = fakeGraph({
       getMediaUrl: async () => ({

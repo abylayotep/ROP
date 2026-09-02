@@ -4,6 +4,8 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import type { Db } from '../db/client.js';
 import type { Env } from '../env.js';
 import { ApiError } from '../lib/errors.js';
+import { credentialsKey } from '../lib/secret-box.js';
+import { createGraphClient } from '../lib/whatsapp/graph.js';
 import { registerAgentRoutes } from './agents.js';
 import { registerAuthRoutes } from './auth.js';
 import { requireSession } from './require-session.js';
@@ -45,7 +47,11 @@ export function buildServer(env: Env, db: Db): FastifyInstance {
   registerAgentRoutes(app, db, guard);
   // Meta calls the webhook directly with no session of its own, so it takes no guard —
   // the request signature is the check instead.
-  registerWhatsappWebhook(app, db, env);
+  registerWhatsappWebhook(app, db, env, {
+    graph: createGraphClient(),
+    key: credentialsKey(env),
+    mediaDir: env.MEDIA_DIR,
+  });
   // Later plans register their routes here, reusing the same guard.
 
   return app;

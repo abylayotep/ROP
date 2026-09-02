@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import type { Db } from '../db/client.js';
 import { whatsappEvents } from '../db/schema.js';
 import type { Env } from '../env.js';
+import { type InboundDeps, processPendingEvents } from '../lib/whatsapp/inbound.js';
 import { verifySignature } from '../lib/whatsapp/signature.js';
 
 /**
@@ -15,7 +16,12 @@ import { verifySignature } from '../lib/whatsapp/signature.js';
  *
  * There is no session guard here by design — Meta has no session. The signature is the check.
  */
-export function registerWhatsappWebhook(app: FastifyInstance, db: Db, env: Env): void {
+export function registerWhatsappWebhook(
+  app: FastifyInstance,
+  db: Db,
+  env: Env,
+  deps: InboundDeps,
+): void {
   app.register(async (scope) => {
     scope.addContentTypeParser(
       'application/json',
@@ -58,9 +64,14 @@ export function registerWhatsappWebhook(app: FastifyInstance, db: Db, env: Env):
 
       await db.insert(whatsappEvents).values({ payload });
 
-      // Answer before parsing. Meta retries only on a non-200, so a parser that throws
-      // after this point costs nothing: the row above is the message, and task 5's
-      // processing runs from it.
+      // Answer first, work second. Meta retries only on a non-200, and the event is already
+      // stored, so nothing is lost if this throws — the row keeps its error for a re-run.
+      setImmediate(() => {
+        void processPendingEvents(db, deps).catch((error) => {
+          app.log.error({ error }, 'whatsapp: processing pending events failed');
+        });
+      });
+
       return reply.code(200).send();
     });
   });

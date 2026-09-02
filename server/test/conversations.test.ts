@@ -413,4 +413,15 @@ describe('media', () => {
 
     expect(res.statusCode).toBe(404);
   });
+
+  it('answers 404 for a message id that is not a uuid', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/agents/${agentId}/messages/not-a-uuid/media`,
+      cookies: jar,
+    });
+
+    expect(res.statusCode).toBe(404);
+    expect(res.json().message).toBe('Файл не найден');
+  });
 });

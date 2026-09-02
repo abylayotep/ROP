@@ -1,13 +1,12 @@
 import { and, eq, gt, lt } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
 import { sessions } from '../db/schema.js';
+import { isUuid } from './uuid.js';
 
 export type Session = typeof sessions.$inferSelect;
 
 export const SESSION_COOKIE = 'rakurs_session';
 export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** `now` is a parameter so expiry is testable without mocking the clock. */
 export async function createSession(db: Db, userId: string, now = new Date()): Promise<Session> {
@@ -25,7 +24,7 @@ export async function findValidSession(
 ): Promise<Session | null> {
   // The cookie is attacker-controlled. Comparing non-UUID text against a uuid column
   // makes Postgres raise, which would turn a junk cookie into a 500 on every request.
-  if (!UUID.test(id)) return null;
+  if (!isUuid(id)) return null;
 
   const [row] = await db
     .select()
@@ -35,7 +34,7 @@ export async function findValidSession(
 }
 
 export async function revokeSession(db: Db, id: string): Promise<void> {
-  if (!UUID.test(id)) return;
+  if (!isUuid(id)) return;
   await db.delete(sessions).where(eq(sessions.id, id));
 }
 

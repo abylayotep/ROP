@@ -2,6 +2,7 @@ import { and, eq } from 'drizzle-orm';
 import type { FastifyReply, FastifyRequest, preHandlerHookHandler } from 'fastify';
 import type { Db } from '../db/client.js';
 import { accountMembers, agents } from '../db/schema.js';
+import { isUuid } from '../lib/uuid.js';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -9,8 +10,6 @@ declare module 'fastify' {
   }
 }
 // `membershipRole` is declared once, in require-account.ts, and both guards attach it.
-
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * Membership check for every `/api/agents/:agentId/…` route.
@@ -30,7 +29,7 @@ export function requireAgent(
 
     // The id comes from the URL. Comparing non-UUID text against a uuid column makes
     // Postgres raise, which would turn a typo into a 500.
-    if (!agentId || !UUID.test(agentId)) {
+    if (!agentId || !isUuid(agentId)) {
       return reply.code(404).send({ message: 'Агент не найден' });
     }
 

@@ -9,6 +9,7 @@ import { contacts, conversations, messages, whatsappNumbers } from '../db/schema
 import type { Env } from '../env.js';
 import { ApiError } from '../lib/errors.js';
 import { credentialsKey, decryptSecret } from '../lib/secret-box.js';
+import { isUuid } from '../lib/uuid.js';
 import { GraphError, type GraphClient } from '../lib/whatsapp/graph.js';
 import { requireAgent } from './require-agent.js';
 
@@ -181,6 +182,10 @@ export function registerConversationRoutes(
     async (req, reply) => {
       const { messageId } = req.params as { messageId: string };
 
+      // The id comes from the URL. Comparing non-UUID text against a uuid column makes
+      // Postgres raise, which would turn a typo into a 500 instead of the 404 below.
+      if (!isUuid(messageId)) throw new ApiError(404, 'Файл не найден');
+
       const [row] = await db
         .select({ message: messages })
         .from(messages)
@@ -201,8 +206,7 @@ export function registerConversationRoutes(
 
 /** The conversation with everything the routes need, or a 404 that says nothing more. */
 async function loadConversation(db: Db, agentId: string, conversationId: string) {
-  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  if (!UUID.test(conversationId)) throw new ApiError(404, 'Диалог не найден');
+  if (!isUuid(conversationId)) throw new ApiError(404, 'Диалог не найден');
 
   const [row] = await db
     .select({ conversation: conversations, contact: contacts, number: whatsappNumbers })

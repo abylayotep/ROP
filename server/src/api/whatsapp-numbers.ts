@@ -7,6 +7,7 @@ import { whatsappNumbers } from '../db/schema.js';
 import type { Env } from '../env.js';
 import { ApiError } from '../lib/errors.js';
 import { credentialsKey, encryptSecret } from '../lib/secret-box.js';
+import { isUuid } from '../lib/uuid.js';
 import { GraphError, type GraphClient } from '../lib/whatsapp/graph.js';
 import { requireAgent } from './require-agent.js';
 
@@ -17,8 +18,6 @@ const connection = z.object({
 });
 
 const enabling = z.object({ enabled: z.boolean() });
-
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** The access token is never part of this. It goes in and it does not come out. */
 const toApi = (row: typeof whatsappNumbers.$inferSelect): WhatsappNumber => ({
@@ -128,7 +127,7 @@ export function registerWhatsappNumberRoutes(
       const { numberId } = req.params as { numberId: string };
       // A numberId that is not a uuid makes Postgres raise on the comparison, which would
       // turn a typo into a 500.
-      if (!UUID.test(numberId)) throw new ApiError(404, 'Номер не найден');
+      if (!isUuid(numberId)) throw new ApiError(404, 'Номер не найден');
 
       const parsed = enabling.safeParse(req.body);
       if (!parsed.success) throw new ApiError(400, 'Не удалось разобрать настройку номера');
@@ -151,7 +150,7 @@ export function registerWhatsappNumberRoutes(
     { preHandler: [guard, ownerOnly] },
     async (req): Promise<{ ok: true }> => {
       const { numberId } = req.params as { numberId: string };
-      if (!UUID.test(numberId)) throw new ApiError(404, 'Номер не найден');
+      if (!isUuid(numberId)) throw new ApiError(404, 'Номер не найден');
 
       const [row] = await db
         .delete(whatsappNumbers)

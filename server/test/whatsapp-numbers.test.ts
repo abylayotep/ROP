@@ -115,6 +115,24 @@ describe('connecting a number', () => {
     expect(await db.select().from(whatsappNumbers)).toEqual([]);
   });
 
+  it('does not echo the pasted token back when Meta rejects it', async () => {
+    app = buildServer(env, db, {
+      graph: fakeGraph({
+        getPhoneNumber: async () => {
+          throw new GraphError(`Malformed access token ${valid.accessToken}`, 401, 190);
+        },
+      }),
+    });
+    await app.ready();
+    jar = await login('owner@example.com');
+
+    const res = await connect(valid);
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().message).not.toContain(valid.accessToken);
+    expect(res.json().message).toContain('<токен скрыт>');
+  });
+
   it('says plainly when the number is stored but Meta will not deliver', async () => {
     app = buildServer(env, db, {
       graph: fakeGraph({
@@ -263,6 +281,25 @@ describe('listing and changing a number', () => {
     expect(
       decryptSecret(stored!.accessToken, Buffer.from(env.CREDENTIALS_KEY, 'base64'), '136'),
     ).toBe('EAAG-token');
+  });
+
+  it('does not echo the replacement token back when Meta rejects it', async () => {
+    const { id } = (await connect(valid)).json();
+    app = buildServer(env, db, {
+      graph: fakeGraph({
+        getPhoneNumber: async () => {
+          throw new GraphError('Malformed access token EAAG-broken', 401, 190);
+        },
+      }),
+    });
+    await app.ready();
+    jar = await login('owner@example.com');
+
+    const res = await patch(id, { accessToken: 'EAAG-broken' });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().message).not.toContain('EAAG-broken');
+    expect(res.json().message).toContain('<токен скрыт>');
   });
 
   it('refuses a body that asks for nothing', async () => {

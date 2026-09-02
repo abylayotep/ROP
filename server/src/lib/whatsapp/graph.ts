@@ -50,6 +50,15 @@ export class GraphError extends Error {
   }
 }
 
+/**
+ * Meta echoes a rejected token back inside its own error text — «Malformed access token
+ * <the token>». That text is shown to whoever pressed the button, so the secret has to be
+ * taken out of it before it leaves this process.
+ */
+export function withoutSecret(message: string, secret: string): string {
+  return secret ? message.split(secret).join('<токен скрыт>') : message;
+}
+
 async function failure(response: Response): Promise<GraphError> {
   const text = await response.text();
   try {

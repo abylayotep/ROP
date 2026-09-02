@@ -8,7 +8,7 @@ import type { Env } from '../env.js';
 import { ApiError } from '../lib/errors.js';
 import { credentialsKey, encryptSecret } from '../lib/secret-box.js';
 import { isUuid } from '../lib/uuid.js';
-import { GraphError, type GraphClient } from '../lib/whatsapp/graph.js';
+import { GraphError, withoutSecret, type GraphClient } from '../lib/whatsapp/graph.js';
 import { requireAgent } from './require-agent.js';
 
 const connection = z.object({
@@ -89,7 +89,7 @@ export function registerWhatsappNumberRoutes(
         displayPhone = (await graph.getPhoneNumber(phoneNumberId, accessToken)).displayPhoneNumber;
       } catch (error) {
         if (error instanceof GraphError) {
-          throw new ApiError(400, `Meta не приняла эти данные: ${error.message}`);
+          throw new ApiError(400, `Meta не приняла эти данные: ${withoutSecret(error.message, accessToken)}`);
         }
         throw error;
       }
@@ -102,7 +102,7 @@ export function registerWhatsappNumberRoutes(
         if (error instanceof GraphError) {
           throw new ApiError(
             400,
-            `Номер проверен, но не удалось подписать приложение на WABA: ${error.message}`,
+            `Номер проверен, но не удалось подписать приложение на WABA: ${withoutSecret(error.message, accessToken)}`,
           );
         }
         throw error;
@@ -178,7 +178,7 @@ export function registerWhatsappNumberRoutes(
             .displayPhoneNumber;
         } catch (error) {
           if (error instanceof GraphError) {
-            throw new ApiError(400, `Meta не приняла этот токен: ${error.message}`);
+            throw new ApiError(400, `Meta не приняла этот токен: ${withoutSecret(error.message, accessToken)}`);
           }
           throw error;
         }

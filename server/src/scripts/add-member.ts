@@ -42,6 +42,17 @@ if (role !== 'owner' && role !== 'member') {
   process.exit(1);
 }
 
+// The scripts are run from a checkout, where the environment lives in server/.env, and
+// from `docker compose run` in production, where Compose supplies it and no file exists.
+// A missing file is therefore the normal case in one of the two, not an error.
+if (process.env.NODE_ENV !== 'production') {
+  try {
+    process.loadEnvFile();
+  } catch {
+    // No .env — fall back to whatever is already in the environment.
+  }
+}
+
 const env = loadEnv();
 const db = createDb(env.DATABASE_URL);
 

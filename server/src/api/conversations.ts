@@ -10,7 +10,7 @@ import type { Env } from '../env.js';
 import { ApiError } from '../lib/errors.js';
 import { credentialsKey, decryptSecret } from '../lib/secret-box.js';
 import { isUuid } from '../lib/uuid.js';
-import { GraphError, type GraphClient } from '../lib/whatsapp/graph.js';
+import { GraphError, withoutSecret, type GraphClient } from '../lib/whatsapp/graph.js';
 import { requireAgent } from './require-agent.js';
 
 /** WhatsApp allows a free-form reply for 24 hours after the customer's last message. */
@@ -135,17 +135,14 @@ export function registerConversationRoutes(
         );
       }
 
+      const token = decryptSecret(number.accessToken, credentialsKey(env), number.phoneNumberId);
+
       let messageId: string;
       try {
-        ({ messageId } = await graph.sendText(
-          number.phoneNumberId,
-          decryptSecret(number.accessToken, credentialsKey(env), number.phoneNumberId),
-          contact.phone,
-          body,
-        ));
+        ({ messageId } = await graph.sendText(number.phoneNumberId, token, contact.phone, body));
       } catch (error) {
         if (error instanceof GraphError) {
-          throw new ApiError(502, `Meta не отправила сообщение: ${error.message}`);
+          throw new ApiError(502, `Meta не отправила сообщение: ${withoutSecret(error.message, token)}`);
         }
         throw error;
       }

@@ -356,6 +356,22 @@ describe('answering', () => {
     );
     expect(await db.select().from(messages)).toEqual([]);
   });
+
+  it('does not echo the decrypted token back when Meta rejects the send', async () => {
+    await withGraph(
+      fakeGraph({
+        sendText: async () => {
+          throw new GraphError('Malformed access token EAAG-token', 401, 190);
+        },
+      }),
+    );
+
+    const res = await answer({ body: 'привет' });
+
+    expect(res.statusCode).toBe(502);
+    expect(res.json().message).not.toContain('EAAG-token');
+    expect(res.json().message).toContain('<токен скрыт>');
+  });
 });
 
 describe('media', () => {

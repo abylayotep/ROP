@@ -5,18 +5,25 @@ import type { Db } from '../db/client.js';
 import type { Env } from '../env.js';
 import { ApiError } from '../lib/errors.js';
 import { credentialsKey } from '../lib/secret-box.js';
-import { createGraphClient } from '../lib/whatsapp/graph.js';
+import { createGraphClient, type GraphClient } from '../lib/whatsapp/graph.js';
 import { registerAgentRoutes } from './agents.js';
 import { registerAuthRoutes } from './auth.js';
 import { requireSession } from './require-session.js';
+import { registerWhatsappNumberRoutes } from './whatsapp-numbers.js';
 import { registerWhatsappWebhook } from './whatsapp-webhook.js';
+
+export interface ServerDeps {
+  /** Injected by tests so a suite never reaches the network. Defaults to the real client. */
+  graph?: GraphClient;
+}
 
 /**
  * Builds the Fastify instance without listening, so tests can drive it through
  * `app.inject()` with no port to allocate and nothing to tear down.
  */
-export function buildServer(env: Env, db: Db): FastifyInstance {
+export function buildServer(env: Env, db: Db, deps: ServerDeps = {}): FastifyInstance {
   const app = Fastify({ logger: env.NODE_ENV !== 'test' });
+  const graph = deps.graph ?? createGraphClient();
 
   app.register(cookie, { secret: env.SESSION_SECRET });
   app.register(rateLimit, { global: false });
@@ -45,10 +52,11 @@ export function buildServer(env: Env, db: Db): FastifyInstance {
   app.get('/api/health', async () => ({ ok: true }));
   registerAuthRoutes(app, db, env, guard);
   registerAgentRoutes(app, db, guard);
+  registerWhatsappNumberRoutes(app, db, env, guard, graph);
   // Meta calls the webhook directly with no session of its own, so it takes no guard —
   // the request signature is the check instead.
   registerWhatsappWebhook(app, db, env, {
-    graph: createGraphClient(),
+    graph,
     key: credentialsKey(env),
     mediaDir: env.MEDIA_DIR,
   });

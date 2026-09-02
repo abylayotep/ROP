@@ -30,3 +30,24 @@ export interface Me {
   email: string;
   accounts: Account[];
 }
+
+/* ── WhatsApp ───────────────────────────────────────────────────────────────
+ * A connected number, and what the owner must paste into Meta to connect one. */
+
+export interface WhatsappNumber {
+  id: string;
+  phoneNumberId: string;
+  wabaId: string;
+  /** As Meta formats it, for a human to recognise. */
+  displayPhone: string;
+  enabled: boolean;
+  /** False means Meta accepted the number but will not deliver anything yet. */
+  subscribed: boolean;
+  connectedAt: string;
+}
+
+/** What to paste into the Meta application's webhook settings. */
+export interface WebhookSetup {
+  url: string;
+  verifyToken: string;
+}

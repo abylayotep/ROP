@@ -37,7 +37,7 @@ export const SECTIONS: SectionDef[] = [
   {
     path: 'integrations',
     label: 'Интеграции',
-    pending: 'WhatsApp появится на этапе 2, Meta Conversions API — на этапе 6.',
+    pending: '',
   },
   {
     path: 'stats',

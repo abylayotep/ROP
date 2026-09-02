@@ -1,4 +1,4 @@
-import type { Agent, Me } from '@/types';
+import type { Agent, Me, WebhookSetup, WhatsappNumber } from '@/types';
 import { request } from './client';
 
 export { API_URL, ApiError, humanError, request } from './client';
@@ -34,3 +34,25 @@ export const updateAgent = (
   agentId: string,
   body: { name?: string; description?: string; timezone?: string },
 ) => request<Agent>(`/agents/${agentId}`, { method: 'PATCH', body });
+
+// ── WhatsApp ─────────────────────────────────────────────────────────────────
+
+export const listWhatsappNumbers = (agentId: string, signal?: AbortSignal) =>
+  request<WhatsappNumber[]>(`/agents/${agentId}/whatsapp/numbers`, { signal });
+
+export const connectWhatsappNumber = (
+  agentId: string,
+  body: { phoneNumberId: string; wabaId: string; accessToken: string },
+) => request<WhatsappNumber>(`/agents/${agentId}/whatsapp/numbers`, { method: 'POST', body });
+
+export const setWhatsappNumberEnabled = (agentId: string, numberId: string, enabled: boolean) =>
+  request<WhatsappNumber>(`/agents/${agentId}/whatsapp/numbers/${numberId}`, {
+    method: 'PATCH',
+    body: { enabled },
+  });
+
+export const disconnectWhatsappNumber = (agentId: string, numberId: string) =>
+  request<{ ok: true }>(`/agents/${agentId}/whatsapp/numbers/${numberId}`, { method: 'DELETE' });
+
+export const getWebhookSetup = (agentId: string, signal?: AbortSignal) =>
+  request<WebhookSetup>(`/agents/${agentId}/whatsapp/setup`, { signal });

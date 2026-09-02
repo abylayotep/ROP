@@ -196,6 +196,20 @@ describe('agent routes', () => {
     expect(res.json().message).toBe('Недостаточно прав');
   });
 
+  it('answers an empty patch with the agent unchanged', async () => {
+    const { id } = (await createAgent({ name: 'Сафина' })).json();
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/api/agents/${id}`,
+      cookies: jar,
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().name).toBe('Сафина');
+  });
+
   it('reads and renames one agent', async () => {
     const { id } = (await createAgent({ name: 'Сафина' })).json();
 
@@ -385,6 +399,10 @@ export function registerAgentRoutes(
       const parsed = patch.safeParse(req.body);
       if (!parsed.success) throw new ApiError(400, 'Не удалось разобрать настройки агента');
 
+      // Drizzle raises on an UPDATE with nothing to set, and a request that changes
+      // nothing is not an error — answer with the row as it stands.
+      if (Object.keys(parsed.data).length === 0) return toApi(req.agent!);
+
       const [row] = await db
         .update(agents)
         .set(parsed.data)
@@ -426,7 +444,7 @@ npm --prefix server test
 npm --prefix server run typecheck
 ```
 
-Expected: PASS, including the seven agent-route cases.
+Expected: PASS, including the eight agent-route cases.
 
 - [ ] **Step 10: Commit**
 

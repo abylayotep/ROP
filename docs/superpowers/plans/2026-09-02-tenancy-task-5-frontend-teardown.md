@@ -11,7 +11,8 @@ Nothing here is deleted "to be restored later". Each stage brings its screen bac
 
 **Files:**
 - Delete: `rakurs/mock-server/`, six screens, four component directories, five lib modules,
-  `rakurs/src/store/data.tsx`
+  `rakurs/src/store/data.tsx`, and the three layout files — they read `useData` and the
+  pruned contract types, and Task 7 writes them fresh
 - Modify: `packages/contract/index.ts`, `rakurs/src/api/index.ts`, `rakurs/src/api/client.ts`,
   `rakurs/src/store/app-state.tsx`, `rakurs/src/store/auth.tsx`, `rakurs/src/App.tsx`,
   `rakurs/src/main.tsx`, `rakurs/package.json`
@@ -36,9 +37,15 @@ rm -rf mock-server \
        src/screens/SettingsScreen.tsx \
        src/store/data.tsx \
        src/lib/selectors.ts src/lib/navigation.ts src/lib/broadcast.ts \
-       src/lib/constants.ts src/lib/tone.ts
+       src/lib/constants.ts src/lib/tone.ts \
+       src/components/layout/Layout.tsx src/components/layout/Header.tsx \
+       src/components/layout/Sidebar.tsx
 cd ..
 ```
+
+The layout files go too: the header reads `useData` and a `Period` type that both die in this
+task, so leaving them behind would make the typecheck below impossible to pass. Task 7 writes
+all three again around the new sections.
 
 Remove the `"mock"` line from `rakurs/package.json` scripts — the server it ran is gone.
 

@@ -10,7 +10,8 @@ an unfinished section from a broken one.
 **Files:**
 - Create: `rakurs/src/lib/sections.ts`
 - Create: `rakurs/src/screens/SectionScreen.tsx`
-- Modify: `rakurs/src/components/layout/Sidebar.tsx`, `Header.tsx`, `Layout.tsx`
+- Create: `rakurs/src/components/layout/Sidebar.tsx`, `Header.tsx`, `Layout.tsx` (Task 5
+  deleted the prototype versions)
 - Modify: `rakurs/src/App.tsx`
 
 **Interfaces:**
@@ -102,9 +103,9 @@ export function SectionScreen({ section }: { section: SectionDef }) {
 }
 ```
 
-- [ ] **Step 3: Rewrite the sidebar**
+- [ ] **Step 3: Write the sidebar**
 
-Replace `rakurs/src/components/layout/Sidebar.tsx` with:
+Create `rakurs/src/components/layout/Sidebar.tsx`:
 
 ```tsx
 import { Link, NavLink } from 'react-router-dom';
@@ -190,9 +191,9 @@ export function Sidebar() {
 }
 ```
 
-- [ ] **Step 4: Rewrite the header**
+- [ ] **Step 4: Write the header**
 
-Replace `rakurs/src/components/layout/Header.tsx` with:
+Create `rakurs/src/components/layout/Header.tsx`:
 
 ```tsx
 import { useLocation } from 'react-router-dom';
@@ -257,7 +258,7 @@ export function Header() {
 
 - [ ] **Step 5: Put the outlet in the layout**
 
-Replace `rakurs/src/components/layout/Layout.tsx` with:
+Create `rakurs/src/components/layout/Layout.tsx`:
 
 ```tsx
 import { Outlet } from 'react-router-dom';
@@ -290,7 +291,7 @@ export function Layout() {
 }
 ```
 
-The exported `Screen` helper goes with it — the layout now owns those paddings.
+The prototype's exported `Screen` helper does not come back: the layout owns those paddings now.
 
 - [ ] **Step 6: Route through the real shell**
 

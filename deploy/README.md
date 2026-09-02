@@ -6,12 +6,25 @@ nginx serves the built frontend from `/var/www/rakurs` and proxies `/api` to
 ## First deploy
 
 ```bash
-cp deploy/env.example deploy/.env       # fill both secrets
+cp deploy/env.example deploy/.env       # fill in every value
 npm --prefix rakurs run build
 rsync -a --delete rakurs/dist/ vps:/var/www/rakurs/
 docker compose -f deploy/compose.yml --env-file deploy/.env up -d --build
 docker compose -f deploy/compose.yml --env-file deploy/.env run --rm api npm run migrate
 ```
+
+`deploy/.env` must hold:
+
+- `POSTGRES_PASSWORD`, `SESSION_SECRET` — generate each with `head -c 32 /dev/urandom | base64`;
+- `META_APP_SECRET` — the Meta app's secret, signs every webhook delivery;
+- `META_WEBHOOK_VERIFY_TOKEN` — the string Meta echoes back during the webhook handshake;
+- `CREDENTIALS_KEY` — encrypts stored WhatsApp access tokens, exactly 32 bytes base64,
+  generate with `head -c 32 /dev/urandom | base64`;
+- `MEDIA_DIR` — present for consistency with `server/.env`, but `compose.yml` does not read
+  it: the container's media path is fixed there to match the named volume;
+- `PUBLIC_URL` — must be the real domain (`https://rakurs.example.com`), because the
+  integrations screen builds the webhook address Meta is given from it. A wrong value here
+  sends Meta's deliveries somewhere else.
 
 Create the first company and its owner — once. There is no sign-up route by design:
 
@@ -44,6 +57,10 @@ rsync -a --delete rakurs/dist/ vps:/var/www/rakurs/
 docker compose -f deploy/compose.yml --env-file deploy/.env up -d --build
 docker compose -f deploy/compose.yml --env-file deploy/.env run --rm api npm run migrate
 ```
+
+The `media` volume survives `down` and `up` — WhatsApp attachments are not lost on an
+update. Only `docker compose down -v`, or removing the `media` volume directly, deletes
+every file a client has ever sent.
 
 ## What is exposed
 

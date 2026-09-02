@@ -26,12 +26,22 @@ services:
       PORT: 3000
       DATABASE_URL: postgres://rakurs:${POSTGRES_PASSWORD}@postgres:5432/rakurs
       SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET}
+      META_APP_SECRET: ${META_APP_SECRET}
+      META_WEBHOOK_VERIFY_TOKEN: ${META_WEBHOOK_VERIFY_TOKEN}
+      CREDENTIALS_KEY: ${CREDENTIALS_KEY}
+      MEDIA_DIR: /var/lib/rakurs/media
+      PUBLIC_URL: ${PUBLIC_URL}
     # Bound to loopback: only nginx on this host can reach it, whatever the
     # firewall happens to say.
     ports: ['127.0.0.1:3000:3000']
+    volumes:
+      # Named, not a bind mount: the files belong to the container's lifecycle, not to
+      # the checkout, so `docker compose down` does not take a client's photographs with it.
+      - media:/var/lib/rakurs/media
     depends_on:
       postgres: { condition: service_healthy }
     restart: unless-stopped
 
 volumes:
   rakurs-db:
+  media:

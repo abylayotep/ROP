@@ -142,7 +142,7 @@ function ConnectedNumbers({
                       }
                       try {
                         await api.disconnectWhatsappNumber(agentId, number.id);
-                        toast.ok('Номер отключён');
+                        toast.ok('Номер удалён');
                         onChanged();
                       } catch (error) {
                         toast.fail(error);

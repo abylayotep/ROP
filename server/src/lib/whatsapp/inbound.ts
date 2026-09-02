@@ -128,12 +128,21 @@ export async function processPendingEvents(
   db: Db,
   deps: InboundDeps,
 ): Promise<{ processed: number; failed: number }> {
-  // A claim, not a select. `for update skip locked` is the whole point of the statement:
-  // it makes two concurrent passes take different rows instead of the same ones, so a
-  // second webhook delivery arriving mid-pass does not repeat the Graph calls and the
-  // media downloads of the first. Counting the attempt here, before the work, is what
-  // eventually retires an event that always throws — otherwise it is retried forever and
-  // every later pass has to walk past it.
+  // A claim, not a select: one statement takes a batch and counts the attempt before any
+  // of the work starts. Counting it here is what eventually retires an event that always
+  // throws — otherwise it is retried forever and every later pass has to walk past it.
+  //
+  // `for update skip locked` keeps two claims that land in the same instant off each
+  // other's rows. It does not reserve a row for the duration of its processing: this
+  // statement autocommits, so the locks are gone the moment it returns, long before the
+  // row is processed and stamped. Two passes a hundred milliseconds apart can therefore
+  // both take the same event — the second one finds it still unprocessed and unlocked.
+  //
+  // That is harmless, because every write below is idempotent: the message insert dedupes
+  // on the unique index, both upserts are conflict-safe, a media file is rewritten to the
+  // same path, and the timestamp update is a `greatest`. The cost is a duplicated download
+  // and an attempt burned twice. Real exclusivity would need a `processing_at` column or a
+  // transaction spanning the whole of the work; neither is here.
   const claimed = await db.execute(sql`
     update whatsapp_events
        set attempts = attempts + 1

@@ -68,11 +68,14 @@ The guard is built once in `buildServer` and shared, the way `requireSession` al
 
 | Method | Path | Role | Returns |
 |---|---|---|---|
-| GET | `/api/me` | any session | user (name, initials, email) and their accounts with role |
+| GET | `/api/auth/me` | any session | user (name, initials, email) and their accounts with role |
 | GET | `/api/accounts/:accountId/agents` | member | agents of that account |
 | POST | `/api/accounts/:accountId/agents` | owner | creates an agent from name, description, timezone |
 | GET | `/api/agents/:agentId` | member | one agent |
 | PATCH | `/api/agents/:agentId` | owner | renames, re-describes, changes timezone |
+
+`POST /api/auth/login` returns the same payload as `GET /api/auth/me`, so the client stores one
+type either way — the rule the login route already follows.
 
 `/api/profile` and `/api/settings` are removed with the row they read. Deleting an agent is
 deliberately absent: an agent owns conversations and money data, so removal needs its own
@@ -95,7 +98,7 @@ Passwords never come from argv: arguments land in shell history and in `ps`.
 Routes:
 
 ```
-/login                          — unauthenticated
+(no route)                      — the login screen replaces the app while anonymous
 /                               — agent picker: cards for the account's agents,
                                   "Создать агента" for owners.
                                   One account with one agent redirects straight in.
@@ -132,10 +135,12 @@ Server, with the existing test database:
 - `requireAgent`: another account's agent → 404; a member on an owner-only route → 403; an
   own agent → 200; a malformed id → 404.
 - Agent create and patch: validation, and that a created agent belongs to the caller's account.
-- Both provisioning scripts through piped stdin, including the duplicate-email path.
+- The provisioning library: duplicate email, a short password, an unknown company, an
+  ambiguous company name, and that a failed user insert leaves no orphan account. The scripts
+  themselves are thin stdin wrappers and are exercised by hand once.
 
 Frontend: `typecheck` and `build`. The screens are empty states, so there is nothing to assert
-beyond the routes compiling and the guard redirecting an anonymous visitor to `/login`.
+beyond the routes compiling and an anonymous visitor getting the login screen.
 
 ## Out of scope
 

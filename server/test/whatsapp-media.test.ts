@@ -1,4 +1,5 @@
 import { readFile, rm } from 'node:fs/promises';
+import { eq } from 'drizzle-orm';
 import { beforeEach, afterEach, describe, expect, it } from 'vitest';
 import { agents, messages, whatsappEvents, whatsappNumbers } from '../src/db/schema.js';
 import { createAccountWithOwner } from '../src/lib/provision.js';
@@ -125,6 +126,29 @@ describe('inbound media', () => {
     const [event] = await db.select().from(whatsappEvents);
     expect(event!.error).not.toContain('EAAG-token');
     expect(event!.error).toContain('<токен скрыт>');
+  });
+
+  it('processes the rest of the delivery when a number\'s token cannot be decrypted', async () => {
+    // A key that no longer matches the one this token was sealed with — rotated, or a
+    // row someone edited by hand. `decryptSecret` throws in that case, and that must
+    // cost this message its file, not the whole delivery.
+    await db
+      .update(whatsappNumbers)
+      .set({ accessToken: 'not-encrypted-at-all' })
+      .where(eq(whatsappNumbers.phoneNumberId, '136'));
+    const graph = fakeGraph();
+
+    const result = await processPendingEvents(db, deps(graph));
+
+    expect(result).toEqual({ processed: 1, failed: 0 });
+    expect(graph.calls).toEqual([]);
+    const [message] = await db.select().from(messages);
+    expect(message!.kind).toBe('image');
+    expect(message!.body).toBe('Вот эта модель');
+    expect(message!.mediaPath).toBeNull();
+    const [event] = await db.select().from(whatsappEvents);
+    expect(event!.processedAt).toBeInstanceOf(Date);
+    expect(event!.error).toBeTruthy();
   });
 
   it('refuses a file larger than the cap without downloading it', async () => {

@@ -284,11 +284,14 @@ async function applyChange(db: Db, deps: InboundDeps, value: ChangeValue): Promi
     let media: { path: string; mime: string } | null = null;
     const mediaId = mediaIdOf(incoming);
     if (mediaId && !known) {
-      // Bound to a local rather than decrypted inline: the catch below needs it in scope
-      // to scrub Meta's echo of it, and this error lands in a column that never gets
-      // deleted, unlike a response shown once and forgotten.
-      const token = decryptSecret(number.accessToken, deps.key, number.phoneNumberId);
+      let token = '';
       try {
+        // Decrypted inside the try, on purpose: a key that no longer matches — rotated,
+        // or a row someone edited — must cost this one message its file, not abort the
+        // whole delivery. `withoutSecret` with an empty secret returns the message
+        // unchanged, which is right: there is no token to hide when decryption itself
+        // is what failed.
+        token = decryptSecret(number.accessToken, deps.key, number.phoneNumberId);
         media = await downloadInboundMedia(deps, {
           mediaId,
           token,

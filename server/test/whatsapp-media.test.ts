@@ -1,0 +1,138 @@
+import { readFile, rm } from 'node:fs/promises';
+import { beforeEach, afterEach, describe, expect, it } from 'vitest';
+import { agents, messages, whatsappEvents, whatsappNumbers } from '../src/db/schema.js';
+import { createAccountWithOwner } from '../src/lib/provision.js';
+import { encryptSecret } from '../src/lib/secret-box.js';
+import { GraphError } from '../src/lib/whatsapp/graph.js';
+import { processPendingEvents } from '../src/lib/whatsapp/inbound.js';
+import { extensionFor } from '../src/lib/whatsapp/media.js';
+import { withDb } from './helpers/db.js';
+import { testEnv } from './helpers/env.js';
+import { fakeGraph } from './helpers/fake-graph.js';
+
+const env = testEnv({ MEDIA_DIR: 'var/media-test' });
+const key = Buffer.from(env.CREDENTIALS_KEY, 'base64');
+
+let db: Awaited<ReturnType<typeof withDb>>;
+let agentId: string;
+
+const deps = (graph = fakeGraph()) => ({ graph, key, mediaDir: env.MEDIA_DIR });
+
+const photo = {
+  object: 'whatsapp_business_account',
+  entry: [
+    {
+      id: '932',
+      changes: [
+        {
+          field: 'messages',
+          value: {
+            messaging_product: 'whatsapp',
+            metadata: { display_phone_number: '77085807932', phone_number_id: '136' },
+            contacts: [{ profile: { name: 'Айгерім' }, wa_id: '77771234567' }],
+            messages: [
+              {
+                from: '77771234567',
+                id: 'wamid.PHOTO',
+                timestamp: '1756000000',
+                type: 'image',
+                image: { id: 'media-42', mime_type: 'image/jpeg', caption: 'Вот эта модель' },
+              },
+            ],
+          },
+        },
+      ],
+    },
+  ],
+};
+
+beforeEach(async () => {
+  db = await withDb();
+  const { accountId } = await createAccountWithOwner(db, {
+    company: 'Сафина',
+    email: 'owner@example.com',
+    name: 'Владелец',
+    initials: 'ВЛ',
+    password: 'correct-horse-battery',
+  });
+  const [agent] = await db.insert(agents).values({ accountId, name: 'Сафина' }).returning();
+  agentId = agent!.id;
+  await db.insert(whatsappNumbers).values({
+    agentId,
+    phoneNumberId: '136',
+    wabaId: '932',
+    displayPhone: '+7 708 580 79 32',
+    accessToken: encryptSecret('EAAG-token', key, '136'),
+  });
+  await db.insert(whatsappEvents).values({ payload: photo });
+});
+
+afterEach(async () => {
+  await rm(env.MEDIA_DIR, { recursive: true, force: true });
+});
+
+describe('inbound media', () => {
+  it('downloads the file and remembers where it went', async () => {
+    const graph = fakeGraph();
+
+    await processPendingEvents(db, deps(graph));
+
+    const [message] = await db.select().from(messages);
+    expect(message!.kind).toBe('image');
+    expect(message!.body).toBe('Вот эта модель');
+    expect(message!.mediaMime).toBe('image/jpeg');
+    expect(message!.mediaPath).toMatch(new RegExp(`^${agentId}/.+\\.jpg$`));
+    expect([...(await readFile(`${env.MEDIA_DIR}/${message!.mediaPath}`))]).toEqual([1, 2, 3]);
+  });
+
+  it('sends Meta the token stored for that number, decrypted', async () => {
+    const graph = fakeGraph();
+
+    await processPendingEvents(db, deps(graph));
+
+    expect(graph.calls.map((c) => c.method)).toEqual(['getMediaUrl', 'downloadMedia']);
+    expect(graph.calls[0]!.args[1]).toBe('EAAG-token');
+    expect(graph.calls[1]!.args[1]).toBe('EAAG-token');
+  });
+
+  it('keeps the message when the file cannot be fetched', async () => {
+    const graph = fakeGraph({
+      getMediaUrl: async () => {
+        throw new GraphError('Media not found', 404, 100);
+      },
+    });
+
+    const result = await processPendingEvents(db, deps(graph));
+
+    expect(result).toEqual({ processed: 1, failed: 0 });
+    const [message] = await db.select().from(messages);
+    expect(message!.kind).toBe('image');
+    expect(message!.mediaPath).toBeNull();
+    const [event] = await db.select().from(whatsappEvents);
+    expect(event!.error).toContain('Media not found');
+    expect(event!.processedAt).toBeInstanceOf(Date);
+  });
+
+  it('refuses a file larger than the cap without downloading it', async () => {
+    const graph = fakeGraph({
+      getMediaUrl: async () => ({
+        url: 'https://lookaside.fb/big',
+        mimeType: 'video/mp4',
+        fileSize: 30 * 1024 * 1024,
+      }),
+    });
+
+    await processPendingEvents(db, deps(graph));
+
+    expect(graph.calls.map((c) => c.method)).toEqual(['getMediaUrl']);
+    expect((await db.select().from(messages))[0]!.mediaPath).toBeNull();
+  });
+
+  it('names the file by what it is, not by what it claims', () => {
+    expect(extensionFor('image/jpeg')).toBe('.jpg');
+    expect(extensionFor('image/png')).toBe('.png');
+    expect(extensionFor('audio/ogg; codecs=opus')).toBe('.ogg');
+    expect(extensionFor('application/pdf')).toBe('.pdf');
+    expect(extensionFor('application/vnd.made-up')).toBe('.bin');
+  });
+});

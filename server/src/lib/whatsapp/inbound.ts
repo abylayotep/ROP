@@ -7,7 +7,9 @@ import {
   whatsappEvents,
   whatsappNumbers,
 } from '../../db/schema.js';
+import { decryptSecret } from '../secret-box.js';
 import type { GraphClient } from './graph.js';
+import { downloadInboundMedia } from './media.js';
 
 /**
  * Turning stored webhook deliveries into rows.
@@ -85,6 +87,18 @@ function bodyOf(message: InboundMessage): string | null {
   }
 }
 
+/** The media id a message carries, if it carries one. */
+function mediaIdOf(message: InboundMessage): string | null {
+  return (
+    message.image?.id ??
+    message.audio?.id ??
+    message.video?.id ??
+    message.document?.id ??
+    message.sticker?.id ??
+    null
+  );
+}
+
 export async function processPendingEvents(
   db: Db,
   deps: InboundDeps,
@@ -100,10 +114,10 @@ export async function processPendingEvents(
 
   for (const event of pending) {
     try {
-      await applyPayload(db, deps, event.payload);
+      const mediaErrors = await applyPayload(db, deps, event.payload);
       await db
         .update(whatsappEvents)
-        .set({ processedAt: new Date(), error: null })
+        .set({ processedAt: new Date(), error: mediaErrors.length ? mediaErrors.join('; ') : null })
         .where(eq(whatsappEvents.id, event.id));
       processed += 1;
     } catch (error) {
@@ -120,18 +134,21 @@ export async function processPendingEvents(
   return { processed, failed };
 }
 
-async function applyPayload(db: Db, deps: InboundDeps, payload: unknown): Promise<void> {
+/** Returns the media download errors collected while applying the payload, if any. */
+async function applyPayload(db: Db, deps: InboundDeps, payload: unknown): Promise<string[]> {
   const entries = (payload as { entry?: unknown }).entry;
   if (!Array.isArray(entries)) throw new Error('entry is not an array');
 
+  const errors: string[] = [];
   for (const entry of entries) {
     const changes = (entry as { changes?: unknown }).changes;
     if (!Array.isArray(changes)) throw new Error('changes is not an array');
 
     for (const change of changes) {
-      await applyChange(db, deps, (change as { value?: ChangeValue }).value ?? {});
+      errors.push(...(await applyChange(db, deps, (change as { value?: ChangeValue }).value ?? {})));
     }
   }
+  return errors;
 }
 
 /**
@@ -163,9 +180,10 @@ async function recordReferral(
     .where(and(eq(conversations.id, conversationId), isNull(conversations.referralSeenAt)));
 }
 
-async function applyChange(db: Db, deps: InboundDeps, value: ChangeValue): Promise<void> {
+/** Returns the media download errors collected while applying this change, if any. */
+async function applyChange(db: Db, deps: InboundDeps, value: ChangeValue): Promise<string[]> {
   const phoneNumberId = value.metadata?.phone_number_id;
-  if (!phoneNumberId) return;
+  if (!phoneNumberId) return [];
 
   const [number] = await db
     .select()
@@ -174,7 +192,7 @@ async function applyChange(db: Db, deps: InboundDeps, value: ChangeValue): Promi
 
   // Not an error: one Meta application serves every client, and a delivery about a number
   // we do not host is simply not ours.
-  if (!number) return;
+  if (!number) return [];
 
   for (const status of value.statuses ?? []) {
     await db
@@ -183,18 +201,37 @@ async function applyChange(db: Db, deps: InboundDeps, value: ChangeValue): Promi
       .where(eq(messages.waMessageId, status.id));
   }
 
+  const errors: string[] = [];
   for (const incoming of value.messages ?? []) {
     const profileName = value.contacts?.find((c) => c.wa_id === incoming.from)?.profile?.name;
     const contactId = await upsertContact(db, number.agentId, incoming.from, profileName);
     const conversationId = await upsertConversation(db, number.agentId, number.id, contactId);
 
-    await storeMessage(db, conversationId, incoming);
+    let media: { path: string; mime: string } | null = null;
+    const mediaId = mediaIdOf(incoming);
+    if (mediaId) {
+      try {
+        media = await downloadInboundMedia(deps, {
+          mediaId,
+          token: decryptSecret(number.accessToken, deps.key, number.phoneNumberId),
+          agentId: number.agentId,
+          waMessageId: incoming.id,
+        });
+      } catch (error) {
+        // The message is still worth having: its caption, its sender and its place in the
+        // thread are all real. Only the file is missing, and the event says why.
+        errors.push(error instanceof Error ? error.message : String(error));
+      }
+    }
+
+    await storeMessage(db, conversationId, incoming, media);
     if (incoming.referral) await recordReferral(db, conversationId, incoming.referral);
     await db
       .update(conversations)
       .set({ lastInboundAt: at(incoming.timestamp), lastMessageAt: at(incoming.timestamp) })
       .where(eq(conversations.id, conversationId));
   }
+  return errors;
 }
 
 async function upsertContact(
@@ -237,6 +274,7 @@ async function storeMessage(
   db: Db,
   conversationId: string,
   incoming: InboundMessage,
+  media: { path: string; mime: string } | null,
 ): Promise<void> {
   await db
     .insert(messages)
@@ -248,6 +286,8 @@ async function storeMessage(
       kind: incoming.type,
       body: bodyOf(incoming),
       sentAt: at(incoming.timestamp),
+      mediaPath: media?.path ?? null,
+      mediaMime: media?.mime ?? null,
     })
     // Meta delivers the same message more than once by design. The unique index on
     // wa_message_id is the defence; this clause is how we accept the duplicate quietly.

@@ -2,10 +2,12 @@ import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
+import type { Me } from '@rakurs/contract';
 import type { Db } from '../db/client.js';
 import { users } from '../db/schema.js';
 import type { Env } from '../env.js';
 import { ApiError } from '../lib/errors.js';
+import { buildMe } from '../lib/me.js';
 import { hashPassword, verifyPassword } from '../lib/password.js';
 import { createSession, revokeSession, SESSION_COOKIE } from '../lib/session.js';
 
@@ -51,7 +53,7 @@ export function registerAuthRoutes(
       reply.setCookie(SESSION_COOKIE, session.id, cookieOptions(env, session.expiresAt));
 
       // Same shape as /api/auth/me, so the client stores one type either way.
-      return { name: user.name, initials: user.initials, email: user.email };
+      return buildMe(db, user);
     },
   );
 
@@ -62,9 +64,9 @@ export function registerAuthRoutes(
     return { ok: true };
   });
 
-  app.get('/api/auth/me', { preHandler: guard }, async (req) => ({
-    name: req.user!.name,
-    initials: req.user!.initials,
-    email: req.user!.email,
-  }));
+  app.get(
+    '/api/auth/me',
+    { preHandler: guard },
+    async (req): Promise<Me> => buildMe(db, req.user!),
+  );
 }

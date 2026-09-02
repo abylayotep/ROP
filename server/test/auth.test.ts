@@ -32,7 +32,12 @@ describe('auth', () => {
     const res = await login('right-password');
 
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ name: 'Владелец', initials: 'ВЛ', email: 'owner@example.com' });
+    expect(res.json()).toEqual({
+      name: 'Владелец',
+      initials: 'ВЛ',
+      email: 'owner@example.com',
+      accounts: [],
+    });
     expect(res.cookies[0]).toMatchObject({ name: SESSION_COOKIE, httpOnly: true });
   });
 

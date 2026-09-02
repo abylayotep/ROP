@@ -4,6 +4,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import type { Db } from '../db/client.js';
 import type { Env } from '../env.js';
 import { ApiError } from '../lib/errors.js';
+import { registerAgentRoutes } from './agents.js';
 import { registerAuthRoutes } from './auth.js';
 import { requireSession } from './require-session.js';
 
@@ -40,6 +41,7 @@ export function buildServer(env: Env, db: Db): FastifyInstance {
 
   app.get('/api/health', async () => ({ ok: true }));
   registerAuthRoutes(app, db, env, guard);
+  registerAgentRoutes(app, db, guard);
   // Later plans register their routes here, reusing the same guard.
 
   return app;

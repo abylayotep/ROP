@@ -1,5 +1,33 @@
 /** Доменные типы «Ракурса». Ровно те формы, которые отдаёт бэкенд. */
 
+/* ── Tenancy ────────────────────────────────────────────────────────────────
+ * Account → agents. Everything the cabinet shows belongs to one agent.       */
+
+export type Role = 'owner' | 'member';
+
+/** An account the signed-in person belongs to, with their powers in it. */
+export interface Account {
+  id: string;
+  name: string;
+  role: Role;
+}
+
+export interface Agent {
+  id: string;
+  accountId: string;
+  name: string;
+  description: string;
+  timezone: string;
+}
+
+/** The signed-in person and where they may go. Returned by login and by /auth/me. */
+export interface Me {
+  name: string;
+  initials: string;
+  email: string;
+  accounts: Account[];
+}
+
 // ── Диалоги ────────────────────────────────────────────────────────────────
 
 export type DialogStatus = 'Купил' | 'Купила' | 'Упустили' | 'В работе';

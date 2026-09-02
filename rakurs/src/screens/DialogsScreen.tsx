@@ -101,7 +101,18 @@ export function DialogsScreen() {
             <EmptyState>Выберите переписку слева.</EmptyState>
           </Card>
         ) : (
-          <Thread agentId={agent.id} conversationId={selected} onSent={list.reload} />
+          // `key={selected}` forces a remount on every conversation switch: a new
+          // conversation is a new subject, and neither the loaded thread nor the
+          // composer's draft belongs to the previous one. Without it `Thread` would
+          // keep the old messages on screen until the new fetch resolves, and any
+          // text left in the composer would still be sitting there, ready to be sent
+          // to the wrong person.
+          <Thread
+            key={selected}
+            agentId={agent.id}
+            conversationId={selected}
+            onSent={list.reload}
+          />
         )}
       </div>
     </div>

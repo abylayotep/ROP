@@ -7,6 +7,7 @@ const valid = {
   META_APP_SECRET: 'test-app-secret',
   META_WEBHOOK_VERIFY_TOKEN: 'test-verify-token',
   CREDENTIALS_KEY: Buffer.alloc(32, 7).toString('base64'),
+  PUBLIC_URL: 'https://rakurs.test',
 } as NodeJS.ProcessEnv;
 
 describe('loadEnv', () => {

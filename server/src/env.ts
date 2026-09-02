@@ -25,8 +25,12 @@ const schema = z.object({
     .refine((v) => Buffer.from(v, 'base64').length === 32, 'must be 32 bytes, base64-encoded'),
   /** Where downloaded WhatsApp media is written. */
   MEDIA_DIR: z.string().min(1).default('var/media'),
-  /** How this server is reachable from the internet; shown as the webhook address. */
-  PUBLIC_URL: z.string().url().default('http://localhost:3000'),
+  /**
+   * How this server is reachable from the internet; shown as the webhook address.
+   * No default: a missing value in production would silently point the webhook at
+   * localhost, which looks like a working setup while nothing is ever delivered.
+   */
+  PUBLIC_URL: z.string().url(),
 });
 
 export type Env = z.infer<typeof schema>;

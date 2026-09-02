@@ -98,6 +98,3 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
 }
-
-/** Период отчёта в днях — так его ждёт бэкенд. */
-export const periodDays = (p: string): number => Number.parseInt(p, 10);

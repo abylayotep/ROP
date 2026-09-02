@@ -7,12 +7,13 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { getMe, login as apiLogin, logout as apiLogout, type AuthUser } from '@/api';
+import { getMe, login as apiLogin, logout as apiLogout } from '@/api';
+import type { Me } from '@/types';
 
 type AuthState =
   | { status: 'loading' }
   | { status: 'anonymous' }
-  | { status: 'authenticated'; user: AuthUser };
+  | { status: 'authenticated'; user: Me };
 
 interface AuthContextValue {
   state: AuthState;

@@ -4,7 +4,6 @@ import { BrowserRouter, HashRouter } from 'react-router-dom';
 import { App } from './App';
 import { ToastProvider } from '@/components/ui/Toast';
 import { AppStateProvider } from '@/store/app-state';
-import { DataProvider } from '@/store/data';
 import '@/styles/global.css';
 
 // Однофайловая сборка открывается по file://, где обычные пути не работают —
@@ -19,9 +18,7 @@ createRoot(root).render(
     <Router>
       <AppStateProvider>
         <ToastProvider>
-          <DataProvider>
-            <App />
-          </DataProvider>
+          <App />
         </ToastProvider>
       </AppStateProvider>
     </Router>

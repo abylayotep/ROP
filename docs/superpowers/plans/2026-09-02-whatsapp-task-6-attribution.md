@@ -237,7 +237,7 @@ Call it from the message loop in `applyChange`, before the timestamps are update
     if (incoming.referral) await recordReferral(db, conversationId, incoming.referral);
 ```
 
-`and` and `isNull` are already imported by the module; if the compiler says otherwise, add them.
+`isNull` is already imported by the module; `and` is not, so add it.
 
 - [ ] **Step 4: Run it and watch it pass**
 

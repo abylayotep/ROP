@@ -6,7 +6,7 @@ Where the work actually happens: the list of conversations on the left, the thre
 and a composer that says why it is disabled instead of failing when it is used.
 
 **Files:**
-- Create: `rakurs/src/screens/sections/DialogsScreen.tsx`
+- Create: `rakurs/src/screens/DialogsScreen.tsx`
 - Modify: `rakurs/src/api/index.ts`, `rakurs/src/App.tsx`, `rakurs/src/lib/sections.ts`
 
 **Interfaces:**
@@ -46,7 +46,8 @@ the session cookie attached.
 
 - [ ] **Step 2: Write the screen**
 
-Create `rakurs/src/screens/sections/DialogsScreen.tsx`:
+Create `rakurs/src/screens/DialogsScreen.tsx` — the screens directory is flat, there is no
+`sections/` subdirectory:
 
 ```tsx
 import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from 'react';
@@ -152,7 +153,16 @@ export function DialogsScreen() {
             <EmptyState>Выберите переписку слева.</EmptyState>
           </Card>
         ) : (
-          <Thread agentId={agent.id} conversationId={selected} onSent={list.reload} />
+          /* Keyed by the conversation so switching remounts: the composer's draft belongs
+             to the conversation it was typed in, and `useApi` keeps its previous data
+             until a new fetch resolves. Without this, text written for one client can be
+             sent to another. */
+          <Thread
+            key={selected}
+            agentId={agent.id}
+            conversationId={selected}
+            onSent={list.reload}
+          />
         )}
       </div>
     </div>

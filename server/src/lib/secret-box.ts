@@ -20,7 +20,8 @@ const IV_BYTES = 12;
  * `aad` (associated data) must be the value that identifies the row this secret belongs
  * to — stable for the row's whole life. In this product that is the WhatsApp
  * `phone_number_id`: it is the number's identity, is known before the insert, and is
- * never edited (the only PATCH on that table toggles `enabled`). Binding the ciphertext
+ * never edited (the PATCH on that table changes `enabled` and the token, never this).
+ * A replaced token is therefore re-encrypted under the same aad. Binding the ciphertext
  * to it means a value copied from one row into another fails to decrypt, so UPDATE
  * access to the database is not enough to move client A's token onto client B's row.
  */

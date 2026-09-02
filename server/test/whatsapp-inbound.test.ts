@@ -1,5 +1,6 @@
+import { rm } from 'node:fs/promises';
 import { eq } from 'drizzle-orm';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   agents,
   contacts,
@@ -9,21 +10,19 @@ import {
   whatsappNumbers,
 } from '../src/db/schema.js';
 import { createAccountWithOwner } from '../src/lib/provision.js';
+import { encryptSecret } from '../src/lib/secret-box.js';
 import { processPendingEvents } from '../src/lib/whatsapp/inbound.js';
 import { withDb } from './helpers/db.js';
 import { testEnv } from './helpers/env.js';
 import { fakeGraph } from './helpers/fake-graph.js';
 
 const env = testEnv();
+const key = Buffer.from(env.CREDENTIALS_KEY, 'base64');
 
 let db: Awaited<ReturnType<typeof withDb>>;
 let agentId: string;
 
-const deps = () => ({
-  graph: fakeGraph(),
-  key: Buffer.from(env.CREDENTIALS_KEY, 'base64'),
-  mediaDir: env.MEDIA_DIR,
-});
+const deps = () => ({ graph: fakeGraph(), key, mediaDir: env.MEDIA_DIR });
 
 beforeEach(async () => {
   db = await withDb();
@@ -41,8 +40,12 @@ beforeEach(async () => {
     phoneNumberId: '136',
     wabaId: '932',
     displayPhone: '+7 708 580 79 32',
-    accessToken: 'encrypted-token',
+    accessToken: encryptSecret('EAAG-token', key, '136'),
   });
+});
+
+afterEach(async () => {
+  await rm(env.MEDIA_DIR, { recursive: true, force: true });
 });
 
 /**
@@ -233,5 +236,79 @@ describe('inbound processing', () => {
     await processPendingEvents(db, deps());
 
     expect(await processPendingEvents(db, deps())).toEqual({ processed: 0, failed: 0 });
+  });
+
+  it('keeps the newer timestamp when an older message is redelivered', async () => {
+    await store(
+      delivery({ message: { id: 'wamid.NEW', timestamp: '1756000600', text: { body: 'Алло?' } } }),
+    );
+    await processPendingEvents(db, deps());
+
+    await store(
+      delivery({ message: { id: 'wamid.OLD', timestamp: '1756000000', text: { body: 'Ало' } } }),
+    );
+    await processPendingEvents(db, deps());
+
+    const [conversation] = await db.select().from(conversations);
+    // The reply window is measured from this: moving it back would refuse an operator a
+    // reply they are entitled to send.
+    expect(conversation!.lastInboundAt?.toISOString()).toBe('2025-08-24T01:56:40.000Z');
+    expect(conversation!.lastMessageAt?.toISOString()).toBe('2025-08-24T01:56:40.000Z');
+  });
+
+  it('does not drag lastMessageAt back under an operator who already replied', async () => {
+    await store(
+      delivery({ message: { id: 'wamid.NEW', timestamp: '1756000600', text: { body: 'Алло?' } } }),
+    );
+    await processPendingEvents(db, deps());
+
+    // The operator answers now, which is later than anything Meta has sent.
+    const repliedAt = new Date('2025-08-24T02:10:00.000Z');
+    await db.update(conversations).set({ lastMessageAt: repliedAt });
+
+    // And only then does an older inbound turn up.
+    await store(
+      delivery({ message: { id: 'wamid.OLD', timestamp: '1756000000', text: { body: 'Ало' } } }),
+    );
+    await processPendingEvents(db, deps());
+
+    const [conversation] = await db.select().from(conversations);
+    // The reply must not slide back down the list under someone who is reading it.
+    expect(conversation!.lastMessageAt?.toISOString()).toBe('2025-08-24T02:10:00.000Z');
+    expect(conversation!.lastInboundAt?.toISOString()).toBe('2025-08-24T01:56:40.000Z');
+  });
+
+  it('gives up on an event that always fails, after five attempts', async () => {
+    await store({ object: 'whatsapp_business_account', entry: 'not an array' });
+
+    const passes = [];
+    for (let i = 0; i < 6; i += 1) passes.push(await processPendingEvents(db, deps()));
+
+    expect(passes.slice(0, 5)).toEqual(Array(5).fill({ processed: 0, failed: 1 }));
+    // Retired: the row keeps its reason, but no later pass has to walk past it.
+    expect(passes[5]).toEqual({ processed: 0, failed: 0 });
+
+    const [event] = await db.select().from(whatsappEvents);
+    expect(event!.attempts).toBe(5);
+    expect(event!.error).toBe('entry is not an array');
+  });
+
+  it('does not fetch a redelivered file from Meta a second time', async () => {
+    const image = {
+      id: 'wamid.IMG',
+      type: 'image',
+      text: undefined,
+      image: { id: 'media-1', mime_type: 'image/jpeg', caption: 'Вот' },
+    };
+    await store(delivery({ message: image }));
+    await store(delivery({ message: image }));
+
+    const shared = deps();
+    await processPendingEvents(db, shared);
+    await processPendingEvents(db, shared);
+
+    // getMediaUrl and downloadMedia, once each — not twice.
+    expect(shared.graph.calls.map((c) => c.method)).toEqual(['getMediaUrl', 'downloadMedia']);
+    expect(await db.select().from(messages)).toHaveLength(1);
   });
 });

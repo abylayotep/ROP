@@ -92,66 +92,149 @@ function ConnectedNumbers({
       {numbers.map((number) => (
         <div
           key={number.id}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 12,
-            padding: '10px 0',
-            borderTop: '1px solid var(--line-soft)',
-          }}
+          style={{ padding: '10px 0', borderTop: '1px solid var(--line-soft)' }}
         >
-          <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 13.5 }}>{number.displayPhone}</div>
-            <div style={hint}>ID номера {number.phoneNumberId}</div>
-            {/* The failure this line exists for: Meta took the number and delivers
-                nothing, which looks identical to working until a client writes. */}
-            {!number.subscribed && (
-              <div style={{ ...hint, color: 'var(--danger)' }}>
-                Приложение не подписано на WABA — сообщения приходить не будут.
-              </div>
-            )}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 13.5 }}>{number.displayPhone}</div>
+              <div style={hint}>ID номера {number.phoneNumberId}</div>
+              {/* The failure this line exists for: Meta took the number and delivers
+                  nothing, which looks identical to working until a client writes. */}
+              {!number.subscribed && (
+                <div style={{ ...hint, color: 'var(--danger)' }}>
+                  Приложение не подписано на WABA — сообщения приходить не будут.
+                </div>
+              )}
+            </div>
+            <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+              <span style={{ ...hint, marginTop: 0 }}>
+                {number.enabled ? 'Включён' : 'Выключен'}
+              </span>
+              {owner && (
+                <>
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={async () => {
+                      try {
+                        await api.setWhatsappNumberEnabled(agentId, number.id, !number.enabled);
+                        onChanged();
+                      } catch (error) {
+                        toast.fail(error);
+                      }
+                    }}
+                  >
+                    {number.enabled ? 'Выключить' : 'Включить'}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={async () => {
+                      // Удаление уносит переписки, сообщения и данные о рекламе, из
+                      // которой пришли клиенты. Meta их второй раз не отдаст.
+                      if (
+                        !window.confirm(
+                          'Отключить номер? Вместе с ним удалятся все переписки, сообщения и данные о рекламе, ' +
+                            'из которой пришли клиенты. Это нельзя отменить.',
+                        )
+                      ) {
+                        return;
+                      }
+                      try {
+                        await api.disconnectWhatsappNumber(agentId, number.id);
+                        toast.ok('Номер отключён');
+                        onChanged();
+                      } catch (error) {
+                        toast.fail(error);
+                      }
+                    }}
+                  >
+                    Удалить номер
+                  </button>
+                </>
+              )}
+            </div>
           </div>
-          <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
-            <span style={{ ...hint, marginTop: 0 }}>
-              {number.enabled ? 'Включён' : 'Выключен'}
-            </span>
-            {owner && (
-              <>
-                <button
-                  type="button"
-                  className="btn"
-                  onClick={async () => {
-                    try {
-                      await api.setWhatsappNumberEnabled(agentId, number.id, !number.enabled);
-                      onChanged();
-                    } catch (error) {
-                      toast.fail(error);
-                    }
-                  }}
-                >
-                  {number.enabled ? 'Выключить' : 'Включить'}
-                </button>
-                <button
-                  type="button"
-                  className="btn"
-                  onClick={async () => {
-                    try {
-                      await api.disconnectWhatsappNumber(agentId, number.id);
-                      toast.ok('Номер отключён');
-                      onChanged();
-                    } catch (error) {
-                      toast.fail(error);
-                    }
-                  }}
-                >
-                  Отключить
-                </button>
-              </>
-            )}
-          </div>
+          {owner && <ReplaceToken agentId={agentId} number={number} onReplaced={onChanged} />}
         </div>
       ))}
     </Card>
+  );
+}
+
+/**
+ * Замена протухшего токена.
+ *
+ * Временный токен Meta живёт сутки, и без этой формы единственным способом поставить
+ * новый было бы удалить номер — вместе со всеми диалогами и рекламной атрибуцией.
+ */
+function ReplaceToken({
+  agentId,
+  number,
+  onReplaced,
+}: {
+  agentId: string;
+  number: WhatsappNumber;
+  onReplaced: () => void;
+}) {
+  const toast = useToast();
+
+  const [open, setOpen] = useState(false);
+  const [accessToken, setAccessToken] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setSaving(true);
+    try {
+      await api.replaceWhatsappToken(agentId, number.id, accessToken);
+      // Очищается только на успехе: токен, который Meta не приняла, стоит оставить на
+      // экране, чтобы его можно было поправить, а не вставлять заново.
+      setAccessToken('');
+      setOpen(false);
+      toast.ok('Токен обновлён');
+      onReplaced();
+    } catch (error) {
+      toast.fail(error);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        className="btn"
+        style={{ marginTop: 8 }}
+        onClick={() => setOpen(true)}
+      >
+        Обновить токен
+      </button>
+    );
+  }
+
+  return (
+    <form onSubmit={submit} style={{ marginTop: 8 }}>
+      <div style={label}>Новый токен доступа</div>
+      <input
+        style={field}
+        type="password"
+        value={accessToken}
+        onChange={(e) => setAccessToken(e.target.value)}
+      />
+      <div style={hint}>
+        Проверяется в Meta до сохранения. Переписки и данные о рекламе остаются на месте.
+      </div>
+      <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+        <button type="submit" className="btn" disabled={saving || !accessToken}>
+          {saving ? 'Проверяем…' : 'Сохранить токен'}
+        </button>
+        <button type="button" className="btn" onClick={() => setOpen(false)}>
+          Отмена
+        </button>
+      </div>
+    </form>
   );
 }
 

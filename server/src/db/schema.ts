@@ -1,6 +1,7 @@
 import {
   boolean,
   index,
+  integer,
   jsonb,
   pgTable,
   primaryKey,
@@ -184,7 +185,11 @@ export const messages = pgTable(
     conversationId: uuid('conversation_id')
       .notNull()
       .references(() => conversations.id, { onDelete: 'cascade' }),
-    waMessageId: text('wa_message_id').notNull().unique(),
+    // Nullable because not every message has an id from WhatsApp: stage 3's system note on
+    // a thread has never been sent, and stage 5's AI draft exists before anyone sends it.
+    // Still unique — Postgres treats nulls as distinct, so many rows may hold null while
+    // the deduplication of real ids is untouched.
+    waMessageId: text('wa_message_id').unique(),
     // 'in' | 'out'
     direction: text('direction').notNull(),
     // 'client' | 'operator' | 'ai' — stage 5 adds a value here, not a column.
@@ -218,6 +223,10 @@ export const whatsappEvents = pgTable(
     receivedAt: timestamp('received_at', { withTimezone: true }).notNull().defaultNow(),
     processedAt: timestamp('processed_at', { withTimezone: true }),
     error: text('error'),
+    // Counted up when a pass claims the row, before the work starts. An event that always
+    // throws stops being picked up once this reaches the cap, so a permanent failure does
+    // not grow the queue a webhook delivery has to walk.
+    attempts: integer('attempts').notNull().default(0),
   },
   (t) => [index('whatsapp_events_processed_at_idx').on(t.processedAt)],
 );

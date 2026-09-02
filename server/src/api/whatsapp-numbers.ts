@@ -17,7 +17,19 @@ const connection = z.object({
   accessToken: z.string().trim().min(1),
 });
 
-const enabling = z.object({ enabled: z.boolean() });
+/**
+ * Both fields optional, at least one required.
+ *
+ * A token expires — Meta's own temporary one lasts a day — and without a way to replace it
+ * the only cure would be deleting the number, which cascades through the conversations and
+ * takes every `ctwa_clid` with it. Meta hands that click identifier over exactly once.
+ */
+const settings = z
+  .object({
+    enabled: z.boolean().optional(),
+    accessToken: z.string().trim().min(1).optional(),
+  })
+  .refine((body) => body.enabled !== undefined || body.accessToken !== undefined);
 
 /** The access token is never part of this. It goes in and it does not come out. */
 const toApi = (row: typeof whatsappNumbers.$inferSelect): WhatsappNumber => ({
@@ -113,7 +125,18 @@ export function registerWhatsappNumberRoutes(
         return toApi(row!);
       } catch (error) {
         if (isDuplicate(error)) {
-          throw new ApiError(409, 'Этот номер уже подключён к другому агенту');
+          // The commonest way to get here is an owner re-saving their own number, so say
+          // which agent holds it rather than sending them looking for a colleague.
+          const [existing] = await db
+            .select({ agentId: whatsappNumbers.agentId })
+            .from(whatsappNumbers)
+            .where(eq(whatsappNumbers.phoneNumberId, phoneNumberId));
+          throw new ApiError(
+            409,
+            existing?.agentId === req.agent!.id
+              ? 'Этот номер уже подключён к этому агенту'
+              : 'Этот номер уже подключён к другому агенту',
+          );
         }
         throw error;
       }
@@ -129,16 +152,44 @@ export function registerWhatsappNumberRoutes(
       // turn a typo into a 500.
       if (!isUuid(numberId)) throw new ApiError(404, 'Номер не найден');
 
-      const parsed = enabling.safeParse(req.body);
+      const parsed = settings.safeParse(req.body);
       if (!parsed.success) throw new ApiError(400, 'Не удалось разобрать настройку номера');
+      const { enabled, accessToken } = parsed.data;
 
-      const [row] = await db
-        .update(whatsappNumbers)
-        .set({ enabled: parsed.data.enabled })
-        // The agent condition is what stops one account editing another's number even
-        // when the identifier is guessed.
-        .where(and(eq(whatsappNumbers.id, numberId), eq(whatsappNumbers.agentId, req.agent!.id)))
-        .returning();
+      // The agent condition is what stops one account editing another's number even
+      // when the identifier is guessed.
+      const owned = and(
+        eq(whatsappNumbers.id, numberId),
+        eq(whatsappNumbers.agentId, req.agent!.id),
+      );
+
+      const [current] = await db.select().from(whatsappNumbers).where(owned);
+      if (!current) throw new ApiError(404, 'Номер не найден');
+
+      const changes: Partial<typeof whatsappNumbers.$inferInsert> = {};
+      if (enabled !== undefined) changes.enabled = enabled;
+
+      if (accessToken !== undefined) {
+        // Proved before anything is written: a mistyped token must leave the working one
+        // in place, not replace it with one Meta will refuse on the next message.
+        let displayPhone: string;
+        try {
+          displayPhone = (await graph.getPhoneNumber(current.phoneNumberId, accessToken))
+            .displayPhoneNumber;
+        } catch (error) {
+          if (error instanceof GraphError) {
+            throw new ApiError(400, `Meta не приняла этот токен: ${error.message}`);
+          }
+          throw error;
+        }
+        // The same associated data as the original: the row's identity has not changed,
+        // only its secret. `subscribedAt` is left alone — the subscription belongs to the
+        // WABA, not to the token that was used to request it.
+        changes.accessToken = encryptSecret(accessToken, credentialsKey(env), current.phoneNumberId);
+        changes.displayPhone = displayPhone;
+      }
+
+      const [row] = await db.update(whatsappNumbers).set(changes).where(owned).returning();
 
       if (!row) throw new ApiError(404, 'Номер не найден');
       return toApi(row);

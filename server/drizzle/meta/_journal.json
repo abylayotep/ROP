@@ -22,6 +22,13 @@
       "when": 1788364787776,
       "tag": "0002_sleepy_scarlet_spider",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1788373872925,
+      "tag": "0003_foamy_peter_quill",
+      "breakpoints": true
     }
   ]
 }

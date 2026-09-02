@@ -27,6 +27,15 @@ export function useApi<T>(
   const ref = useRef(fetcher);
   ref.current = fetcher;
 
+  // Прошлый ответ теперь относится к другому вопросу и не должен оставаться на экране
+  // под новым заголовком. Перезагрузка — это тот же вопрос, заданный ещё раз, и она
+  // сохраняет то, что уже показано: отправка сообщения не гасит диалог, в котором его
+  // отправили. Поэтому очистка живёт в своём эффекте, без nonce в зависимостях.
+  useEffect(() => {
+    setData(undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, deps);
+
   useEffect(() => {
     const controller = new AbortController();
     let alive = true;

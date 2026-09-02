@@ -57,6 +57,14 @@ const connect = (payload: Record<string, unknown>, cookies = jar) =>
     payload,
   });
 
+const patch = (numberId: string, payload: Record<string, unknown>, cookies = jar) =>
+  app.inject({
+    method: 'PATCH',
+    url: `/api/agents/${agentId}/whatsapp/numbers/${numberId}`,
+    cookies,
+    payload,
+  });
+
 const valid = {
   phoneNumberId: '136',
   wabaId: '932',
@@ -141,6 +149,15 @@ describe('connecting a number', () => {
     expect(res.json().message).toBe('Этот номер уже подключён к другому агенту');
   });
 
+  it('names this agent when the owner re-saves their own number', async () => {
+    await connect(valid);
+
+    const res = await connect(valid);
+
+    expect(res.statusCode).toBe(409);
+    expect(res.json().message).toBe('Этот номер уже подключён к этому агенту');
+  });
+
   it('rejects a body missing the token', async () => {
     const res = await connect({ phoneNumberId: '136', wabaId: '932' });
 
@@ -200,6 +217,71 @@ describe('listing and changing a number', () => {
 
     expect(res.json().enabled).toBe(false);
     expect(await db.select().from(whatsappNumbers)).toHaveLength(1);
+  });
+
+  it('replaces the token without touching the conversations behind it', async () => {
+    const { id } = (await connect(valid)).json();
+
+    const res = await patch(id, { accessToken: 'EAAG-fresh' });
+
+    expect(res.statusCode).toBe(200);
+    // Proved with Meta against this number's own phone_number_id before being stored.
+    expect(graph.calls.at(-1)).toMatchObject({
+      method: 'getPhoneNumber',
+      args: ['136', 'EAAG-fresh'],
+    });
+
+    const [stored] = await db.select().from(whatsappNumbers);
+    expect(stored!.accessToken).not.toContain('EAAG-fresh');
+    expect(
+      decryptSecret(stored!.accessToken, Buffer.from(env.CREDENTIALS_KEY, 'base64'), '136'),
+    ).toBe('EAAG-fresh');
+    // The subscription belongs to the WABA, not to the token that requested it.
+    expect(stored!.subscribedAt).toBeInstanceOf(Date);
+    expect(res.json().subscribed).toBe(true);
+    expect(res.json().accessToken).toBeUndefined();
+  });
+
+  it('keeps the working token when Meta rejects the new one', async () => {
+    const { id } = (await connect(valid)).json();
+    app = buildServer(env, db, {
+      graph: fakeGraph({
+        getPhoneNumber: async () => {
+          throw new GraphError('Invalid OAuth access token.', 401, 190);
+        },
+      }),
+    });
+    await app.ready();
+    jar = await login('owner@example.com');
+
+    const res = await patch(id, { accessToken: 'EAAG-broken' });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().message).toBe('Meta не приняла этот токен: Invalid OAuth access token.');
+
+    const [stored] = await db.select().from(whatsappNumbers);
+    expect(
+      decryptSecret(stored!.accessToken, Buffer.from(env.CREDENTIALS_KEY, 'base64'), '136'),
+    ).toBe('EAAG-token');
+  });
+
+  it('refuses a body that asks for nothing', async () => {
+    const { id } = (await connect(valid)).json();
+
+    const res = await patch(id, {});
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().message).toBe('Не удалось разобрать настройку номера');
+  });
+
+  it('does not let a member replace the token', async () => {
+    const { id } = (await connect(valid)).json();
+    await db
+      .update(accountMembers)
+      .set({ role: 'member' })
+      .where(eq(accountMembers.accountId, accountId));
+
+    expect((await patch(id, { accessToken: 'EAAG-fresh' })).statusCode).toBe(403);
   });
 
   it('disconnects a number', async () => {

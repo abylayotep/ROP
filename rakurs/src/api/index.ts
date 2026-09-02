@@ -59,6 +59,18 @@ export const setWhatsappNumberEnabled = (agentId: string, numberId: string, enab
     body: { enabled },
   });
 
+/**
+ * Заменить токен, не теряя переписки.
+ *
+ * Удаление номера уносит с собой все диалоги и данные о рекламе, из которой пришли
+ * клиенты, а Meta их второй раз не отдаст. Поэтому протухший токен меняется здесь.
+ */
+export const replaceWhatsappToken = (agentId: string, numberId: string, accessToken: string) =>
+  request<WhatsappNumber>(`/agents/${agentId}/whatsapp/numbers/${numberId}`, {
+    method: 'PATCH',
+    body: { accessToken },
+  });
+
 export const disconnectWhatsappNumber = (agentId: string, numberId: string) =>
   request<{ ok: true }>(`/agents/${agentId}/whatsapp/numbers/${numberId}`, { method: 'DELETE' });
 

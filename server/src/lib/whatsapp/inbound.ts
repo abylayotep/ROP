@@ -1,4 +1,4 @@
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import {
   contacts,
@@ -99,15 +99,59 @@ function mediaIdOf(message: InboundMessage): string | null {
   );
 }
 
+/** Rows a delivery will not be retried past. Five is generous for a transient fault. */
+const MAX_ATTEMPTS = 5;
+
+/** How many events one pass takes. A webhook delivery must not turn into a long job. */
+const BATCH = 50;
+
+/** A claimed event. Raw SQL, so the columns arrive under their database names. */
+interface ClaimedEvent {
+  id: string;
+  payload: unknown;
+  received_at: Date;
+}
+
+/**
+ * The rows out of a `db.execute` result.
+ *
+ * The driver decides the shape: postgres-js hands back the rows as an array, node-postgres
+ * wraps them in an object. Reading both means this does not break on a driver swap.
+ */
+function rowsOf<T>(result: unknown): T[] {
+  if (Array.isArray(result)) return result as T[];
+  const rows = (result as { rows?: unknown }).rows;
+  return Array.isArray(rows) ? (rows as T[]) : [];
+}
+
 export async function processPendingEvents(
   db: Db,
   deps: InboundDeps,
 ): Promise<{ processed: number; failed: number }> {
-  const pending = await db
-    .select()
-    .from(whatsappEvents)
-    .where(isNull(whatsappEvents.processedAt))
-    .orderBy(whatsappEvents.receivedAt);
+  // A claim, not a select. `for update skip locked` is the whole point of the statement:
+  // it makes two concurrent passes take different rows instead of the same ones, so a
+  // second webhook delivery arriving mid-pass does not repeat the Graph calls and the
+  // media downloads of the first. Counting the attempt here, before the work, is what
+  // eventually retires an event that always throws — otherwise it is retried forever and
+  // every later pass has to walk past it.
+  const claimed = await db.execute(sql`
+    update whatsapp_events
+       set attempts = attempts + 1
+     where id in (
+       select id from whatsapp_events
+        where processed_at is null and attempts < ${MAX_ATTEMPTS}
+        order by received_at
+        limit ${BATCH}
+        for update skip locked
+     )
+    returning *
+  `);
+  // `returning` gives no order of its own — the `order by` above only chooses which rows
+  // the batch takes. Arrival order has to hold here, because the first referral on a
+  // conversation is the one kept and the last name seen is the one stored.
+  const pending = rowsOf<ClaimedEvent>(claimed).sort(
+    (a, b) => new Date(a.received_at).getTime() - new Date(b.received_at).getTime(),
+  );
 
   let processed = 0;
   let failed = 0;
@@ -198,7 +242,20 @@ async function applyChange(db: Db, deps: InboundDeps, value: ChangeValue): Promi
     await db
       .update(messages)
       .set({ status: status.status })
-      .where(eq(messages.waMessageId, status.id));
+      .where(
+        and(
+          eq(messages.waMessageId, status.id),
+          // Global uniqueness makes the id alone safe today, but the delivery arrived on
+          // one number and may only speak for the threads on that number.
+          inArray(
+            messages.conversationId,
+            db
+              .select({ id: conversations.id })
+              .from(conversations)
+              .where(eq(conversations.whatsappNumberId, number.id)),
+          ),
+        ),
+      );
   }
 
   const errors: string[] = [];
@@ -207,9 +264,17 @@ async function applyChange(db: Db, deps: InboundDeps, value: ChangeValue): Promi
     const contactId = await upsertContact(db, number.agentId, incoming.from, profileName);
     const conversationId = await upsertConversation(db, number.agentId, number.id, contactId);
 
+    // Meta redelivers the same message by design. The insert below would drop the
+    // duplicate anyway, so downloading its file a second time is pure waste — a Graph
+    // call and a full transfer for bytes already on disk.
+    const [known] = await db
+      .select({ id: messages.id })
+      .from(messages)
+      .where(eq(messages.waMessageId, incoming.id));
+
     let media: { path: string; mime: string } | null = null;
     const mediaId = mediaIdOf(incoming);
-    if (mediaId) {
+    if (mediaId && !known) {
       try {
         media = await downloadInboundMedia(deps, {
           mediaId,
@@ -224,11 +289,25 @@ async function applyChange(db: Db, deps: InboundDeps, value: ChangeValue): Promi
       }
     }
 
-    await storeMessage(db, conversationId, incoming, media);
+    if (!known) await storeMessage(db, conversationId, incoming, media);
     if (incoming.referral) await recordReferral(db, conversationId, incoming.referral);
+
+    const sentAt = at(incoming.timestamp);
+    // Bound as an ISO string with an explicit cast, not as a Date: a Date inlined into a
+    // `sql` fragment reaches Postgres as an untyped parameter and `greatest` cannot be
+    // resolved against it, which fails the whole delivery.
+    const sentAtParam = sql`${sentAt.toISOString()}::timestamptz`;
     await db
       .update(conversations)
-      .set({ lastInboundAt: at(incoming.timestamp), lastMessageAt: at(incoming.timestamp) })
+      .set({
+        // Both columns only ever move forward. Meta redelivers, sometimes out of order:
+        // lastInboundAt going backwards would refuse an operator a reply they are
+        // entitled to send, and lastMessageAt going backwards would reorder the list
+        // under someone who is reading it. Guarded per column rather than in a where
+        // clause, because an operator's reply moves lastMessageAt on its own.
+        lastInboundAt: sql`greatest(coalesce(${conversations.lastInboundAt}, to_timestamp(0)), ${sentAtParam})`,
+        lastMessageAt: sql`greatest(coalesce(${conversations.lastMessageAt}, to_timestamp(0)), ${sentAtParam})`,
+      })
       .where(eq(conversations.id, conversationId));
   }
   return errors;

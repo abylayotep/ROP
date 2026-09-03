@@ -1,0 +1,19 @@
+# Site block for a host that already runs Caddy for another product. Append it to
+# /etc/caddy/Caddyfile and `sudo systemctl reload caddy`. The api container binds to
+# 127.0.0.1:3000 (deploy/compose.yml); the built frontend is copied to /var/www/rakurs.
+#
+# /api/* is proxied untouched: the webhook signature is over the exact bytes Meta sent.
+rop.tasbaqa.ru {
+    handle /api/* {
+        reverse_proxy 127.0.0.1:3000 {
+            transport http {
+                read_timeout 120s
+            }
+        }
+    }
+    handle {
+        root * /var/www/rakurs
+        try_files {path} /index.html
+        file_server
+    }
+}

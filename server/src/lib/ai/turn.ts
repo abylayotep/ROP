@@ -135,46 +135,86 @@ const UNSOURCED = (value: string): string =>
   'сослалась модель, ни в словах клиента, ни в инструкциях владельца';
 
 /**
- * The spaces a number is written with, removed, so `1 500` and `1500` are one number.
+ * A number's own separators, removed, so one number written two ways is one number.
  *
- * Only between digits: a space anywhere else separates words, and removing those would let a
- * reply's «15» match a record that never wrote it. `\s` in a unicode regex already covers the
- * non-breaking and narrow spaces a price is typed with — U+00A0, U+2009, U+202F.
+ * Two readings, because no single one is right for both of the shapes a number arrives in.
+ *
+ * `spaced` joins only whitespace between two digits: `1 500` is `1500`. `\s` in a unicode
+ * regex already covers the non-breaking and narrow spaces a price is typed with — U+00A0,
+ * U+2009, U+202F. `punctuated` joins the brackets and dashes too, so a phone number retyped
+ * as `8 (777) 123-45-67` is the record's `87771234567`.
+ *
+ * Only ever between two digits. A dash between words is a dash, and joining those would let
+ * a reply's `15` come out of «1 дверь, 5 окон».
  */
-function joinDigits(text: string): string {
-  return text.replace(/(?<=\p{Nd})\s+(?=\p{Nd})/gu, '');
+const SPACED = /(?<=\p{Nd})\s+(?=\p{Nd})/gu;
+const PUNCTUATED = /(?<=\p{Nd})[\s()\-\u2013\u2014]+(?=\p{Nd})/gu;
+
+/** Every whole number in the text, under one of the two readings. */
+function digitRuns(text: string, joiner: RegExp): string[] {
+  return text.replace(joiner, '').match(/\p{Nd}+/gu) ?? [];
 }
 
 /**
  * The first number in the reply that appears in none of the texts the agent was given.
  *
  * `\p{Nd}` rather than `\d`: `\d` is ASCII-only, and a model answering a Kazakhstani customer
- * can write Eastern Arabic digits. Containment rather than equality of whole runs, because a
- * phone number re-typed as `8 (777) 123-45-67` from a record's `87771234567` is the same
- * number written differently, and a handoff over punctuation is a customer left unanswered.
+ * can write Eastern Arabic digits.
+ *
+ * ## Whole numbers, not substrings
+ *
+ * A run has to *be* one of the numbers the agent was given, not merely sit inside one. The
+ * first version of this check asked for containment and let through the likeliest
+ * hallucination there is — a truncation: `150` passed against a record's `1500`, `20` against
+ * a `2026`, and a single digit passed on any source that held one anywhere.
+ *
+ * ## Why each side is read twice
+ *
+ * Containment was there to spare the phone number, and reading both sides twice spares it
+ * without the loophole. A source lends every run of both its readings: `1500-2000 ₸` lends
+ * `1500`, `2000` **and** `15002000`, so a price quoted out of a range still matches, and
+ * `8 (777) 123-45-67` lends `87771234567`. A reply is honest when either of *its* readings is
+ * wholly covered — the phone passes on its joined reading, a range quoted from two separate
+ * records passes on its spaced one, and `150` is missing from both.
+ *
+ * Each source is read on its own. Concatenated, a record ending in `1500` and the next one
+ * opening with `20000` would together lend a reply the number `50020`, which neither says.
  *
  * ## What this still cannot catch
  *
  * A fact stated in words rather than in digits — «три тысячи тенге», «доставка бесплатная»,
  * «работаем с прошлого года» — passes, because there is no digit run in it to check. And a
  * non-numeric invention — «гарантия есть», «монтаж входит в стоимость», an address — passes
- * for the same reason. Catching either means reading the reply against the records
- * semantically, and that is not this stage's work. `docs/ai-agent.md` says the same, and must
- * keep saying it: this check is the only promise here kept by code rather than by a prompt,
- * and a guide claiming more than the code does is worse than one claiming less.
+ * for the same reason.
+ *
+ * Nor does it know what a number *means*. A customer who writes «участок 500 метров» has put
+ * `500` among the sources, and a reply pricing something at «500 ₸» is then a number the
+ * agent was given, used for something else entirely. Units and roles are semantics, and the
+ * customer's own message has to be a source or the agent cannot ask «вам нужны 2 двери?».
+ *
+ * Catching any of these means reading the reply against the records semantically, and that is
+ * not this stage's work. `docs/ai-agent.md` says the same, and must keep saying it: this check
+ * is the only promise here kept by code rather than by a prompt, and a guide claiming more
+ * than the code does is worse than one claiming less.
  */
 export function unsourcedNumber(reply: string, sources: readonly string[]): string | null {
-  const runs = joinDigits(reply).match(/\p{Nd}+/gu);
-  if (runs === null) return null;
+  const spaced = digitRuns(reply, SPACED);
+  if (spaced.length === 0) return null;
+  const punctuated = digitRuns(reply, PUNCTUATED);
 
-  // Each source is normalised on its own and searched on its own: concatenated, a record
-  // ending in `1500` and the next one opening with `20000` would together lend a reply the
-  // number `50020`, which neither of them contains.
-  const given = sources.map(joinDigits);
-  for (const run of runs) {
-    if (!given.some((source) => source.includes(run))) return run;
+  const given = new Set<string>();
+  for (const source of sources) {
+    for (const run of digitRuns(source, SPACED)) given.add(run);
+    for (const run of digitRuns(source, PUNCTUATED)) given.add(run);
   }
-  return null;
+
+  const missing = (runs: string[]): string | undefined => runs.find((run) => !given.has(run));
+  const bySpaces = missing(spaced);
+  if (bySpaces === undefined) return null;
+  if (missing(punctuated) === undefined) return null;
+  // The spaced reading's miss, because it is the number as the reader will see it written:
+  // the joined reading would report a phone and a price run together as one long digit soup.
+  return bySpaces;
 }
 
 const empty = (

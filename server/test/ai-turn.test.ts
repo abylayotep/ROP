@@ -1014,6 +1014,56 @@ describe('unsourcedNumber', () => {
     // «1 дверь, 5 окон» is two numbers with words between them, not the number 15.
     expect(unsourcedNumber('15', ['1 дверь, 5 окон'])).toBe('15');
   });
+
+  describe('a truncation of a real number is not a real number', () => {
+    // The first version of this check asked for containment, and containment lets through
+    // the likeliest hallucination there is: a number that is the front or the middle of one
+    // the agent really was given.
+    it('catches a price truncated out of the record’s own', () => {
+      expect(unsourcedNumber('Доставка 150 ₸.', ['Доставка — 1500 ₸.'])).toBe('150');
+    });
+
+    it('catches a number cut out of a year', () => {
+      expect(unsourcedNumber('Ждать 20 дней.', ['Работаем с 2026 года.'])).toBe('20');
+    });
+
+    it('catches a single digit that merely occurs in the instructions', () => {
+      expect(unsourcedNumber('Скидка 5%.', ['Работаем с 2015 года. Отвечай коротко.'])).toBe(
+        '5',
+      );
+    });
+
+    it('still lets the customer’s own number through, whatever it meant', () => {
+      // Not a truncation: `500` is a whole number the customer wrote. That the agent has
+      // priced a distance is semantics, and semantics is the documented blind spot — the
+      // customer's message has to be a source, or «вам нужны 2 двери?» is a handoff.
+      expect(unsourcedNumber('Это 500 ₸.', ['У меня участок 500 метров.'])).toBeNull();
+    });
+  });
+
+  describe('the same number written another way is the same number', () => {
+    it('matches a phone retyped with brackets and dashes', () => {
+      // The reason containment was there in the first place. It has to keep working, or the
+      // next person to read this widens the check back to substrings.
+      expect(unsourcedNumber('Звоните: 8 (777) 123-45-67.', ['Телефон 87771234567'])).toBeNull();
+    });
+
+    it('matches a phone the record itself wrote with dashes', () => {
+      expect(unsourcedNumber('Звоните 87771234567.', ['Телефон: 8-777-123-45-67'])).toBeNull();
+    });
+
+    it('lends a price out of a range the record wrote with a dash', () => {
+      expect(unsourcedNumber('От 1500 ₸.', ['Двери 1500-20000 ₸.'])).toBeNull();
+    });
+
+    it('lets a reply quote a range built out of two separate records', () => {
+      expect(unsourcedNumber('От 1500 до 20000 ₸.', ['цена 1500', 'цена 20000'])).toBeNull();
+    });
+
+    it('does not let the dashes lend a number neither side wrote', () => {
+      expect(unsourcedNumber('Доставка 999 ₸.', ['Телефон 8-777-123-45-67'])).toBe('999');
+    });
+  });
 });
 
 describe('a number nothing the agent read contains', () => {

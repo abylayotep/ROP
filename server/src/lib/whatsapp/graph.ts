@@ -212,9 +212,9 @@ export function createGraphClient(): GraphClient {
           const parsed = JSON.parse(text) as { access_token?: string };
           if (parsed.access_token) return parsed.access_token;
         } catch {
-          // Meta's docs show a bare token as the body; accept that shape too.
+          // Not JSON. A gateway page answering 200 is not a token, and guessing at the
+          // shape of the body would hand one downstream to be stored and encrypted.
         }
-        if (/^[A-Za-z0-9]+$/.test(text.trim())) return text.trim();
         throw new GraphError('Meta вернула ответ без токена', response.status);
       });
     },
@@ -224,7 +224,7 @@ export function createGraphClient(): GraphClient {
         `${GRAPH_ROOT}/${wabaId}/phone_numbers?fields=${PHONE_FIELDS}`,
         token,
       );
-      return raw.data.map(toPhone);
+      return (raw.data ?? []).map(toPhone);
     },
 
     async requestSmbAppData(phoneNumberId, token, syncType) {

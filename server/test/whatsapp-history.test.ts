@@ -6,7 +6,7 @@ import { encryptSecret } from '../src/lib/secret-box.js';
 import { processPendingEvents } from '../src/lib/whatsapp/inbound.js';
 import { withDb } from './helpers/db.js';
 import { testEnv } from './helpers/env.js';
-import { fakeGraph } from './helpers/fake-graph.js';
+import { fakeGraph, type FakeGraph } from './helpers/fake-graph.js';
 import { fakeModel, type FakeModel } from './helpers/fake-model.js';
 
 const env = testEnv();
@@ -15,12 +15,14 @@ const key = Buffer.from(env.CREDENTIALS_KEY, 'base64');
 let db: Awaited<ReturnType<typeof withDb>>;
 let agentId: string;
 let model: FakeModel;
+let graph: FakeGraph;
 
-const deps = () => ({ graph: fakeGraph(), key, mediaDir: env.MEDIA_DIR, model });
+const deps = () => ({ graph, key, mediaDir: env.MEDIA_DIR, model });
 
 beforeEach(async () => {
   db = await withDb();
   model = fakeModel();
+  graph = fakeGraph();
   const { accountId } = await createAccountWithOwner(db, {
     company: 'Sealhouse',
     email: 'owner@example.com',
@@ -129,6 +131,24 @@ describe('history import', () => {
 
     const [message] = await db.select().from(messages);
     expect(message).toMatchObject({ kind: 'unsupported', body: 'Файл из истории телефона', mediaPath: null });
+  });
+
+  it('fills a placeholder from a follow-up chunk that carries the real media', async () => {
+    await store(history([{ phase: 0, chunk_order: 1, progress: 50, threads: [thread('77771234567', [
+      { from: '77771234567', id: 'wamid.M1', timestamp: '1750000000', type: 'media_placeholder', history_context: { status: 'READ' } },
+    ])] }]));
+    await processPendingEvents(db, deps());
+
+    await store(history([{ phase: 0, chunk_order: 2, progress: 60, threads: [thread('77771234567', [
+      { from: '77771234567', id: 'wamid.M1', timestamp: '1750000000', type: 'image', image: { id: 'media-1', mime_type: 'image/jpeg' }, history_context: { status: 'READ' } },
+    ])] }]));
+    expect(await processPendingEvents(db, deps())).toEqual({ processed: 1, failed: 0 });
+
+    const rows = await db.select().from(messages);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ kind: 'image', mediaMime: 'image/jpeg' });
+    expect(rows[0]!.mediaPath).toBe(`${agentId}/wamid.M1.jpg`);
+    expect(graph.calls.map((c) => c.method)).toEqual(['getMediaUrl', 'downloadMedia']);
   });
 
   it('records that the owner declined history sharing', async () => {

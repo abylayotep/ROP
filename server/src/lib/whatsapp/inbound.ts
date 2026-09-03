@@ -65,7 +65,7 @@ interface StatusUpdate {
 
 /** A message the operator sent from the WhatsApp Business app. Same fields as inbound plus `to`. */
 interface EchoMessage extends InboundMessage {
-  to: string;
+  to?: string;
 }
 
 interface ContactSync {
@@ -439,10 +439,11 @@ async function applyChange(
     case 'smb_app_state_sync':
       await applyContactSync(db, number.agentId, value.state_sync ?? []);
       return [];
-    case 'history':
+    case 'history': {
       // `ChangeValue` and `HistoryValue` overlap on `metadata`; the cast is honest.
-      await applyHistory(db, number, value as HistoryValue);
-      return [];
+      const { errors } = await applyHistory(db, deps, number, value as HistoryValue);
+      return errors;
+    }
     default:
       // A field we did not subscribe to, or one a later stage will handle. Stored already;
       // nothing to do.
@@ -576,7 +577,15 @@ async function applyEchoes(
 ): Promise<string[]> {
   const errors: string[] = [];
   for (const echo of echoes) {
-    const contactId = await upsertContact(db, number.agentId, digits(echo.to), undefined);
+    // Meta always names the recipient; a delivery that does not is malformed. There is no
+    // thread to file it under, so it is written down and skipped rather than thrown — one
+    // bad echo must not cost the whole delivery.
+    const to = digits(echo.to ?? '');
+    if (!to || !echo.id) {
+      errors.push('эхо без адресата пропущено');
+      continue;
+    }
+    const contactId = await upsertContact(db, number.agentId, to, undefined);
     const conversationId = await upsertConversation(db, number.agentId, number.id, contactId);
 
     const [known] = await db

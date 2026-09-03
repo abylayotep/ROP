@@ -106,6 +106,19 @@ describe('a message the operator sent from the phone', () => {
     expect(await db.select().from(messages)).toHaveLength(1);
   });
 
+  it('skips an echo with no recipient and says so on the event', async () => {
+    await store(change('smb_message_echoes', {
+      ...meta,
+      message_echoes: [{ from: '77715230342', id: 'wamid.NOTO', timestamp: '1756000100', type: 'text', text: { body: 'Кому?' } }],
+    }));
+
+    expect(await processPendingEvents(db, deps())).toEqual({ processed: 1, failed: 0 });
+
+    expect(await db.select().from(messages)).toHaveLength(0);
+    const [event] = await db.select().from(whatsappEvents);
+    expect(event!.error).toContain('эхо без адресата пропущено');
+  });
+
   it('does not open a reply window', async () => {
     await store(echo());
     await processPendingEvents(db, deps());

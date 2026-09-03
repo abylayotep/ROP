@@ -72,14 +72,15 @@ describe('connecting the phone number', () => {
 
     expect(graph.calls.map((c) => c.method)).toEqual([
       'exchangeCode',
+      'listPhoneNumbers',
       'getPhoneNumber',
       'subscribeApp',
       'requestSmbAppData',
       'requestSmbAppData',
     ]);
     expect(graph.calls[0]!.args).toEqual(['AQD-code', '1585667806534384', env.META_APP_SECRET]);
-    expect(graph.calls[3]!.args[2]).toBe('smb_app_state_sync');
-    expect(graph.calls[4]!.args[2]).toBe('history');
+    expect(graph.calls[4]!.args[2]).toBe('smb_app_state_sync');
+    expect(graph.calls[5]!.args[2]).toBe('history');
 
     const [row] = await db.select().from(whatsappNumbers);
     expect(row!.businessId).toBe('877');
@@ -107,6 +108,21 @@ describe('connecting the phone number', () => {
 
     expect(res.statusCode).toBe(400);
     expect(res.json().message).toBe('У аккаунта несколько номеров. Повторите подключение и выберите номер в окне Meta.');
+    expect(await db.select().from(whatsappNumbers)).toHaveLength(0);
+  });
+
+  it('refuses a number that does not belong to the reported WABA', async () => {
+    await boot({
+      listPhoneNumbers: async () => [
+        { id: '999', displayPhoneNumber: '+7 9', verifiedName: 'other', platformType: null, isOnBizApp: true },
+      ],
+    });
+
+    const res = await connect({ code: 'AQD-code', wabaId: '932', phoneNumberId: '136' });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().message).toBe('Номер не принадлежит выбранному аккаунту WhatsApp Business');
+    expect(graph.calls.map((c) => c.method)).not.toContain('subscribeApp');
     expect(await db.select().from(whatsappNumbers)).toHaveLength(0);
   });
 

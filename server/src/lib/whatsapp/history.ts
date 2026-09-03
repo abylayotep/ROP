@@ -1,6 +1,10 @@
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, isNull, sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import { contacts, conversations, messages, whatsappNumbers } from '../../db/schema.js';
+import { decryptSecret } from '../secret-box.js';
+import { withoutSecret } from './graph.js';
+import type { InboundDeps } from './inbound.js';
+import { downloadInboundMedia } from './media.js';
 
 /** Meta's error code for «the business turned history sharing off on the phone». */
 const HISTORY_DECLINED = 2593109;
@@ -14,10 +18,23 @@ interface HistoryMessage {
   timestamp: string;
   type: string;
   text?: { body: string };
-  image?: { caption?: string };
-  video?: { caption?: string };
-  document?: { caption?: string; filename?: string };
+  image?: { id?: string; caption?: string };
+  audio?: { id?: string };
+  video?: { id?: string; caption?: string };
+  document?: { id?: string; caption?: string; filename?: string };
+  sticker?: { id?: string };
   history_context?: { status?: string };
+}
+
+/**
+ * The media id a history message carries, if it carries one.
+ *
+ * A first chunk describes a file as `media_placeholder` — the phone had not uploaded it yet.
+ * A later chunk repeats the same `id` with the real sub-object, and that is the only moment
+ * the bytes can be fetched.
+ */
+function mediaIdOf(m: HistoryMessage): string | null {
+  return m.image?.id ?? m.audio?.id ?? m.video?.id ?? m.document?.id ?? m.sticker?.id ?? null;
 }
 
 interface HistoryChunk {
@@ -69,10 +86,11 @@ function bodyOf(m: HistoryMessage): string | null {
  */
 export async function applyHistory(
   db: Db,
+  deps: InboundDeps,
   number: NumberRow,
   value: HistoryValue,
-): Promise<{ stored: number }> {
-  let stored = 0;
+): Promise<{ errors: string[] }> {
+  const errors: string[] = [];
   let progress = number.historyProgress;
 
   for (const chunk of value.history ?? []) {
@@ -123,12 +141,47 @@ export async function applyHistory(
             sentAt,
           };
         });
-        const inserted = await db
-          .insert(messages)
-          .values(rows)
-          .onConflictDoNothing({ target: messages.waMessageId })
-          .returning({ id: messages.id });
-        stored += inserted.length;
+        await db.insert(messages).values(rows).onConflictDoNothing({ target: messages.waMessageId });
+      }
+
+      // A chunk that carries the real media for a placeholder stored earlier. The insert
+      // above cannot do it: the row already exists and the conflict drops the repeat.
+      for (const m of list) {
+        const mediaId = mediaIdOf(m);
+        if (!mediaId) continue;
+        const [placeholder] = await db
+          .select({ id: messages.id })
+          .from(messages)
+          .where(
+            and(
+              eq(messages.waMessageId, m.id),
+              eq(messages.kind, 'unsupported'),
+              isNull(messages.mediaPath),
+            ),
+          );
+        if (!placeholder) continue;
+        let token = '';
+        try {
+          token = decryptSecret(number.accessToken, deps.key, number.phoneNumberId);
+          const media = await downloadInboundMedia(deps, {
+            mediaId,
+            token,
+            agentId: number.agentId,
+            waMessageId: m.id,
+          });
+          await db
+            .update(messages)
+            .set({
+              kind: m.type,
+              body: bodyOf(m),
+              mediaPath: media.path,
+              mediaMime: media.mime,
+            })
+            .where(eq(messages.id, placeholder.id));
+        } catch (error) {
+          // The placeholder stays as it is and says so; only the file is missing.
+          errors.push(withoutSecret(error instanceof Error ? error.message : String(error), token));
+        }
       }
 
       if (latest > 0) {
@@ -149,5 +202,5 @@ export async function applyHistory(
       .set({ historyProgress: sql`greatest(${whatsappNumbers.historyProgress}, ${progress})` })
       .where(eq(whatsappNumbers.id, number.id));
   }
-  return { stored };
+  return { errors };
 }

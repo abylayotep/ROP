@@ -67,6 +67,14 @@ export function registerWhatsappCoexistenceRoutes(
       let number: PhoneNumber;
       try {
         if (phoneNumberId) {
+          // The browser named both the WABA and the number, and neither is trusted. Without
+          // this check an owner could file someone else's number under their own WABA — the
+          // token would still work, and every later call would be made against the wrong
+          // account.
+          const all = await graph.listPhoneNumbers(wabaId, token);
+          if (!all.some((p) => p.id === phoneNumberId)) {
+            throw new ApiError(400, 'Номер не принадлежит выбранному аккаунту WhatsApp Business');
+          }
           number = await graph.getPhoneNumber(phoneNumberId, token);
         } else {
           const all = await graph.listPhoneNumbers(wabaId, token);

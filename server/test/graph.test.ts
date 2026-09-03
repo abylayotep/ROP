@@ -180,6 +180,14 @@ describe('graph client', () => {
     expect((calls[0]!.init.headers as Record<string, string>)?.Authorization).toBeUndefined();
   });
 
+  it('refuses a successful exchange whose body carries no token', async () => {
+    answerWith({ token_type: 'bearer' });
+
+    await expect(client.exchangeCode('AQD-code', '1585667806534384', 'app-secret')).rejects.toThrow(
+      'Meta вернула ответ без токена',
+    );
+  });
+
   it('reads whether a number is on the phone app', async () => {
     answerWith({
       id: '136',

@@ -137,7 +137,7 @@ function ConnectedNumbers({
                       : `Импорт истории: ${number.historyProgress} %`}
                 </div>
               )}
-              {number.offboarded && (
+              {number.connectionKind === 'coexistence' && number.offboarded && (
                 <div style={{ ...hint, color: 'var(--danger)' }}>
                   Телефон отключил API. Подключите заново на телефоне: Настройки → Аккаунт →
                   Business Platform.

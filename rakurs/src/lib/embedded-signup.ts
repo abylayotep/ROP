@@ -4,6 +4,9 @@ import type { CoexistenceConnection, EmbeddedSignupSetup } from '@/types';
 const GRAPH_VERSION = 'v26.0';
 const SDK_URL = 'https://connect.facebook.net/en_US/sdk.js';
 
+/** Origins Meta's signup window posts from: https, any facebook.com subdomain, nothing else. */
+const FACEBOOK_ORIGIN = /^https:\/\/([a-z0-9-]+\.)*facebook\.com$/;
+
 /** The slice of Meta's SDK this file uses. Not the whole surface, on purpose. */
 interface FacebookSdk {
   init(options: { appId: string; autoLogAppEvents: boolean; xfbml: boolean; version: string }): void;
@@ -72,8 +75,17 @@ export function runCoexistenceSignup(setup: EmbeddedSignupSetup): Promise<Coexis
           }
         };
 
+        /** Every failure path leaves through here, so the listener is never left behind. */
+        const fail = (message: string) => {
+          window.removeEventListener('message', onMessage);
+          reject(new Error(message));
+        };
+
         const onMessage = (event: MessageEvent) => {
-          if (typeof event.origin !== 'string' || !event.origin.endsWith('facebook.com')) return;
+          // Meta posts from www., web. and business. subdomains, so the subdomain is open —
+          // but the scheme and the registrable domain are not: a suffix test would also
+          // admit https://evilfacebook.com and plain http.
+          if (!FACEBOOK_ORIGIN.test(event.origin)) return;
           let data: {
             type?: string;
             event?: string;
@@ -92,8 +104,7 @@ export function runCoexistenceSignup(setup: EmbeddedSignupSetup): Promise<Coexis
           if (data?.type !== 'WA_EMBEDDED_SIGNUP') return;
 
           if (data.event === 'CANCEL' || data.event === 'ERROR') {
-            window.removeEventListener('message', onMessage);
-            reject(new Error(data.data?.error_message ?? 'Подключение отменено'));
+            fail(data.data?.error_message ?? 'Подключение отменено');
             return;
           }
           if (data.data?.waba_id) {
@@ -112,9 +123,11 @@ export function runCoexistenceSignup(setup: EmbeddedSignupSetup): Promise<Coexis
             if (response.authResponse?.code) {
               code = response.authResponse.code;
               settle();
-            } else if (!session) {
-              window.removeEventListener('message', onMessage);
-              reject(new Error('Meta не вернула код подтверждения'));
+            } else {
+              // Unconditionally, not only when the session is still missing: without a code
+              // the promise can never settle, and a session that arrived first would
+              // otherwise leave the button stuck on «Ждём Meta…» forever.
+              fail('Meta не вернула код подтверждения');
             }
           },
           {

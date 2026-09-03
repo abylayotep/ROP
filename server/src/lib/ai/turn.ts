@@ -83,7 +83,7 @@ export interface TurnResult {
   outcome: TurnOutcome;
   /**
    * The reply the agent produced for the customer. Null when it produced none, and when the
-   * reply was withheld — a number stated with no record behind it is not shown to anyone.
+   * reply was withheld — a number nothing the agent read contains is not shown to anyone.
    */
   reply: string | null;
   /** The knowledge records the answer was built from, minus any the model was not given. */
@@ -119,7 +119,7 @@ export const keyAad = (agentId: string): string => agentId;
 const DETAIL_LIMIT = 500;
 
 /**
- * Why a reply that names no record and states a number is not sent.
+ * Why a reply stating a number nobody gave the agent is not sent.
  *
  * The prompt asks the model for this and the model usually obliges, but a rule that lives
  * only in a prompt is a request rather than a property of the system — and the one rule this
@@ -127,11 +127,55 @@ const DETAIL_LIMIT = 500;
  * A digit is where that rule is cheapest to check and most expensive to break: prices,
  * dates, sizes and phone numbers are what a customer acts on.
  *
- * What it does **not** catch: a model that cites a real record and invents a number that is
- * not in that record's text. Catching that means reading the reply against the records it
- * named, and it is not this stage's work.
+ * The number is named, because a person reading the note has to know which one to check.
+ * Sliced, because the run is written by the model and lands in a column an owner reads.
  */
-const UNSOURCED = 'в ответе есть число, но модель не назвала ни одной записи базы знаний';
+const UNSOURCED = (value: string): string =>
+  `в ответе есть число «${value.slice(0, 40)}», которого нет ни в записях, на которые ` +
+  'сослалась модель, ни в словах клиента, ни в инструкциях владельца';
+
+/**
+ * The spaces a number is written with, removed, so `1 500` and `1500` are one number.
+ *
+ * Only between digits: a space anywhere else separates words, and removing those would let a
+ * reply's «15» match a record that never wrote it. `\s` in a unicode regex already covers the
+ * non-breaking and narrow spaces a price is typed with — U+00A0, U+2009, U+202F.
+ */
+function joinDigits(text: string): string {
+  return text.replace(/(?<=\p{Nd})\s+(?=\p{Nd})/gu, '');
+}
+
+/**
+ * The first number in the reply that appears in none of the texts the agent was given.
+ *
+ * `\p{Nd}` rather than `\d`: `\d` is ASCII-only, and a model answering a Kazakhstani customer
+ * can write Eastern Arabic digits. Containment rather than equality of whole runs, because a
+ * phone number re-typed as `8 (777) 123-45-67` from a record's `87771234567` is the same
+ * number written differently, and a handoff over punctuation is a customer left unanswered.
+ *
+ * ## What this still cannot catch
+ *
+ * A fact stated in words rather than in digits — «три тысячи тенге», «доставка бесплатная»,
+ * «работаем с прошлого года» — passes, because there is no digit run in it to check. And a
+ * non-numeric invention — «гарантия есть», «монтаж входит в стоимость», an address — passes
+ * for the same reason. Catching either means reading the reply against the records
+ * semantically, and that is not this stage's work. `docs/ai-agent.md` says the same, and must
+ * keep saying it: this check is the only promise here kept by code rather than by a prompt,
+ * and a guide claiming more than the code does is worse than one claiming less.
+ */
+export function unsourcedNumber(reply: string, sources: readonly string[]): string | null {
+  const runs = joinDigits(reply).match(/\p{Nd}+/gu);
+  if (runs === null) return null;
+
+  // Each source is normalised on its own and searched on its own: concatenated, a record
+  // ending in `1500` and the next one opening with `20000` would together lend a reply the
+  // number `50020`, which neither of them contains.
+  const given = sources.map(joinDigits);
+  for (const run of runs) {
+    if (!given.some((source) => source.includes(run))) return run;
+  }
+  return null;
+}
 
 const empty = (
   outcome: TurnOutcome,
@@ -284,6 +328,9 @@ function safe(text: string, secret: string): string {
 
 /** The thread as it stood when the turn read it, for comparing against afterwards. */
 interface Snapshot {
+  /** The agent's own switch — the master one, in the owner's settings. */
+  agentEnabled: boolean;
+  /** This conversation's switch, which any employee may flip. */
   aiEnabled: boolean;
   lastInboundAt: number | null;
   lastMessageId: string;
@@ -297,6 +344,12 @@ interface Snapshot {
  * over by the answer — which is the single thing the per-conversation switch exists to
  * prevent — and a customer who writes again would be answered about the message before.
  *
+ * **Both** switches are re-read, not only the conversation's. The master switch is what an
+ * owner reaches for when they are watching the agent say something wrong, and it has to stop
+ * the replies that are already in flight — otherwise pressing it still lets through every
+ * turn already past its model call, which is a window of up to two model deadlines times the
+ * conversations in the batch.
+ *
  * The comparison is against the snapshot rather than against `true`, so that a dry run on a
  * conversation whose switch is already off is not mistaken for one that has just been taken
  * over. And this runs before anything is applied rather than immediately before the send:
@@ -306,7 +359,22 @@ interface Snapshot {
  * reply is still talked over, and closing that needs a lock on the conversation rather than
  * a second read.
  */
-async function movedOn(db: Db, conversationId: string, before: Snapshot): Promise<string | null> {
+async function movedOn(
+  db: Db,
+  ids: { agentId: string; conversationId: string },
+  before: Snapshot,
+): Promise<string | null> {
+  const { agentId, conversationId } = ids;
+
+  const [current] = await db
+    .select({ aiEnabled: agents.aiEnabled })
+    .from(agents)
+    .where(eq(agents.id, agentId));
+  if (!current) return 'Агент исчез, пока модель думала.';
+  if (current.aiEnabled !== before.agentEnabled) {
+    return 'Агента выключили целиком, пока модель думала.';
+  }
+
   const [row] = await db
     .select({ aiEnabled: conversations.aiEnabled, lastInboundAt: conversations.lastInboundAt })
     .from(conversations)
@@ -378,6 +446,7 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
   if (last.author !== 'client') return empty('skipped', 'Последнее слово не за клиентом.');
 
   const before: Snapshot = {
+    agentEnabled: agent.aiEnabled,
     aiEnabled: conversation.aiEnabled,
     lastInboundAt: conversation.lastInboundAt?.getTime() ?? null,
     lastMessageId: last.id,
@@ -523,7 +592,7 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
 
   // The thread may have moved while the model was thinking. Checked before anything is
   // applied, so that leaving is genuinely leaving: see `movedOn`.
-  const moved = await movedOn(db, conversation.id, before);
+  const moved = await movedOn(db, { agentId: agent.id, conversationId: conversation.id }, before);
   if (moved !== null) {
     if (!dryRun) {
       await db.insert(aiReplies).values({ ...spend(), outcome: 'skipped', detail: moved });
@@ -552,12 +621,29 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
   const usedItemIds = reply.usedItemIds.filter((id) => given.has(id));
 
   // The rule the whole stage rests on, enforced here rather than only asked for in the
-  // prompt. See `UNSOURCED` for what this catches and what it does not.
-  const unsourced = usedItemIds.length === 0 && /\d/.test(reply.reply);
+  // prompt. Every number in the reply has to appear in the text the agent was actually
+  // given: the records it cited, the message it is answering, and the owner's instructions.
+  //
+  // All three, not the records alone. The customer's own «нужны 2 двери» comes back in the
+  // agent's clarifying question, and the owner's «работаем с 2015 года» is a line rule 9
+  // tells the agent to repeat — a check that saw only the records would silence both and
+  // hand the thread to a person over a greeting.
+  //
+  // See `unsourcedNumber` for what this still cannot catch.
+  const cited = new Set(usedItemIds);
+  const sources = [
+    ...context.knowledge
+      .filter((item) => cited.has(item.id))
+      .flatMap((item) => [item.title, item.content]),
+    last.body ?? '',
+    agent.instructions,
+  ];
+  const invented = unsourcedNumber(reply.reply, sources);
+  const unsourced = invented !== null;
 
   const reasons: string[] = [];
   if (reply.handoff !== null) reasons.push(safe(reply.handoff.reason, key));
-  if (unsourced) reasons.push(UNSOURCED);
+  if (invented !== null) reasons.push(UNSOURCED(invented));
   const handoffReason = reasons.length === 0 ? null : reasons.join('; ');
 
   // Fields first, then the stage, then the send. A customer who receives an answer must
@@ -663,10 +749,10 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
 
   if (body === '') {
     details.push('Модель не написала ответа клиенту.');
-  } else if (unsourced) {
+  } else if (invented !== null) {
     // The reply itself is what cannot be trusted, so it is the reply that is withheld. The
     // handoff above has already left the thread to a person.
-    details.push(`${UNSOURCED} — ответ клиенту не отправлен.`);
+    details.push(`${UNSOURCED(invented)} — ответ клиенту не отправлен.`);
   } else {
     // Checked in both modes: a sandbox that reported «отправлено» where a real turn would
     // fail on a disabled number or an unreadable token would be answering a different

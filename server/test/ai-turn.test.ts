@@ -23,7 +23,12 @@ import {
   type Completion,
   type CompletionInput,
 } from '../src/lib/ai/openrouter.js';
-import { extractJson, runTurn, type TurnDeps } from '../src/lib/ai/turn.js';
+import {
+  extractJson,
+  runTurn,
+  unsourcedNumber,
+  type TurnDeps,
+} from '../src/lib/ai/turn.js';
 import { GraphError } from '../src/lib/whatsapp/graph.js';
 import { withDb } from './helpers/db.js';
 import { testEnv } from './helpers/env.js';
@@ -887,6 +892,33 @@ describe('a thread that moves while the model thinks', () => {
     expect(log?.promptTokens).toBe(100);
   });
 
+  it('says nothing when the owner switches the whole agent off mid-call', async () => {
+    // The master switch is what an owner presses while watching the agent say something
+    // wrong. Re-reading only the conversation's flag would let every turn already past its
+    // model call speak anyway.
+    const model = racingModel(async () => {
+      await db.update(agents).set({ aiEnabled: false }).where(eq(agents.id, agentId));
+    }, answer());
+
+    const result = await turn(model);
+
+    expect(result.outcome).toBe('skipped');
+    expect(result.detail).toContain('Агента выключили');
+    expect(graph.calls.filter((call) => call.method === 'sendText')).toHaveLength(0);
+    expect((await thread()).filter((message) => message.direction === 'out')).toHaveLength(0);
+    const [log] = await replyLog();
+    expect(log?.outcome).toBe('skipped');
+  });
+
+  it('runs the sandbox on an agent whose master switch is already off', async () => {
+    await db.update(agents).set({ aiEnabled: false }).where(eq(agents.id, agentId));
+    const model = fakeModel(answer());
+
+    const result = await turn(model, { dryRun: true });
+
+    expect(result.outcome).toBe('sent');
+  });
+
   it('says nothing when an operator answers mid-call', async () => {
     const model = racingModel(() => say('operator', 'Здравствуйте, я Айдос.'), answer());
 
@@ -951,11 +983,44 @@ describe('a thread that moves while the model thinks', () => {
   });
 });
 
-describe('a number with no record behind it', () => {
+describe('unsourcedNumber', () => {
+  it('is nothing when the reply carries no digits at all', () => {
+    expect(unsourcedNumber('Здравствуйте! Чем помочь?', [])).toBeNull();
+  });
+
+  it('names the number no source contains', () => {
+    expect(unsourcedNumber('Доставка 2200 ₸.', ['Доставка по Алматы — 1500 ₸.'])).toBe('2200');
+  });
+
+  it('matches a spaced number against an unspaced one', () => {
+    expect(unsourcedNumber('от 20 000 ₸ бесплатно', ['от 20000 ₸ бесплатно'])).toBeNull();
+  });
+
+  it('matches an unspaced number against a spaced one', () => {
+    expect(unsourcedNumber('Доставка 1500 ₸.', ['Доставка — 1 500 ₸.'])).toBeNull();
+  });
+
+  it('counts Eastern Arabic digits, which `\\d` never saw', () => {
+    expect(unsourcedNumber('باقتنا ٢٢٠٠', ['цена 1500'])).toBe('٢٢٠٠');
+  });
+
+  it('does not lend a number made of the tail of one source and the head of another', () => {
+    // Sources are searched one by one. Concatenated, `1500` and `20000` would together
+    // contain `50020`, which neither of them says.
+    expect(unsourcedNumber('50020', ['цена 1500', 'от 20000'])).toBe('50020');
+  });
+
+  it('joins only the spaces that sit between two digits', () => {
+    // «1 дверь, 5 окон» is two numbers with words between them, not the number 15.
+    expect(unsourcedNumber('15', ['1 дверь, 5 окон'])).toBe('15');
+  });
+});
+
+describe('a number nothing the agent read contains', () => {
   it('withholds a reply that states a price and cites nothing', async () => {
     // The prompt asks for this and the model usually obliges; a rule that lives only in a
     // prompt is a request, not a property of the system.
-    const model = fakeModel(answer({ reply: 'Доставка стоит 1500 ₸.', usedItemIds: [] }));
+    const model = fakeModel(answer({ reply: 'Доставка стоит 2200 ₸.', usedItemIds: [] }));
 
     const result = await turn(model);
 
@@ -964,10 +1029,24 @@ describe('a number with no record behind it', () => {
     expect(graph.calls.filter((call) => call.method === 'sendText')).toHaveLength(0);
     expect((await conversationRow()).aiEnabled).toBe(false);
     const written = await noteRows();
-    expect(written[0]?.body).toContain('не назвала ни одной записи');
+    expect(written[0]?.body).toContain('в ответе есть число «2200»');
     const [log] = await replyLog();
     expect(log?.outcome).toBe('handoff');
     expect(log?.messageId).toBeNull();
+  });
+
+  it('withholds a price the model invented while citing a real record', async () => {
+    // The hole the one-line check left: citing any record unlocked every number. The record
+    // says 1500, the model says 2200, and the customer would have acted on 2200.
+    const model = fakeModel(answer({ reply: 'Доставка 2200 ₸.', usedItemIds: [itemId] }));
+
+    const result = await turn(model);
+
+    expect(result.outcome).toBe('handoff');
+    expect(result.reply).toBeNull();
+    expect(graph.calls.filter((call) => call.method === 'sendText')).toHaveLength(0);
+    const written = await noteRows();
+    expect(written[0]?.body).toContain('2200');
   });
 
   it('withholds it when the only cited record belonged to another agent', async () => {
@@ -990,6 +1069,51 @@ describe('a number with no record behind it', () => {
 
   it('sends a price that names the record it came from', async () => {
     const model = fakeModel(answer({ reply: 'Доставка 1500 ₸.', usedItemIds: [itemId] }));
+
+    const result = await turn(model);
+
+    expect(result.outcome).toBe('sent');
+    expect(graph.calls.filter((call) => call.method === 'sendText')).toHaveLength(1);
+  });
+
+  it('sends a price written with a space where the record wrote none', async () => {
+    const model = fakeModel(
+      answer({ reply: 'Доставка 1 500 ₸, а от 20 000 ₸ бесплатно.', usedItemIds: [itemId] }),
+    );
+
+    const result = await turn(model);
+
+    expect(result.outcome).toBe('sent');
+    expect(graph.calls.filter((call) => call.method === 'sendText')).toHaveLength(1);
+  });
+
+  it('sends a clarifying question that repeats the customer’s own number', async () => {
+    // The check silencing this is the check hurting the customer: they asked about two
+    // doors, the agent asked them to confirm, and nobody would have answered them at all.
+    await say('client', 'Нужны 2 входные двери, посчитайте.');
+    const model = fakeModel(
+      answer({ reply: 'Уточните, вам нужны 2 входные двери?', usedItemIds: [] }),
+    );
+
+    const result = await turn(model);
+
+    expect(result.outcome).toBe('sent');
+    expect(result.reply).toBe('Уточните, вам нужны 2 входные двери?');
+    expect(graph.calls.filter((call) => call.method === 'sendText')).toHaveLength(1);
+    expect((await conversationRow()).aiEnabled).toBe(true);
+  });
+
+  it('sends a greeting that repeats a year out of the owner’s instructions', async () => {
+    // Rule 9 tells the agent it may and should repeat the owner's words, and the guide's own
+    // example instructions say «Работаем с 2015 года». A greeting written from the guide must
+    // not hand the conversation to a human.
+    await db
+      .update(agents)
+      .set({ instructions: 'Мы ставим двери в Алматы. Работаем с 2015 года.' })
+      .where(eq(agents.id, agentId));
+    const model = fakeModel(
+      answer({ reply: 'Здравствуйте! Мы работаем с 2015 года. Какие двери нужны?' }),
+    );
 
     const result = await turn(model);
 

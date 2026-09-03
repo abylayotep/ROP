@@ -104,5 +104,5 @@ Then restart Docker. On a local colima setup: `colima ssh -- sudo …` followed 
 On a host that already runs Caddy (the Tasbaqa VPS), skip `deploy/nginx.conf` and append
 `deploy/Caddyfile.rop` to `/etc/caddy/Caddyfile`, then `sudo systemctl reload caddy`. Caddy
 obtains the certificate itself once the domain's A record points at the host. The stack
-runs from `/opt/rakurs` with the same commands as above; the Compose project name is the
-directory name, so it cannot collide with the other product's.
+runs from `/opt/rakurs` with the same commands as above; the Compose project is named `rakurs` in
+`compose.yml`, so it cannot collide with the other product's.

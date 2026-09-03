@@ -290,7 +290,7 @@ Wire it in `inbound.ts`'s `switch`:
 
 with `import { applyHistory, type HistoryValue } from './history.js';`. `ChangeValue` and `HistoryValue` overlap on `metadata`, so the cast is honest.
 
-Follow-up media for a placeholder (the second `history` webhook with the real asset, ≤14 days old) is stored as a new message only if its `wa_message_id` differs; if Meta reuses the id, the unique index drops it and the placeholder stays. That is acceptable for this stage and noted in the docs task.
+Follow-up media for a placeholder (the second `history` webhook with the real asset, ≤14 days old) reuses the same `wa_message_id`, so the insert conflicts and changes nothing. `applyHistory` therefore looks the placeholder up by that id and, when it is still `unsupported` with no file, downloads the media and updates the row in place.
 
 - [ ] **Step 4: Run everything**
 

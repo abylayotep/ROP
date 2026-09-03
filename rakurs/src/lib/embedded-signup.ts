@@ -68,8 +68,20 @@ export function runCoexistenceSignup(setup: EmbeddedSignupSetup): Promise<Coexis
         let code: string | null = null;
         let session: Omit<CoexistenceConnection, 'code'> | null = null;
 
+        /**
+         * Meta answers on two channels and may answer on neither: a window closed by hand
+         * fires no CANCEL, and the promise would then never settle, leaving the button on
+         * «Ждём Meta…» for the rest of the session. Five minutes is far longer than the flow
+         * takes and far shorter than the patience of whoever is watching.
+         */
+        const timer = window.setTimeout(
+          () => fail('Meta не ответила. Закройте окно Meta и попробуйте снова.'),
+          5 * 60 * 1000,
+        );
+
         const settle = () => {
           if (code && session) {
+            window.clearTimeout(timer);
             window.removeEventListener('message', onMessage);
             resolve({ code, ...session });
           }
@@ -77,6 +89,7 @@ export function runCoexistenceSignup(setup: EmbeddedSignupSetup): Promise<Coexis
 
         /** Every failure path leaves through here, so the listener is never left behind. */
         const fail = (message: string) => {
+          window.clearTimeout(timer);
           window.removeEventListener('message', onMessage);
           reject(new Error(message));
         };

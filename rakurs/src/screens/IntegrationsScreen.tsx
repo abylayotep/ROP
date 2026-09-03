@@ -5,6 +5,7 @@ import { Card, CardHead, Toggle } from '@/components/ui/primitives';
 import { Async, EmptyState, RowsSkeleton, Skeleton } from '@/components/ui/states';
 import { useToast } from '@/components/ui/Toast';
 import { useApi } from '@/hooks/useApi';
+import { runCoexistenceSignup } from '@/lib/embedded-signup';
 import { useAgent } from '@/store/agent';
 import type { CapiEvent, CapiSettings, WebhookSetup, WhatsappNumber } from '@/types';
 
@@ -65,7 +66,12 @@ export function IntegrationsScreen() {
             agentId={agent.id}
           />
           {owner && setup && <WebhookCard setup={setup} />}
-          {owner && <ConnectForm agentId={agent.id} onConnected={query.reload} />}
+          {owner && (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 16 }}>
+              <PhoneNumberCard agentId={agent.id} onConnected={query.reload} />
+              <ConnectForm agentId={agent.id} onConnected={query.reload} />
+            </div>
+          )}
           {!owner && numbers.length === 0 && (
             <Card>
               <EmptyState>Номер подключает владелец компании.</EmptyState>
@@ -114,6 +120,29 @@ function ConnectedNumbers({
             <div style={{ minWidth: 0 }}>
               <div style={{ fontSize: 13.5 }}>{number.displayPhone}</div>
               <div style={hint}>ID номера {number.phoneNumberId}</div>
+              <div style={hint}>
+                {number.connectionKind === 'coexistence' ? 'Номер с телефона' : 'Отдельный номер'}
+              </div>
+              {number.connectionKind === 'coexistence' && number.syncError && (
+                <div style={{ ...hint, color: 'var(--danger)' }}>
+                  Meta не приняла запрос контактов и истории: {number.syncError}
+                </div>
+              )}
+              {number.connectionKind === 'coexistence' && !number.syncError && (
+                <div style={hint}>
+                  {number.historyDeclined
+                    ? 'Владелец выключил передачу истории на телефоне.'
+                    : number.historyProgress >= 100
+                      ? 'История импортирована.'
+                      : `Импорт истории: ${number.historyProgress} %`}
+                </div>
+              )}
+              {number.offboarded && (
+                <div style={{ ...hint, color: 'var(--danger)' }}>
+                  Телефон отключил API. Подключите заново на телефоне: Настройки → Аккаунт →
+                  Business Platform.
+                </div>
+              )}
               {/* The failure this line exists for: Meta took the number and delivers
                   nothing, which looks identical to working until a client writes. */}
               {!number.subscribed && (
@@ -150,7 +179,10 @@ function ConnectedNumbers({
                       // которой пришли клиенты. Meta их второй раз не отдаст.
                       if (
                         !window.confirm(
-                          'Отключить номер? Вместе с ним удалятся все переписки, сообщения и данные о рекламе, ' +
+                          (number.connectionKind === 'coexistence'
+                            ? 'Телефон при этом не отключается — это делается на самом телефоне. '
+                            : '') +
+                            'Отключить номер? Вместе с ним удалятся все переписки, сообщения и данные о рекламе, ' +
                             'из которой пришли клиенты. Это нельзя отменить.',
                         )
                       ) {
@@ -171,7 +203,9 @@ function ConnectedNumbers({
               )}
             </div>
           </div>
-          {owner && <ReplaceToken agentId={agentId} number={number} onReplaced={onChanged} />}
+          {owner && number.connectionKind === 'manual' && (
+            <ReplaceToken agentId={agentId} number={number} onReplaced={onChanged} />
+          )}
         </div>
       ))}
     </Card>
@@ -260,7 +294,8 @@ function WebhookCard({ setup }: { setup: WebhookSetup }) {
       <div style={{ fontSize: 13.5, fontWeight: 650, marginBottom: 8 }}>Вебхук в Meta</div>
       <div style={hint}>
         Вставьте это в настройках приложения Meta: WhatsApp → Configuration → Webhook. Затем
-        подпишитесь на поле messages.
+        подпишитесь на поля messages, smb_message_echoes, smb_app_state_sync, history и
+        account_update.
       </div>
       <div style={{ marginTop: 10 }}>
         <div style={label}>Callback URL</div>
@@ -308,10 +343,10 @@ function ConnectForm({ agentId, onConnected }: { agentId: string; onConnected: (
   return (
     <Card>
       <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-        <div style={{ fontSize: 13.5, fontWeight: 650 }}>Подключить номер WhatsApp</div>
+        <div style={{ fontSize: 13.5, fontWeight: 650 }}>Отдельный номер</div>
         <div style={hint}>
-          Значения берутся в Meta: WhatsApp → API Setup. Токен — постоянный, от системного
-          пользователя.
+          Номер, которого нет в WhatsApp на телефоне. Значения берутся в Meta: WhatsApp → API
+          Setup. Токен — постоянный, от системного пользователя.
         </div>
 
         <div>
@@ -343,6 +378,59 @@ function ConnectForm({ agentId, onConnected }: { agentId: string; onConnected: (
           </button>
         </div>
       </form>
+    </Card>
+  );
+}
+
+/**
+ * Подключение номера, который уже живёт в WhatsApp Business на телефоне.
+ *
+ * Окно открывает Meta; кабинет получает код и данные сессии и сразу отдаёт их серверу —
+ * код живёт тридцать секунд. Сам сервер обменивает код на токен, подписывает приложение
+ * и запрашивает у Meta контакты и историю. Всё, что здесь может пойти не так, приходит
+ * текстом с сервера и показывается как есть.
+ */
+function PhoneNumberCard({ agentId, onConnected }: { agentId: string; onConnected: () => void }) {
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+
+  async function connect() {
+    setBusy(true);
+    try {
+      const setup = await api.getEmbeddedSignupSetup(agentId);
+      const connection = await runCoexistenceSignup(setup);
+      await api.connectCoexistenceNumber(agentId, connection);
+      toast.ok('Номер подключён. Контакты и история подтянутся в течение нескольких минут.');
+      onConnected();
+    } catch (error) {
+      toast.fail(error);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <div style={{ fontSize: 13.5, fontWeight: 650 }}>WhatsApp на телефоне</div>
+        <div style={hint}>
+          Номер остаётся в приложении WhatsApp Business: оператор отвечает с телефона, ИИ и
+          кабинет работают в тех же чатах. Подтянутся контакты и история за 6 месяцев.
+        </div>
+        <ul style={{ ...hint, margin: 0, paddingLeft: 18 }}>
+          <li>Номер уже зарегистрирован в приложении WhatsApp Business, не в обычном WhatsApp.</li>
+          <li>Приложение на телефоне обновлено.</li>
+          <li>Пока идёт импорт, телефон должен быть в сети.</li>
+        </ul>
+        <div style={hint}>
+          Групповые чаты, звонки и рассылки из приложения в кабинет не попадают.
+        </div>
+        <div>
+          <button type="button" className="btn" disabled={busy} onClick={connect}>
+            {busy ? 'Ждём Meta…' : 'Подключить через Meta'}
+          </button>
+        </div>
+      </div>
     </Card>
   );
 }

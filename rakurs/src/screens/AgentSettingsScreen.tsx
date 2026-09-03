@@ -2,6 +2,7 @@ import { useState, type CSSProperties, type FormEvent } from 'react';
 import * as api from '@/api';
 import { Card } from '@/components/ui/primitives';
 import { useToast } from '@/components/ui/Toast';
+import { FunnelSettings } from '@/screens/FunnelSettings';
 import { useAgent } from '@/store/agent';
 import type { Agent, Role } from '@/types';
 
@@ -26,10 +27,14 @@ const ZONES = ['Asia/Almaty', 'Asia/Tashkent', 'Europe/Moscow', 'UTC'];
 export function AgentSettingsScreen() {
   const { agent, role, replace } = useAgent();
 
-  // The three fields are seeded from the agent on mount. Keying the form on the agent's id
-  // remounts it when the URL moves to another agent under a provider that stays alive, so
-  // the form can never show one agent's name and save it onto another.
-  return <SettingsForm key={agent.id} agent={agent} role={role} replace={replace} />;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {/* Keyed on the agent's id so the form cannot show one agent's name and save it
+          onto another when the URL moves under a provider that stays alive. */}
+      <SettingsForm key={agent.id} agent={agent} role={role} replace={replace} />
+      <FunnelSettings key={`funnel:${agent.id}`} />
+    </div>
+  );
 }
 
 function SettingsForm({

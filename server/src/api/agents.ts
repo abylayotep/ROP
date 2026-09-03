@@ -5,6 +5,7 @@ import { z } from 'zod';
 import type { Db } from '../db/client.js';
 import { agents } from '../db/schema.js';
 import { ApiError } from '../lib/errors.js';
+import { seedFunnel } from '../lib/funnel.js';
 import { requireAccount } from './require-account.js';
 import { requireAgent } from './require-agent.js';
 
@@ -26,6 +27,7 @@ const toApi = (row: typeof agents.$inferSelect): Agent => ({
   name: row.name,
   description: row.description,
   timezone: row.timezone,
+  currency: row.currency,
 });
 
 export function registerAgentRoutes(
@@ -57,11 +59,17 @@ export function registerAgentRoutes(
       const parsed = create.safeParse(req.body);
       if (!parsed.success) throw new ApiError(400, 'Укажите название агента');
 
-      const [row] = await db
-        .insert(agents)
-        .values({ accountId, ...parsed.data })
-        .returning();
-      return toApi(row!);
+      // One transaction: an agent whose funnel failed to write would show an empty board
+      // with no way to fill it from the cabinet.
+      const row = await db.transaction(async (tx) => {
+        const [created] = await tx
+          .insert(agents)
+          .values({ accountId, ...parsed.data })
+          .returning();
+        await seedFunnel(tx, created!.id);
+        return created!;
+      });
+      return toApi(row);
     },
   );
 

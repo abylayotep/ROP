@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import * as api from '@/api';
+import { LeadPanel } from '@/components/lead/LeadPanel';
 import { Card } from '@/components/ui/primitives';
 import { Async, EmptyState, Skeleton } from '@/components/ui/states';
 import { useToast } from '@/components/ui/Toast';
@@ -26,7 +28,11 @@ const bubble = (mine: boolean): CSSProperties => ({
 
 export function DialogsScreen() {
   const { agent } = useAgent();
-  const [selected, setSelected] = useState<string | null>(null);
+  // The selected conversation lives in the URL, so a card on the board opens its thread.
+  const [params, setParams] = useSearchParams();
+  const selected = params.get('conversation');
+  const select = (conversationId: string) =>
+    setParams({ conversation: conversationId }, { replace: true });
 
   const list = useApi<ConversationSummary[]>(
     (signal) => api.listConversations(agent.id, signal),
@@ -51,7 +57,7 @@ export function DialogsScreen() {
                   <button
                     key={conversation.id}
                     type="button"
-                    onClick={() => setSelected(conversation.id)}
+                    onClick={() => select(conversation.id)}
                     style={{
                       display: 'block',
                       width: '100%',
@@ -101,18 +107,32 @@ export function DialogsScreen() {
             <EmptyState>Выберите переписку слева.</EmptyState>
           </Card>
         ) : (
-          // `key={selected}` forces a remount on every conversation switch: a new
-          // conversation is a new subject, and neither the loaded thread nor the
-          // composer's draft belongs to the previous one. Without it `Thread` would
-          // keep the old messages on screen until the new fetch resolves, and any
-          // text left in the composer would still be sitting there, ready to be sent
-          // to the wrong person.
-          <Thread
-            key={selected}
-            agentId={agent.id}
-            conversationId={selected}
-            onSent={list.reload}
-          />
+          <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              {/* `key={selected}` forces a remount on every conversation switch: a new
+                  conversation is a new subject, and neither the loaded thread nor the
+                  composer's draft belongs to the previous one. Without it `Thread` would
+                  keep the old messages on screen until the new fetch resolves, and any
+                  text left in the composer would still be sitting there, ready to be sent
+                  to the wrong person. */}
+              <Thread
+                key={selected}
+                agentId={agent.id}
+                conversationId={selected}
+                onSent={list.reload}
+              />
+            </div>
+            <div style={{ width: 300, flex: '0 0 300px' }}>
+              {/* The same key for the same reason: another client's card must not flash
+                  on screen under the wrong name. */}
+              <LeadPanel
+                key={selected}
+                agentId={agent.id}
+                conversationId={selected}
+                onChanged={list.reload}
+              />
+            </div>
+          </div>
         )}
       </div>
     </div>

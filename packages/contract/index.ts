@@ -21,6 +21,8 @@ export interface Agent {
   name: string;
   description: string;
   timezone: string;
+  /** ISO 4217. Every order this agent records is in it. */
+  currency: string;
 }
 
 /** The signed-in person and where they may go. Returned by login and by /auth/me. */
@@ -56,7 +58,7 @@ export interface Message {
   id: string;
   /** 'in' | 'out' */
   direction: string;
-  /** 'client' | 'operator' | 'ai' */
+  /** 'client' | 'operator' | 'ai' | 'system' — 'system' is the cabinet's own auto-message. */
   author: string;
   /** WhatsApp's own type: text, image, audio, video, document, sticker, location, … */
   kind: string;
@@ -84,4 +86,129 @@ export interface ConversationSummary {
 
 export interface ConversationThread extends ConversationSummary {
   messages: Message[];
+}
+
+/* ── Воронка ────────────────────────────────────────────────────────────────
+ * The funnel an owner shapes, and the fields it asks to be filled. */
+
+export type StageKind = 'active' | 'qualified' | 'awaiting_payment' | 'success' | 'failure';
+
+export interface Stage {
+  id: string;
+  name: string;
+  /** A hex colour, shown as the column's marker. */
+  color: string;
+  kind: StageKind;
+  position: number;
+  /** When a lead belongs here, in the owner's own words. Read by the agent in stage 5. */
+  description: string;
+  /** Sent on entering the stage. Null means the stage sends nothing. */
+  autoMessage: string | null;
+}
+
+export type LeadFieldKind = 'text' | 'number' | 'date';
+
+export interface LeadField {
+  id: string;
+  name: string;
+  kind: LeadFieldKind;
+  /** How to fill it, for the agent in stage 5. Never shown to an operator. */
+  hint: string;
+  position: number;
+}
+
+/* ── Лид ────────────────────────────────────────────────────────────────────
+ * A conversation seen as a sale in progress. */
+
+export interface LeadFieldValue {
+  fieldId: string;
+  value: string;
+}
+
+export interface Note {
+  id: string;
+  body: string;
+  /** Null for the lines the cabinet writes itself. */
+  authorName: string | null;
+  createdAt: string;
+}
+
+export interface Order {
+  id: string;
+  /** A string, not a number: an amount must not pass through a float. */
+  amount: string;
+  currency: string;
+  status: 'pending' | 'paid' | 'cancelled';
+  comment: string;
+  paidAt: string | null;
+  createdAt: string;
+}
+
+export interface Lead {
+  conversationId: string;
+  contactName: string | null;
+  contactPhone: string;
+  stageId: string | null;
+  stageSetAt: string | null;
+  /** 'operator' | 'ai' | 'scenario' | 'system' */
+  stageSetBy: string | null;
+  assignedTo: string | null;
+  assigneeName: string | null;
+  adHeadline: string | null;
+  values: LeadFieldValue[];
+  notes: Note[];
+  orders: Order[];
+  /** The sum of this lead's paid orders, as a string with two decimals. */
+  paidTotal: string;
+  currency: string;
+}
+
+/** Someone in the account, for the assignee list. */
+export interface Member {
+  id: string;
+  name: string;
+  initials: string;
+  role: Role;
+}
+
+/* ── Доска и клиенты ────────────────────────────────────────────────────────
+ * The funnel seen as columns, and everyone who ever wrote seen as a table. */
+
+export interface BoardCard {
+  conversationId: string;
+  contactName: string | null;
+  contactPhone: string;
+  lastMessageAt: string | null;
+  preview: string | null;
+  /** Whether a free-form reply is still allowed. */
+  windowOpen: boolean;
+  adHeadline: string | null;
+  /** The sum of this lead's paid orders, as a string with two decimals. */
+  paidTotal: string;
+  assigneeName: string | null;
+}
+
+export interface BoardColumn {
+  stage: Stage;
+  cards: BoardCard[];
+}
+
+export interface Board {
+  columns: BoardColumn[];
+  /** Conversations nobody has put in a stage yet. Shown first, never hidden. */
+  unsorted: BoardCard[];
+  currency: string;
+}
+
+export interface Customer {
+  conversationId: string;
+  contactName: string | null;
+  contactPhone: string;
+  stageName: string | null;
+  stageKind: StageKind | null;
+  paidTotal: string;
+  orderCount: number;
+  lastMessageAt: string | null;
+  firstSeenAt: string;
+  assigneeName: string | null;
 }

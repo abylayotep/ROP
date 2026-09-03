@@ -10,6 +10,21 @@
 const GRAPH_VERSION = 'v21.0';
 const GRAPH_ROOT = `https://graph.facebook.com/${GRAPH_VERSION}`;
 
+/**
+ * Meta sits on the request path of an operator's action — sending a reply, or moving a lead
+ * into a stage that answers for itself. `fetch` has no deadline of its own, so a Graph call
+ * that never returns would hold that request open until the browser gave up, with nothing on
+ * screen to explain the wait.
+ */
+const TIMEOUT_MS = 15_000;
+
+/**
+ * Downloading a file is bytes rather than a sentence of JSON, and it runs on Meta's webhook
+ * delivery rather than under someone watching a screen. Meta allows documents up to 100 MB,
+ * so the same fifteen seconds would drop files that were arriving perfectly well.
+ */
+const MEDIA_TIMEOUT_MS = 60_000;
+
 export interface PhoneNumber {
   id: string;
   displayPhoneNumber: string;
@@ -72,17 +87,47 @@ async function failure(response: Response): Promise<GraphError> {
   return new GraphError(`HTTP ${response.status}`, response.status);
 }
 
+/**
+ * Runs one exchange with Meta under a deadline, so that its expiry reads as Meta failing
+ * rather than as a stray error.
+ *
+ * Node rejects an expired `AbortSignal.timeout` with a `TimeoutError` that is not a
+ * `GraphError` and whose message is English. Every caller here branches on `GraphError` and
+ * shows `message` to a Russian-speaking operator, so an unwrapped timeout would either be
+ * rethrown as a 500 or rendered as «The operation was aborted due to timeout». 504, because
+ * the request did leave this process — we simply never heard back.
+ *
+ * It wraps the whole exchange rather than the `fetch` alone: the signal stays live while the
+ * body is read, and `fetch` resolves as soon as the headers arrive. A large download is
+ * exactly where the deadline is most likely to pass, and it would pass on the body read.
+ */
+async function within<T>(timeoutMs: number, exchange: () => Promise<T>): Promise<T> {
+  try {
+    return await exchange();
+  } catch (error) {
+    if ((error as { name?: string } | null)?.name === 'TimeoutError') {
+      throw new GraphError(`Meta не ответила за ${Math.round(timeoutMs / 1000)} с.`, 504);
+    }
+    throw error;
+  }
+}
+
 async function call<T>(url: string, token: string, init: RequestInit = {}): Promise<T> {
-  const response = await fetch(url, {
-    ...init,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      ...(init.body ? { 'Content-Type': 'application/json' } : {}),
-      ...(init.headers as Record<string, string> | undefined),
-    },
+  return within(TIMEOUT_MS, async () => {
+    const response = await fetch(url, {
+      ...init,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        ...(init.body ? { 'Content-Type': 'application/json' } : {}),
+        ...(init.headers as Record<string, string> | undefined),
+      },
+      // After `...init` on purpose: no caller passes a signal today, and if one starts, the
+      // deadline is not the thing to lose silently.
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+    if (!response.ok) throw await failure(response);
+    return (await response.json()) as T;
   });
-  if (!response.ok) throw await failure(response);
-  return (await response.json()) as T;
 }
 
 export function createGraphClient(): GraphClient {
@@ -136,9 +181,14 @@ export function createGraphClient(): GraphClient {
 
     async downloadMedia(url, token) {
       // Not `call`: the answer is bytes, and the host is lookaside.fb, not the Graph root.
-      const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-      if (!response.ok) throw await failure(response);
-      return Buffer.from(await response.arrayBuffer());
+      return within(MEDIA_TIMEOUT_MS, async () => {
+        const response = await fetch(url, {
+          headers: { Authorization: `Bearer ${token}` },
+          signal: AbortSignal.timeout(MEDIA_TIMEOUT_MS),
+        });
+        if (!response.ok) throw await failure(response);
+        return Buffer.from(await response.arrayBuffer());
+      });
     },
   };
 }

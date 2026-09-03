@@ -135,7 +135,18 @@ export function registerConversationRoutes(
         );
       }
 
-      const token = decryptSecret(number.accessToken, credentialsKey(env), number.phoneNumberId);
+      // A key that no longer matches the stored token throws an English developer message.
+      // The frontend renders `message` verbatim, so it is answered here in the operator's
+      // language, with the one thing they can do about it.
+      let token: string;
+      try {
+        token = decryptSecret(number.accessToken, credentialsKey(env), number.phoneNumberId);
+      } catch {
+        throw new ApiError(
+          409,
+          'Не удалось прочитать токен номера. Подключите номер заново в интеграциях.',
+        );
+      }
 
       let messageId: string;
       try {

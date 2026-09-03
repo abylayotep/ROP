@@ -11,6 +11,7 @@ import type { ModelClient } from '../ai/openrouter.js';
 import { runTurn } from '../ai/turn.js';
 import { decryptSecret } from '../secret-box.js';
 import { withoutSecret, type GraphClient } from './graph.js';
+import { applyHistory, type HistoryValue } from './history.js';
 import { downloadInboundMedia } from './media.js';
 
 /**
@@ -378,6 +379,10 @@ async function applyChange(
       return applyEchoes(db, deps, number, value.message_echoes ?? []);
     case 'smb_app_state_sync':
       await applyContactSync(db, number.agentId, value.state_sync ?? []);
+      return [];
+    case 'history':
+      // `ChangeValue` and `HistoryValue` overlap on `metadata`; the cast is honest.
+      await applyHistory(db, number, value as HistoryValue);
       return [];
     default:
       // A field we did not subscribe to, or one a later stage will handle. Stored already;

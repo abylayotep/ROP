@@ -105,9 +105,19 @@ export function registerStageRoutes(
    * only after inserting or updating the new sale stage, and in the middle of the seeding
    * and the reorder — failing an owner's request with a Postgres message nobody can read
    * instead of the Russian sentence these routes answer with.
+   *
+   * `no key update` rather than `update`: the weaker lock serialises these routes against each
+   * other exactly the same way, but does not conflict with the `key share` a foreign key takes
+   * on the parent row. Under the stronger lock, an owner with a stage form open would block
+   * every insert that references the agent — contacts, conversations, messages — which is the
+   * webhook writing down a customer's message while nobody is looking.
    */
   async function lockAgent(tx: Executor, agentId: string): Promise<void> {
-    await tx.select({ id: agents.id }).from(agents).where(eq(agents.id, agentId)).for('update');
+    await tx
+      .select({ id: agents.id })
+      .from(agents)
+      .where(eq(agents.id, agentId))
+      .for('no key update');
   }
 
   /** The agent's stage, or a 404 that tells a stranger nothing. */

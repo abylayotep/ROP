@@ -57,6 +57,13 @@
       "when": 1788417414652,
       "tag": "0007_clammy_roulette",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1788419235195,
+      "tag": "0008_rainy_eddie_brock",
+      "breakpoints": true
     }
   ]
 }

@@ -124,6 +124,7 @@ export async function loadLead(
     assignedTo: row.conversation.assignedTo,
     assigneeName: assignee?.name ?? null,
     adHeadline: row.conversation.adHeadline,
+    aiEnabled: row.conversation.aiEnabled,
     values,
     notes: noteRows.map(({ note, authorName }) => toNote(note, authorName)),
     orders: orderRows.map(toOrder),

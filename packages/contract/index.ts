@@ -155,6 +155,12 @@ export interface Lead {
   assignedTo: string | null;
   assigneeName: string | null;
   adHeadline: string | null;
+  /**
+   * Whether the agent still answers on this thread. On by default, and off the moment a
+   * handoff or an operator takes it — which is why it travels with the lead: the panel that
+   * offers the switch is the one that has to show it already flipped.
+   */
+  aiEnabled: boolean;
   values: LeadFieldValue[];
   notes: Note[];
   orders: Order[];
@@ -269,4 +275,119 @@ export interface KbImport {
    * honest thing to do is name how many records the owner should go and check.
    */
   keptEdited: number;
+}
+
+/* ── Агент ──────────────────────────────────────────────────────────────────
+ * What the owner may set about the model, what they may pick, and what one
+ * sandbox turn answers back. The key is not here: it goes in and never out. */
+
+export interface AiSettings {
+  /** The agent answers customers only when this is on. A new agent starts off. */
+  aiEnabled: boolean;
+  /** An OpenRouter model id, one of `AiModel.id`. */
+  model: string;
+  /**
+   * 0…2. A number rather than a string: a temperature is a dial, not an amount, so
+   * nothing is lost by passing it through a float the way an order's sum would be.
+   */
+  temperature: number;
+  /** What the owner wrote about how their business sells. The agent's whole character. */
+  instructions: string;
+  /** 'auto' answers in the customer's own language; anything else names one. */
+  replyLanguage: string;
+  /** Whether a key is stored. The key itself never leaves the server. */
+  keySet: boolean;
+}
+
+/** A model the owner may pick, with the line they read while picking. */
+export interface AiModel {
+  id: string;
+  label: string;
+  description: string;
+}
+
+/** A knowledge record an answer was built from, named so the screen can show which. */
+export interface AiTurnItem {
+  id: string;
+  title: string;
+}
+
+/** A lead field the turn filled, or would have filled. */
+export interface AiTurnField {
+  id: string;
+  name: string;
+  value: string;
+}
+
+/**
+ * What a sandbox turn would have done. Nothing in it has happened: no message was sent,
+ * no lead was touched, and the conversation it ran on no longer exists.
+ */
+export interface AiTurn {
+  /** Null when the agent produced no reply, or when the reply was withheld. */
+  reply: string | null;
+  usedItems: AiTurnItem[];
+  /** The stage the lead would be moved to. Null when it would not move. */
+  stageName: string | null;
+  fields: AiTurnField[];
+  /**
+   * Why the turn would leave the conversation to a person, or null when it would not. The
+   * reason and not a flag: «передал человеку» with no «почему» is the one answer an owner
+   * tuning instructions cannot act on.
+   */
+  handoff: string | null;
+  /** 'sent' | 'unrecorded' | 'applied' | 'handoff' | 'failed' | 'skipped'. */
+  outcome: string;
+  /** Why it ended that way, when that is worth telling the owner. Never carries a key. */
+  detail: string | null;
+}
+
+/* ── Расход агента ──────────────────────────────────────────────────────────
+ * Что стоили ответы агента за период — чтобы выбор модели можно было сравнить
+ * с ценой, а не только с ощущением. Строится по журналу ответов. */
+
+/** How far back a usage answer looks. The screen offers exactly these three. */
+export type AiUsagePeriod = 'day' | 'week' | 'month';
+
+/** One period's turns, counted by how they ended, with what they spent. */
+export interface AiUsageTotals {
+  /** Every turn that reached the model, however it ended. */
+  turns: number;
+  /** Reached the customer. */
+  sent: number;
+  /** Left to a person — the model asked, or the cabinet withheld the reply. */
+  handoff: number;
+  /** Produced nothing: OpenRouter refused, or the reply never left. */
+  failed: number;
+  promptTokens: number;
+  completionTokens: number;
+  /**
+   * What OpenRouter charged, in US dollars, as a string.
+   *
+   * A string end to end for the same reason an order's amount is one: summed in Postgres
+   * as `numeric` and read back as text, so a fraction of a cent per turn is never rounded
+   * through a float on its way to the screen.
+   */
+  cost: string;
+}
+
+/** The same counts for one model, so two models can be compared side by side. */
+export interface AiUsageModel extends AiUsageTotals {
+  /** An OpenRouter model id. It may be one no longer offered — the log keeps what ran. */
+  model: string;
+}
+
+export interface AiUsage {
+  period: AiUsagePeriod;
+  /** The moment the period starts, ISO. The screen names it rather than implying it. */
+  since: string;
+  /**
+   * Null when the agent took no turns in the period.
+   *
+   * Null and not a row of zeros: an owner who has not switched the agent on would read
+   * «0 $» as a fact about their model instead of the absence of any fact at all.
+   */
+  total: AiUsageTotals | null;
+  /** One row per model that ran, busiest first. Empty exactly when `total` is null. */
+  byModel: AiUsageModel[];
 }

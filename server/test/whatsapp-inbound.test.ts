@@ -15,6 +15,7 @@ import { processPendingEvents } from '../src/lib/whatsapp/inbound.js';
 import { withDb } from './helpers/db.js';
 import { testEnv } from './helpers/env.js';
 import { fakeGraph } from './helpers/fake-graph.js';
+import { fakeModel } from './helpers/fake-model.js';
 
 const env = testEnv();
 const key = Buffer.from(env.CREDENTIALS_KEY, 'base64');
@@ -22,7 +23,7 @@ const key = Buffer.from(env.CREDENTIALS_KEY, 'base64');
 let db: Awaited<ReturnType<typeof withDb>>;
 let agentId: string;
 
-const deps = () => ({ graph: fakeGraph(), key, mediaDir: env.MEDIA_DIR });
+const deps = () => ({ graph: fakeGraph(), key, mediaDir: env.MEDIA_DIR, model: fakeModel() });
 
 beforeEach(async () => {
   db = await withDb();

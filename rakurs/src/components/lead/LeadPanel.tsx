@@ -1,7 +1,7 @@
 import { useEffect, useState, type CSSProperties, type FormEvent } from 'react';
 import * as api from '@/api';
 import { OrderDialog } from '@/components/lead/OrderDialog';
-import { Card, Divider } from '@/components/ui/primitives';
+import { Card, Divider, Toggle } from '@/components/ui/primitives';
 import { Async, Skeleton } from '@/components/ui/states';
 import { useToast } from '@/components/ui/Toast';
 import { useApi } from '@/hooks/useApi';
@@ -144,6 +144,17 @@ export function LeadPanel({
               )}
             </div>
 
+            {/* Beside the stage, where an operator is already looking when they decide to
+                step in. Any member may flip it: waiting for an owner to log in is not an
+                option mid-conversation. */}
+            <AiSwitch
+              agentId={agentId}
+              conversationId={conversationId}
+              on={lead.aiEnabled}
+              onSet={(aiEnabled) => setLead({ ...lead, aiEnabled })}
+              onFailed={query.reload}
+            />
+
             <div>
               <div style={label}>Ответственный</div>
               {/* Same reason: without the member list an assigned lead reads «Никто». */}
@@ -225,6 +236,70 @@ export function LeadPanel({
         )
       }
     </Async>
+  );
+}
+
+/**
+ * «ИИ отвечает в этом диалоге».
+ *
+ * One thread, not the agent: the operator who sees the agent go wrong on one conversation
+ * has to be able to stop it there without taking the agent off every other conversation in
+ * the cabinet. It also goes off by itself when the agent hands a thread over, which is why
+ * the switch shows what the server stored rather than what was clicked.
+ */
+function AiSwitch({
+  agentId,
+  conversationId,
+  on,
+  onSet,
+  onFailed,
+}: {
+  agentId: string;
+  conversationId: string;
+  on: boolean;
+  onSet: (aiEnabled: boolean) => void;
+  onFailed: () => void;
+}) {
+  const toast = useToast();
+  const [saving, setSaving] = useState(false);
+
+  async function toggle() {
+    if (saving) return;
+    setSaving(true);
+    try {
+      // The route answers with the flag as stored, and that is what goes on screen: a
+      // switch showing what was clicked would claim a change the server refused.
+      const { aiEnabled } = await api.setConversationAi(agentId, conversationId, !on);
+      onSet(aiEnabled);
+    } catch (error) {
+      toast.fail(error);
+      onFailed();
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <span style={{ fontSize: 12, fontWeight: 650 }}>ИИ отвечает в этом диалоге</span>
+        <button
+          type="button"
+          className="btn-quiet"
+          aria-pressed={on}
+          disabled={saving}
+          style={{ marginLeft: 'auto', display: 'flex', opacity: saving ? 0.5 : 1 }}
+          onClick={toggle}
+        >
+          <Toggle on={on} />
+        </button>
+      </div>
+      <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 5, lineHeight: 1.45 }}>
+        {on
+          ? 'Выключите — и диалог останется человеку. Другие диалоги это не затронет.'
+          : 'Отвечает человек. Другие диалоги агент ведёт как вёл.'}
+      </div>
+    </div>
   );
 }
 

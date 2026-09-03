@@ -5,6 +5,7 @@ import { processPendingEvents } from '../src/lib/whatsapp/inbound.js';
 import { withDb } from './helpers/db.js';
 import { testEnv } from './helpers/env.js';
 import { fakeGraph } from './helpers/fake-graph.js';
+import { fakeModel } from './helpers/fake-model.js';
 
 const env = testEnv();
 
@@ -14,6 +15,7 @@ const deps = () => ({
   graph: fakeGraph(),
   key: Buffer.from(env.CREDENTIALS_KEY, 'base64'),
   mediaDir: env.MEDIA_DIR,
+  model: fakeModel(),
 });
 
 /** What Meta puts on the first message of a conversation that started from an ad. */

@@ -5,11 +5,25 @@ import { z } from 'zod';
 import type { Db } from '../db/client.js';
 import { kbItems, kbSources } from '../db/schema.js';
 import { ApiError } from '../lib/errors.js';
+import {
+  PAGE_REFUSED,
+  PageError,
+  htmlToText,
+  pageTitle,
+  type FetchedPage,
+  type PageFetcher,
+} from '../lib/knowledge/fetch-page.js';
 import { kbItemColumns, searchKnowledge, type KbRow } from '../lib/knowledge/search.js';
 // pleep's own limits, and they are the right shape: a fact, not an essay. They live beside
 // the splitter because that is the code that has to cut to fit them; a second copy here
 // would be one edit away from letting the splitter produce what this route rejects.
-import { CONTENT_MAX, TITLE_MAX, splitBlocks, type SplitPart } from '../lib/knowledge/split.js';
+import {
+  CONTENT_MAX,
+  TITLE_MAX,
+  splitBlocks,
+  splitByHeadings,
+  type SplitPart,
+} from '../lib/knowledge/split.js';
 import { isUuid } from '../lib/uuid.js';
 import { requireAgent } from './require-agent.js';
 
@@ -59,6 +73,17 @@ const listQuery = z.object({
   q: z.string().optional(),
 });
 
+/**
+ * Long enough for the query string of a real catalogue page and far short of anything a
+ * person typed. An address is checked properly by `URL` below; this only keeps a megabyte of
+ * paste out of the parser.
+ */
+const URL_MAX = 2048;
+
+const importPage = z.object({
+  url: z.string().trim().min(1).max(URL_MAX),
+});
+
 const importText = z.object({
   title: z.string().trim().min(1).max(TITLE_MAX),
   kind: z.enum(KINDS).default('other'),
@@ -95,6 +120,10 @@ function knowledgeError(
       return tooBig
         ? new ApiError(400, `Текст длиннее ${PASTE_MAX} символов`)
         : new ApiError(400, 'Вставьте текст для импорта');
+    case 'url':
+      return tooBig
+        ? new ApiError(400, `Адрес длиннее ${URL_MAX} символов`)
+        : new ApiError(400, 'Укажите адрес страницы');
     default:
       return new ApiError(400, 'Не удалось разобрать запись');
   }
@@ -122,10 +151,54 @@ const toKbSource = (row: typeof kbSources.$inferSelect): KbSource => ({
   createdAt: row.createdAt.toISOString(),
 });
 
+/**
+ * The address the owner typed, refused before anything leaves this process.
+ *
+ * `file:`, `data:` and `gopher:` are not addresses of a customer's website — `file:` would
+ * have this server read its own disk and hand the result back over the API — so the check is
+ * an allow list and it happens here, in front of the fetcher, rather than only inside it.
+ * Here, because a refusal at this point has written nothing: the failed-source row below is
+ * for an address that was worth trying, and a typo is not.
+ */
+function targetUrl(raw: string): URL {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new ApiError(400, 'Это не похоже на адрес страницы');
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new ApiError(400, 'Адрес должен начинаться с http:// или https://');
+  }
+  return url;
+}
+
+/**
+ * What really happened, for `app.log` and nowhere else.
+ *
+ * The owner is shown `PAGE_REFUSED` and only that, however the fetch failed — see the note
+ * on it in `fetch-page.ts`. A message naming the status, the content type or the resolver's
+ * complaint would answer «what is listening on this host and port» for whoever typed the
+ * address, and the address guard exists precisely because that question is not theirs to ask
+ * of the client's own network. This is the other half of that: the detail is kept, in the
+ * log, where the people who operate this can read it.
+ */
+function failureDetail(error: unknown): string {
+  if (error instanceof PageError) return error.detail;
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** A page whose text splits into nothing. The owner's to fix, so it says what happened. */
+const NOTHING_TO_SAVE = 'На странице нечего сохранить';
+
+/** The transaction handle, so the insert below can be shared by both imports. */
+type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
+
 export function registerKnowledgeRoutes(
   app: FastifyInstance,
   db: Db,
   guard: preHandlerHookHandler,
+  pageFetcher: PageFetcher,
 ): void {
   // Any member: an operator who watches the agent give a wrong answer is the fastest way
   // it gets corrected, and a lock would put a day between noticing and fixing.
@@ -260,6 +333,42 @@ export function registerKnowledgeRoutes(
   );
 
   /**
+   * The items of one import, written in chunks inside the caller's transaction.
+   *
+   * Shared by the first import and the reimport, and chunked because a statement carries at
+   * most 65534 bound parameters: `INSERT_CHUNK` is what keeps a site with thousands of
+   * headings from becoming «Внутренняя ошибка сервера». It is still all of them or none —
+   * the chunks run inside the transaction the caller opened.
+   */
+  async function insertItems(
+    tx: Tx,
+    agentId: string,
+    sourceId: string,
+    kind: (typeof KINDS)[number],
+    parts: SplitPart[],
+  ): Promise<KbRow[]> {
+    const rows: KbRow[] = [];
+    for (let from = 0; from < parts.length; from += INSERT_CHUNK) {
+      const written = await tx
+        .insert(kbItems)
+        .values(
+          parts.slice(from, from + INSERT_CHUNK).map((part) => ({
+            agentId,
+            sourceId,
+            kind,
+            title: part.title,
+            content: part.content,
+          })),
+        )
+        // Named columns, like every other read of an item: `returning()` would fetch the
+        // generated tsvector and hand it straight to the response.
+        .returning(kbItemColumns);
+      rows.push(...written);
+    }
+    return rows;
+  }
+
+  /**
    * Writes a finished import: the source, then its items, in one transaction.
    *
    * Shared with task 4's page import, which differs only in where the parts came from.
@@ -287,24 +396,7 @@ export function registerKnowledgeRoutes(
         })
         .returning();
 
-      const rows: KbRow[] = [];
-      for (let from = 0; from < parts.length; from += INSERT_CHUNK) {
-        const written = await tx
-          .insert(kbItems)
-          .values(
-            parts.slice(from, from + INSERT_CHUNK).map((part) => ({
-              agentId,
-              sourceId: created!.id,
-              kind,
-              title: part.title,
-              content: part.content,
-            })),
-          )
-          // Named columns, like every other read of an item: `returning()` would fetch the
-          // generated tsvector and hand it straight to the response.
-          .returning(kbItemColumns);
-        rows.push(...written);
-      }
+      const rows = await insertItems(tx, agentId, created!.id, kind, parts);
 
       return {
         source: toKbSource(created!),
@@ -331,6 +423,195 @@ export function registerKnowledgeRoutes(
         parsed.data.kind,
         parts,
       );
+    },
+  );
+
+  /** One source of this agent's, or 404 — never another agent's, and never a bare 500. */
+  async function loadSource(agentId: string, sourceId: string) {
+    if (!isUuid(sourceId)) throw new ApiError(404, 'Источник не найден');
+    const [row] = await db
+      .select()
+      .from(kbSources)
+      .where(and(eq(kbSources.id, sourceId), eq(kbSources.agentId, agentId)));
+    if (!row) throw new ApiError(404, 'Источник не найден');
+    return row;
+  }
+
+  /** Why this source's last attempt did not work. Its items are not touched. */
+  async function markFailed(sourceId: string, agentId: string, reason: string): Promise<void> {
+    await db
+      .update(kbSources)
+      .set({ status: 'failed', error: reason })
+      .where(and(eq(kbSources.id, sourceId), eq(kbSources.agentId, agentId)));
+  }
+
+  /** The page's text as items — empty when there was nothing on it worth keeping. */
+  const partsOf = (page: FetchedPage): SplitPart[] => splitByHeadings(htmlToText(page.html));
+
+  /**
+   * Records a failed attempt against the address, reusing the row if there already is one.
+   *
+   * One row per address, not one per attempt: an owner whose site is down presses the button
+   * again, and again, and ten identical «не удалось» rows in their sources list bury the
+   * imports that worked. The row is the standing answer to «what happened with this
+   * address», so it is overwritten rather than added to.
+   */
+  async function recordFailure(agentId: string, url: string, reason: string): Promise<void> {
+    const [existing] = await db
+      .select({ id: kbSources.id })
+      .from(kbSources)
+      .where(
+        and(eq(kbSources.agentId, agentId), eq(kbSources.kind, 'page'), eq(kbSources.url, url)),
+      );
+
+    if (existing) {
+      await db
+        .update(kbSources)
+        .set({ status: 'failed', error: reason })
+        .where(and(eq(kbSources.id, existing.id), eq(kbSources.agentId, agentId)));
+      return;
+    }
+
+    await db.insert(kbSources).values({
+      agentId,
+      kind: 'page',
+      title: pageTitle('', url),
+      url,
+      status: 'failed',
+      error: reason,
+    });
+  }
+
+  app.post(
+    '/api/agents/:agentId/knowledge/import/page',
+    { preHandler: [guard, ownerOnly] },
+    async (req): Promise<KbImport> => {
+      const parsed = importPage.safeParse(req.body);
+      if (!parsed.success) throw knowledgeError(parsed.error.issues[0]);
+      const url = targetUrl(parsed.data.url);
+
+      let page: FetchedPage;
+      try {
+        page = await pageFetcher.fetch(url.href);
+      } catch (error) {
+        // The attempt is kept. The owner pasted an address, waited, and got an error; a
+        // sources list that then shows nothing at all leaves them unable to tell a refusal
+        // from a page that quietly imported as empty.
+        await recordFailure(req.agent!.id, url.href, PAGE_REFUSED);
+        app.log.warn(
+          { url: url.href, detail: failureDetail(error) },
+          'knowledge page import failed',
+        );
+        throw new ApiError(502, PAGE_REFUSED);
+      }
+
+      const parts = partsOf(page);
+      // Refused before anything is written: a source with no items is a row that says an
+      // import happened and shows nothing for it. More often than not this is a page whose
+      // text arrives from JavaScript, and the honest answer is that we read it and there was
+      // nothing there — which is the owner's to act on, so it says so.
+      if (parts.length === 0) throw new ApiError(400, NOTHING_TO_SAVE);
+
+      return storeImport(
+        req.agent!.id,
+        // `finalUrl`, not what was typed: the fetcher follows redirects hop by hop, and the
+        // page the text came from is the one worth reimporting later.
+        { kind: 'page', title: pageTitle(page.html, page.finalUrl), url: page.finalUrl },
+        'other',
+        parts,
+      );
+    },
+  );
+
+  app.post(
+    '/api/agents/:agentId/knowledge/sources/:sourceId/reimport',
+    { preHandler: [guard, ownerOnly] },
+    async (req): Promise<KbImport> => {
+      const { sourceId } = req.params as { sourceId: string };
+      const source = await loadSource(req.agent!.id, sourceId);
+      if (source.kind !== 'page' || !source.url) {
+        throw new ApiError(400, 'Обновить можно только импорт страницы');
+      }
+
+      // Fetched before anything is deleted, and outside the transaction: a site that is
+      // down for an hour must not empty the knowledge base while it is.
+      let page: FetchedPage;
+      try {
+        page = await pageFetcher.fetch(source.url);
+      } catch (error) {
+        await markFailed(source.id, req.agent!.id, PAGE_REFUSED);
+        app.log.warn(
+          { url: source.url, detail: failureDetail(error) },
+          'knowledge page reimport failed',
+        );
+        throw new ApiError(502, PAGE_REFUSED);
+      }
+
+      const parts = partsOf(page);
+      // Marked failed before answering, exactly as a failed fetch is. The items stay — they
+      // are still the best answer we have — but leaving the source `ready` with the
+      // `itemCount` of the previous import would have it claim a success that did not
+      // happen, and the owner would have no idea the page had stopped yielding anything.
+      if (parts.length === 0) {
+        await markFailed(source.id, req.agent!.id, NOTHING_TO_SAVE);
+        throw new ApiError(400, NOTHING_TO_SAVE);
+      }
+
+      return db.transaction(async (tx) => {
+        const mine = and(eq(kbItems.sourceId, source.id), eq(kbItems.agentId, req.agent!.id));
+
+        // What a person corrected outranks the page it came from. Those items are read
+        // first, kept, and then their titles are what the fresh parts are filtered against
+        // — otherwise the reimport would put the page's own wording back beside the
+        // correction and the agent would have both to choose from.
+        const kept = await tx
+          .select(kbItemColumns)
+          .from(kbItems)
+          .where(and(mine, eq(kbItems.edited, true)));
+        await tx.delete(kbItems).where(and(mine, eq(kbItems.edited, false)));
+
+        const keptTitles = new Set(kept.map((row) => row.title));
+        const fresh = parts.filter((part) => !keptTitles.has(part.title));
+        const written = await insertItems(tx, req.agent!.id, source.id, 'other', fresh);
+
+        const [updated] = await tx
+          .update(kbSources)
+          .set({
+            title: pageTitle(page.html, page.finalUrl),
+            url: page.finalUrl,
+            status: 'ready',
+            // Cleared, not left behind: this attempt succeeded, and a stale reason beside a
+            // ready source reads as a failure that is still happening.
+            error: null,
+            itemCount: kept.length + written.length,
+            importedAt: new Date(),
+          })
+          .where(and(eq(kbSources.id, source.id), eq(kbSources.agentId, req.agent!.id)))
+          .returning();
+
+        return {
+          source: toKbSource(updated!),
+          items: [...kept, ...written].map((row) => toKbItem(row, updated!.title)),
+        };
+      });
+    },
+  );
+
+  app.delete(
+    '/api/agents/:agentId/knowledge/sources/:sourceId',
+    { preHandler: [guard, ownerOnly] },
+    async (req): Promise<{ ok: true }> => {
+      const { sourceId } = req.params as { sourceId: string };
+      const source = await loadSource(req.agent!.id, sourceId);
+
+      // Only the source row goes. Its items stay, with `sourceId` set to null by the
+      // schema's `on delete set null` — they are the facts the agent answers from and the
+      // corrections someone made to them, and forgetting the address they came from is not
+      // a decision to forget those.
+      await db
+        .delete(kbSources)
+        .where(and(eq(kbSources.id, source.id), eq(kbSources.agentId, req.agent!.id)));
+      return { ok: true };
     },
   );
 }

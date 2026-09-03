@@ -10,7 +10,6 @@ import type {
   AiTurn,
   AiUsage,
   AiUsageModel,
-  AiUsagePeriod,
   AiUsageTotals,
 } from '@rakurs/contract';
 import { and, asc, desc, eq, gte, inArray, sql } from 'drizzle-orm';
@@ -33,6 +32,7 @@ import type { Env } from '../env.js';
 import { MODELS, type ModelClient } from '../lib/ai/openrouter.js';
 import { keyAad, runTurn, type TurnResult } from '../lib/ai/turn.js';
 import { ApiError } from '../lib/errors.js';
+import { periodQuery, periodSince } from '../lib/period.js';
 import { credentialsKey, encryptSecret } from '../lib/secret-box.js';
 import { isUuid } from '../lib/uuid.js';
 import type { GraphClient } from '../lib/whatsapp/graph.js';
@@ -93,19 +93,6 @@ const settings = z
     openrouterKey: z.string().trim().min(1).nullable().optional(),
   })
   .refine((body) => Object.keys(body).length > 0);
-
-/**
- * How far back each period looks. A month is thirty days, not a calendar one.
- *
- * The owner is asking «во сколько мне обходится эта модель», not «сколько я потратил в
- * августе»: a rolling window answers that on the third of the month as well as on the
- * thirtieth, where a calendar month would show two days of turns and look like a bargain.
- */
-const PERIOD_DAYS: Record<AiUsagePeriod, number> = { day: 1, week: 7, month: 30 };
-
-const DAY_MS = 24 * 60 * 60 * 1000;
-
-const usageQuery = z.object({ period: z.enum(['day', 'week', 'month']).optional() });
 
 /**
  * Everything a usage answer counts, in one aggregate — the whole period, or one model.
@@ -350,13 +337,13 @@ export function registerAiRoutes(
     '/api/agents/:agentId/ai/usage',
     { preHandler: [guard, anyMember] },
     async (req): Promise<AiUsage> => {
-      const parsed = usageQuery.safeParse(req.query);
+      const parsed = periodQuery.safeParse(req.query);
       if (!parsed.success) throw new ApiError(400, 'Неизвестный период');
       const period = parsed.data.period ?? 'week';
 
-      // Computed here and answered back, so the screen names the same instant the numbers
-      // were counted from instead of guessing at one from its own clock.
-      const since = new Date(Date.now() - PERIOD_DAYS[period] * DAY_MS);
+      // Computed on the server and answered back, so the screen names the same instant the
+      // numbers were counted from instead of guessing at one from its own clock.
+      const since = periodSince(period);
       const window = and(eq(aiReplies.agentId, req.agent!.id), gte(aiReplies.createdAt, since));
 
       const [totalRows, modelRows] = await Promise.all([

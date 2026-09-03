@@ -21,6 +21,7 @@ import type {
   Member,
   Message,
   Stage,
+  StatsCurrent,
   WebhookSetup,
   WhatsappNumber,
 } from '@/types';
@@ -393,3 +394,15 @@ export const listCapiEvents = (
  */
 export const resendCapiEvent = (agentId: string, eventId: string) =>
   request<CapiEvent>(`${capi(agentId)}/events/${eventId}/resend`, { method: 'POST' });
+
+// ── Статистика ───────────────────────────────────────────────────────────────
+
+/**
+ * Сколько лидов стоит сейчас на каждой стадии. Любому сотруднику.
+ *
+ * Периода здесь нет, и это не упущение: карточка считает все диалоги агента, включая
+ * заведённые до того, как кабинет начал записывать переходы. Именно она отвечает на
+ * «почему воронка пустая, у меня двести лидов».
+ */
+export const getStatsCurrent = (agentId: string, signal?: AbortSignal) =>
+  request<StatsCurrent>(`/agents/${agentId}/stats/current`, { signal });

@@ -355,8 +355,13 @@ export interface AiTurn {
  * Что стоили ответы агента за период — чтобы выбор модели можно было сравнить
  * с ценой, а не только с ощущением. Строится по журналу ответов. */
 
-/** How far back a usage answer looks. The screen offers exactly these three. */
-export type AiUsagePeriod = 'day' | 'week' | 'month';
+/**
+ * How far back a usage answer looks. The screen offers exactly these three.
+ *
+ * Kept as its own name because the AI screen imports it; it is `Period` — the расход card
+ * and the statistics cards ask the same question of the same three buttons.
+ */
+export type AiUsagePeriod = Period;
 
 /** One period's turns, counted by how they ended, with what they spent. */
 export interface AiUsageTotals {
@@ -471,4 +476,51 @@ export interface CapiEvent {
   currency: string | null;
   contactName: string | null;
   contactPhone: string | null;
+}
+
+/* ── Статистика ─────────────────────────────────────────────────────────────
+ * Где сейчас стоят лиды и что с ними происходило за период. Две карточки, не
+ * одна: снимок на сейчас считает всё, что вообще было, а движение по воронке
+ * записывается только с того дня, когда кабинет начал его записывать. */
+
+/**
+ * How far back a report looks. The screen offers exactly these three, everywhere.
+ *
+ * Rolling windows of 1, 7 and 30 days, not calendar ones — `server/src/lib/period.ts` says
+ * why, and is the only place that turns one of these into a date.
+ */
+export type Period = 'day' | 'week' | 'month';
+
+/** One stage of the funnel with how many leads are standing in it right now. */
+export interface StageStanding {
+  stageId: string;
+  name: string;
+  color: string;
+  kind: StageKind;
+  position: number;
+  /** Conversations whose `stageId` is this one. Zero here is a fact, not an absence. */
+  leads: number;
+}
+
+/**
+ * Where every lead of the agent stands at this instant.
+ *
+ * No period, and the absence is load-bearing: this counts every conversation the cabinet
+ * has ever had, including the ones triaged before it began recording movement, and it is
+ * the card that answers «почему воронка пустая, у меня двести лидов».
+ */
+export interface StatsCurrent {
+  /** Every current stage in `position` order, including the ones holding nobody. */
+  stages: StageStanding[];
+  /** Leads nobody has triaged — no stage at all. */
+  unsorted: number;
+  /** Every conversation of the agent: the stages plus `unsorted`, and nothing else. */
+  total: number;
+  /**
+   * When the cabinet began recording stage movement, ISO.
+   *
+   * Carried by this card so it can print the sentence that explains the card below it,
+   * whose numbers start on that date rather than at the beginning of the business.
+   */
+  stageHistorySince: string;
 }

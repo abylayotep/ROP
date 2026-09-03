@@ -183,6 +183,47 @@ describe('the stage auto-message', () => {
     expect(stored[0]?.status).toBe('sent');
   });
 
+  it('does not go out when the move loses the race it did not see', async () => {
+    const first = await stageNamed('Новый лид');
+    const stageId = await template('В диалоге', 'Здравствуйте, {{name}}!');
+    await move(first.id);
+
+    // The race, made deterministic. A second writer holds the conversation row, so the
+    // request reads the old stage and then blocks on its own UPDATE; the row is moved out
+    // from under it and released. Under READ COMMITTED the UPDATE re-checks its WHERE
+    // against the new row — the stage it read is no longer there, it matches nothing, and
+    // this request must stay quiet. Without that guard the customer reads the template
+    // twice: once from the writer that won and once from this one.
+    let release: (() => void) | undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const other = db.transaction(async (tx) => {
+      await tx
+        .select({ id: conversations.id })
+        .from(conversations)
+        .where(eq(conversations.id, conversationId))
+        .for('update');
+      await held;
+      await tx
+        .update(conversations)
+        .set({ stageId })
+        .where(eq(conversations.id, conversationId));
+    });
+
+    const blocked = move(stageId);
+    // Long enough for the request to read and reach its blocked UPDATE.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    release!();
+    await other;
+    const res = await blocked;
+
+    expect(res.statusCode).toBe(200);
+    expect(graph.calls.filter((call) => call.method === 'sendText')).toHaveLength(0);
+    const stored = await db.select().from(messages).where(eq(messages.conversationId, conversationId));
+    expect(stored).toHaveLength(0);
+  });
+
   it('sends nothing for a stage with no template', async () => {
     const first = await stageNamed('Новый лид');
     const second = await stageNamed('В диалоге');

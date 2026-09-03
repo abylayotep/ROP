@@ -261,6 +261,56 @@ describe('the lead', () => {
     expect(res.json().stageSetBy).toBe(moved.json().stageSetBy);
   });
 
+  it('keeps the assignee when the stage move loses its race', async () => {
+    const first = await stageNamed('Новый лид');
+    const mine = await stageNamed('В диалоге');
+    const theirs = await stageNamed('Квалифицирован');
+    await app.inject({
+      method: 'PATCH',
+      url: leadUrl(),
+      cookies: jar,
+      payload: { stageId: first.id },
+    });
+    const members = (await app.inject({ url: `/api/agents/${agentId}/members`, cookies: jar })).json();
+    const operator = members.find((member: { name: string }) => member.name === 'Оператор');
+
+    // The same forced race as in funnel-message.test.ts: a second writer holds the row,
+    // the request reads the old stage and blocks on its write, the lead is moved out from
+    // under it. The move is then rightly lost — somebody else made it — but the assignee
+    // this request also carried is a separate answer to a separate question and must land.
+    let release: (() => void) | undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const other = db.transaction(async (tx) => {
+      await tx
+        .select({ id: conversations.id })
+        .from(conversations)
+        .where(eq(conversations.id, conversationId))
+        .for('update');
+      await held;
+      await tx
+        .update(conversations)
+        .set({ stageId: theirs.id })
+        .where(eq(conversations.id, conversationId));
+    });
+
+    const blocked = app.inject({
+      method: 'PATCH',
+      url: leadUrl(),
+      cookies: jar,
+      payload: { stageId: mine.id, assignedTo: operator.id },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    release!();
+    await other;
+    await blocked;
+
+    const lead = (await app.inject({ url: leadUrl(), cookies: jar })).json();
+    expect(lead.assignedTo).toBe(operator.id);
+    expect(lead.stageId).toBe(theirs.id);
+  });
+
   it('lists the members of the account with their roles', async () => {
     const res = await app.inject({ url: `/api/agents/${agentId}/members`, cookies: jar });
 

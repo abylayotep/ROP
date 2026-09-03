@@ -1,5 +1,5 @@
 import type { Lead, Member, Note, Order } from '@rakurs/contract';
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, eq, isNull } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
@@ -161,7 +161,10 @@ export function registerLeadRoutes(
       if (!parsed.success) throw new ApiError(400, 'Не удалось разобрать карточку');
 
       const current = await loadLead(db, req.agent!, conversationId);
-      const patch: Partial<typeof conversations.$inferInsert> = {};
+      // Two patches, not one: the stage move is written under a guard on the stage this
+      // request read, and the assignee is not. See the write below for why.
+      const stagePatch: Partial<typeof conversations.$inferInsert> = {};
+      const assigneePatch: Partial<typeof conversations.$inferInsert> = {};
 
       if (parsed.data.stageId !== undefined && parsed.data.stageId !== current.stageId) {
         if (parsed.data.stageId !== null) {
@@ -174,10 +177,10 @@ export function registerLeadRoutes(
             .where(and(eq(stages.id, parsed.data.stageId), eq(stages.agentId, req.agent!.id)));
           if (!stage) throw new ApiError(404, 'Стадия не найдена');
         }
-        patch.stageId = parsed.data.stageId;
-        patch.stageSetAt = new Date();
+        stagePatch.stageId = parsed.data.stageId;
+        stagePatch.stageSetAt = new Date();
         // Stage 5 writes 'ai' here through the same column.
-        patch.stageSetBy = 'operator';
+        stagePatch.stageSetBy = 'operator';
       }
 
       if (parsed.data.assignedTo !== undefined && parsed.data.assignedTo !== current.assignedTo) {
@@ -194,26 +197,60 @@ export function registerLeadRoutes(
             );
           if (!membership) throw new ApiError(404, 'Сотрудник не найден');
         }
-        patch.assignedTo = parsed.data.assignedTo;
+        assigneePatch.assignedTo = parsed.data.assignedTo;
       }
 
-      if (Object.keys(patch).length > 0) {
-        await db
-          .update(conversations)
-          .set(patch)
-          .where(
-            and(eq(conversations.id, conversationId), eq(conversations.agentId, req.agent!.id)),
-          );
-      }
+      const mine = and(
+        eq(conversations.id, conversationId),
+        eq(conversations.agentId, req.agent!.id),
+      );
+
+      /**
+       * True when this request is the one that actually moved the lead.
+       *
+       * The stage write carries the stage it read in its WHERE, so of two requests that
+       * read the same old stage exactly one updates a row and the other updates none.
+       * Without that, both passed the gate below and the customer got the stage's template
+       * twice.
+       */
+      let moved = false;
+
+      await db.transaction(async (tx) => {
+        // The assignee is written unguarded and separately. Folding it into the guarded
+        // statement would make a lost stage race silently drop the assignee change too,
+        // and the two answer different questions: an assignee is last-write-wins, while a
+        // stage move that lost its race has already been made by somebody else, so losing
+        // it is the right outcome — the reloaded lead below shows the operator where the
+        // card really is.
+        if (Object.keys(assigneePatch).length > 0) {
+          await tx.update(conversations).set(assigneePatch).where(mine);
+        }
+        if (Object.keys(stagePatch).length > 0) {
+          const rows = await tx
+            .update(conversations)
+            .set(stagePatch)
+            .where(
+              and(
+                mine,
+                // `= null` is never true, so an unsorted lead needs `is null` instead.
+                current.stageId === null
+                  ? isNull(conversations.stageId)
+                  : eq(conversations.stageId, current.stageId),
+              ),
+            )
+            .returning({ id: conversations.id });
+          moved = rows.length > 0;
+        }
+      });
 
       // Only on a real move to a real stage, and never on the first one a lead is given:
       // a customer who has just written already has an answer, and a template on top of
       // it is the cabinet talking over its own operator.
-      if (patch.stageId != null && current.stageId !== null) {
+      if (moved && stagePatch.stageId != null && current.stageId !== null) {
         await sendStageMessage(
           db,
           { graph, key: credentialsKey(env) },
-          { agentId: req.agent!.id, conversationId, stageId: patch.stageId },
+          { agentId: req.agent!.id, conversationId, stageId: stagePatch.stageId },
         );
       }
       return loadLead(db, req.agent!, conversationId);

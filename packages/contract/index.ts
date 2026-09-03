@@ -244,3 +244,9 @@ export interface KbSource {
   itemCount: number;
   createdAt: string;
 }
+
+/** What an import produced, answered by the import routes so the owner sees it at once. */
+export interface KbImport {
+  source: KbSource;
+  items: KbItem[];
+}

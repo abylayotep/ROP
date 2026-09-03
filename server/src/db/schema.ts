@@ -14,6 +14,9 @@ import {
   uuid,
   type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
+// Type-only, so this stays a leaf module at runtime. `capi_events.payload` holds the exact
+// bytes sent to Meta, and the brand is what stops anything but `serialiseEvent` filling it.
+import type { CapiEventBody } from '../lib/capi/events.js';
 
 /**
  * Tenancy plus authentication, plus WhatsApp: connected numbers, contacts,
@@ -511,4 +514,78 @@ export const whatsappEvents = pgTable(
     attempts: integer('attempts').notNull().default(0),
   },
   (t) => [index('whatsapp_events_processed_at_idx').on(t.processedAt)],
+);
+
+/**
+ * Where an agent's conversions go, and whether they go at all.
+ *
+ * One row per agent, keyed by the agent: this is the dataset tied to that agent's WhatsApp
+ * number, and there is exactly one. pleep also keeps a second dataset for a website pixel;
+ * this product has no website channel, and a settings form for a thing nobody can send to
+ * is worse than not having it.
+ */
+export const capiSettings = pgTable('capi_settings', {
+  agentId: uuid('agent_id')
+    .primaryKey()
+    .references(() => agents.id, { onDelete: 'cascade' }),
+  datasetId: text('dataset_id').notNull(),
+  // Encrypted with the credentials key and sealed to the agent's id, like every other
+  // secret here. Never selected into an API response.
+  accessToken: text('access_token').notNull(),
+  // Meta's test event code. Set while an owner is checking the wiring in Events Manager,
+  // cleared afterwards — an event carrying it is not counted for optimisation.
+  testEventCode: text('test_event_code'),
+  enabled: boolean('enabled').notNull().default(false),
+  verifiedAt: timestamp('verified_at', { withTimezone: true }),
+  error: text('error'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
+ * One thing worth telling Meta, and what happened when we told it.
+ *
+ * `eventId` is unique, and it is derived from what is being reported rather than from when:
+ * the same order queued twice by a retry, a redelivery or an owner pressing resend is one
+ * row, and Meta counts it once. The payload is stored as built, so a failure can be read
+ * afterwards without rebuilding it from rows that may have changed since.
+ */
+export const capiEvents = pgTable(
+  'capi_events',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    agentId: uuid('agent_id')
+      .notNull()
+      .references(() => agents.id, { onDelete: 'cascade' }),
+    // Set null rather than cascade: a report that has already gone to Meta is a fact about
+    // the past, and deleting the conversation does not unmake it.
+    conversationId: uuid('conversation_id').references(() => conversations.id, {
+      onDelete: 'set null',
+    }),
+    orderId: uuid('order_id').references(() => orders.id, { onDelete: 'set null' }),
+    // 'purchase' | 'lead'
+    kind: text('kind').notNull(),
+    eventId: text('event_id').notNull().unique(),
+    // Text, not jsonb, and typed so only `serialiseEvent` can produce a value for it.
+    //
+    // The order's amount is exact only as long as nothing parses and re-emits it, and jsonb
+    // parses: Postgres would store the number faithfully, but reading the column back hands
+    // JavaScript a double, and re-serialising that double is no longer guaranteed to be the
+    // digits the column held. Storing the finished request body means what is stored is byte
+    // for byte what is sent — a resend writes the same bytes out again and nothing is ever
+    // re-serialised, so no double appears anywhere on the path.
+    //
+    // The cost is that nothing can query inside the payload. Nothing needs to: the log screen
+    // reads `kind`, `status`, `error` and `sentAt`, which are columns, and the body is only
+    // ever read whole by a person looking at why one report failed.
+    payload: text('payload').notNull().$type<CapiEventBody>(),
+    // 'pending' | 'sent' | 'failed' | 'skipped'
+    status: text('status').notNull().default('pending'),
+    attempts: integer('attempts').notNull().default(0),
+    // What Meta answered when it refused. Redacted of the token before it is written.
+    error: text('error'),
+    sentAt: timestamp('sent_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('capi_events_status_created_idx').on(t.status, t.createdAt)],
 );

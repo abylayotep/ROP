@@ -414,7 +414,10 @@ function Lead({
         </div>
 
         <div className="ellipsis" style={{ fontSize: 11.5, color: 'var(--text-dim)', marginTop: 4 }}>
-          {card.preview ?? 'Вложение'}
+          {/* Пустое превью значит разное: у диалога без единого сообщения нет и времени
+              последнего, а у сообщения с фотографией нет текста. Разводим по времени, а не
+              по превью — иначе новый лид выглядит как приславший вложение. */}
+          {card.lastMessageAt === null ? 'Сообщений нет' : (card.preview ?? 'Вложение')}
         </div>
 
         {card.adHeadline && (

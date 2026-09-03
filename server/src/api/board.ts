@@ -64,8 +64,9 @@ function selectCards(db: Db, agentId: string) {
       // The sum is cast wider than the column it sums. Each amount is numeric(14,2), so it
       // stops just under 10^12, but a handful of them add past that — and `::numeric(14,2)`
       // on the total would raise `numeric field overflow`, which fails the whole board or
-      // customers request rather than one card. numeric(16,2) holds any sum of amounts this
-      // table can store.
+      // customers request rather than one card. numeric(16,2) holds ten thousand amounts at
+      // that ceiling, which is far past any real conversation; it is a wider margin, not a
+      // proof.
       paidTotal: sql<string>`coalesce((
         select sum(o.amount) from orders o
         where o.conversation_id = ${conversations.id} and o.status = 'paid'

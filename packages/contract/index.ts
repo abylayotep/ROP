@@ -155,6 +155,12 @@ export interface Lead {
   assignedTo: string | null;
   assigneeName: string | null;
   adHeadline: string | null;
+  /**
+   * Whether the agent still answers on this thread. On by default, and off the moment a
+   * handoff or an operator takes it — which is why it travels with the lead: the panel that
+   * offers the switch is the one that has to show it already flipped.
+   */
+  aiEnabled: boolean;
   values: LeadFieldValue[];
   notes: Note[];
   orders: Order[];

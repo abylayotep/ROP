@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { Layout } from '@/components/layout/Layout';
 import { SECTIONS } from '@/lib/sections';
+import { AgentScreen } from '@/screens/AgentScreen';
 import { AgentSettingsScreen } from '@/screens/AgentSettingsScreen';
 import { AgentsScreen } from '@/screens/AgentsScreen';
 import { BoardScreen } from '@/screens/BoardScreen';
@@ -60,6 +61,8 @@ function AuthGate() {
                 <CustomersScreen />
               ) : section.path === 'knowledge' ? (
                 <KnowledgeScreen />
+              ) : section.path === 'agent' ? (
+                <AgentScreen />
               ) : (
                 <SectionScreen section={section} />
               )

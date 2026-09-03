@@ -1,5 +1,8 @@
 import type {
   Agent,
+  AiModel,
+  AiSettings,
+  AiTurn,
   Board,
   ConversationSummary,
   ConversationThread,
@@ -17,7 +20,7 @@ import type {
   WebhookSetup,
   WhatsappNumber,
 } from '@/types';
-import { API_URL, request } from './client';
+import { API_URL, LONG_TIMEOUT_MS, request } from './client';
 
 export { API_URL, ApiError, humanError, request } from './client';
 
@@ -265,3 +268,54 @@ export const reimportKbSource = (agentId: string, sourceId: string) =>
 /** Owner only. The items stay — only the record of where they came from goes. */
 export const deleteKbSource = (agentId: string, sourceId: string) =>
   request<{ ok: true }>(`${knowledge(agentId)}/sources/${sourceId}`, { method: 'DELETE' });
+
+// ── Агент (ИИ) ───────────────────────────────────────────────────────────────
+
+export const getAiSettings = (agentId: string, signal?: AbortSignal) =>
+  request<AiSettings>(`/agents/${agentId}/ai`, { signal });
+
+/**
+ * What may be changed about the agent. Owner only on the server.
+ *
+ * Every field is optional and an absent one is left as it stands, so a form can send what
+ * it edited and nothing else. `openrouterKey` is the exception worth naming: `undefined`
+ * keeps the stored key, an explicit `null` deletes it, and a string replaces it. The key
+ * never comes back — `keySet` is all a reader is told.
+ */
+export const updateAiSettings = (
+  agentId: string,
+  body: {
+    aiEnabled?: boolean;
+    model?: string;
+    temperature?: number;
+    instructions?: string;
+    replyLanguage?: string;
+    openrouterKey?: string | null;
+  },
+) => request<AiSettings>(`/agents/${agentId}/ai`, { method: 'PATCH', body });
+
+/** The same list for every account: model ids the server will accept, with their lines. */
+export const listAiModels = (signal?: AbortSignal) =>
+  request<AiModel[]>('/ai/models', { signal });
+
+/**
+ * Один ход агента, который никуда не уходит.
+ *
+ * Сообщения клиенту не отправляется, лид не меняется, в переписке ничего не остаётся —
+ * возвращается только то, что агент сделал бы. Ходов на весь сервер разрешено немного, и
+ * сверх того запрос отвечает 429 с текстом про занятую песочницу.
+ */
+export const runAiSandbox = (agentId: string, text: string) =>
+  request<AiTurn>(`/agents/${agentId}/ai/sandbox`, {
+    method: 'POST',
+    body: { text },
+    // The model has sixty seconds on the server; the default client deadline is thirty.
+    timeoutMs: LONG_TIMEOUT_MS,
+  });
+
+/** Any member: the operator watching the agent go wrong is the one who has to stop it. */
+export const setConversationAi = (agentId: string, conversationId: string, aiEnabled: boolean) =>
+  request<{ aiEnabled: boolean }>(`/agents/${agentId}/conversations/${conversationId}/ai`, {
+    method: 'PATCH',
+    body: { aiEnabled },
+  });

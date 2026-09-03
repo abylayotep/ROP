@@ -22,11 +22,7 @@ export const SECTIONS: SectionDef[] = [
   },
   { path: 'customers', label: 'Клиенты', pending: '' },
   { path: 'knowledge', label: 'База знаний', pending: '' },
-  {
-    path: 'agent',
-    label: 'Агент',
-    pending: 'Скрипт продаж, выбор модели и правила появятся на этапе 5.',
-  },
+  { path: 'agent', label: 'Агент', pending: '' },
   {
     path: 'integrations',
     label: 'Интеграции',

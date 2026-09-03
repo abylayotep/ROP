@@ -12,6 +12,15 @@ export const API_URL = import.meta.env.VITE_API_URL || '/api';
 /** Запрос дольше этого считаем зависшим — иначе экран висит в загрузке бесконечно. */
 const TIMEOUT_MS = 30_000;
 
+/**
+ * The one call that legitimately runs longer, and by how much.
+ *
+ * A sandbox turn waits on a model under its own sixty-second deadline on the server, so the
+ * default here would abort a turn the owner has already paid for and report it as a network
+ * failure. Given a margin for the round trip on top.
+ */
+export const LONG_TIMEOUT_MS = 70_000;
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -44,10 +53,12 @@ interface RequestOptions extends Omit<RequestInit, 'body'> {
   body?: unknown;
   query?: Record<string, string | number | undefined>;
   signal?: AbortSignal;
+  /** Overrides `TIMEOUT_MS` for a call the server itself is allowed to take longer over. */
+  timeoutMs?: number;
 }
 
 export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const { body, query, signal, headers, ...rest } = options;
+  const { body, query, signal, headers, timeoutMs, ...rest } = options;
 
   const url = new URL(`${API_URL}${path}`, window.location.origin);
   if (query) {
@@ -58,7 +69,7 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
 
   // Свой таймаут поверх внешней отмены: экран не должен висеть, если сервер молчит.
   const timeout = new AbortController();
-  const timer = setTimeout(() => timeout.abort(), TIMEOUT_MS);
+  const timer = setTimeout(() => timeout.abort(), timeoutMs ?? TIMEOUT_MS);
   signal?.addEventListener('abort', () => timeout.abort(), { once: true });
 
   let res: Response;

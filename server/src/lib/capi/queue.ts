@@ -1,11 +1,11 @@
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, gte, inArray, sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
-import { capiEvents, capiSettings } from '../../db/schema.js';
+import { capiEvents, capiSettings, contacts, conversations, orders } from '../../db/schema.js';
 import { decryptSecret } from '../secret-box.js';
 import { withoutSecret } from '../whatsapp/graph.js';
 import { CapiError, type CapiClient } from './client.js';
-import { DISABLED, NO_SETTINGS } from './enqueue.js';
-import type { CapiEventBody } from './events.js';
+import { DISABLED, NO_CLID, NO_SETTINGS } from './enqueue.js';
+import { buildPurchase, serialiseEvent, type CapiEventBody } from './events.js';
 
 /**
  * Draining the queue: telling Meta what the cabinet already knows.
@@ -99,9 +99,38 @@ const READY = sql`
       end) <= now()
 `;
 
+/**
+ * Why a purchase that was queued can no longer be reported, discovered at claim time.
+ *
+ * Written by the drain and by nothing else: every one of these describes something that
+ * happened between the operator marking the order paid and this pass getting to it. They are
+ * read by an owner on the integrations screen, so they are in the owner's language.
+ */
+const ORDER_GONE = 'Не отправлено: заказ удалён, отправлять уже нечего.';
+const NOT_PAID =
+  'Не отправлено: заказ больше не отмечен оплаченным — оплату отменили или изменили статус.';
+const UNBUILDABLE =
+  'Не отправлено: не удалось собрать событие по текущему заказу. Проверьте сумму заказа.';
+
+/**
+ * What is written onto a row that was claimed for a send that never reported back.
+ *
+ * `claim` counts the attempt before the send, so a process that dies between the two leaves
+ * the row pending with the attempt already spent. Five of those and the row matches no ready
+ * clause: nothing will claim it again, nothing will ever mark it failed, and it sits on the
+ * screen as «В очереди» — which the screen documents as «не ошибка» — with no resend button,
+ * because pending rows do not get one. The sale is then lost in silence, which is the one
+ * outcome this whole queue exists to prevent.
+ */
+const EXHAUSTED =
+  'Попытки отправки закончились: событие так и не ушло в Meta. ' +
+  'Нажмите «Отправить снова», когда причина устранена.';
+
 /** A claimed event. Raw SQL, so the columns arrive under their database names. */
 interface ClaimedEvent {
   id: string;
+  kind: string;
+  order_id: string | null;
   payload: CapiEventBody;
   attempts: number;
   created_at: Date;
@@ -161,6 +190,33 @@ async function skipAll(db: Db, agentId: string, reason: string): Promise<number>
 }
 
 /**
+ * Ends the events that were claimed and never answered for.
+ *
+ * A drain that is killed mid-send — a redeploy, an OOM, a lost database connection between
+ * the claim and the outcome — leaves the row pending with its attempt already counted. That
+ * is survivable four times; the fifth leaves a row that is pending, at the cap, and therefore
+ * outside `READY` forever. Nothing claims it again, so nothing ever writes `failed` on it,
+ * and the screen shows «В очереди» with no resend button on a sale that will never go.
+ *
+ * So the drain begins by looking for exactly that shape and marking it failed. `failed` is
+ * the state the screen renders in red and offers a resend for, which is the whole point: the
+ * owner sees the sale that stalled and can push it again.
+ *
+ * Meta's own last words are kept where there were any — a row that spent its fifth attempt
+ * on a refusal is already written `failed` by `recordFailure`, so in practice these rows have
+ * no error at all, and `coalesce` is what makes the rare exception keep the more useful text.
+ */
+async function failExhausted(db: Db): Promise<number> {
+  const done = await db
+    .update(capiEvents)
+    .set({ status: 'failed', error: sql`coalesce(${capiEvents.error}, ${EXHAUSTED})` })
+    .where(and(eq(capiEvents.status, 'pending'), gte(capiEvents.attempts, MAX_ATTEMPTS)))
+    .returning({ id: capiEvents.id });
+
+  return done.length;
+}
+
+/**
  * Takes this agent's next batch, and counts and dates the attempt in the same statement.
  *
  * `for update skip locked` keeps two claims that land in the same instant off each other's
@@ -179,7 +235,7 @@ async function claim(db: Db, agentId: string): Promise<ClaimedEvent[]> {
         limit ${BATCH}
         for update skip locked
      )
-    returning id, payload, attempts, created_at
+    returning id, kind, order_id, payload, attempts, created_at
   `);
 
   // `returning` has no order of its own. Oldest first, so a batch reaches Meta in the order
@@ -187,6 +243,131 @@ async function claim(db: Db, agentId: string): Promise<ClaimedEvent[]> {
   return rowsOf<ClaimedEvent>(claimed).sort(
     (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
   );
+}
+
+/** A claimed purchase, re-read: either the bytes to send now, or why it cannot go at all. */
+type Rebuilt = { body: CapiEventBody } | { reason: string };
+
+/**
+ * Builds the purchase again from the order as it stands at this moment.
+ *
+ * The stored payload is a snapshot of the instant the operator pressed «оплачен», and the
+ * minutes between that instant and this pass are precisely when the mistake gets corrected:
+ * the order goes back to `cancelled`, or the amount gets its missing zero. Sending the
+ * snapshot reports a sale that was undone, or the wrong money — and because `alreadyQueued`
+ * refuses to queue the same order twice, nothing in the cabinet would ever send a corrected
+ * one. Deleting and re-creating the order to force it mints a new `event_id`, and Meta then
+ * counts the sale twice.
+ *
+ * Rebuilding here costs nothing and fixes both, because `event_id` is derived from the order
+ * id and does not move: what goes to Meta is the same single conversion, told correctly.
+ */
+async function rebuildPurchase(
+  db: Db,
+  agentId: string,
+  orderId: string | null,
+): Promise<Rebuilt> {
+  // Null exactly when the order has been deleted: the column is `on delete set null`, so the
+  // report outlives the order it was about — but it can no longer be rebuilt from it.
+  if (orderId === null) return { reason: ORDER_GONE };
+
+  const [row] = await db
+    .select({ order: orders, conversation: conversations, contact: contacts })
+    .from(orders)
+    .innerJoin(conversations, eq(conversations.id, orders.conversationId))
+    .innerJoin(contacts, eq(contacts.id, conversations.contactId))
+    .where(and(eq(orders.id, orderId), eq(orders.agentId, agentId)));
+
+  if (!row) return { reason: ORDER_GONE };
+  if (row.order.status !== 'paid' || row.order.paidAt === null) return { reason: NOT_PAID };
+
+  const ctwaClid = row.conversation.ctwaClid;
+  if (ctwaClid === null) return { reason: NO_CLID };
+
+  try {
+    return {
+      body: serialiseEvent(
+        buildPurchase({
+          orderId: row.order.id,
+          ctwaClid,
+          phone: row.contact.phone,
+          amount: row.order.amount,
+          currency: row.order.currency,
+          paidAt: row.order.paidAt,
+        }),
+      ),
+    };
+  } catch {
+    // `buildPurchase` refuses an amount that is not a plain decimal. Waiting will not make it
+    // one, so the event ends here rather than spending four more attempts on the same answer.
+    return { reason: UNBUILDABLE };
+  }
+}
+
+/**
+ * Ends one claimed event without sending it, and gives back the attempt the claim spent.
+ *
+ * Nothing was refused and nothing was even offered to Meta, so charging the event an attempt
+ * would be a lie told in a column an owner reads as «попыток: 1». `skipAll` spends none for
+ * the same reason; this path only has to undo what `claim` did a moment earlier.
+ */
+async function skipOne(db: Db, id: string, reason: string): Promise<void> {
+  await db
+    .update(capiEvents)
+    .set({
+      status: 'skipped',
+      error: reason,
+      attempts: sql`greatest(${capiEvents.attempts} - 1, 0)`,
+    })
+    .where(eq(capiEvents.id, id));
+}
+
+/**
+ * Re-reads what the claimed batch actually reports, and returns what is still worth sending.
+ *
+ * Only purchases are rebuilt. A lead is a milestone that cannot be undone: a conversation
+ * legitimately walks on from the qualifying stage into `awaiting_payment` or `success`, so
+ * asking «is it still qualified?» would drop exactly the leads that converted, and by then
+ * `stage_set_at` names a later stage — a rebuilt `event_time` would be the wrong moment, not
+ * a corrected one. Everything else a lead carries is write-once (`ctwa_clid`) or not editable
+ * in the cabinet (the contact's phone), and a lead has no amount, which is the mutable half
+ * of a purchase. There is nothing about a lead that a second read would tell us.
+ */
+async function refresh(
+  db: Db,
+  agentId: string,
+  claimed: ClaimedEvent[],
+): Promise<{ ready: ClaimedEvent[]; skipped: number }> {
+  const ready: ClaimedEvent[] = [];
+  let skipped = 0;
+
+  for (const event of claimed) {
+    if (event.kind !== 'purchase') {
+      ready.push(event);
+      continue;
+    }
+
+    const rebuilt = await rebuildPurchase(db, agentId, event.order_id);
+    if ('reason' in rebuilt) {
+      await skipOne(db, event.id, rebuilt.reason);
+      skipped += 1;
+      continue;
+    }
+
+    // Stored, so the log shows the bytes that were actually sent rather than the ones an
+    // earlier version of the order produced. Written only when it changed, so an unchanged
+    // batch is one statement lighter.
+    if (rebuilt.body !== event.payload) {
+      await db
+        .update(capiEvents)
+        .set({ payload: rebuilt.body })
+        .where(eq(capiEvents.id, event.id));
+    }
+
+    ready.push({ ...event, payload: rebuilt.body });
+  }
+
+  return { ready, skipped };
 }
 
 /**
@@ -239,6 +420,10 @@ export async function sendPendingCapiEvents(
   const deadline = Date.now() + MAX_DRAIN_MS;
   const result: CapiDrainResult = { sent: 0, failed: 0, skipped: 0 };
 
+  // Before anything is claimed: a row left behind by a drain that died is invisible to every
+  // query below it, so nothing else in this function would ever find it.
+  result.failed += await failExhausted(db);
+
   // Agents first, batches second: Meta takes an array, so one agent with five sales is one
   // request. Oldest queue first, so a busy agent cannot keep a quiet one waiting forever.
   const waiting = rowsOf<{ agent_id: string }>(
@@ -271,6 +456,12 @@ export async function sendPendingCapiEvents(
     const claimed = await claim(db, agentId);
     if (claimed.length === 0) continue;
 
+    // Read again before sending: the order may have been cancelled or corrected since it was
+    // queued, and the event id does not change, so what goes out is the same conversion.
+    const { ready, skipped } = await refresh(db, agentId, claimed);
+    result.skipped += skipped;
+    if (ready.length === 0) continue;
+
     let token = '';
     try {
       // Decrypted inside the try, on purpose: a key that no longer matches — rotated, or a
@@ -279,9 +470,10 @@ export async function sendPendingCapiEvents(
       // hide when decryption itself is what failed.
       token = decryptSecret(settings.accessToken, deps.key, tokenAad(agentId));
 
-      // The payloads go out as they were stored. They are not parsed, not rebuilt and not
-      // re-serialised anywhere on this path — that is what keeps the order's amount the
-      // digits the column holds.
+      // The payloads go out as `refresh` left them: rebuilt from the order for a purchase,
+      // stored as they were for a lead. Either way they are bytes by now — nothing on this
+      // path parses or re-serialises them, which is what keeps the order's amount the digits
+      // the column holds.
       //
       // Meta's `fbtrace_id` is kept: it is the first thing their support asks for when a
       // report is missing from Events Manager, and by then the response is long gone. A
@@ -290,7 +482,7 @@ export async function sendPendingCapiEvents(
         datasetId: settings.datasetId,
         token,
         testEventCode: settings.testEventCode,
-        events: claimed.map((row) => row.payload),
+        events: ready.map((row) => row.payload),
       });
 
       await db
@@ -301,11 +493,11 @@ export async function sendPendingCapiEvents(
           error: null,
           fbtraceId: answer.fbtraceId,
         })
-        .where(inArray(capiEvents.id, claimed.map((row) => row.id)));
-      result.sent += claimed.length;
+        .where(inArray(capiEvents.id, ready.map((row) => row.id)));
+      result.sent += ready.length;
     } catch (error) {
-      await recordFailure(db, claimed, error, token);
-      result.failed += claimed.length;
+      await recordFailure(db, ready, error, token);
+      result.failed += ready.length;
     }
   }
 

@@ -113,6 +113,16 @@ export const agents = pgTable(
     // Encrypted with the credentials key, the same way a WhatsApp token is. Never selected
     // into an API response.
     openrouterKey: text('openrouter_key'),
+    // The instant this agent began recording stage movement into `stage_transitions`.
+    //
+    // Everything before it is unrecorded and unrecoverable: the cabinet kept only the last
+    // move a lead made, and nothing it kept can be turned into the moves that came before.
+    // The statistics screen names this date so an owner reads the funnel as «since then»
+    // rather than assuming it covers the whole history of their business. The migration that
+    // adds the column stamps every agent that already exists; a new agent takes the default.
+    stageHistorySince: timestamp('stage_history_since', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index('agents_account_id_idx').on(t.accountId)],
@@ -352,6 +362,55 @@ export const orders = pgTable(
   (t) => [
     index('orders_conversation_idx').on(t.conversationId),
     index('orders_agent_paid_at_idx').on(t.agentId, t.paidAt),
+  ],
+);
+
+/**
+ * One move of one lead from one stage to another.
+ *
+ * Append-only. Nothing updates or deletes a row here: a move recorded wrongly is corrected
+ * by the next move, not by rewriting this one. That is what lets the funnel be read as a
+ * ledger — the count of entries into a stage over a period cannot change after the fact.
+ *
+ * Every stage is stored twice, as an id and as a snapshot of its name, kind and position at
+ * the moment of the move. An owner may delete a stage once it is empty, and `set null` on
+ * the id alone would erase which stage a lead passed through, leaving a row that says a move
+ * happened but not where to. The snapshot keeps the row readable forever; the id is what the
+ * funnel joins on while the stage still exists, and what the chain is built from.
+ *
+ * `conversationId` cascades, unlike `capi_events.conversation_id`, which nulls. The funnel
+ * counts distinct conversations per stage, and a row whose conversation is gone cannot be
+ * counted distinctly without inventing an identity for it. A report already sent to Meta is
+ * a fact about the outside world and survives the lead; a row here is only ever an input to
+ * our own arithmetic, so it goes when the lead does.
+ */
+export const stageTransitions = pgTable(
+  'stage_transitions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    agentId: uuid('agent_id')
+      .notNull()
+      .references(() => agents.id, { onDelete: 'cascade' }),
+    conversationId: uuid('conversation_id')
+      .notNull()
+      .references(() => conversations.id, { onDelete: 'cascade' }),
+    fromStageId: uuid('from_stage_id').references(() => stages.id, { onDelete: 'set null' }),
+    toStageId: uuid('to_stage_id').references(() => stages.id, { onDelete: 'set null' }),
+    // Null exactly when the lead came from nowhere — its first stage.
+    fromName: text('from_name'),
+    toName: text('to_name').notNull(),
+    // 'active' | 'qualified' | 'awaiting_payment' | 'success' | 'failure'
+    toKind: text('to_kind').notNull(),
+    fromPosition: integer('from_position'),
+    toPosition: integer('to_position').notNull(),
+    // 'operator' | 'ai' | 'scenario' | 'system'
+    movedBy: text('moved_by').notNull(),
+    movedByUserId: uuid('moved_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+    occurredAt: timestamp('occurred_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('stage_transitions_agent_occurred_idx').on(t.agentId, t.occurredAt),
+    index('stage_transitions_conversation_idx').on(t.conversationId, t.occurredAt),
   ],
 );
 

@@ -78,6 +78,13 @@
       "when": 1788432117163,
       "tag": "0010_mute_baron_zemo",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1788441157957,
+      "tag": "0011_long_jack_power",
+      "breakpoints": true
     }
   ]
 }

@@ -27,6 +27,8 @@ export function CustomersScreen() {
 
   const customers = useApi<Customer[]>((signal) => api.listCustomers(agent.id, signal), [agent.id]);
 
+  const open = (conversationId: string) => navigate(`../dialogs?conversation=${conversationId}`);
+
   const rows = useMemo(() => {
     const found = (customers.data ?? []).filter((customer) =>
       matches(customer, query.trim().toLowerCase()),
@@ -38,8 +40,12 @@ export function CustomersScreen() {
       if (sort === 'name') {
         return (a.contactName ?? a.contactPhone).localeCompare(b.contactName ?? b.contactPhone, 'ru');
       }
-      // No activity goes to the bottom, not the top: a missing date is not «the freshest».
-      return (b.lastMessageAt ?? '').localeCompare(a.lastMessageAt ?? '');
+      // Compared as plain strings, not with localeCompare: these are ISO timestamps, where
+      // byte order is time order, and a locale has no business deciding it. No activity goes
+      // to the bottom rather than the top — a missing date is not «the freshest».
+      const left = a.lastMessageAt ?? '';
+      const right = b.lastMessageAt ?? '';
+      return right < left ? -1 : right > left ? 1 : 0;
     });
   }, [customers.data, query, sort]);
 
@@ -53,6 +59,8 @@ export function CustomersScreen() {
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
               <input
                 value={query}
+                type="search"
+                aria-label="Поиск по имени или телефону"
                 placeholder="Имя или телефон"
                 onChange={(e) => setQuery(e.target.value)}
                 style={{
@@ -101,7 +109,7 @@ export function CustomersScreen() {
               номер.
             </EmptyState>
           ) : rows.length === 0 ? (
-            <EmptyState>Никто не подошёл под «{query}».</EmptyState>
+            <EmptyState>Никто не подошёл под «{query.trim()}».</EmptyState>
           ) : (
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead>
@@ -127,8 +135,19 @@ export function CustomersScreen() {
                   <tr
                     key={customer.conversationId}
                     className="row-hover"
+                    // A table row is not focusable by itself, so without these the whole
+                    // table is unreachable from the keyboard — and a list of customers is
+                    // exactly what someone walks through without touching the mouse.
+                    tabIndex={0}
+                    role="link"
                     style={{ borderTop: '1px solid var(--line-soft)', cursor: 'pointer' }}
-                    onClick={() => navigate(`../dialogs?conversation=${customer.conversationId}`)}
+                    onClick={() => open(customer.conversationId)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        open(customer.conversationId);
+                      }
+                    }}
                   >
                     <td style={cell}>
                       <div style={{ fontWeight: 600 }}>

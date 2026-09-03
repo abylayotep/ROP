@@ -3,6 +3,8 @@ import type {
   AiModel,
   AiSettings,
   AiTurn,
+  AiUsage,
+  AiUsagePeriod,
   Board,
   ConversationSummary,
   ConversationThread,
@@ -297,6 +299,16 @@ export const updateAiSettings = (
 /** The same list for every account: model ids the server will accept, with their lines. */
 export const listAiModels = (signal?: AbortSignal) =>
   request<AiModel[]>('/ai/models', { signal });
+
+/**
+ * Во что обошлись ответы агента за период, и во что — каждая модель отдельно.
+ *
+ * Любому сотруднику: настройки правит владелец, но потрачены деньги компании.
+ * `total` приходит `null`, когда за период ходов не было, — это не то же самое, что
+ * строка нулей, и экран говорит об этом словами.
+ */
+export const getAiUsage = (agentId: string, period: AiUsagePeriod, signal?: AbortSignal) =>
+  request<AiUsage>(`/agents/${agentId}/ai/usage?period=${period}`, { signal });
 
 /**
  * Один ход агента, который никуда не уходит.

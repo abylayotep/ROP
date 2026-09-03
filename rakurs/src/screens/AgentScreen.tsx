@@ -1,11 +1,11 @@
 import { useState, type CSSProperties, type FormEvent, type ReactNode } from 'react';
 import * as api from '@/api';
-import { Card, CardHead, Toggle } from '@/components/ui/primitives';
-import { Async, Skeleton } from '@/components/ui/states';
+import { Card, CardHead, Segmented, Toggle } from '@/components/ui/primitives';
+import { Async, EmptyState, Skeleton } from '@/components/ui/states';
 import { useToast } from '@/components/ui/Toast';
 import { useApi } from '@/hooks/useApi';
 import { useAgent } from '@/store/agent';
-import type { AiModel, AiSettings, AiTurn } from '@/types';
+import type { AiModel, AiSettings, AiTurn, AiUsage, AiUsagePeriod } from '@/types';
 
 /**
  * Что агент говорит клиентам, чем он это говорит и что бы он ответил.
@@ -163,6 +163,8 @@ function AgentSettings({
         settings={settings}
         onSaved={setSettings}
       />
+      {/* Прямо под выбором модели: решение принимают здесь, и цена нужна здесь же. */}
+      <UsageCard agentId={agentId} models={loaded.models} />
       {owner && <KeyCard agentId={agentId} settings={settings} onSaved={setSettings} />}
       {owner && <SandboxCard agentId={agentId} settings={settings} />}
       {!owner && (
@@ -490,11 +492,217 @@ function ModelCard({
   );
 }
 
+/* ── Расход ──────────────────────────────────────────────────────────────── */
+
+const PERIODS: { id: AiUsagePeriod; label: string; plainly: string }[] = [
+  { id: 'day', label: 'Сутки', plainly: 'За последние сутки' },
+  { id: 'week', label: 'Неделя', plainly: 'За последние 7 дней' },
+  { id: 'month', label: 'Месяц', plainly: 'За последние 30 дней' },
+];
+
+/**
+ * Доллары OpenRouter, а не валюта компании: платит владелец им и в них.
+ *
+ * Число доходит сюда строкой и складывается в Postgres — здесь оно только печатается.
+ * Знаков после запятой четыре, пока сумма меньше доллара: на дешёвой модели сутки стоят
+ * доли цента, и два знака показали бы «0,00 $» там, где расход есть.
+ */
+function money(cost: string): string {
+  const value = Number(cost);
+  if (!Number.isFinite(value)) return `${cost} $`;
+  const digits = value !== 0 && value < 1 ? 4 : 2;
+  return `${value.toFixed(digits).replace('.', ',')} $`;
+}
+
+const count = (value: number) => value.toLocaleString('ru-RU');
+
+/** Одно число с подписью. Плитками, потому что читают их взглядом, а не по строкам. */
+function Stat({ label, value, color }: { label: string; value: string; color?: string }) {
+  return (
+    <div style={{ minWidth: 96 }}>
+      <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>{label}</div>
+      <div
+        className="mono"
+        style={{ fontSize: 19, fontWeight: 700, letterSpacing: '-0.5px', marginTop: 4, color }}
+      >
+        {value}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Во что обошлись ответы агента — то, ради чего выбор модели вообще можно сравнить.
+ *
+ * Период выбирается, а не подразумевается, и назван словами: «за последние 7 дней» — это
+ * ответ, а «7» в углу — загадка. Ходов за период не было — так и написано; строка нулей
+ * читалась бы как факт о модели, а у владельца, который агента ещё не включал, никакого
+ * факта о модели нет.
+ *
+ * Свой запрос, а не часть загрузки экрана: смена периода не должна гасить недописанные
+ * инструкции и ответ песочницы.
+ */
+function UsageCard({ agentId, models }: { agentId: string; models: AiModel[] }) {
+  const [period, setPeriod] = useState<AiUsagePeriod>('week');
+  const query = useApi<AiUsage>((signal) => api.getAiUsage(agentId, period, signal), [
+    agentId,
+    period,
+  ]);
+
+  const chosen = PERIODS.find((item) => item.id === period)!;
+  // Модель, которой больше нет в списке, показывается своим идентификатором: журнал хранит
+  // то, что работало, и переименовывать это задним числом нечем.
+  const modelLabel = (id: string) => models.find((item) => item.id === id)?.label ?? id;
+
+  return (
+    <Card>
+      <CardHead
+        title="Расход"
+        gap={12}
+        right={
+          <Segmented
+            items={PERIODS.map((item) => ({ id: item.id, label: item.label }))}
+            value={period}
+            onChange={setPeriod}
+            size="sm"
+          />
+        }
+      />
+
+      <Async state={query} skeleton={<Skeleton height={96} />} compactError>
+        {(usage) => (
+          <>
+            <div style={{ fontSize: 12, color: 'var(--text-dim)' }}>
+              {chosen.plainly}, с{' '}
+              {new Date(usage.since).toLocaleDateString('ru-RU', {
+                day: 'numeric',
+                month: 'long',
+              })}
+              .
+            </div>
+
+            {usage.total === null ? (
+              <EmptyState>
+                За этот период агент не отвечал — считать нечего.
+                <br />
+                Расход появляется здесь после первого ответа клиенту или запуска песочницы.
+              </EmptyState>
+            ) : (
+              <>
+                <div
+                  style={{
+                    display: 'flex',
+                    flexWrap: 'wrap',
+                    gap: '16px 28px',
+                    marginTop: 14,
+                  }}
+                >
+                  <Stat label="Ходов" value={count(usage.total.turns)} />
+                  <Stat
+                    label="Ушло клиенту"
+                    value={count(usage.total.sent)}
+                    color="var(--accent-2)"
+                  />
+                  <Stat
+                    label="Передано человеку"
+                    value={count(usage.total.handoff)}
+                    color={usage.total.handoff > 0 ? 'var(--warn)' : undefined}
+                  />
+                  <Stat
+                    label="Не дошло"
+                    value={count(usage.total.failed)}
+                    color={usage.total.failed > 0 ? 'var(--danger)' : undefined}
+                  />
+                  <Stat
+                    label="Токенов"
+                    value={count(usage.total.promptTokens + usage.total.completionTokens)}
+                  />
+                  <Stat label="Потрачено" value={money(usage.total.cost)} />
+                </div>
+
+                {/* По моделям — ради сравнения той, на которой сидят, с той, с которой
+                    ушли. Если модель за период была одна, сравнивать не с чем: таблица из
+                    одной строки повторила бы плитки выше, и вместо неё — строка о том, чьи
+                    это цифры. Не назвать модель нельзя: плитки сами по себе молчат о том,
+                    к чему относятся. */}
+                {usage.byModel.length === 1 && (
+                  <div style={{ ...hint, marginTop: 12 }}>
+                    Все ходы за период — на модели {modelLabel(usage.byModel[0]!.model)}.
+                  </div>
+                )}
+                {usage.byModel.length > 1 && (
+                  <div style={{ marginTop: 18 }}>
+                    <div style={{ ...label, marginBottom: 8 }}>По моделям</div>
+                    <div style={{ overflowX: 'auto' }}>
+                      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                        <thead>
+                          <tr style={{ color: 'var(--text-dim)', textAlign: 'right' }}>
+                            <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500 }}>
+                              Модель
+                            </th>
+                            <th style={{ padding: '6px 8px', fontWeight: 500 }}>Ходов</th>
+                            <th style={{ padding: '6px 8px', fontWeight: 500 }}>Ушло</th>
+                            <th style={{ padding: '6px 8px', fontWeight: 500 }}>Человеку</th>
+                            <th style={{ padding: '6px 8px', fontWeight: 500 }}>Не дошло</th>
+                            <th style={{ padding: '6px 8px', fontWeight: 500 }}>Токенов</th>
+                            <th style={{ padding: '6px 8px', fontWeight: 500 }}>Потрачено</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {usage.byModel.map((row) => (
+                            <tr
+                              key={row.model}
+                              style={{ borderTop: '1px solid var(--line-soft)', textAlign: 'right' }}
+                            >
+                              <td style={{ textAlign: 'left', padding: '8px' }}>
+                                {modelLabel(row.model)}
+                              </td>
+                              <td className="mono" style={{ padding: '8px' }}>
+                                {count(row.turns)}
+                              </td>
+                              <td className="mono" style={{ padding: '8px' }}>
+                                {count(row.sent)}
+                              </td>
+                              <td className="mono" style={{ padding: '8px' }}>
+                                {count(row.handoff)}
+                              </td>
+                              <td className="mono" style={{ padding: '8px' }}>
+                                {count(row.failed)}
+                              </td>
+                              <td className="mono" style={{ padding: '8px' }}>
+                                {count(row.promptTokens + row.completionTokens)}
+                              </td>
+                              <td className="mono" style={{ padding: '8px' }}>
+                                {money(row.cost)}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                <div style={hint}>
+                  Это то, что OpenRouter выставил за вызовы модели, в долларах. Сюда попадают
+                  и запуски песочницы, и повтор после негодного ответа — два вызова и один
+                  счёт. Модель, которая цену не сообщает, записывается нулём: ход был, а
+                  строка стоимости пустая. Точный счёт — в аккаунте OpenRouter.
+                </div>
+              </>
+            )}
+          </>
+        )}
+      </Async>
+    </Card>
+  );
+}
+
 /**
  * Ключ OpenRouter — тем же путём, что и токен WhatsApp.
  *
  * Ключ уходит на сервер и обратно не возвращается: экран знает только, есть он или нет.
- * Оплату модели владелец видит у себя в OpenRouter, а не здесь.
+ * Расход по модели — в карточке «Расход» выше; точный счёт — в аккаунте OpenRouter.
  */
 function KeyCard({
   agentId,

@@ -341,3 +341,53 @@ export interface AiTurn {
   /** Why it ended that way, when that is worth telling the owner. Never carries a key. */
   detail: string | null;
 }
+
+/* ── Расход агента ──────────────────────────────────────────────────────────
+ * Что стоили ответы агента за период — чтобы выбор модели можно было сравнить
+ * с ценой, а не только с ощущением. Строится по журналу ответов. */
+
+/** How far back a usage answer looks. The screen offers exactly these three. */
+export type AiUsagePeriod = 'day' | 'week' | 'month';
+
+/** One period's turns, counted by how they ended, with what they spent. */
+export interface AiUsageTotals {
+  /** Every turn that reached the model, however it ended. */
+  turns: number;
+  /** Reached the customer. */
+  sent: number;
+  /** Left to a person — the model asked, or the cabinet withheld the reply. */
+  handoff: number;
+  /** Produced nothing: OpenRouter refused, or the reply never left. */
+  failed: number;
+  promptTokens: number;
+  completionTokens: number;
+  /**
+   * What OpenRouter charged, in US dollars, as a string.
+   *
+   * A string end to end for the same reason an order's amount is one: summed in Postgres
+   * as `numeric` and read back as text, so a fraction of a cent per turn is never rounded
+   * through a float on its way to the screen.
+   */
+  cost: string;
+}
+
+/** The same counts for one model, so two models can be compared side by side. */
+export interface AiUsageModel extends AiUsageTotals {
+  /** An OpenRouter model id. It may be one no longer offered — the log keeps what ran. */
+  model: string;
+}
+
+export interface AiUsage {
+  period: AiUsagePeriod;
+  /** The moment the period starts, ISO. The screen names it rather than implying it. */
+  since: string;
+  /**
+   * Null when the agent took no turns in the period.
+   *
+   * Null and not a row of zeros: an owner who has not switched the agent on would read
+   * «0 $» as a fact about their model instead of the absence of any fact at all.
+   */
+  total: AiUsageTotals | null;
+  /** One row per model that ran, busiest first. Empty exactly when `total` is null. */
+  byModel: AiUsageModel[];
+}

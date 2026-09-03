@@ -4,14 +4,23 @@
  * The settings follow the path `whatsapp-numbers.ts` settled on for a WhatsApp token: the
  * key goes in and never comes out, and what a reader is told is whether one is stored.
  */
-import type { AiModel, AiSettings, AiTurn } from '@rakurs/contract';
-import { and, asc, desc, eq, inArray } from 'drizzle-orm';
+import type {
+  AiModel,
+  AiSettings,
+  AiTurn,
+  AiUsage,
+  AiUsageModel,
+  AiUsagePeriod,
+  AiUsageTotals,
+} from '@rakurs/contract';
+import { and, asc, desc, eq, gte, inArray, sql } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { POOL_MAX, type Db } from '../db/client.js';
 import {
   agents,
+  aiReplies,
   contacts,
   conversations,
   kbItems,
@@ -77,6 +86,68 @@ const settings = z
     openrouterKey: z.string().trim().min(1).nullable().optional(),
   })
   .refine((body) => Object.keys(body).length > 0);
+
+/**
+ * How far back each period looks. A month is thirty days, not a calendar one.
+ *
+ * The owner is asking «во сколько мне обходится эта модель», not «сколько я потратил в
+ * августе»: a rolling window answers that on the third of the month as well as on the
+ * thirtieth, where a calendar month would show two days of turns and look like a bargain.
+ */
+const PERIOD_DAYS: Record<AiUsagePeriod, number> = { day: 1, week: 7, month: 30 };
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+const usageQuery = z.object({ period: z.enum(['day', 'week', 'month']).optional() });
+
+/**
+ * Everything a usage answer counts, in one aggregate — the whole period, or one model.
+ *
+ * Counted and summed in Postgres rather than over rows read into Node: a month of turns is
+ * a row per reply, and none of them is worth sending over the wire to be added up here.
+ *
+ * The two token sums are cast to `bigint` and read back as text, then parsed. `::int` would
+ * be enough for any real agent and would raise `integer out of range` for the one that is
+ * not — turning a busy month into a 500 on the screen that exists to explain the bill.
+ *
+ * The cost is a string the whole way, exactly as `board.ts` sums an order total: `numeric`
+ * added in Postgres and read back with `::text`. A turn costs fractions of a cent, and a
+ * float would round them away before anyone saw them. The sum is cast wider than the column
+ * — `cost` is numeric(12,8), so ten thousand of the most expensive turns imaginable still
+ * fit inside numeric(16,8) rather than raising `numeric field overflow` on the whole route.
+ */
+const usageColumns = {
+  turns: sql<number>`count(*)::int`,
+  sent: sql<number>`(count(*) filter (where ${aiReplies.outcome} = 'sent'))::int`,
+  handoff: sql<number>`(count(*) filter (where ${aiReplies.outcome} = 'handoff'))::int`,
+  failed: sql<number>`(count(*) filter (where ${aiReplies.outcome} = 'failed'))::int`,
+  promptTokens: sql<string>`coalesce(sum(${aiReplies.promptTokens}), 0)::bigint::text`,
+  completionTokens: sql<string>`coalesce(sum(${aiReplies.completionTokens}), 0)::bigint::text`,
+  cost: sql<string>`coalesce(sum(${aiReplies.cost}), 0)::numeric(16,8)::text`,
+};
+
+/** What `usageColumns` selects, before the two token sums stop being text. */
+interface UsageRow {
+  turns: number;
+  sent: number;
+  handoff: number;
+  failed: number;
+  promptTokens: string;
+  completionTokens: string;
+  cost: string;
+}
+
+const toTotals = (row: UsageRow): AiUsageTotals => ({
+  turns: row.turns,
+  sent: row.sent,
+  handoff: row.handoff,
+  failed: row.failed,
+  // Text out of Postgres, a number in the contract: a token count is a count, not an
+  // amount, and it is far below the point where a double stops being exact.
+  promptTokens: Number(row.promptTokens),
+  completionTokens: Number(row.completionTokens),
+  cost: row.cost,
+});
 
 /** The key is never part of this. Only whether there is one. */
 const toApi = (row: typeof agents.$inferSelect): AiSettings => ({
@@ -255,6 +326,56 @@ export function registerAiRoutes(
   // business. A session is still required — it is not the public's list.
   app.get('/api/ai/models', { preHandler: [guard] }, async (): Promise<AiModel[]> =>
     MODELS.map((model) => ({ ...model })),
+  );
+
+  /**
+   * Во что обошлись ответы агента за период, и во что — каждая модель отдельно.
+   *
+   * Any member, not owner only: the settings this reads beside are the owner's, but what the
+   * agent did is the company's, and a manager watching the agent answer should not have to
+   * ask the owner what it cost.
+   *
+   * Two statements rather than one with `grouping sets`: neither reads the other's result, so
+   * they go together, and the whole-period total is summed by Postgres in its own right — not
+   * by adding the per-model rows up in Node, where the cost would stop being a string.
+   */
+  app.get(
+    '/api/agents/:agentId/ai/usage',
+    { preHandler: [guard, anyMember] },
+    async (req): Promise<AiUsage> => {
+      const parsed = usageQuery.safeParse(req.query);
+      if (!parsed.success) throw new ApiError(400, 'Неизвестный период');
+      const period = parsed.data.period ?? 'week';
+
+      // Computed here and answered back, so the screen names the same instant the numbers
+      // were counted from instead of guessing at one from its own clock.
+      const since = new Date(Date.now() - PERIOD_DAYS[period] * DAY_MS);
+      const window = and(eq(aiReplies.agentId, req.agent!.id), gte(aiReplies.createdAt, since));
+
+      const [totalRows, modelRows] = await Promise.all([
+        db.select(usageColumns).from(aiReplies).where(window),
+        db
+          .select({ model: aiReplies.model, ...usageColumns })
+          .from(aiReplies)
+          .where(window)
+          .groupBy(aiReplies.model)
+          // Busiest first — that is the model the owner is on. The model id breaks a tie so
+          // two models with the same number of turns do not swap places between reloads.
+          .orderBy(sql`count(*) desc`, asc(aiReplies.model)),
+      ]);
+
+      // `count(*)` over no rows is one row of zeros, not no rows: the emptiness has to be
+      // recognised here, or the screen would report a month of free answers.
+      const total = totalRows[0]!;
+      const empty = total.turns === 0;
+
+      return {
+        period,
+        since: since.toISOString(),
+        total: empty ? null : toTotals(total),
+        byModel: modelRows.map((row): AiUsageModel => ({ model: row.model, ...toTotals(row) })),
+      };
+    },
   );
 
   app.post(

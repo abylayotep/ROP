@@ -174,6 +174,41 @@ function targetUrl(raw: string): URL {
 }
 
 /**
+ * The address a page source is known by: what the owner typed, tidied.
+ *
+ * **The identity of a page source is the typed address, never where the fetch ended up.**
+ * The final URL is knowable only when the fetch succeeds, and a key that exists on one path
+ * and not the other is not a key: a failure on a redirecting address — `http` to `https`, or
+ * bare to `www`, which is most real sites — could not find the row the successful import had
+ * written under the final URL, so it inserted a second one. The next success rewrote that
+ * row's url to the final URL, and the sources list held two rows for one address with the
+ * items split between them and the younger one unreachable for good. The typed address is
+ * known before the fetch, after a failed fetch, and after a successful one, and it is also
+ * the thing the owner will paste again.
+ *
+ * The redirect is not lost by this — it is followed again on every read, which is what a
+ * redirect is for.
+ *
+ * Tidied, because three spellings of one page are one page and were three sources with a
+ * full duplicate set of items each:
+ *
+ * - the fragment goes: `#top` is a position in a page, and it never reaches the server;
+ * - a trailing slash goes, except on the root: `/prices` and `/prices/` are one page
+ *   everywhere that is not a deliberately broken server;
+ * - the scheme and host are lowercased, which `URL` does for us.
+ *
+ * **The query string is left exactly as it is.** `?id=5` is very often the page itself, and
+ * folding it away would merge a whole catalogue into one source — a worse failure than the
+ * duplicates this prevents, and a silent one.
+ */
+function pageKey(url: URL): string {
+  const key = new URL(url.href);
+  key.hash = '';
+  key.pathname = key.pathname.replace(/\/+$/, '') || '/';
+  return key.href;
+}
+
+/**
  * What really happened, for `app.log` and nowhere else.
  *
  * The owner is shown `PAGE_REFUSED` and only that, however the fetch failed — see the note
@@ -463,6 +498,8 @@ export function registerKnowledgeRoutes(
   async function applyReimport(
     agentId: string,
     source: typeof kbSources.$inferSelect,
+    /** The address the source is known by — `source.url`, which both callers have proven. */
+    url: string,
     page: FetchedPage,
     parts: SplitPart[],
   ): Promise<KbImport> {
@@ -482,8 +519,10 @@ export function registerKnowledgeRoutes(
       const [updated] = await tx
         .update(kbSources)
         .set({
-          title: pageTitle(page.html, page.finalUrl),
-          url: page.finalUrl,
+          title: pageTitle(page.html, url),
+          // `url` is not written back. It is what this source is known by, and a reimport
+          // that moved it to wherever the redirects ended would make the row unfindable by
+          // the address the owner keeps typing — which is the whole bug this key exists for.
           status: 'ready',
           // Cleared, not left behind: this attempt succeeded, and a stale reason beside a
           // ready source reads as a failure that is still happening.
@@ -571,20 +610,19 @@ export function registerKnowledgeRoutes(
     async (req): Promise<KbImport> => {
       const parsed = importPage.safeParse(req.body);
       if (!parsed.success) throw knowledgeError(parsed.error.issues[0]);
-      const url = targetUrl(parsed.data.url);
+      // One key, from the address itself, so every path below — the failure, the lookup, the
+      // insert and the reimport — names this source the same way. See `pageKey`.
+      const url = pageKey(targetUrl(parsed.data.url));
 
       let page: FetchedPage;
       try {
-        page = await pageFetcher.fetch(url.href);
+        page = await pageFetcher.fetch(url);
       } catch (error) {
         // The attempt is kept. The owner pasted an address, waited, and got an error; a
         // sources list that then shows nothing at all leaves them unable to tell a refusal
         // from a page that quietly imported as empty.
-        await recordFailure(req.agent!.id, url.href, PAGE_REFUSED);
-        app.log.warn(
-          { url: url.href, detail: failureDetail(error) },
-          'knowledge page import failed',
-        );
+        await recordFailure(req.agent!.id, url, PAGE_REFUSED);
+        app.log.warn({ url, detail: failureDetail(error) }, 'knowledge page import failed');
         throw new ApiError(502, PAGE_REFUSED);
       }
 
@@ -592,13 +630,7 @@ export function registerKnowledgeRoutes(
       // «Обновить» spelled another way — the owner means «read this page again» either way —
       // and without this it was a second source and a second copy of every item, with the
       // two drifting apart from the next reimport onwards.
-      //
-      // Both the typed address and where it ended up are looked for: the row stores the
-      // final URL, so a page that redirects would otherwise be found by neither the address
-      // the owner keeps typing nor, on the first pass, by anything else.
-      const existing =
-        (await findPageSource(req.agent!.id, url.href)) ??
-        (await findPageSource(req.agent!.id, page.finalUrl));
+      const existing = await findPageSource(req.agent!.id, url);
 
       const parts = partsOf(page);
       // Refused before anything is written: a source with no items is a row that says an
@@ -613,13 +645,11 @@ export function registerKnowledgeRoutes(
         throw new ApiError(400, NOTHING_TO_SAVE);
       }
 
-      if (existing) return applyReimport(req.agent!.id, existing, page, parts);
+      if (existing) return applyReimport(req.agent!.id, existing, url, page, parts);
 
       return storeImport(
         req.agent!.id,
-        // `finalUrl`, not what was typed: the fetcher follows redirects hop by hop, and the
-        // page the text came from is the one worth reimporting later.
-        { kind: 'page', title: pageTitle(page.html, page.finalUrl), url: page.finalUrl },
+        { kind: 'page', title: pageTitle(page.html, url), url },
         'other',
         parts,
       );
@@ -635,18 +665,19 @@ export function registerKnowledgeRoutes(
       if (source.kind !== 'page' || !source.url) {
         throw new ApiError(400, 'Обновить можно только импорт страницы');
       }
+      // The address the owner gave us, read again exactly as it was the first time. It will
+      // redirect again if it redirected before, which is the point: a redirect is a standing
+      // instruction of the site's, not a fact about the page we get to record once.
+      const url = source.url;
 
       // Fetched before anything is deleted, and outside the transaction: a site that is
       // down for an hour must not empty the knowledge base while it is.
       let page: FetchedPage;
       try {
-        page = await pageFetcher.fetch(source.url);
+        page = await pageFetcher.fetch(url);
       } catch (error) {
         await markFailed(source.id, req.agent!.id, PAGE_REFUSED);
-        app.log.warn(
-          { url: source.url, detail: failureDetail(error) },
-          'knowledge page reimport failed',
-        );
+        app.log.warn({ url, detail: failureDetail(error) }, 'knowledge page reimport failed');
         throw new ApiError(502, PAGE_REFUSED);
       }
 
@@ -660,7 +691,7 @@ export function registerKnowledgeRoutes(
         throw new ApiError(400, NOTHING_TO_SAVE);
       }
 
-      return applyReimport(req.agent!.id, source, page, parts);
+      return applyReimport(req.agent!.id, source, url, page, parts);
     },
   );
 

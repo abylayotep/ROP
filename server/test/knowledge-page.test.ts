@@ -101,6 +101,16 @@ const twoPrices = (windows: string) =>
 const priceList = (body: string) =>
   `<!doctype html><html><head><title>Сафина</title></head><body><h2>Прайс</h2><p>${body}</p></body></html>`;
 
+/** A price list of a given length: 400 lines split into two pieces, 700 into three. */
+const price = (tenge: string, lines: number) =>
+  priceList(`Дверь входная, ${tenge} тенге. `.repeat(lines));
+
+/** Serves one page at one address and imports it, for a test that needs it in place. */
+const importAt = (url: string, html: string) => {
+  setFetcher(fakeFetcher({ [url]: html }));
+  return importPage(url);
+};
+
 const importPage = (url: string) =>
   app.inject({
     method: 'POST',
@@ -319,6 +329,78 @@ describe('importing a page', () => {
     expect(await db.select().from(kbItems)).toHaveLength(3);
   });
 
+  it('keeps one row for an address that redirects, across a failure and a success', async () => {
+    // Most real addresses redirect: http to https, bare to www. The source used to be known
+    // by where the fetch ENDED, which a failed fetch cannot know — so a failure on such an
+    // address could not find the row the import had written, and inserted a second one. The
+    // next success then rewrote that row's url to the final address, leaving two rows for
+    // one page with the items split between them and the younger one lost for good.
+    const arrived = { html: PAGE, finalUrl: 'https://www.safina.kz/' };
+    setFetcher(fakeFetcher({ 'http://safina.kz/': arrived }));
+    const first = await importPage('http://safina.kz/');
+
+    expect(first.statusCode).toBe(200);
+    // Stored as typed. The redirect is followed again on every read, which is what a
+    // redirect is for — it is not a fact about the page we get to record once.
+    expect(first.json().source.url).toBe('http://safina.kz/');
+
+    setFetcher(fakeFetcher({ 'http://safina.kz/': new Error('таймаут') }));
+    const down = await importPage('http://safina.kz/');
+    expect(down.statusCode).toBe(502);
+    expect(await db.select().from(kbSources)).toHaveLength(1);
+
+    setFetcher(fakeFetcher({ 'http://safina.kz/': arrived }));
+    const back = await importPage('http://safina.kz/');
+
+    expect(back.json().reimported).toBe(true);
+    expect(back.json().source.id).toBe(first.json().source.id);
+    const rows = await db.select().from(kbSources);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.url).toBe('http://safina.kz/');
+    expect(rows[0]?.status).toBe('ready');
+    expect(await db.select().from(kbItems)).toHaveLength(3);
+  });
+
+  it('refetches the typed address on «Обновить», not where it last led', async () => {
+    setFetcher(fakeFetcher({ 'http://safina.kz/': { html: PAGE, finalUrl: 'https://safina.kz/' } }));
+    const first = await importPage('http://safina.kz/');
+
+    // Only the typed address is served, so a reimport that had stored the final URL asks for
+    // a page this fetcher does not have and fails.
+    setFetcher(fakeFetcher({ 'http://safina.kz/': { html: PAGE, finalUrl: 'https://safina.kz/' } }));
+    const res = await reimport(first.json().source.id);
+
+    expect(res.statusCode).toBe(200);
+    expect(fetcher.calls).toEqual(['http://safina.kz/']);
+  });
+
+  it('treats a trailing slash and a fragment as the same address', async () => {
+    // Three spellings of one page were three sources, each with a full duplicate set of
+    // items. The query string is deliberately not folded away: `?id=5` is very often the
+    // page itself, and merging a catalogue into one source would be the worse mistake.
+    setFetcher(fakeFetcher({ 'https://safina.kz/dostavka': PAGE }));
+
+    await importPage('https://safina.kz/dostavka');
+    await importPage('https://safina.kz/dostavka/');
+    await importPage('https://safina.kz/dostavka#top');
+
+    const rows = await db.select().from(kbSources);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.url).toBe('https://safina.kz/dostavka');
+    expect(await db.select().from(kbItems)).toHaveLength(3);
+  });
+
+  it('keeps a different query string as a different page', async () => {
+    setFetcher(
+      fakeFetcher({ 'https://safina.kz/p?id=5': PAGE, 'https://safina.kz/p?id=6': PAGE }),
+    );
+
+    await importPage('https://safina.kz/p?id=5');
+    await importPage('https://safina.kz/p?id=6');
+
+    expect(await db.select().from(kbSources)).toHaveLength(2);
+  });
+
   it('gives the status column no default, because no path writes a third value', async () => {
     // Both imports are synchronous: the request fetches, splits and writes before it
     // answers. `pending` was a state nothing could ever be in, and a default is how a state
@@ -428,17 +510,46 @@ describe('reimporting', () => {
     expect(rows.some((row) => row.title === 'Доставка по городу')).toBe(true);
   });
 
-  it('counts an edited fragment of a page that no longer splits that way', async () => {
-    // A section long enough to be cut in two imports as «Прайс (1)» and «Прайс (2)». The
-    // owner edits the second piece, the page then shortens to a single «Прайс», and the
-    // fragment survives as part of a version of the page that no longer exists. Nothing can
-    // stitch it back on, so it is counted — the owner is the only one who can read the two
-    // and decide the fragment has had its day.
-    const long = 'Дверь входная, 80000 тенге. '.repeat(400);
-    setFetcher(fakeFetcher({ 'https://safina.kz/': priceList(long) }));
-    const first = await importPage('https://safina.kz/');
+  it('writes every fresh piece when a long section renumbers', async () => {
+    // The third scenario, and the one that kills the title filter twice over. A price list
+    // long enough to be cut in two imports as «Прайс (1)» and «Прайс (2)»; the owner edits
+    // the second piece; the list then grows and is cut into three. Matching by title
+    // discarded the fresh «Прайс (2)» — the middle of the current price list — and left the
+    // edited fragment of the OLD list sitting where it should have been, wearing its name.
+    const first = await importAt('https://safina.kz/', price('80000', 400));
     const pieces = first.json().items as { id: string; title: string }[];
     expect(pieces.map((piece) => piece.title)).toEqual(['Прайс (1)', 'Прайс (2)']);
+
+    await edit(pieces[1]!.id, 'Хвост прайса, выверенный руками.');
+
+    setFetcher(fakeFetcher({ 'https://safina.kz/': price('95000', 700) }));
+    const res = await reimport(first.json().source.id);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().keptEdited).toBe(1);
+    const rows = await db.select().from(kbItems);
+    expect(rows.map((row) => row.title).sort()).toEqual([
+      'Прайс (1)',
+      'Прайс (2)',
+      'Прайс (2)',
+      'Прайс (3)',
+    ]);
+    // The fresh middle piece is there, under the same title as the kept fragment. Nothing
+    // decides between the two here — that is the owner's reading, and `keptEdited` is how
+    // they are told there is one to do.
+    const fresh = rows.filter((row) => row.title === 'Прайс (2)' && !row.edited);
+    expect(fresh).toHaveLength(1);
+    expect(fresh[0]?.content).toContain('95000');
+    expect(rows.find((row) => row.edited)?.content).toBe('Хвост прайса, выверенный руками.');
+  });
+
+  it('counts an edited fragment of a page that no longer splits that way', async () => {
+    // The same section shortening instead of growing: «Прайс (2)» survives as a fragment of
+    // a version of the page that no longer exists, beside a whole fresh «Прайс». Nothing can
+    // stitch it back on, so it is counted — the owner is the only one who can read the two
+    // and decide the fragment has had its day.
+    const first = await importAt('https://safina.kz/', price('80000', 400));
+    const pieces = first.json().items as { id: string; title: string }[];
 
     await edit(pieces[1]!.id, 'Хвост прайса, выверенный руками.');
 

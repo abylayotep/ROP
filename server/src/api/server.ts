@@ -58,7 +58,7 @@ export function buildServer(env: Env, db: Db, deps: ServerDeps = {}): FastifyIns
   registerWhatsappNumberRoutes(app, db, env, guard, graph);
   registerConversationRoutes(app, db, env, guard, graph);
   registerStageRoutes(app, db, guard);
-  registerLeadRoutes(app, db, guard);
+  registerLeadRoutes(app, db, env, guard, graph);
   // Meta calls the webhook directly with no session of its own, so it takes no guard —
   // the request signature is the check instead.
   registerWhatsappWebhook(app, db, env, {

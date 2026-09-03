@@ -3,6 +3,7 @@ import { and, asc, eq } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
+import type { Env } from '../env.js';
 import {
   accountMembers,
   contacts,
@@ -15,7 +16,10 @@ import {
   users,
 } from '../db/schema.js';
 import { ApiError } from '../lib/errors.js';
+import { sendStageMessage } from '../lib/funnel-message.js';
+import { credentialsKey } from '../lib/secret-box.js';
 import { isUuid } from '../lib/uuid.js';
+import type { GraphClient } from '../lib/whatsapp/graph.js';
 import { requireAgent } from './require-agent.js';
 
 const patchLead = z.object({
@@ -133,7 +137,9 @@ export async function loadLead(
 export function registerLeadRoutes(
   app: FastifyInstance,
   db: Db,
+  env: Env,
   guard: preHandlerHookHandler,
+  graph: GraphClient,
 ): void {
   const anyMember = requireAgent(db);
 
@@ -198,6 +204,17 @@ export function registerLeadRoutes(
           .where(
             and(eq(conversations.id, conversationId), eq(conversations.agentId, req.agent!.id)),
           );
+      }
+
+      // Only on a real move to a real stage, and never on the first one a lead is given:
+      // a customer who has just written already has an answer, and a template on top of
+      // it is the cabinet talking over its own operator.
+      if (patch.stageId != null && current.stageId !== null) {
+        await sendStageMessage(
+          db,
+          { graph, key: credentialsKey(env) },
+          { agentId: req.agent!.id, conversationId, stageId: patch.stageId },
+        );
       }
       return loadLead(db, req.agent!, conversationId);
     },

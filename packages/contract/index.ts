@@ -58,7 +58,7 @@ export interface Message {
   id: string;
   /** 'in' | 'out' */
   direction: string;
-  /** 'client' | 'operator' | 'ai' */
+  /** 'client' | 'operator' | 'ai' | 'system' — 'system' is the cabinet's own auto-message. */
   author: string;
   /** WhatsApp's own type: text, image, audio, video, document, sticker, location, … */
   kind: string;

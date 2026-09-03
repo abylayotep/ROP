@@ -10,6 +10,7 @@ import { registerAgentRoutes } from './agents.js';
 import { registerAuthRoutes } from './auth.js';
 import { registerBoardRoutes } from './board.js';
 import { registerConversationRoutes } from './conversations.js';
+import { registerKnowledgeRoutes } from './knowledge.js';
 import { registerLeadRoutes } from './leads.js';
 import { registerOrderRoutes } from './orders.js';
 import { requireSession } from './require-session.js';
@@ -63,6 +64,7 @@ export function buildServer(env: Env, db: Db, deps: ServerDeps = {}): FastifyIns
   registerLeadRoutes(app, db, env, guard, graph);
   registerOrderRoutes(app, db, guard);
   registerBoardRoutes(app, db, guard);
+  registerKnowledgeRoutes(app, db, guard);
   // Meta calls the webhook directly with no session of its own, so it takes no guard —
   // the request signature is the check instead.
   registerWhatsappWebhook(app, db, env, {

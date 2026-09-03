@@ -254,6 +254,41 @@ describe('searchKnowledge', () => {
     expect(hits[0]?.item.id).toBe(row!.id);
   });
 
+  it('narrows to a kind inside the query, not after the limit', async () => {
+    const db = await withDb();
+    const agentId = await seedAgent(db);
+    await db.insert(kbItems).values([
+      item(agentId, 'Доставка', 'Доставка по Алматы, доставка в Астану.', 'procedure'),
+      item(agentId, 'Дверь входная', 'Цена включает доставку.', 'product'),
+    ]);
+
+    // A limit of one, and the procedure outranks the product. A caller that asked for
+    // everything and filtered the answer would be handed that one procedure and conclude
+    // there is no product — the door is in the store, just below the cut.
+    const hits = await searchKnowledge(db, agentId, 'доставка', 1, { kind: 'product' });
+
+    expect(hits).toHaveLength(1);
+    expect(hits[0]?.item.title).toBe('Дверь входная');
+  });
+
+  it('narrows to a kind on the loose pass as well', async () => {
+    const db = await withDb();
+    const agentId = await seedAgent(db);
+    await db.insert(kbItems).values([
+      item(agentId, 'Доставка', 'Возим по Алматы.', 'procedure'),
+      item(agentId, 'Дверь входная', 'Цена включает доставку.', 'product'),
+    ]);
+
+    // No item carries every word, so the strict pass finds nothing and the query is retried
+    // as OR. That second pass builds its own WHERE, and is where a narrowing added to only
+    // one of them would let the other kind back in.
+    const hits = await searchKnowledge(db, agentId, 'сколько стоит доставка', 10, {
+      kind: 'product',
+    });
+
+    expect(hits.map((hit) => hit.item.title)).toEqual(['Дверь входная']);
+  });
+
   it('keeps an item when the source it came from is deleted', async () => {
     const db = await withDb();
     const agentId = await seedAgent(db);

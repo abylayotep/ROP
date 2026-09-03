@@ -212,3 +212,35 @@ export interface Customer {
   firstSeenAt: string;
   assigneeName: string | null;
 }
+
+/* ── База знаний ────────────────────────────────────────────────────────────
+ * What the agent answers from. One row is one retrievable answer. */
+
+export type KbItemKind = 'product' | 'qa' | 'procedure' | 'contact' | 'other';
+
+export interface KbItem {
+  id: string;
+  kind: KbItemKind;
+  title: string;
+  content: string;
+  /** True once a person has changed it. A reimport keeps these and replaces the rest. */
+  edited: boolean;
+  sourceId: string | null;
+  /** The import this came from, for the screen. Null for a hand-written item. */
+  sourceTitle: string | null;
+  updatedAt: string;
+}
+
+export type KbSourceKind = 'text' | 'page';
+
+export interface KbSource {
+  id: string;
+  kind: KbSourceKind;
+  title: string;
+  url: string | null;
+  status: 'pending' | 'ready' | 'failed';
+  /** Why it failed, in the operator's language. Null when it did not. */
+  error: string | null;
+  itemCount: number;
+  createdAt: string;
+}

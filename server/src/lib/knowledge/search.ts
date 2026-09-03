@@ -28,9 +28,35 @@ export const TEXT_SEARCH_CONFIG = 'russian';
  */
 export type KbRow = Omit<typeof kbItems.$inferSelect, 'search'>;
 
+/**
+ * The columns a `KbRow` is made of, for every query that reads an item.
+ *
+ * Written once and shared with the routes, because `select()` means `SELECT *`: it fetches
+ * the tsvector — kilobytes of derived machinery per row — and puts it one `JSON.stringify`
+ * away from the wire. Naming the columns in one place is what makes `KbRow`'s promise true
+ * of every reader rather than only of this file.
+ */
+export const kbItemColumns = {
+  id: kbItems.id,
+  agentId: kbItems.agentId,
+  sourceId: kbItems.sourceId,
+  kind: kbItems.kind,
+  title: kbItems.title,
+  content: kbItems.content,
+  edited: kbItems.edited,
+  createdAt: kbItems.createdAt,
+  updatedAt: kbItems.updatedAt,
+} as const;
+
 export interface KnowledgeHit {
   item: KbRow;
   rank: number;
+}
+
+/** Narrowing applied inside the query. Stage 5 will add its own without a new function. */
+export interface SearchOptions {
+  /** Only items of this kind. Filtering the results instead would drop them after `limit`. */
+  kind?: string;
 }
 
 /**
@@ -74,6 +100,7 @@ export async function searchKnowledge(
   agentId: string,
   query: string,
   limit: number,
+  options: SearchOptions = {},
 ): Promise<KnowledgeHit[]> {
   const text = normalizeQuery(query);
   // A blank query matches everything in tsquery terms, which would hand the agent the whole
@@ -81,27 +108,24 @@ export async function searchKnowledge(
   // means no query is issued at all.
   if (text === '') return [];
 
+  // Every narrowing belongs in the WHERE, next to the tenancy check and before `limit` is
+  // applied. A caller that filtered the returned array instead would be filtering rows the
+  // ranker had already cut off at `limit`: with more matches than that, the items it asked
+  // for can be present in the store, ranked below the cut, and silently absent from what it
+  // gets back. Both passes carry it for the same reason.
+  const scope = and(
+    eq(kbItems.agentId, agentId),
+    options.kind === undefined ? undefined : eq(kbItems.kind, options.kind),
+  );
+
   // Both passes read the same rows and differ only in the tsquery they are asked for.
   const run = async (tsquery: SQL): Promise<KnowledgeHit[]> => {
     const rank = sql<number>`ts_rank_cd(${kbItems.search}, ${tsquery})`;
 
     const rows = await db
-      .select({
-        item: {
-          id: kbItems.id,
-          agentId: kbItems.agentId,
-          sourceId: kbItems.sourceId,
-          kind: kbItems.kind,
-          title: kbItems.title,
-          content: kbItems.content,
-          edited: kbItems.edited,
-          createdAt: kbItems.createdAt,
-          updatedAt: kbItems.updatedAt,
-        },
-        rank,
-      })
+      .select({ item: kbItemColumns, rank })
       .from(kbItems)
-      .where(and(eq(kbItems.agentId, agentId), sql`${kbItems.search} @@ ${tsquery}`))
+      .where(and(scope, sql`${kbItems.search} @@ ${tsquery}`))
       .orderBy(desc(rank))
       .limit(limit);
 

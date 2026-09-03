@@ -189,6 +189,9 @@ export function registerLeadRoutes(
         stagePatch.stageId = parsed.data.stageId;
         stagePatch.stageSetAt = new Date();
         // Stage 5 writes 'ai' here through the same column.
+        // The agent's own move in `lib/ai/turn.ts` is a COPY of this path, not a call to it:
+        // the same guarded UPDATE, the same auto-message, the same queued conversion, with
+        // `ai` in place of `operator`. A change here has to be made there too.
         stagePatch.stageSetBy = 'operator';
       }
 

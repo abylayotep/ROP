@@ -732,6 +732,10 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
         // stage's template once rather than twice.
         const stageMoved = await db
           .update(conversations)
+          // Deliberately the same shape as an operator's move in `leads.ts` — the guarded
+          // UPDATE, the auto-message, the queued conversion — but a COPY of it, not a call to
+          // it. A change to one has to be made to the other; the tests that pin the auto-message
+          // and the CAPI hook exist on both sides for that reason.
           .set({ stageId: target.id, stageSetAt: new Date(), stageSetBy: 'ai' })
           .where(
             and(

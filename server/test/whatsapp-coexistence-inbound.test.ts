@@ -158,3 +158,48 @@ describe('contacts synced from the phone', () => {
     expect(await db.select().from(contacts)).toHaveLength(1);
   });
 });
+
+describe('account updates from Meta', () => {
+  const update = (event: string, extra: Record<string, unknown> = {}) => ({
+    object: 'whatsapp_business_account',
+    entry: [{ id: '932', changes: [{ field: 'account_update', value: { event, ...extra } }] }],
+  });
+
+  it('disables the number when the phone disconnected the API', async () => {
+    await store(update('PARTNER_REMOVED', { disconnection_info: { reason: 'ACCOUNT_DISCONNECTED', initiated_by: 'BUSINESS' } }));
+
+    expect(await processPendingEvents(db, deps())).toEqual({ processed: 1, failed: 0 });
+
+    const [number] = await db.select().from(whatsappNumbers);
+    expect(number!.enabled).toBe(false);
+    expect(number!.offboardedAt).not.toBeNull();
+  });
+
+  it('treats ACCOUNT_OFFBOARDED the same way', async () => {
+    await store(update('ACCOUNT_OFFBOARDED'));
+    await processPendingEvents(db, deps());
+
+    const [number] = await db.select().from(whatsappNumbers);
+    expect(number!.offboardedAt).not.toBeNull();
+  });
+
+  it('re-enables on reconnect', async () => {
+    await db.update(whatsappNumbers).set({ enabled: false, offboardedAt: new Date() }).where(eq(whatsappNumbers.id, numberId));
+    await store(update('ACCOUNT_RECONNECTED'));
+
+    await processPendingEvents(db, deps());
+
+    const [number] = await db.select().from(whatsappNumbers);
+    expect(number!).toMatchObject({ enabled: true, offboardedAt: null });
+  });
+
+  it('ignores a WABA it does not host and an event it does not know', async () => {
+    await store({ object: 'whatsapp_business_account', entry: [{ id: '999', changes: [{ field: 'account_update', value: { event: 'PARTNER_REMOVED' } }] }] });
+    await store(update('VERIFIED_ACCOUNT'));
+
+    expect(await processPendingEvents(db, deps())).toEqual({ processed: 2, failed: 0 });
+
+    const [number] = await db.select().from(whatsappNumbers);
+    expect(number!).toMatchObject({ enabled: true, offboardedAt: null });
+  });
+});

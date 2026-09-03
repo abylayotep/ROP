@@ -280,6 +280,11 @@ async function applyPayload(db: Db, deps: InboundDeps, payload: unknown): Promis
 
     for (const change of changes) {
       const { field, value } = change as { field?: string; value?: ChangeValue };
+      if (field === 'account_update') {
+        const wabaId = (entry as { id?: string }).id;
+        if (wabaId) await applyAccountUpdate(db, wabaId, (value ?? {}) as AccountUpdateValue);
+        continue;
+      }
       errors.push(...(await applyChange(db, deps, field ?? 'messages', value ?? {}, touched)));
     }
   }
@@ -345,6 +350,60 @@ async function recordReferral(
       referralSeenAt: new Date(),
     })
     .where(and(eq(conversations.id, conversationId), isNull(conversations.referralSeenAt)));
+}
+
+/** The `account_update` payload, which speaks about the WABA rather than about a phone. */
+interface AccountUpdateValue {
+  event?: string;
+  disconnection_info?: { reason?: string; initiated_by?: string };
+}
+
+/**
+ * Meta's word on whether the phone still lets us in.
+ *
+ * Coexistence has no deregister call: the owner disconnects on the phone, Meta tells us
+ * here, and until they reconnect every send would fail. Disabling the number keeps the
+ * cabinet honest — the composer says why — and the row, with its conversations and click
+ * ids, stays for when they come back. Every number on the WABA is affected: the event is
+ * about the account, not one phone.
+ *
+ * The manual-kind filter keeps a pasted-token number on the same WABA untouched: Meta's
+ * offboard event is about the phone's companion, not about the system-user token.
+ */
+async function applyAccountUpdate(
+  db: Db,
+  wabaId: string,
+  value: AccountUpdateValue,
+): Promise<void> {
+  switch (value.event) {
+    case 'PARTNER_REMOVED':
+    case 'ACCOUNT_OFFBOARDED':
+      await db
+        .update(whatsappNumbers)
+        // `coalesce` so a redelivered offboard keeps the moment it first happened.
+        .set({ enabled: false, offboardedAt: sql`coalesce(${whatsappNumbers.offboardedAt}, now())` })
+        .where(
+          and(
+            eq(whatsappNumbers.wabaId, wabaId),
+            eq(whatsappNumbers.connectionKind, 'coexistence'),
+          ),
+        );
+      return;
+    case 'ACCOUNT_RECONNECTED':
+      await db
+        .update(whatsappNumbers)
+        .set({ enabled: true, offboardedAt: null })
+        .where(
+          and(
+            eq(whatsappNumbers.wabaId, wabaId),
+            eq(whatsappNumbers.connectionKind, 'coexistence'),
+          ),
+        );
+      return;
+    default:
+      // Verification, name and tier changes all arrive here. None of them change our access.
+      return;
+  }
 }
 
 /**

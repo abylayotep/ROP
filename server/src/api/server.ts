@@ -13,6 +13,7 @@ import { registerAgentRoutes } from './agents.js';
 import { registerAiRoutes } from './ai.js';
 import { registerAuthRoutes } from './auth.js';
 import { registerBoardRoutes } from './board.js';
+import { registerCapiRoutes } from './capi.js';
 import { registerConversationRoutes } from './conversations.js';
 import { registerKnowledgeRoutes } from './knowledge.js';
 import { registerLeadRoutes } from './leads.js';
@@ -99,6 +100,9 @@ export function buildServer(env: Env, db: Db, deps: ServerDeps = {}): FastifyIns
     registerBoardRoutes(app, db, guard);
     registerKnowledgeRoutes(app, db, guard, pageFetcher);
     registerAiRoutes(app, db, env, guard, { model, graph });
+    // The same client the drain sends with, so a save is verified against the Meta a
+    // report will actually reach.
+    registerCapiRoutes(app, db, env, guard, capi);
     // Meta calls the webhook directly with no session of its own, so it takes no guard —
     // the request signature is the check instead.
     registerWhatsappWebhook(

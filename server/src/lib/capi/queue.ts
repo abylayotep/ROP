@@ -26,6 +26,17 @@ export interface CapiQueueDeps {
   key: Buffer;
 }
 
+/**
+ * The associated data the dataset's token is sealed with.
+ *
+ * Declared next to the code that opens the token, and imported by the route that writes it,
+ * exactly as `keyAad` in `lib/ai/turn.ts` is declared beside `runTurn` and imported by
+ * `api/ai.ts`. Two files agreeing on a value by both writing `agentId` is an agreement that
+ * holds only until one of them is edited; a token sealed under one aad and opened under
+ * another does not fail loudly, it fails as «Meta не приняла токен» weeks later.
+ */
+export const tokenAad = (agentId: string): string => agentId;
+
 export interface CapiDrainResult {
   /** Events Meta accepted in this pass. */
   sent: number;
@@ -266,7 +277,7 @@ export async function sendPendingCapiEvents(
       // row someone edited — must cost this agent's batch, not the whole pass. `withoutSecret`
       // with an empty secret returns the text unchanged, which is right: there is no token to
       // hide when decryption itself is what failed.
-      token = decryptSecret(settings.accessToken, deps.key, agentId);
+      token = decryptSecret(settings.accessToken, deps.key, tokenAad(agentId));
 
       // The payloads go out as they were stored. They are not parsed, not rebuilt and not
       // re-serialised anywhere on this path — that is what keeps the order's amount the

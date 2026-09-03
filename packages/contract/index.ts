@@ -391,3 +391,60 @@ export interface AiUsage {
   /** One row per model that ran, busiest first. Empty exactly when `total` is null. */
   byModel: AiUsageModel[];
 }
+
+/* ── Meta Conversions API ───────────────────────────────────────────────────
+ * Куда уходят покупки из переписки и что с ними стало. Токен сюда не попадает:
+ * он уходит на сервер и обратно не возвращается — только признак, что он есть. */
+
+/**
+ * The dataset an agent's conversions go to, and whether they go at all.
+ *
+ * The access token is deliberately absent. It is stored encrypted and never leaves the
+ * server; `tokenSet` is the only thing a screen may know about it — the same arrangement
+ * `WhatsappNumber` and `AiSettings` use for their secrets.
+ *
+ * An agent that has never configured this is answered a blank one — `datasetId: ''`,
+ * `tokenSet: false` — rather than null, so the form has something to render either way.
+ */
+export interface CapiSettings {
+  /** Meta's dataset (pixel) id. Empty exactly when nothing has been configured yet. */
+  datasetId: string;
+  /** Meta's test event code, while an owner is watching Events Manager. Usually null. */
+  testEventCode: string | null;
+  enabled: boolean;
+  /** Whether an access token is stored. The token itself never leaves the server. */
+  tokenSet: boolean;
+  /** When the dataset and the token were last proved against Meta, ISO. */
+  verifiedAt: string | null;
+  /** What Meta last said when it refused the pair, or null. */
+  error: string | null;
+}
+
+/**
+ * One thing that was reported to Meta, or was not, and why.
+ *
+ * `value` and `currency` come from the order the report is about, so a purchase can be
+ * recognised by its amount; a lead carries neither. The contact is named so an owner
+ * reading a failure knows whose sale it was — it is not part of what Meta receives.
+ */
+export interface CapiEvent {
+  id: string;
+  /** 'purchase' | 'lead' */
+  kind: string;
+  /** 'pending' | 'sent' | 'failed' | 'skipped' */
+  status: string;
+  attempts: number;
+  /**
+   * Why it has not gone. Meta's own words for a refusal, in Meta's own English, because
+   * «Invalid access token» is the whole answer and only the owner can act on it; ours, in
+   * Russian, for the reasons the cabinet decided itself. Never carries the token.
+   */
+  error: string | null;
+  sentAt: string | null;
+  createdAt: string;
+  /** The order's amount as a string, or null for a lead. Never through a float. */
+  value: string | null;
+  currency: string | null;
+  contactName: string | null;
+  contactPhone: string | null;
+}

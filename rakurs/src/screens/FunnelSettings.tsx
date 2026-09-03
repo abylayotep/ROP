@@ -32,6 +32,31 @@ const FIELD_KINDS: { id: LeadField['kind']; label: string }[] = [
   { id: 'date', label: 'Дата' },
 ];
 
+/**
+ * Runs one mutation and says whether it worked.
+ *
+ * The list is re-read either way. On a refusal the server has already contradicted what
+ * is on screen — an order it rejected, a stage it would not delete, a name already taken
+ * by another field — and leaving those rows up would have the owner reading a funnel the
+ * server never agreed to.
+ */
+function useRun(onChanged: () => void) {
+  const toast = useToast();
+
+  return async function run(action: () => Promise<unknown>, ok?: string): Promise<boolean> {
+    try {
+      await action();
+      if (ok) toast.ok(ok);
+      return true;
+    } catch (error) {
+      toast.fail(error);
+      return false;
+    } finally {
+      onChanged();
+    }
+  };
+}
+
 export function FunnelSettings() {
   const { agent, role } = useAgent();
   const readOnly = role !== 'owner';
@@ -90,30 +115,10 @@ function StageList({
   readOnly: boolean;
   onChanged: () => void;
 }) {
-  const toast = useToast();
+  const run = useRun(onChanged);
   const [open, setOpen] = useState<string | null>(null);
   const [name, setName] = useState('');
   const [moving, setMoving] = useState(false);
-
-  /**
-   * Runs one mutation and says whether it worked.
-   *
-   * The list is re-read either way. On a refusal the server has already contradicted what
-   * is on screen — a reorder it rejected, a stage it would not delete — and leaving those
-   * rows up would have the owner reading a funnel the server never agreed to.
-   */
-  async function run(action: () => Promise<unknown>, ok?: string): Promise<boolean> {
-    try {
-      await action();
-      if (ok) toast.ok(ok);
-      return true;
-    } catch (error) {
-      toast.fail(error);
-      return false;
-    } finally {
-      onChanged();
-    }
-  }
 
   /** The order is sent whole: the server accepts nothing but the complete list. */
   async function move(index: number, delta: number) {
@@ -348,21 +353,39 @@ function FieldList({
   readOnly: boolean;
   onChanged: () => void;
 }) {
-  const toast = useToast();
+  const run = useRun(onChanged);
+  const [open, setOpen] = useState<string | null>(null);
   const [name, setName] = useState('');
   const [kind, setKind] = useState<LeadField['kind']>('text');
   const [hint, setHint] = useState('');
+  const [moving, setMoving] = useState(false);
+
+  /** Whole, like the stages: the server refuses anything short of the complete list. */
+  async function move(index: number, delta: number) {
+    // `list` only changes once the answer comes back, so a second click before then would
+    // recompute the same order from the same rows and quietly undo itself.
+    if (moving) return;
+    const next = [...list];
+    const [moved] = next.splice(index, 1);
+    next.splice(index + delta, 0, moved!);
+
+    setMoving(true);
+    try {
+      await run(() => api.reorderLeadFields(agentId, next.map((field) => field.id)));
+    } finally {
+      setMoving(false);
+    }
+  }
 
   async function add(event: FormEvent) {
     event.preventDefault();
     if (!name.trim()) return;
-    try {
-      await api.createLeadField(agentId, { name, kind, hint });
+    const added = await run(() => api.createLeadField(agentId, { name, kind, hint }));
+    // Kept on a refusal — «Поле с таким названием уже есть» is answered by editing the
+    // name, not by typing it again from nothing.
+    if (added) {
       setName('');
       setHint('');
-      onChanged();
-    } catch (error) {
-      toast.fail(error);
     }
   }
 
@@ -377,12 +400,8 @@ function FieldList({
     ) {
       return;
     }
-    try {
-      await api.deleteLeadField(agentId, field.id);
-      onChanged();
-    } catch (error) {
-      toast.fail(error);
-    }
+    const deleted = await run(() => api.deleteLeadField(agentId, field.id));
+    if (deleted) setOpen(null);
   }
 
   return (
@@ -390,31 +409,62 @@ function FieldList({
       {list.length === 0 && (
         <div style={{ fontSize: 12, color: 'var(--text-dim)' }}>Полей пока нет.</div>
       )}
-      {list.map((field) => (
-        <div
-          key={field.id}
-          className="sunken-box"
-          style={{ padding: '9px 12px', display: 'flex', alignItems: 'center', gap: 9 }}
-        >
-          <span style={{ fontSize: 12.5, fontWeight: 600 }}>{field.name}</span>
-          <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>
-            {FIELD_KINDS.find((item) => item.id === field.kind)?.label}
-          </span>
-          {field.hint && (
-            <span className="ellipsis" style={{ fontSize: 11, color: 'var(--text-dim)' }}>
-              {field.hint}
+      {list.map((field, index) => (
+        <div key={field.id} className="sunken-box" style={{ padding: '9px 12px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+            <span style={{ fontSize: 12.5, fontWeight: 600 }}>{field.name}</span>
+            <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>
+              {FIELD_KINDS.find((item) => item.id === field.kind)?.label}
             </span>
-          )}
-          {!readOnly && (
-            <button
-              type="button"
-              className="btn-link"
-              style={{ marginLeft: 'auto', fontSize: 11.5, color: 'var(--danger)' }}
-              title="Удалить поле и все ответы на него"
-              onClick={() => remove(field)}
-            >
-              Удалить
-            </button>
+            {field.hint && (
+              <span className="ellipsis" style={{ fontSize: 11, color: 'var(--text-dim)' }}>
+                {field.hint}
+              </span>
+            )}
+            {!readOnly && (
+              <div style={{ marginLeft: 'auto', display: 'flex', gap: 4 }}>
+                <button
+                  type="button"
+                  className="btn-quiet"
+                  disabled={moving || index === 0}
+                  aria-label={`Поднять поле «${field.name}» выше`}
+                  title="Поднять выше"
+                  onClick={() => move(index, -1)}
+                >
+                  ↑
+                </button>
+                <button
+                  type="button"
+                  className="btn-quiet"
+                  disabled={moving || index === list.length - 1}
+                  aria-label={`Опустить поле «${field.name}» ниже`}
+                  title="Опустить ниже"
+                  onClick={() => move(index, 1)}
+                >
+                  ↓
+                </button>
+                <button
+                  type="button"
+                  className="btn-link"
+                  style={{ fontSize: 11.5 }}
+                  onClick={() => setOpen(open === field.id ? null : field.id)}
+                >
+                  {open === field.id ? 'Свернуть' : 'Изменить'}
+                </button>
+              </div>
+            )}
+          </div>
+
+          {open === field.id && (
+            <FieldForm
+              agentId={agentId}
+              field={field}
+              onDone={() => {
+                setOpen(null);
+                onChanged();
+              }}
+              onDelete={() => remove(field)}
+            />
           )}
         </div>
       ))}
@@ -454,5 +504,96 @@ function FieldList({
         </form>
       )}
     </div>
+  );
+}
+
+function FieldForm({
+  agentId,
+  field,
+  onDone,
+  onDelete,
+}: {
+  agentId: string;
+  field: LeadField;
+  onDone: () => void;
+  onDelete: () => void;
+}) {
+  const toast = useToast();
+  const [name, setName] = useState(field.name);
+  const [kind, setKind] = useState(field.kind);
+  const [hint, setHint] = useState(field.hint);
+  const [saving, setSaving] = useState(false);
+
+  async function save(event: FormEvent) {
+    event.preventDefault();
+    setSaving(true);
+    try {
+      await api.updateLeadField(agentId, field.id, { name, kind, hint });
+      toast.ok('Сохранено');
+      onDone();
+    } catch (error) {
+      // «Поле с таким названием уже есть» is written for a human and names the thing to
+      // fix, so it is shown verbatim and the form stays open on top of the typed name.
+      toast.fail(error);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <form onSubmit={save} style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 12 }}>
+      <div style={{ display: 'flex', gap: 8 }}>
+        <input
+          style={{ ...control, flex: 1 }}
+          value={name}
+          placeholder="Название"
+          onChange={(e) => setName(e.target.value)}
+        />
+        <input
+          style={{ ...control, flex: 1 }}
+          value={hint}
+          placeholder="Подсказка для ИИ"
+          onChange={(e) => setHint(e.target.value)}
+        />
+        <select
+          style={control}
+          value={kind}
+          onChange={(e) => setKind(e.target.value as LeadField['kind'])}
+        >
+          {FIELD_KINDS.map((item) => (
+            <option key={item.id} value={item.id}>
+              {item.label}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {/* The answers are stored as text and are kept as they were typed, so a field that
+          becomes a number after the fact can hold a «примерно 200 000» somebody entered
+          while it was still text. Said here because the box will simply refuse to show it. */}
+      {kind !== field.kind && (
+        <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>
+          Ответы лидов останутся как есть: те, что не подходят под новый тип, в карточке не
+          покажутся.
+        </div>
+      )}
+
+      <div style={{ display: 'flex', gap: 8 }}>
+        {/* An empty name comes back as the generic «Не удалось разобрать поле», which does
+            not say which box is wrong. Held back here instead. */}
+        <button type="submit" className="btn-sm" disabled={saving || !name.trim()}>
+          {saving ? 'Сохраняем…' : 'Сохранить'}
+        </button>
+        <button
+          type="button"
+          className="btn-link"
+          style={{ marginLeft: 'auto', fontSize: 11.5, color: 'var(--danger)' }}
+          title="Удалить поле и все ответы на него"
+          onClick={onDelete}
+        >
+          Удалить поле
+        </button>
+      </div>
+    </form>
   );
 }

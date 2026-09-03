@@ -371,4 +371,37 @@ export function registerStageRoutes(
       return { ok: true };
     },
   );
+
+  app.post(
+    '/api/agents/:agentId/lead-fields/order',
+    { preHandler: [guard, ownerOnly] },
+    async (req): Promise<LeadField[]> => {
+      const parsed = reorder.safeParse(req.body);
+      if (!parsed.success) throw new ApiError(400, 'Передайте порядок полей');
+
+      const existing = await listFields(req.agent!.id);
+      const given = new Set(parsed.data.ids);
+      // Taken whole for the same reason the stages are: a partial order has to guess
+      // where the fields nobody named belong, and every guess leaves two of them level.
+      if (given.size !== parsed.data.ids.length || given.size !== existing.length) {
+        throw new ApiError(400, 'В порядке должны быть все поля по одному разу');
+      }
+      if (!existing.every((field) => given.has(field.id))) {
+        throw new ApiError(400, 'В порядке есть поле из другой воронки');
+      }
+
+      // One transaction, so a refusal cannot leave half the list renumbered: the order
+      // of the fields is the order of the boxes in every lead card, and a half-applied
+      // rewrite is a card nobody arranged.
+      await db.transaction(async (tx) => {
+        for (const [position, id] of parsed.data.ids.entries()) {
+          await tx
+            .update(leadFields)
+            .set({ position })
+            .where(and(eq(leadFields.id, id), eq(leadFields.agentId, req.agent!.id)));
+        }
+      });
+      return (await listFields(req.agent!.id)).map(toField);
+    },
+  );
 }

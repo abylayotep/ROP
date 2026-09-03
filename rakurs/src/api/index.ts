@@ -140,8 +140,21 @@ export const createLeadField = (
   body: { name: string; kind: LeadField['kind']; hint: string },
 ) => request<LeadField>(`/agents/${agentId}/lead-fields`, { method: 'POST', body });
 
+/** Переименование поля сохраняет ответы лидов: удаление — единственное, что их уносит. */
+export const updateLeadField = (
+  agentId: string,
+  fieldId: string,
+  body: Partial<Pick<LeadField, 'name' | 'kind' | 'hint'>>,
+) => request<LeadField>(`/agents/${agentId}/lead-fields/${fieldId}`, { method: 'PATCH', body });
+
 export const deleteLeadField = (agentId: string, fieldId: string) =>
   request<{ ok: true }>(`/agents/${agentId}/lead-fields/${fieldId}`, { method: 'DELETE' });
+
+export const reorderLeadFields = (agentId: string, ids: string[]) =>
+  request<LeadField[]>(`/agents/${agentId}/lead-fields/order`, {
+    method: 'POST',
+    body: { ids },
+  });
 
 export const listMembers = (agentId: string, signal?: AbortSignal) =>
   request<Member[]>(`/agents/${agentId}/members`, { signal });

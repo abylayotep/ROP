@@ -588,4 +588,110 @@ describe('lead fields', () => {
     expect(res.statusCode).toBe(200);
     expect(await db.select().from(leadFields)).toHaveLength(0);
   });
+
+  describe('order', () => {
+    /** Three fields, in the order they were added, as the list route returns them. */
+    async function threeFields() {
+      for (const [name, kind] of [
+        ['Город', 'text'],
+        ['Бюджет', 'number'],
+        ['Дата', 'date'],
+      ] as const) {
+        await app.inject({
+          method: 'POST',
+          url: `/api/agents/${agentId}/lead-fields`,
+          cookies: jar,
+          payload: { name, kind },
+        });
+      }
+      const list = await app.inject({ url: `/api/agents/${agentId}/lead-fields`, cookies: jar });
+      return list.json() as { id: string; name: string }[];
+    }
+
+    it('rewrites every position on reorder', async () => {
+      const list = await threeFields();
+      const ids = [list.at(-1)!.id, ...list.slice(0, -1).map((field) => field.id)];
+
+      const res = await app.inject({
+        method: 'POST',
+        url: `/api/agents/${agentId}/lead-fields/order`,
+        cookies: jar,
+        payload: { ids },
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = res.json() as { id: string; position: number }[];
+      expect(body.map((field) => field.id)).toEqual(ids);
+      expect(body.map((field) => field.position)).toEqual(ids.map((_, i) => i));
+    });
+
+    it('refuses an order that does not name every field', async () => {
+      const list = await threeFields();
+
+      const res = await app.inject({
+        method: 'POST',
+        url: `/api/agents/${agentId}/lead-fields/order`,
+        cookies: jar,
+        payload: { ids: list.slice(1).map((field) => field.id) },
+      });
+
+      expect(res.statusCode).toBe(400);
+    });
+
+    it('refuses an order that names one field twice', async () => {
+      const list = await threeFields();
+
+      const res = await app.inject({
+        method: 'POST',
+        url: `/api/agents/${agentId}/lead-fields/order`,
+        cookies: jar,
+        payload: { ids: [list[0]!.id, ...list.map((field) => field.id)] },
+      });
+
+      expect(res.statusCode).toBe(400);
+    });
+
+    it("refuses an order carrying another agent's field", async () => {
+      const list = await threeFields();
+      const [other] = await db
+        .insert(agents)
+        .values({
+          accountId: (await db.select().from(agents).where(eq(agents.id, agentId)))[0]!.accountId,
+          name: 'Другая',
+        })
+        .returning();
+      const [foreign] = await db
+        .insert(leadFields)
+        .values({ agentId: other!.id, name: 'Чужое', kind: 'text', position: 0 })
+        .returning();
+
+      const res = await app.inject({
+        method: 'POST',
+        url: `/api/agents/${agentId}/lead-fields/order`,
+        cookies: jar,
+        payload: { ids: [foreign!.id, ...list.slice(1).map((field) => field.id)] },
+      });
+
+      expect(res.statusCode).toBe(400);
+      // The list is untouched: a refused order must not half-apply.
+      const after = await app.inject({ url: `/api/agents/${agentId}/lead-fields`, cookies: jar });
+      expect((after.json() as { id: string }[]).map((field) => field.id)).toEqual(
+        list.map((field) => field.id),
+      );
+    });
+
+    it('refuses an order from a member', async () => {
+      const list = await threeFields();
+      const memberJar = await login('member@example.com');
+
+      const res = await app.inject({
+        method: 'POST',
+        url: `/api/agents/${agentId}/lead-fields/order`,
+        cookies: memberJar,
+        payload: { ids: list.map((field) => field.id) },
+      });
+
+      expect(res.statusCode).toBe(403);
+    });
+  });
 });

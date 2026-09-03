@@ -18,6 +18,8 @@ docker compose -f deploy/compose.yml --env-file deploy/.env run --rm api npm run
 - `POSTGRES_PASSWORD`, `SESSION_SECRET` — generate each with `head -c 32 /dev/urandom | base64`;
 - `META_APP_SECRET` — the Meta app's secret, signs every webhook delivery;
 - `META_WEBHOOK_VERIFY_TOKEN` — the string Meta echoes back during the webhook handshake;
+- `META_APP_ID` — the Meta application's id; the browser starts Embedded Signup with it;
+- `META_ES_CONFIG_ID` — the Facebook Login for Business configuration id for Embedded Signup;
 - `CREDENTIALS_KEY` — encrypts stored WhatsApp access tokens, exactly 32 bytes base64,
   generate with `head -c 32 /dev/urandom | base64`;
 - `MEDIA_DIR` — present for consistency with `server/.env`, but `compose.yml` does not read

@@ -110,6 +110,11 @@ Create `rakurs/src/screens/KnowledgeScreen.tsx`:
   when `edited`. A row expands into an editable form — title, kind, content — with «Сохранить»
   and «Удалить». Deleting asks for confirmation naming the title.
 - «Добавить запись» opens the same form empty.
+- The list is capped at 100 records and there is no pagination. Say so under the list when it is
+  full, in one line, or an owner concludes their store ends at a hundred and starts deleting.
+- After an import, show what it produced — the count and the titles — before the owner walks away.
+  A price list pasted with no blank lines becomes ONE item by design, and the only thing that
+  saves the owner from discovering that a week later is seeing «Создана 1 запись» straight away.
 - Three empty states, and they say different things: nothing in the base at all, nothing of
   this kind, and nothing matching this query. Say the query back to the person.
 - The import panel above the list for an owner; a member sees the list and can still edit.

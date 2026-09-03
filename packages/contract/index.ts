@@ -21,6 +21,8 @@ export interface Agent {
   name: string;
   description: string;
   timezone: string;
+  /** ISO 4217. Every order this agent records is in it. */
+  currency: string;
 }
 
 /** The signed-in person and where they may go. Returned by login and by /auth/me. */
@@ -84,4 +86,33 @@ export interface ConversationSummary {
 
 export interface ConversationThread extends ConversationSummary {
   messages: Message[];
+}
+
+/* ── Воронка ────────────────────────────────────────────────────────────────
+ * The funnel an owner shapes, and the fields it asks to be filled. */
+
+export type StageKind = 'active' | 'qualified' | 'awaiting_payment' | 'success' | 'failure';
+
+export interface Stage {
+  id: string;
+  name: string;
+  /** A hex colour, shown as the column's marker. */
+  color: string;
+  kind: StageKind;
+  position: number;
+  /** When a lead belongs here, in the owner's own words. Read by the agent in stage 5. */
+  description: string;
+  /** Sent on entering the stage. Null means the stage sends nothing. */
+  autoMessage: string | null;
+}
+
+export type LeadFieldKind = 'text' | 'number' | 'date';
+
+export interface LeadField {
+  id: string;
+  name: string;
+  kind: LeadFieldKind;
+  /** How to fill it, for the agent in stage 5. Never shown to an operator. */
+  hint: string;
+  position: number;
 }

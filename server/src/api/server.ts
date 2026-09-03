@@ -4,6 +4,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import type { Db } from '../db/client.js';
 import type { Env } from '../env.js';
 import { createModelClient, type ModelClient } from '../lib/ai/openrouter.js';
+import { createCapiClient, type CapiClient } from '../lib/capi/client.js';
 import { ApiError } from '../lib/errors.js';
 import { createPageFetcher, type PageFetcher } from '../lib/knowledge/fetch-page.js';
 import { credentialsKey } from '../lib/secret-box.js';
@@ -28,6 +29,8 @@ export interface ServerDeps {
   pageFetcher?: PageFetcher;
   /** And for the model: no test spends a token or depends on a live OpenRouter key. */
   model?: ModelClient;
+  /** And for Meta's Conversions API: no test reports a conversion to a real dataset. */
+  capi?: CapiClient;
 }
 
 /**
@@ -41,6 +44,11 @@ export function buildServer(env: Env, db: Db, deps: ServerDeps = {}): FastifyIns
   // Taken the same way every other outbound client is: the AI routes and the inbound queue
   // both answer with it, and a test replaces it once for both.
   const model = deps.model ?? createModelClient();
+  // Resolved here, alongside every other outbound client, so the settings routes and the
+  // queue drain that follow share one instance and a test replaces it once for all of them.
+  // Nothing reads it yet: the client exists before the code that reports a sale with it.
+  const capi = deps.capi ?? createCapiClient();
+  void capi;
 
   app.register(cookie, { secret: env.SESSION_SECRET });
   app.register(rateLimit, { global: false });

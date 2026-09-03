@@ -113,6 +113,34 @@ describe('buildPurchase', () => {
     expect(serialiseEvent(event)).toContain('"value":999999999999.99');
   });
 
+  it('serialises an amount no double could hold, digit for digit', () => {
+    // The only value that makes this guard breakable.
+    //
+    // `orders.amount` is `numeric(14,2)`, which tops out below 10^12 — fourteen significant
+    // digits — and every decimal of fifteen significant digits or fewer survives a round trip
+    // through a double. So no amount the column can store would notice if `rawJSON` were
+    // replaced with `Number()`, and a test that used one would pass either way. This amount is
+    // deliberately wider than the column would accept, because the guarantee under test
+    // belongs to `serialiseEvent` and not to Postgres: `capi-client.test.ts` guards the
+    // request body with the same figure. A guard nobody can break is not a guard.
+    const wider = '9007199254740993.99';
+
+    // Self-demonstrating: if this ever stops holding, the assertion below proves nothing.
+    expect(String(Number(wider))).not.toBe(wider);
+
+    const event = buildPurchase({
+      orderId: ORDER_ID,
+      ctwaClid: 'clid',
+      phone: '77085807932',
+      amount: wider,
+      currency: 'KZT',
+      paidAt,
+    });
+
+    expect(serialiseEvent(event)).toContain(`"value":${wider}`);
+    expect(serialiseEvent(event)).not.toContain('9007199254740994');
+  });
+
   it('refuses an amount that is not a plain decimal', () => {
     expect(() =>
       buildPurchase({

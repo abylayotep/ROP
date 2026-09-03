@@ -236,9 +236,13 @@ describe('sending a pending event', () => {
     expect(call.datasetId).toBe('1234567890');
     expect(call.token).toBe(TOKEN);
     expect(call.testEventCode).toBeNull();
-    // Byte for byte what the column holds: the amount survives only while nothing re-emits it.
-    // The widest `numeric(14,2)` an order can carry; `capi-events.test.ts` proves the same
-    // guarantee on values no double could hold at all.
+    // Byte for byte what the column holds, at the widest amount `numeric(14,2)` accepts.
+    //
+    // This test cannot prove the amount never becomes a double: the column tops out at
+    // fourteen significant digits, and every such decimal round-trips through one. It proves
+    // the drain sends the column's digits. The guarantee itself is guarded where it can be
+    // broken — `capi-events.test.ts` and `capi-client.test.ts`, on a figure wider than any
+    // order could carry.
     expect(call.events).toEqual([(await eventRow(id)).payload]);
     expect(call.events[0]).toContain('999999999999.99');
   });
@@ -626,7 +630,14 @@ describe('an event nobody ever answered for', () => {
   const stranded = async (id: string) =>
     db
       .update(capiEvents)
-      .set({ status: 'pending', attempts: 5, error: null, lastAttemptAt: new Date() })
+      .set({
+        status: 'pending',
+        attempts: 5,
+        error: null,
+        // Long enough ago that no send could still be waiting on Meta. A row claimed a
+        // moment ago looks the same and must be left alone; the test below pins that.
+        lastAttemptAt: new Date(Date.now() - 60 * 60 * 1000),
+      })
       .where(eq(capiEvents.id, id));
 
   it('fails a pending row whose attempts are all spent, so it stops being invisible', async () => {
@@ -648,9 +659,10 @@ describe('an event nobody ever answered for', () => {
 
   it('leaves the reason Meta gave, where there was one', async () => {
     const id = await pendingId();
+    await stranded(id);
     await db
       .update(capiEvents)
-      .set({ status: 'pending', attempts: 5, error: 'Meta временно недоступна.' })
+      .set({ error: 'Meta временно недоступна.' })
       .where(eq(capiEvents.id, id));
     const capi = fakeCapi();
 
@@ -659,6 +671,26 @@ describe('an event nobody ever answered for', () => {
     const row = await eventRow(id);
     expect(row.status).toBe('failed');
     expect(row.error).toBe('Meta временно недоступна.');
+  });
+
+  it('leaves a send that is merely still happening alone', async () => {
+    // The overlap this guard exists for: the timer's drain holds a `draining` lock, but the
+    // one behind a webhook does not, and a row that was claimed a second ago is pending, at
+    // the cap and without an outcome — indistinguishable from a stranded one but for its age.
+    const id = await pendingId();
+    await db
+      .update(capiEvents)
+      .set({ status: 'pending', attempts: 5, error: null, lastAttemptAt: new Date() })
+      .where(eq(capiEvents.id, id));
+    const capi = fakeCapi();
+
+    const result = await sendPendingCapiEvents(db, { capi, key });
+
+    // Still in flight as far as this pass knows, so it says nothing about it at all.
+    expect(result.failed).toBe(0);
+    const row = await eventRow(id);
+    expect(row.status).toBe('pending');
+    expect(row.error).toBeNull();
   });
 
   it('leaves a pending row that still has attempts alone', async () => {

@@ -205,12 +205,30 @@ async function skipAll(db: Db, agentId: string, reason: string): Promise<number>
  * Meta's own last words are kept where there were any — a row that spent its fifth attempt
  * on a refusal is already written `failed` by `recordFailure`, so in practice these rows have
  * no error at all, and `coalesce` is what makes the rare exception keep the more useful text.
+ *
+ * The age condition is what keeps this off a send that is merely still happening. An event
+ * being sent right now looks exactly like a stranded one — pending, at the cap, no outcome
+ * written yet — and two drains can overlap: the timer's pass holds a `draining` lock, but the
+ * pass behind a webhook does not, and webhooks arrive continuously on a busy number. Without
+ * the gap the second pass would paint the first pass's in-flight sale red, complete with a
+ * resend button, while Meta was still answering. Five minutes is far past anything genuinely
+ * in flight — the client gives Meta fifteen seconds and a whole drain gives up at twenty —
+ * and far short of the retry gaps, so nothing stranded waits meaningfully longer for it.
+ * `coalesce` covers a row whose attempts were written without an attempt date, exactly as
+ * `READY` does.
  */
 async function failExhausted(db: Db): Promise<number> {
   const done = await db
     .update(capiEvents)
     .set({ status: 'failed', error: sql`coalesce(${capiEvents.error}, ${EXHAUSTED})` })
-    .where(and(eq(capiEvents.status, 'pending'), gte(capiEvents.attempts, MAX_ATTEMPTS)))
+    .where(
+      and(
+        eq(capiEvents.status, 'pending'),
+        gte(capiEvents.attempts, MAX_ATTEMPTS),
+        sql`coalesce(${capiEvents.lastAttemptAt}, ${capiEvents.createdAt})
+              < now() - interval '5 minutes'`,
+      ),
+    )
     .returning({ id: capiEvents.id });
 
   return done.length;

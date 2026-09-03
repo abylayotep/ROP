@@ -170,3 +170,45 @@ export interface Member {
   initials: string;
   role: Role;
 }
+
+/* ── Доска и клиенты ────────────────────────────────────────────────────────
+ * The funnel seen as columns, and everyone who ever wrote seen as a table. */
+
+export interface BoardCard {
+  conversationId: string;
+  contactName: string | null;
+  contactPhone: string;
+  lastMessageAt: string | null;
+  preview: string | null;
+  /** Whether a free-form reply is still allowed. */
+  windowOpen: boolean;
+  adHeadline: string | null;
+  /** The sum of this lead's paid orders, as a string with two decimals. */
+  paidTotal: string;
+  assigneeName: string | null;
+}
+
+export interface BoardColumn {
+  stage: Stage;
+  cards: BoardCard[];
+}
+
+export interface Board {
+  columns: BoardColumn[];
+  /** Conversations nobody has put in a stage yet. Shown first, never hidden. */
+  unsorted: BoardCard[];
+  currency: string;
+}
+
+export interface Customer {
+  conversationId: string;
+  contactName: string | null;
+  contactPhone: string;
+  stageName: string | null;
+  stageKind: StageKind | null;
+  paidTotal: string;
+  orderCount: number;
+  lastMessageAt: string | null;
+  firstSeenAt: string;
+  assigneeName: string | null;
+}

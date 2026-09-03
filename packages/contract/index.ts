@@ -524,3 +524,113 @@ export interface StatsCurrent {
    */
   stageHistorySince: string;
 }
+
+/**
+ * One step of the funnel over a period: how many leads entered it, and out of how many.
+ *
+ * A step counts a lead once, however many times it entered the stage in the window, and it
+ * counts only the leads that actually entered — a lead dragged past a stage is absent from
+ * it. That is why `entered` may rise from one step to the next, and why the chain must not
+ * be read as a set of nested totals.
+ */
+export interface FunnelStep {
+  stageId: string;
+  name: string;
+  kind: StageKind;
+  position: number;
+  /** Distinct conversations that entered this stage inside the window. */
+  entered: number;
+  /**
+   * Share of the previous step, 0..1 — and `null`, never `0`, when there is no share.
+   *
+   * Null on the first step, which has no previous one, and null when the previous step has
+   * no entries at all: nothing to divide by is not zero per cent, and printing 0% would
+   * accuse the operator of losing leads that were never there.
+   */
+  conversion: number | null;
+}
+
+/** One advertisement, with what it brought over the period. */
+export interface StatsSource {
+  /**
+   * The ad this thread came from, or `null` for a click that carried no ad id.
+   *
+   * The `null` row is one row and not a missing one: the click happened and is worth
+   * counting, and the screen labels it «Реклама без идентификатора объявления».
+   */
+  sourceId: string | null;
+  sourceType: string | null;
+  headline: string | null;
+  /** Conversations of this ad created inside the window. */
+  leads: number;
+  /** Of those, the ones carrying a `ctwa_clid` — the id a purchase can be reported against. */
+  withClickId: number;
+  /** Of those, the ones standing right now in a stage of kind `success`. */
+  won: number;
+  /**
+   * A string, not a number: an amount must not pass through a float, for the reason
+   * `Order.amount` is a string.
+   *
+   * Every paid order of those conversations, whenever it was paid — so a lead who clicked
+   * inside the window and paid a month later still credits the ad that brought them.
+   */
+  paidTotal: string;
+}
+
+/** What came in over the period, in the agent's own currency. */
+export interface StatsMoney {
+  paidOrders: number;
+  /** A string, not a number: an amount must not pass through a float. */
+  paidTotal: string;
+  /** A string, not a number. Null when there is nothing to average. */
+  averageOrder: string | null;
+  /** A string, not a number. Null — not «0 ₸ с лида» — when the window brought no leads. */
+  revenuePerLead: string | null;
+  /**
+   * Paid orders of the window held in some other currency, excluded from every sum above.
+   *
+   * Counted rather than dropped, so an excluded amount is visible instead of merely missing.
+   */
+  otherCurrencyOrders: number;
+}
+
+/**
+ * The funnel, the ad sources and the money for one rolling window.
+ *
+ * Two of the three are honest about the whole history of the agent and one is not, and the
+ * split is the point of `stageHistorySince` being here: sources and money have been recorded
+ * since the number was connected, while movement between stages starts on the day the
+ * cabinet began writing it down.
+ */
+export interface StatsPeriodReport {
+  period: Period;
+  /** The instant the window starts, ISO, computed on the server. */
+  since: string;
+  /** When the cabinet began recording movement, ISO. The funnel knows nothing before it. */
+  stageHistorySince: string;
+  /**
+   * Every current stage of kind other than `failure`, in `position` order — and empty
+   * exactly when nothing moved at all inside the window.
+   *
+   * `failure` is out of the chain deliberately: «Отказ» sits after «Продажа» by position,
+   * and a chain that walked through it would read a refusal as a step towards a sale. It is
+   * reported beside the chain as `failureEntries`.
+   */
+  funnel: FunnelStep[];
+  /** Distinct conversations that entered any `failure` stage inside the window. */
+  failureEntries: number;
+  /** Moves to an earlier position — per move, because how often it happens is the question. */
+  backwardMoves: number;
+  /** Moves into a stage that has since been deleted, which therefore has no column above. */
+  deletedStageEntries: number;
+  /** The names those deleted stages had, at most ten of them. */
+  deletedStageNames: string[];
+  /** Conversations created inside the window. */
+  newLeads: number;
+  /** Of those, the ones that arrived from an advertisement. */
+  leadsFromAds: number;
+  sources: StatsSource[];
+  /** Null exactly when the window holds no paid order: a row of zeros would read as a fact. */
+  money: StatsMoney | null;
+  currency: string;
+}

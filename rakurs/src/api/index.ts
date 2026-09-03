@@ -20,8 +20,10 @@ import type {
   Me,
   Member,
   Message,
+  Period,
   Stage,
   StatsCurrent,
+  StatsPeriodReport,
   WebhookSetup,
   WhatsappNumber,
 } from '@/types';
@@ -406,3 +408,20 @@ export const resendCapiEvent = (agentId: string, eventId: string) =>
  */
 export const getStatsCurrent = (agentId: string, signal?: AbortSignal) =>
   request<StatsCurrent>(`/agents/${agentId}/stats/current`, { signal });
+
+/**
+ * Воронка, источники и деньги за период. Любому сотруднику.
+ *
+ * Период — тот же, что у расхода на ИИ: сутки, неделя или месяц, скользящим окном.
+ * Сервер отвечает своим `since` — экран показывает именно тот момент, от которого
+ * посчитаны цифры, а не свой собственный.
+ *
+ * Здесь три карточки с разной честностью, и `stageHistorySince` в ответе — про это:
+ * источники и деньги считаются с того дня, как подключили номер, а движение по
+ * воронке — только с того дня, когда кабинет начал его записывать.
+ */
+export const getStatsPeriod = (agentId: string, period: Period, signal?: AbortSignal) =>
+  request<StatsPeriodReport>(`/agents/${agentId}/stats/period`, {
+    query: { period },
+    signal,
+  });

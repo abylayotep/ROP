@@ -36,10 +36,15 @@ import {
  * The reasons an owner reads on the integrations screen, so they are in the owner's
  * language. Meta's own refusals arrive in English and are stored as Meta wrote them; these
  * are ours, and nobody at Meta reads them.
+ *
+ * Two of them are exported because the queue writes the same two: the dataset can be turned
+ * off between the sale and the pass that reports it, and an owner reading the log must not
+ * have to work out that «отключена в интеграциях» and some second wording for the same
+ * condition mean the same thing.
  */
-const NO_SETTINGS =
+export const NO_SETTINGS =
   'Не отправлено: Meta Conversions API не настроен. Укажите набор данных в интеграциях.';
-const DISABLED = 'Не отправлено: отправка в Meta отключена в интеграциях.';
+export const DISABLED = 'Не отправлено: отправка в Meta отключена в интеграциях.';
 const NO_CLID =
   'Не отправлено: диалог начался не с рекламы, у него нет ctwa_clid, ' +
   'и Meta не с чем его сопоставить.';

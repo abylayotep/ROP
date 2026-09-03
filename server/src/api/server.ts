@@ -45,10 +45,8 @@ export function buildServer(env: Env, db: Db, deps: ServerDeps = {}): FastifyIns
   // both answer with it, and a test replaces it once for both.
   const model = deps.model ?? createModelClient();
   // Resolved here, alongside every other outbound client, so the settings routes and the
-  // queue drain that follow share one instance and a test replaces it once for all of them.
-  // Nothing reads it yet: the client exists before the code that reports a sale with it.
+  // queue drain share one instance and a test replaces it once for all of them.
   const capi = deps.capi ?? createCapiClient();
-  void capi;
 
   app.register(cookie, { secret: env.SESSION_SECRET });
   app.register(rateLimit, { global: false });
@@ -103,12 +101,14 @@ export function buildServer(env: Env, db: Db, deps: ServerDeps = {}): FastifyIns
     registerAiRoutes(app, db, env, guard, { model, graph });
     // Meta calls the webhook directly with no session of its own, so it takes no guard —
     // the request signature is the check instead.
-    registerWhatsappWebhook(app, db, env, {
-      graph,
-      key: credentialsKey(env),
-      mediaDir: env.MEDIA_DIR,
-      model,
-    });
+    registerWhatsappWebhook(
+      app,
+      db,
+      env,
+      { graph, key: credentialsKey(env), mediaDir: env.MEDIA_DIR, model },
+      // The Conversions API queue is drained by the same delivery, once Meta has its 200.
+      { capi, key: credentialsKey(env) },
+    );
     // Later plans register their routes here, reusing the same guard.
   });
 

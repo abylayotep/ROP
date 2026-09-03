@@ -25,15 +25,15 @@
 
 **Where the drain runs.** It must not be on the webhook's request path — Meta is waiting there. Put it where the existing pass runs, after the response, and cap how long one drain may take so a slow Meta cannot pile passes on each other.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `server/test/capi-queue.test.ts` with `fakeCapi` injected. Cover: a pending event is sent and marked; the token reaches the client decrypted and never reaches the stored error; a retryable refusal increments attempts and stays pending; a non-retryable one fails at once; the cap stops an event that always fails; two concurrent drains send one event once; several pending events for one agent go in one call; an event whose agent's settings were disabled after queueing is skipped rather than sent.
 
-- [ ] **Step 2: Run it and watch it fail**
+- [x] **Step 2: Run it and watch it fail**
 
-- [ ] **Step 3: Write it**
+- [x] **Step 3: Write it**
 
-- [ ] **Step 4: Run everything and commit**
+- [x] **Step 4: Run everything and commit**
 
 ```bash
 npm --prefix server test

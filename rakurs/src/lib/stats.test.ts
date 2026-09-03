@@ -1,9 +1,9 @@
 /**
- * Две фразы, которые карточка «Движение по воронке» печатает про саму себя.
+ * Two sentences the «Движение по воронке» card prints about itself.
  *
- * Обе проверяются здесь, а не глазами: одна печатает число, вторая — предложение, и обе
- * ошибались тихо. «0 %» выглядит как настоящий ответ, а «лидов не двигали» — как настоящее
- * предложение, и заметить их можно только на конкретных цифрах.
+ * Both are checked here rather than by eye: one prints a number, the other a sentence, and
+ * both used to be wrong quietly. «0 %» looks like a real answer and «лидов не двигали»
+ * looks like a real sentence; only concrete figures give them away.
  */
 import { describe, expect, it } from 'vitest';
 import { chainAbsence, percent } from './stats';

@@ -85,4 +85,25 @@ describe('auth', () => {
     expect((await app.inject({ method: 'GET', url: '/api/auth/me', cookies: jar })).statusCode)
       .toBe(401);
   });
+
+  it('says in Russian that there were too many attempts, not that the server broke', async () => {
+    // The rate limiter throws its own error rather than an ApiError. Without the handler's
+    // case for it, someone who mistyped their password reads «Внутренняя ошибка сервера»
+    // and has no idea that waiting a minute is the answer.
+    // A fixed address: the limiter keys on one, and `inject` leaves it empty otherwise, so
+    // every attempt would look like it came from somewhere new.
+    const attempt = () =>
+      app.inject({
+        method: 'POST',
+        url: '/api/auth/login',
+        remoteAddress: '203.0.113.7',
+        payload: { email: 'owner@example.com', password: 'wrong-password' },
+      });
+
+    let last = await attempt();
+    for (let n = 0; n < 15 && last.statusCode !== 429; n += 1) last = await attempt();
+
+    expect(last.statusCode).toBe(429);
+    expect(last.json().message).toBe('Слишком много попыток. Подождите минуту.');
+  });
 });

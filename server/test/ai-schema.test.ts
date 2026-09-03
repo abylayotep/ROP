@@ -1,0 +1,159 @@
+import { eq } from 'drizzle-orm';
+import { describe, expect, it } from 'vitest';
+import {
+  accounts,
+  agents,
+  aiReplies,
+  contacts,
+  conversations,
+  messages,
+  whatsappNumbers,
+} from '../src/db/schema.js';
+import { withDb } from './helpers/db.js';
+
+/** An agent with one conversation on it — the fixture every case here starts from. */
+async function seed(db: Awaited<ReturnType<typeof withDb>>) {
+  const [account] = await db.insert(accounts).values({ name: 'Сафина' }).returning();
+  const [agent] = await db
+    .insert(agents)
+    .values({ accountId: account!.id, name: 'Сафина' })
+    .returning();
+  const [number] = await db
+    .insert(whatsappNumbers)
+    .values({
+      agentId: agent!.id,
+      phoneNumberId: `pn-${Math.random().toString(36).slice(2)}`,
+      wabaId: 'waba',
+      displayPhone: '+7 708 580 79 32',
+      accessToken: 'x',
+    })
+    .returning();
+  const [contact] = await db
+    .insert(contacts)
+    .values({ agentId: agent!.id, phone: '77085807932' })
+    .returning();
+  const [conversation] = await db
+    .insert(conversations)
+    .values({
+      agentId: agent!.id,
+      contactId: contact!.id,
+      whatsappNumberId: number!.id,
+    })
+    .returning();
+
+  return { agentId: agent!.id, conversationId: conversation!.id };
+}
+
+describe('ai schema', () => {
+  it('starts an agent with the AI off and nothing written', async () => {
+    const db = await withDb();
+    const { agentId } = await seed(db);
+
+    const [row] = await db.select().from(agents).where(eq(agents.id, agentId));
+
+    expect(row?.aiEnabled).toBe(false);
+    expect(row?.model).toBe('openai/gpt-4o-mini');
+    // numeric arrives as a string on purpose: a temperature must not drift through a float.
+    expect(row?.temperature).toBe('0.30');
+    expect(row?.instructions).toBe('');
+    expect(row?.replyLanguage).toBe('auto');
+    expect(row?.openrouterKey).toBeNull();
+  });
+
+  it('starts a conversation with the AI on', async () => {
+    const db = await withDb();
+    const { conversationId } = await seed(db);
+
+    const [row] = await db.select().from(conversations).where(eq(conversations.id, conversationId));
+
+    // The per-conversation switch defaults to on: turning the agent off for everyone
+    // is the other switch, on the agent itself.
+    expect(row?.aiEnabled).toBe(true);
+  });
+
+  it('logs a turn with its model, its tokens and its cost', async () => {
+    const db = await withDb();
+    const { agentId, conversationId } = await seed(db);
+    const [message] = await db
+      .insert(messages)
+      .values({
+        conversationId,
+        direction: 'out',
+        author: 'ai',
+        kind: 'text',
+        body: 'Доставка по Алматы бесплатная.',
+        sentAt: new Date(),
+      })
+      .returning();
+
+    const [reply] = await db
+      .insert(aiReplies)
+      .values({
+        agentId,
+        conversationId,
+        messageId: message!.id,
+        model: 'openai/gpt-4o-mini',
+        promptTokens: 1840,
+        completionTokens: 96,
+        cost: '0.00042100',
+        outcome: 'sent',
+        usedItemIds: ['a3f1', 'b7c2'],
+      })
+      .returning();
+
+    expect(reply?.model).toBe('openai/gpt-4o-mini');
+    expect(reply?.promptTokens).toBe(1840);
+    expect(reply?.completionTokens).toBe(96);
+    // numeric arrives as a string on purpose, the same way an order's amount does.
+    expect(reply?.cost).toBe('0.00042100');
+    expect(reply?.outcome).toBe('sent');
+    expect(reply?.detail).toBeNull();
+    expect(reply?.usedItemIds).toEqual(['a3f1', 'b7c2']);
+  });
+
+  it('defaults a turn that produced nothing to zero cost and no message', async () => {
+    const db = await withDb();
+    const { agentId, conversationId } = await seed(db);
+
+    const [reply] = await db
+      .insert(aiReplies)
+      .values({
+        agentId,
+        conversationId,
+        model: 'openai/gpt-4o-mini',
+        outcome: 'handoff',
+        detail: 'Ничего не нашлось в базе знаний',
+      })
+      .returning();
+
+    expect(reply?.messageId).toBeNull();
+    expect(reply?.promptTokens).toBe(0);
+    expect(reply?.completionTokens).toBe(0);
+    expect(reply?.cost).toBe('0.00000000');
+    expect(reply?.usedItemIds).toEqual([]);
+  });
+
+  it('deletes a turn log with its conversation', async () => {
+    const db = await withDb();
+    const { agentId, conversationId } = await seed(db);
+    await db
+      .insert(aiReplies)
+      .values({ agentId, conversationId, model: 'openai/gpt-4o-mini', outcome: 'sent' });
+
+    await db.delete(conversations).where(eq(conversations.id, conversationId));
+
+    expect(await db.select().from(aiReplies)).toHaveLength(0);
+  });
+
+  it('deletes a turn log with its agent', async () => {
+    const db = await withDb();
+    const { agentId, conversationId } = await seed(db);
+    await db
+      .insert(aiReplies)
+      .values({ agentId, conversationId, model: 'openai/gpt-4o-mini', outcome: 'sent' });
+
+    await db.delete(agents).where(eq(agents.id, agentId));
+
+    expect(await db.select().from(aiReplies)).toHaveLength(0);
+  });
+});

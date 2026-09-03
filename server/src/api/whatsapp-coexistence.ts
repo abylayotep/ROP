@@ -9,7 +9,7 @@ import { ApiError } from '../lib/errors.js';
 import { credentialsKey, encryptSecret } from '../lib/secret-box.js';
 import { GraphError, withoutSecret, type GraphClient, type PhoneNumber } from '../lib/whatsapp/graph.js';
 import { requireAgent } from './require-agent.js';
-import { toApi } from './whatsapp-numbers.js';
+import { duplicateNumberError, isDuplicate, toApi } from './whatsapp-numbers.js';
 
 const connection = z.object({
   code: z.string().trim().min(1),
@@ -17,11 +17,6 @@ const connection = z.object({
   phoneNumberId: z.string().trim().min(1).optional(),
   businessId: z.string().trim().min(1).optional(),
 });
-
-const isDuplicate = (error: unknown): boolean => {
-  const cause = error instanceof Error ? error.cause : undefined;
-  return typeof cause === 'object' && cause !== null && (cause as { code?: string }).code === '23505';
-};
 
 /**
  * Coexistence: the number that already lives in the WhatsApp Business app on a phone.
@@ -55,7 +50,7 @@ export function registerWhatsappCoexistenceRoutes(
     async (req): Promise<WhatsappNumber> => {
       const parsed = connection.safeParse(req.body as CoexistenceConnection);
       if (!parsed.success) throw new ApiError(400, 'Meta не вернула данные для подключения');
-      const { code, wabaId, businessId } = parsed.data;
+      const { code, wabaId, businessId, phoneNumberId } = parsed.data;
 
       let token: string;
       try {
@@ -71,8 +66,8 @@ export function registerWhatsappCoexistenceRoutes(
       // is the common case; two is the owner's choice to make in Meta's own window.
       let number: PhoneNumber;
       try {
-        if (parsed.data.phoneNumberId) {
-          number = await graph.getPhoneNumber(parsed.data.phoneNumberId, token);
+        if (phoneNumberId) {
+          number = await graph.getPhoneNumber(phoneNumberId, token);
         } else {
           const all = await graph.listPhoneNumbers(wabaId, token);
           if (all.length !== 1) {
@@ -102,7 +97,7 @@ export function registerWhatsappCoexistenceRoutes(
 
       let row: typeof whatsappNumbers.$inferSelect;
       try {
-        [row] = (await db
+        const inserted = await db
           .insert(whatsappNumbers)
           .values({
             agentId: req.agent!.id,
@@ -114,35 +109,27 @@ export function registerWhatsappCoexistenceRoutes(
             subscribedAt: new Date(),
             connectionKind: 'coexistence',
           })
-          .returning()) as [typeof whatsappNumbers.$inferSelect];
+          .returning();
+        row = inserted[0]!;
       } catch (error) {
-        if (isDuplicate(error)) {
-          const [existing] = await db
-            .select({ agentId: whatsappNumbers.agentId })
-            .from(whatsappNumbers)
-            .where(eq(whatsappNumbers.phoneNumberId, number.id));
-          throw new ApiError(
-            409,
-            existing?.agentId === req.agent!.id
-              ? 'Этот номер уже подключён к этому агенту'
-              : 'Этот номер уже подключён к другому агенту',
-          );
-        }
+        if (isDuplicate(error)) throw await duplicateNumberError(db, number.id, req.agent!.id);
         throw error;
       }
 
-      // Both are one-shot on Meta's side. A refusal is written down, not retried: a second
-      // attempt would only replace a clear error with «already requested».
-      let syncError: string | null = null;
+      // Both are one-shot on Meta's side and independent of each other, so a refusal of one
+      // must not forfeit the other against Meta's 24-hour deadline. Errors are written down,
+      // not retried: a second attempt would only replace a clear error with «already
+      // requested».
+      const failures: string[] = [];
       for (const syncType of ['smb_app_state_sync', 'history'] as const) {
         try {
           await graph.requestSmbAppData(number.id, token, syncType);
         } catch (error) {
           if (!(error instanceof GraphError)) throw error;
-          syncError = withoutSecret(error.message, token);
-          break;
+          failures.push(withoutSecret(error.message, token));
         }
       }
+      const syncError = failures.length > 0 ? failures.join('; ') : null;
       const [updated] = await db
         .update(whatsappNumbers)
         .set(syncError ? { syncError } : { syncRequestedAt: new Date() })

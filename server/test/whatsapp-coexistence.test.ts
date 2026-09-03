@@ -158,6 +158,23 @@ describe('connecting the phone number', () => {
     expect(row!.syncRequestedAt).toBeNull();
   });
 
+  it('still asks for history when the contacts sync is refused', async () => {
+    await boot({
+      requestSmbAppData: async (_id, _t, syncType) => {
+        if (syncType === 'smb_app_state_sync') throw new GraphError('Contact sync already requested', 400, 2593002);
+        return { requestId: 'req-history' };
+      },
+    });
+
+    const res = await connect({ code: 'AQD-code', wabaId: '932', phoneNumberId: '136' });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().syncError).toBe('Contact sync already requested');
+    expect(graph.calls.filter((c) => c.method === 'requestSmbAppData')).toHaveLength(2);
+    const [row] = await db.select().from(whatsappNumbers);
+    expect(row!.syncRequestedAt).toBeNull();
+  });
+
   it('says the number is already connected on a repeat', async () => {
     await connect({ code: 'one', wabaId: '932', phoneNumberId: '136' });
 

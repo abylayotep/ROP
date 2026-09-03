@@ -1,5 +1,5 @@
 import type { Lead, Member, Note, Order } from '@rakurs/contract';
-import { and, asc, eq, isNull } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
@@ -17,6 +17,7 @@ import {
 } from '../db/schema.js';
 import { queueLead } from '../lib/capi/enqueue.js';
 import { ApiError } from '../lib/errors.js';
+import { recordStageMove } from '../lib/funnel-history.js';
 import { sendStageMessage } from '../lib/funnel-message.js';
 import { credentialsKey } from '../lib/secret-box.js';
 import { isUuid } from '../lib/uuid.js';
@@ -179,23 +180,55 @@ export function registerLeadRoutes(
       const stagePatch: Partial<typeof conversations.$inferInsert> = {};
       const assigneePatch: Partial<typeof conversations.$inferInsert> = {};
 
+      /**
+       * The stage this request is moving the lead into, and the one it is leaving.
+       *
+       * Both carry `name`, `kind` and `position` because the transition row snapshots
+       * them — see `recordStageMove`. Null while nothing is moving anywhere, and `to`
+       * stays null when the patch clears the stage: a lead taken out of the funnel has
+       * not entered a stage, and there is nothing for the funnel to count it into.
+       */
+      let to: { id: string; name: string; kind: string; position: number } | null = null;
+      let from: { id: string; name: string; position: number } | null = null;
+
       if (parsed.data.stageId !== undefined && parsed.data.stageId !== current.stageId) {
-        if (parsed.data.stageId !== null) {
+        const targetId = parsed.data.stageId;
+        if (targetId !== null) {
           // Checked against this agent's stages, not just for existence: a stage id from
           // another company would otherwise put a lead in a column nobody here can see.
-          if (!isUuid(parsed.data.stageId)) throw new ApiError(404, 'Стадия не найдена');
-          const [stage] = await db
-            .select({ id: stages.id })
+          if (!isUuid(targetId)) throw new ApiError(404, 'Стадия не найдена');
+          // The stage being left is read in the same statement as the one being entered.
+          // `loadLead` hands back `stageId` and not the name, kind and position the
+          // transition snapshots, and a second round trip to fetch them would be one more
+          // wait on every drag across the board.
+          const rows = await db
+            .select({
+              id: stages.id,
+              name: stages.name,
+              kind: stages.kind,
+              position: stages.position,
+            })
             .from(stages)
-            .where(and(eq(stages.id, parsed.data.stageId), eq(stages.agentId, req.agent!.id)));
+            .where(
+              and(
+                eq(stages.agentId, req.agent!.id),
+                current.stageId === null
+                  ? eq(stages.id, targetId)
+                  : inArray(stages.id, [targetId, current.stageId]),
+              ),
+            );
+          const stage = rows.find((row) => row.id === targetId);
           if (!stage) throw new ApiError(404, 'Стадия не найдена');
+          to = stage;
+          from = rows.find((row) => row.id === current.stageId) ?? null;
         }
-        stagePatch.stageId = parsed.data.stageId;
+        stagePatch.stageId = targetId;
         stagePatch.stageSetAt = new Date();
         // Stage 5 writes 'ai' here through the same column.
         // The agent's own move in `lib/ai/turn.ts` is a COPY of this path, not a call to it:
-        // the same guarded UPDATE, the same auto-message, the same queued conversion, with
-        // `ai` in place of `operator`. A change here has to be made there too.
+        // the same guarded UPDATE, the same recorded transition, the same auto-message, the
+        // same queued conversion, with `ai` in place of `operator`. A change here has to be
+        // made there too.
         stagePatch.stageSetBy = 'operator';
       }
 
@@ -256,6 +289,21 @@ export function registerLeadRoutes(
             )
             .returning({ id: conversations.id });
           moved = rows.length > 0;
+
+          // Inside this transaction, not after it: the move and the record of the move
+          // commit together or neither does. And only when the guarded UPDATE returned a
+          // row — a request that lost the race changed nothing, and a transition it wrote
+          // would be this operator taking credit for somebody else's move.
+          if (moved && to !== null) {
+            await recordStageMove(tx, {
+              agentId: req.agent!.id,
+              conversationId,
+              from,
+              to,
+              movedBy: 'operator',
+              movedByUserId: req.user!.id,
+            });
+          }
         }
       });
 

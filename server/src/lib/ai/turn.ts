@@ -35,6 +35,7 @@ import {
   whatsappNumbers,
 } from '../../db/schema.js';
 import { queueLead } from '../capi/enqueue.js';
+import { recordStageMove } from '../funnel-history.js';
 import { sendStageMessage } from '../funnel-message.js';
 import { searchKnowledge } from '../knowledge/search.js';
 import { decryptSecret } from '../secret-box.js';
@@ -733,9 +734,10 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
         const stageMoved = await db
           .update(conversations)
           // Deliberately the same shape as an operator's move in `leads.ts` — the guarded
-          // UPDATE, the auto-message, the queued conversion — but a COPY of it, not a call to
-          // it. A change to one has to be made to the other; the tests that pin the auto-message
-          // and the CAPI hook exist on both sides for that reason.
+          // UPDATE, the recorded transition, the auto-message, the queued conversion — but a
+          // COPY of it, not a call to it. A change to one has to be made to the other; the
+          // tests that pin the transition, the auto-message and the CAPI hook exist on both
+          // sides for that reason.
           .set({ stageId: target.id, stageSetAt: new Date(), stageSetBy: 'ai' })
           .where(
             and(
@@ -752,6 +754,18 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
           details.push('Перевод на этап не выполнен: сделку уже перевели.');
         } else {
           movedTo = target.id;
+          // The funnel's record of the move, written before anything is reported to Meta
+          // or said to the customer, and never swallowed: see `recordStageMove`. `from`
+          // costs no query — `stageRows` is this agent's whole funnel, already loaded to
+          // build the prompt, and the stage the lead is leaving is in it.
+          await recordStageMove(db, {
+            agentId: agent.id,
+            conversationId: conversation.id,
+            from: stageRows.find((stage) => stage.id === conversation.stageId) ?? null,
+            to: target,
+            movedBy: 'ai',
+            movedByUserId: null,
+          });
           // Reported whoever moved the lead. This road is the operator's road copied, not
           // the operator's route called, so the hook in `leads.ts` does not reach here and
           // the agent's move would otherwise go unreported — see the comment above.

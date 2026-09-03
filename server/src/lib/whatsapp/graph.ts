@@ -65,13 +65,30 @@ export class GraphError extends Error {
   }
 }
 
+/** What stands where a secret was. One string, so every test can look for the same thing. */
+export const REDACTED = '<токен скрыт>';
+
+/**
+ * An OpenRouter key by its shape rather than by its value.
+ *
+ * The exact match below is the whole defence only while the provider echoes the credential
+ * back byte for byte. It does not always: a key can come back url-encoded inside a quoted
+ * URL, or truncated to a prefix in a rate-limit message, and either survives a
+ * `split`/`join` on the exact string while still being most of a working key. This catches
+ * anything that opens like one — the `%` is there for the encoded case, and the length floor
+ * keeps the literal word `sk-or-` in a sentence out of it.
+ */
+const KEY_SHAPE = /sk-or-[A-Za-z0-9%._~+-]{6,}/g;
+
 /**
  * Meta echoes a rejected token back inside its own error text — «Malformed access token
  * <the token>». That text is shown to whoever pressed the button, so the secret has to be
- * taken out of it before it leaves this process.
+ * taken out of it before it leaves this process. OpenRouter does the same with its key,
+ * which is why this function is used by the model client and the turn as well.
  */
 export function withoutSecret(message: string, secret: string): string {
-  return secret ? message.split(secret).join('<токен скрыт>') : message;
+  const exact = secret ? message.split(secret).join(REDACTED) : message;
+  return exact.replace(KEY_SHAPE, REDACTED);
 }
 
 async function failure(response: Response): Promise<GraphError> {

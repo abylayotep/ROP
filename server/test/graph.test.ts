@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createGraphClient, GraphError } from '../src/lib/whatsapp/graph.js';
+import {
+  createGraphClient,
+  GraphError,
+  REDACTED,
+  withoutSecret,
+} from '../src/lib/whatsapp/graph.js';
 
 const client = createGraphClient();
 const TOKEN = 'EAAG-token';
@@ -160,5 +165,39 @@ describe('graph client', () => {
     );
 
     await expect(client.sendText('136', TOKEN, '777', 'hi')).rejects.toThrow('HTTP 502');
+  });
+});
+
+describe('withoutSecret', () => {
+  it('takes out the exact secret it was given', () => {
+    expect(withoutSecret(`Malformed access token ${TOKEN}`, TOKEN)).toBe(
+      `Malformed access token ${REDACTED}`,
+    );
+  });
+
+  it('leaves the sentence alone when there is no secret to take out', () => {
+    expect(withoutSecret('HTTP 502', '')).toBe('HTTP 502');
+  });
+
+  it('takes out an OpenRouter key that came back url-encoded', () => {
+    // The exact match cannot see this one: the provider quoted the key inside a URL, so
+    // every byte of it is there and none of them line up with the stored string.
+    const key = 'sk-or-v1-abc/def';
+    const said = 'No auth credentials found for sk-or-v1-abc%2Fdef';
+
+    expect(withoutSecret(said, key)).toBe(`No auth credentials found for ${REDACTED}`);
+  });
+
+  it('takes out an OpenRouter key that came back truncated', () => {
+    const key = 'sk-or-v1-0123456789abcdef';
+
+    expect(withoutSecret('Rate limit for key sk-or-v1-01234567…', key)).toContain(REDACTED);
+    expect(withoutSecret('Rate limit for key sk-or-v1-01234567…', key)).not.toContain('01234567');
+  });
+
+  it('leaves the bare word alone', () => {
+    // A prefix on its own is not a key, and redacting it would hide the sentence that
+    // tells the owner what shape their key should have.
+    expect(withoutSecret('Ключ начинается с sk-or-', '')).toBe('Ключ начинается с sk-or-');
   });
 });

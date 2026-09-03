@@ -473,7 +473,9 @@ export const aiReplies = pgTable(
     // What OpenRouter says the turn cost, in US dollars. A string for the same reason an
     // order's amount is one.
     cost: numeric('cost', { precision: 12, scale: 8 }).notNull().default('0'),
-    // 'sent' | 'handoff' | 'failed'
+    // 'sent' | 'unrecorded' | 'applied' | 'handoff' | 'failed' | 'skipped'. `TurnOutcome`
+    // in `lib/ai/turn.ts` is the list, and says what each one means to a caller deciding
+    // whether the turn may be run again.
     outcome: text('outcome').notNull(),
     // Why it ended that way, when it was not 'sent'. Never carries a key.
     detail: text('detail'),

@@ -3,12 +3,14 @@ import {
   index,
   integer,
   jsonb,
+  numeric,
   pgTable,
   primaryKey,
   text,
   timestamp,
   unique,
   uuid,
+  type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
 
 /**
@@ -86,6 +88,9 @@ export const agents = pgTable(
     name: text('name').notNull(),
     description: text('description').notNull().default(''),
     timezone: text('timezone').notNull().default('Asia/Almaty'),
+    // ISO 4217. One business, one currency: an order form that asks every time would
+    // be asking a question the answer to which never changes.
+    currency: text('currency').notNull().default('KZT'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index('agents_account_id_idx').on(t.accountId)],
@@ -164,6 +169,13 @@ export const conversations = pgTable(
     adHeadline: text('ad_headline'),
     adBody: text('ad_body'),
     referralSeenAt: timestamp('referral_seen_at', { withTimezone: true }),
+    // Nullable and `set null` on delete: a conversation nobody has triaged has no stage,
+    // and removing a stage must not remove the customers who were standing in it.
+    stageId: uuid('stage_id').references((): AnyPgColumn => stages.id, { onDelete: 'set null' }),
+    stageSetAt: timestamp('stage_set_at', { withTimezone: true }),
+    // 'operator' | 'ai' | 'scenario' | 'system'. Stage 5 adds a value, not a column.
+    stageSetBy: text('stage_set_by'),
+    assignedTo: uuid('assigned_to').references(() => users.id, { onDelete: 'set null' }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
@@ -206,6 +218,136 @@ export const messages = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index('messages_conversation_sent_at_idx').on(t.conversationId, t.sentAt)],
+);
+
+/**
+ * One column of the funnel.
+ *
+ * `description` is written for stage 5: it is the sentence the agent will read to decide
+ * whether a conversation belongs here. Nothing in this stage reads it, and it is empty by
+ * default rather than absent, so the editor never has to reason about null.
+ *
+ * Exactly one stage per agent may have kind `success`. That is a rule the API enforces
+ * rather than a constraint here: a partial unique index would make the seeding order
+ * matter and would fail an owner's reorder mid-transaction with a message nobody can read.
+ */
+export const stages = pgTable(
+  'stages',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    agentId: uuid('agent_id')
+      .notNull()
+      .references(() => agents.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    color: text('color').notNull(),
+    // 'active' | 'qualified' | 'awaiting_payment' | 'success' | 'failure'
+    kind: text('kind').notNull(),
+    position: integer('position').notNull(),
+    description: text('description').notNull().default(''),
+    // Sent when a lead enters this stage. Null means the stage sends nothing.
+    autoMessage: text('auto_message'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('stages_agent_position_idx').on(t.agentId, t.position)],
+);
+
+/**
+ * A field the business wants filled on every lead.
+ *
+ * `hint` is stage 5's instruction for filling it, the same way `stages.description` is.
+ * An operator sees only the name.
+ */
+export const leadFields = pgTable(
+  'lead_fields',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    agentId: uuid('agent_id')
+      .notNull()
+      .references(() => agents.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    // 'text' | 'number' | 'date'
+    kind: text('kind').notNull(),
+    hint: text('hint').notNull().default(''),
+    position: integer('position').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [unique('lead_fields_agent_name_key').on(t.agentId, t.name)],
+);
+
+/**
+ * What one lead answered for one field.
+ *
+ * Always text, whatever the field's kind: a field's type can be changed after values
+ * exist, and rewriting stored answers on a type change loses more than formatting on
+ * read ever costs.
+ */
+export const leadValues = pgTable(
+  'lead_values',
+  {
+    conversationId: uuid('conversation_id')
+      .notNull()
+      .references(() => conversations.id, { onDelete: 'cascade' }),
+    fieldId: uuid('field_id')
+      .notNull()
+      .references(() => leadFields.id, { onDelete: 'cascade' }),
+    value: text('value').notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.conversationId, t.fieldId] })],
+);
+
+/**
+ * Money.
+ *
+ * Separate from the stage on purpose: a stage says where the customer is, an order says
+ * how much and when. A second purchase from the same person is a second row here rather
+ * than a first one overwritten, and stage 6 reports the row, because only the row knows
+ * the amount and the time.
+ */
+export const orders = pgTable(
+  'orders',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    agentId: uuid('agent_id')
+      .notNull()
+      .references(() => agents.id, { onDelete: 'cascade' }),
+    conversationId: uuid('conversation_id')
+      .notNull()
+      .references(() => conversations.id, { onDelete: 'cascade' }),
+    // Read back as a string. A float cannot hold 1234567.89 and money must not round.
+    amount: numeric('amount', { precision: 14, scale: 2 }).notNull(),
+    currency: text('currency').notNull(),
+    // 'pending' | 'paid' | 'cancelled'
+    status: text('status').notNull().default('pending'),
+    comment: text('comment').notNull().default(''),
+    // Filled only by 'paid'. Stage 6 sends this as the event time.
+    paidAt: timestamp('paid_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('orders_conversation_idx').on(t.conversationId),
+    index('orders_agent_paid_at_idx').on(t.agentId, t.paidAt),
+  ],
+);
+
+/**
+ * The operator's own record on a lead, and the only place the cabinet writes to when it
+ * cannot do what it was asked — an auto-message it could not send leaves its reason here.
+ *
+ * Never sent to the customer. `authorId` is null for the cabinet's own lines.
+ */
+export const notes = pgTable(
+  'notes',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    conversationId: uuid('conversation_id')
+      .notNull()
+      .references(() => conversations.id, { onDelete: 'cascade' }),
+    authorId: uuid('author_id').references(() => users.id, { onDelete: 'set null' }),
+    body: text('body').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('notes_conversation_created_idx').on(t.conversationId, t.createdAt)],
 );
 
 /**

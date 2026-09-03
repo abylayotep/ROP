@@ -14,19 +14,20 @@
  * to the eye in source code, and one careless formatter pass silently turns
  * them into ASCII, breaking nothing at the type level.
  *
- * Thin space (U+2009) — between digit groups: a regular space there reads as
- * the end of the number. Non-breaking space (U+00A0) — before the currency
- * sign: otherwise on a card 264 pixels wide the amount wraps as «450 000»
- * with «₸» on the next line.
+ * Narrow no-break space (U+202F) — between digit groups. It has to be both: an
+ * ordinary space there reads as the end of the number, and a plain thin space
+ * (U+2009) permits a line break, which is how «450 000,50 ₸» came out as «450»
+ * with «000,50 ₸» underneath it in the lead panel. Non-breaking space (U+00A0)
+ * — before the currency sign, for the same reason one column over.
  */
-const THIN_SPACE = '\u2009';
+const GROUP_SPACE = '\u202f';
 const NO_BREAK_SPACE = '\u00a0';
 
 const SYMBOLS: Record<string, string> = { KZT: '₸', RUB: '₽', USD: '$', EUR: '€', UZS: 'сўм' };
 
 export function formatMoney(amount: string, currency: string): string {
   const [whole = '0', cents = '00'] = amount.split('.');
-  const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, THIN_SPACE);
+  const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, GROUP_SPACE);
   const tail = cents === '00' ? '' : `,${cents}`;
   return `${grouped}${tail}${NO_BREAK_SPACE}${SYMBOLS[currency] ?? currency}`;
 }

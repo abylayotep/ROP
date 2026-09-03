@@ -232,11 +232,22 @@ export function registerStatsRoutes(
         db
           .select({
             sourceId: conversations.adSourceId,
-            // `max()` over a group whose rows all carry the same ad: the headline and the
-            // placement do not vary within one `ad_source_id`, and picking one row's value
-            // needs no window function.
-            sourceType: sql<string | null>`max(${conversations.adSourceType})`,
-            headline: sql<string | null>`max(${conversations.adHeadline})`,
+            // Named only when the group agrees on the name.
+            //
+            // Within one `ad_source_id` these do not vary, and `max()` picks the single
+            // value every row carries. The `sourceId: null` group is different: it holds
+            // every click whose ad could not be identified, and those clicks came from
+            // *different ads*. Naming one of them there would credit two leads to an
+            // advertisement they never saw and leave the one that brought them off the
+            // screen entirely — so a group holding more than one name carries none, and the
+            // screen's «Реклама без идентификатора объявления» stands on its own.
+            //
+            // `count(distinct …)` ignores nulls, so a group where only some rows recorded a
+            // headline still reports the one headline it has.
+            sourceType: sql<string | null>`case when count(distinct ${conversations.adSourceType}) = 1
+              then max(${conversations.adSourceType}) end`,
+            headline: sql<string | null>`case when count(distinct ${conversations.adHeadline}) = 1
+              then max(${conversations.adHeadline}) end`,
             leads: sql<number>`count(*)::int`,
             withClickId: sql<number>`(count(*)
               filter (where ${conversations.ctwaClid} is not null))::int`,
@@ -341,27 +352,44 @@ export function registerStatsRoutes(
        * would print a funnel that never happened, and would be exactly wrong for a funnel
        * whose last position is a refusal.
        */
-      const funnel: FunnelStep[] =
-        counters.moves === 0
-          ? []
-          : funnelRows.map((row, index): FunnelStep => {
-              // Certain: `index > 0` means the array has an element before this one.
-              const previous = index === 0 ? null : funnelRows[index - 1]!;
-              return {
-                stageId: row.stageId,
-                name: row.name,
-                kind: row.kind as StageKind,
-                position: row.position,
-                entered: row.entered,
-                // Integers divided in Node, because a ratio is not money. Null on the first
-                // step, and null — never 0 — when the previous step has no entries at all:
-                // nothing to divide by is not zero per cent.
-                conversion:
-                  previous === null || previous.entered === 0
-                    ? null
-                    : row.entered / previous.entered,
-              };
-            });
+      const funnel: FunnelStep[] = [];
+      if (counters.moves > 0) {
+        /**
+         * Entries of the nearest earlier stage anyone actually entered.
+         *
+         * Not the entries of the row above, which is the whole fix. An owner's stage list is
+         * longer than most deals need, and a stage nobody was routed through is ordinary —
+         * but dividing by the row above makes the skipped stage report «0%», which reads as
+         * «каждая сделка умирает на этой стадии» about a stage where nothing was ever
+         * attempted. That is a worse lie than the conversion above 100% this route already
+         * refuses to invent, because 0% looks plausible.
+         *
+         * Skipping the empty rows also stops a real stage from going silent behind them: two
+         * leads that reached «Счёт отправлен» past two stages nobody used are still two out
+         * of the two that were qualified, and that is the sentence the card should say.
+         */
+        let denominator: number | null = null;
+
+        for (const row of funnelRows) {
+          funnel.push({
+            stageId: row.stageId,
+            name: row.name,
+            kind: row.kind as StageKind,
+            position: row.position,
+            entered: row.entered,
+            // Integers divided in Node, because a ratio is not money.
+            //
+            // Null — never 0 — in the two cases where a percentage would be a claim nobody
+            // can support: a stage nobody entered has no share to state, and the first stage
+            // anyone entered has nothing above it to be a share of.
+            conversion:
+              row.entered === 0 || denominator === null ? null : row.entered / denominator,
+          });
+          // Only a stage somebody entered becomes the next denominator. An empty one is a
+          // stage the funnel walked past, not a stage that lost everybody.
+          if (row.entered > 0) denominator = row.entered;
+        }
+      }
 
       // `null` rather than a row of zeros, which is `AiUsage.total`'s rule for
       // `AiUsage.total`'s reason: zeros read as a fact about the business, while the

@@ -541,11 +541,20 @@ export interface FunnelStep {
   /** Distinct conversations that entered this stage inside the window. */
   entered: number;
   /**
-   * Share of the previous step, 0..1 — and `null`, never `0`, when there is no share.
+   * Share of the nearest earlier step anyone entered — and `null`, never `0`, without one.
    *
-   * Null on the first step, which has no previous one, and null when the previous step has
-   * no entries at all: nothing to divide by is not zero per cent, and printing 0% would
-   * accuse the operator of losing leads that were never there.
+   * The denominator skips the stages nobody was routed through, because an owner's stage
+   * list is longer than most deals need and a stage nobody used is ordinary. Dividing by
+   * the row above instead would print «0%» on the skipped stage — read as «каждая сделка
+   * умирает здесь» about a stage where nothing was ever attempted — and would then silence
+   * the real stage underneath it.
+   *
+   * Null in exactly two cases: this step has no entries of its own, so there is no share to
+   * state; or nobody entered any earlier step, so there is nothing to be a share of.
+   *
+   * Can exceed 1. A lead dragged straight into this stage past the one above never entered
+   * that one, so a step may hold more leads than its denominator. The screen prints what
+   * happened rather than capping it.
    */
   conversion: number | null;
 }
@@ -559,6 +568,13 @@ export interface StatsSource {
    * counting, and the screen labels it «Реклама без идентификатора объявления».
    */
   sourceId: string | null;
+  /**
+   * Null unless the whole group agrees.
+   *
+   * The `sourceId: null` row holds clicks from *different* advertisements, and naming one
+   * of them would credit its leads to an ad they never saw. A row that means «клики,
+   * рекламу которых не удалось определить» carries no name at all.
+   */
   sourceType: string | null;
   headline: string | null;
   /** Conversations of this ad created inside the window. */

@@ -153,6 +153,11 @@ async function move(conversationId: string, stageId: string | null, on = fixture
   expect(res.statusCode).toBe(200);
 }
 
+/** One lead walked through a list of stages by name, in order, as an operator would. */
+async function walk(conversationId: string, names: string[]) {
+  for (const name of names) await move(conversationId, fixture.stage(name).id);
+}
+
 async function addOrder(
   conversationId: string,
   amount: string,
@@ -248,18 +253,58 @@ describe('the funnel over a period', () => {
     expect(answer.deletedStageNames).toEqual([]);
   });
 
-  it('leaves conversion null on the first step and null where the previous step is empty', async () => {
+  it('leaves conversion null on the first step anyone entered', async () => {
     const lead = await addLead();
     // Straight past «В диалоге»: the lead entered two stages and no others.
-    await move(lead, fixture.stage('Новый лид').id);
-    await move(lead, fixture.stage('Интерес проявлен').id);
+    await walk(lead, ['Новый лид', 'Интерес проявлен']);
 
     const answer = await body();
+    // Nothing above it was entered, so there is nothing for it to be a share of.
     expect(step(answer, 'Новый лид')).toMatchObject({ entered: 1, conversion: null });
-    // Nobody entered «В диалоге», so it is 0 out of 1 — a share that exists.
-    expect(step(answer, 'В диалоге')).toMatchObject({ entered: 0, conversion: 0 });
-    // And the step after it has nothing to divide by: null, never 0%.
-    expect(step(answer, 'Интерес проявлен')).toMatchObject({ entered: 1, conversion: null });
+    // Nobody was routed through «В диалоге». It states no share at all — «0%» here would
+    // read as «каждая сделка умирает в диалоге» about a stage nothing was attempted in.
+    expect(step(answer, 'В диалоге')).toMatchObject({ entered: 0, conversion: null });
+    // And the stage under the skipped one is not silenced by it: one out of the one lead
+    // that entered «Новый лид», which is the nearest stage above that anyone entered.
+    expect(step(answer, 'Интерес проявлен')).toMatchObject({ entered: 1, conversion: 1 });
+  });
+
+  it('measures a step against the nearest stage above that anyone entered', async () => {
+    // Four leads down a nine-stage funnel, and nobody is ever routed through
+    // «Предложение отправлено» or «Готов к покупке». A stage list longer than the deals
+    // that run through it is ordinary, and it must not turn into a report of two stages
+    // where every deal dies.
+    const aigul = await addLead();
+    const erzhan = await addLead();
+    const dana = await addLead();
+    const marat = await addLead();
+    const road = ['Новый лид', 'В диалоге', 'Интерес проявлен', 'Квалифицирован'];
+    await walk(aigul, [...road, 'Счёт отправлен', 'Продажа']);
+    await walk(erzhan, [...road, 'Счёт отправлен']);
+    await walk(dana, road.slice(0, 3));
+    await walk(marat, ['Новый лид', 'В диалоге', 'Отказ']);
+
+    const answer = await body();
+    const chain = answer.funnel.map((row: { name: string; entered: number; conversion: number | null }) => [
+      row.name,
+      row.entered,
+      row.conversion,
+    ]);
+    expect(chain).toEqual([
+      ['Новый лид', 4, null],
+      ['В диалоге', 4, 1],
+      ['Интерес проявлен', 3, 0.75],
+      ['Квалифицирован', 2, 2 / 3],
+      // Nobody was sent here, so there is no share to state — not «0%», which is the
+      // plausible-looking lie this rule exists to refuse.
+      ['Предложение отправлено', 0, null],
+      ['Готов к покупке', 0, null],
+      // And the stage below the two skipped ones is not silent: two of the two leads that
+      // were qualified got an invoice.
+      ['Счёт отправлен', 2, 1],
+      ['Продажа', 1, 0.5],
+    ]);
+    expect(answer.failureEntries).toBe(1);
   });
 
   it('does not count a lead into the stages it skipped', async () => {
@@ -458,6 +503,51 @@ describe('the sources', () => {
     expect(answer.sources).toHaveLength(1);
     // One row, not two, and not a missing one: the click happened and is worth counting.
     expect(answer.sources[0]).toMatchObject({ sourceId: null, leads: 2, withClickId: 2 });
+  });
+
+  it('names no ad when the unidentified clicks came from more than one', async () => {
+    await addLead({ ctwaClid: 'clid-1', adSourceType: 'ad', adHeadline: 'Двери со скидкой' });
+    await addLead({ ctwaClid: 'clid-2', adSourceType: 'ad', adHeadline: 'Двери со скидкой' });
+    await addLead({ ctwaClid: 'clid-3', adSourceType: 'ad', adHeadline: 'Установка за день' });
+
+    const answer = await body();
+    expect(answer.sources).toHaveLength(1);
+    // Three clicks counted together, and none of the three ads named. Picking one would
+    // credit two leads to an advertisement they never saw and leave the one that actually
+    // brought them off the screen; the row means «рекламу не удалось определить», and a
+    // row that means that carries no name.
+    expect(answer.sources[0]).toMatchObject({
+      sourceId: null,
+      leads: 3,
+      withClickId: 3,
+      headline: null,
+      // The placement did not vary, so it is not a fabrication and is still reported.
+      sourceType: 'ad',
+    });
+  });
+
+  it('names the ad when the unidentified clicks agree on it', async () => {
+    await addLead({ ctwaClid: 'clid-1', adSourceType: 'ad', adHeadline: 'Двери со скидкой' });
+    // A click that recorded no headline at all does not make the group disagree: there is
+    // still exactly one name among them.
+    await addLead({ ctwaClid: 'clid-2', adSourceType: 'ad', adHeadline: null });
+
+    const answer = await body();
+    expect(answer.sources[0]).toMatchObject({
+      sourceId: null,
+      leads: 2,
+      headline: 'Двери со скидкой',
+    });
+  });
+
+  it('drops the placement too when the group disagrees about it', async () => {
+    await addLead({ ctwaClid: 'clid-1', adSourceType: 'ad', adHeadline: 'Двери со скидкой' });
+    await addLead({ ctwaClid: 'clid-2', adSourceType: 'post', adHeadline: 'Двери со скидкой' });
+
+    const answer = await body();
+    // The same rule, for the same reason: one row must not claim a fact only some of its
+    // clicks support.
+    expect(answer.sources[0]).toMatchObject({ sourceType: null, headline: 'Двери со скидкой' });
   });
 
   it('orders the biggest ad first and breaks a tie on the id', async () => {

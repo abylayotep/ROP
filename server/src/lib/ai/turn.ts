@@ -728,44 +728,67 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
       } else if (dryRun) {
         movedTo = target.id;
       } else {
-        // The operator's own road, guarded on the stage this turn read: of two writers who
-        // saw the same old stage exactly one updates a row, and the customer reads the
-        // stage's template once rather than twice.
-        const stageMoved = await db
-          .update(conversations)
-          // Deliberately the same shape as an operator's move in `leads.ts` — the guarded
-          // UPDATE, the recorded transition, the auto-message, the queued conversion — but a
-          // COPY of it, not a call to it. A change to one has to be made to the other; the
-          // tests that pin the transition, the auto-message and the CAPI hook exist on both
-          // sides for that reason.
-          .set({ stageId: target.id, stageSetAt: new Date(), stageSetBy: 'ai' })
-          .where(
-            and(
-              eq(conversations.id, conversation.id),
-              eq(conversations.agentId, agent.id),
-              conversation.stageId === null
-                ? isNull(conversations.stageId)
-                : eq(conversations.stageId, conversation.stageId),
-            ),
-          )
-          .returning({ id: conversations.id });
+        /**
+         * True when this turn is the one that actually moved the lead.
+         *
+         * Assigned inside the transaction and read after it, exactly as `leads.ts` does:
+         * of two writers who read the same old stage only one updates a row, and only that
+         * one may speak to the customer or report the sale.
+         */
+        let moved = false;
 
-        if (stageMoved.length === 0) {
+        // One transaction, not two autocommitted statements. The move and the record of
+        // the move land together or neither does — a connection lost between them would
+        // otherwise leave the lead in the new stage with no row behind it, and the funnel
+        // would under-count this move forever with nothing on the screen saying so. The
+        // guarantee is written down in `README.md` and in `docs/statistics.md`; this is
+        // where the agent's half of it is kept.
+        await db.transaction(async (tx) => {
+          // The operator's own road, guarded on the stage this turn read: of two writers
+          // who saw the same old stage exactly one updates a row, and the customer reads
+          // the stage's template once rather than twice.
+          const stageMoved = await tx
+            .update(conversations)
+            // Deliberately the same shape as an operator's move in `leads.ts` — the
+            // transaction, the guarded UPDATE, the recorded transition, the auto-message,
+            // the queued conversion — but a COPY of it, not a call to it. A change to one
+            // has to be made to the other; the tests that pin the transition, the
+            // auto-message and the CAPI hook exist on both sides for that reason.
+            .set({ stageId: target.id, stageSetAt: new Date(), stageSetBy: 'ai' })
+            .where(
+              and(
+                eq(conversations.id, conversation.id),
+                eq(conversations.agentId, agent.id),
+                conversation.stageId === null
+                  ? isNull(conversations.stageId)
+                  : eq(conversations.stageId, conversation.stageId),
+              ),
+            )
+            .returning({ id: conversations.id });
+          moved = stageMoved.length > 0;
+
+          // Inside the transaction, and only when the guarded UPDATE returned a row: a
+          // turn that lost the race changed nothing, and a transition it wrote would be
+          // this agent taking credit for somebody else's move. Never swallowed — see
+          // `recordStageMove`. `from` costs no query: `stageRows` is this agent's whole
+          // funnel, already loaded to build the prompt, and the stage the lead is leaving
+          // is in it.
+          if (moved) {
+            await recordStageMove(tx, {
+              agentId: agent.id,
+              conversationId: conversation.id,
+              from: stageRows.find((stage) => stage.id === conversation.stageId) ?? null,
+              to: target,
+              movedBy: 'ai',
+              movedByUserId: null,
+            });
+          }
+        });
+
+        if (!moved) {
           details.push('Перевод на этап не выполнен: сделку уже перевели.');
         } else {
           movedTo = target.id;
-          // The funnel's record of the move, written before anything is reported to Meta
-          // or said to the customer, and never swallowed: see `recordStageMove`. `from`
-          // costs no query — `stageRows` is this agent's whole funnel, already loaded to
-          // build the prompt, and the stage the lead is leaving is in it.
-          await recordStageMove(db, {
-            agentId: agent.id,
-            conversationId: conversation.id,
-            from: stageRows.find((stage) => stage.id === conversation.stageId) ?? null,
-            to: target,
-            movedBy: 'ai',
-            movedByUserId: null,
-          });
           // Reported whoever moved the lead. This road is the operator's road copied, not
           // the operator's route called, so the hook in `leads.ts` does not reach here and
           // the agent's move would otherwise go unreported — see the comment above.

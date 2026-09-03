@@ -12,7 +12,7 @@
  * move that goes unrecorded is a lead the funnel will never know about.
  */
 import { randomUUID } from 'node:crypto';
-import { asc, eq } from 'drizzle-orm';
+import { asc, eq, sql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildServer } from '../src/api/server.js';
@@ -343,6 +343,77 @@ describe('the agent moves a lead', () => {
   it('writes nothing when a turn moves no stage at all', async () => {
     await runTurn(db, deps(), { agentId, conversationId });
 
+    expect(await transitions()).toHaveLength(0);
+  });
+});
+
+/**
+ * Каждый перенос и запись о нём — одна транзакция.
+ *
+ * `README.md` and `docs/statistics.md` both promise it in words: «либо есть и перенос, и
+ * запись, либо нет ни того, ни другого». The failure it rules out is not a lost row but a
+ * *silent* one — a lead standing in a stage the funnel has no record of it entering, which
+ * makes every conversion below that stage quietly wrong and unfalsifiable forever.
+ *
+ * Forced with a trigger rather than by mocking, because what is under test is the database
+ * boundary itself: a rejected insert has to take the `UPDATE` down with it, and only a real
+ * transaction against a real Postgres can show that.
+ */
+describe('the move and the record of it', () => {
+  /** Runs `body` with every insert into `stage_transitions` refused by the database. */
+  async function refusingTransitions<T>(body: () => Promise<T>): Promise<T> {
+    await db.execute(
+      sql`create or replace function refuse_transition() returns trigger language plpgsql as $$
+          begin raise exception 'stage_transitions write refused'; end $$`,
+    );
+    await db.execute(
+      sql`create trigger refuse_transition before insert on stage_transitions
+          for each row execute function refuse_transition()`,
+    );
+    try {
+      return await body();
+    } finally {
+      await db.execute(sql`drop trigger if exists refuse_transition on stage_transitions`);
+      await db.execute(sql`drop function if exists refuse_transition()`);
+    }
+  }
+
+  /** Where the fixture's lead stands right now. */
+  const standsIn = async () =>
+    (
+      await db
+        .select({ stageId: conversations.stageId })
+        .from(conversations)
+        .where(eq(conversations.id, conversationId))
+    )[0]!.stageId;
+
+  it('rolls the operator’s move back when the record of it cannot be written', async () => {
+    const first = await stageNamed('Новый лид');
+
+    const res = await refusingTransitions(() => patch({ stageId: first.id }));
+
+    expect(res.statusCode).not.toBe(200);
+    // Neither happened. The operator sees an error and moves the card again; what he must
+    // never get is a card that moved and a funnel that never heard about it.
+    expect(await standsIn()).toBeNull();
+    expect(await transitions()).toHaveLength(0);
+  });
+
+  it('rolls the agent’s move back when the record of it cannot be written', async () => {
+    const first = await stageNamed('Новый лид');
+    const second = await stageNamed('В диалоге');
+    await db
+      .update(conversations)
+      .set({ stageId: first.id })
+      .where(eq(conversations.id, conversationId));
+
+    const result = await refusingTransitions(() => turn(second.id));
+
+    // The turn reports itself failed, as it does for anything it could not apply — and the
+    // lead is still where it was, so the report is the truth rather than a label on a move
+    // that already committed.
+    expect(result.outcome).toBe('failed');
+    expect(await standsIn()).toBe(first.id);
     expect(await transitions()).toHaveLength(0);
   });
 });

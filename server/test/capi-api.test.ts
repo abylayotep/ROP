@@ -399,17 +399,186 @@ describe('saving the settings', () => {
       method: 'PUT',
       url: settingsUrl(),
       cookies: owner,
-      payload: { datasetId: '1234567890', enabled: false },
+      payload: { datasetId: '1234567890', testEventCode: 'TEST12345' },
     });
 
     expect(res.statusCode).toBe(200);
-    expect(res.json().enabled).toBe(false);
+    expect(res.json().testEventCode).toBe('TEST12345');
     // Verified again with the token that is stored, so a save cannot make the row look
     // proved with a pair nobody checked.
     expect(capi.calls[1]!.token).toBe(TOKEN);
     expect(decryptSecret((await storedSettings())!.accessToken, key, tokenAad(agentId))).toBe(
       TOKEN,
     );
+  });
+
+  it('remembers Meta’s refusal on the row, so the reason outlives the toast', async () => {
+    // The card's red line and the contract's `error` are for exactly this: the owner presses
+    // «Сохранить», Meta refuses, and by the time they reload the toast that said why is gone.
+    await app.inject({
+      method: 'PUT',
+      url: settingsUrl(),
+      cookies: owner,
+      payload: { datasetId: '1234567890', accessToken: TOKEN },
+    });
+
+    capi = fakeCapi(
+      new CapiError('Meta не приняла токен доступа.', 400, false, 'Invalid OAuth access token.'),
+    );
+    app = buildServer(env, db, { graph: fakeGraph(), capi });
+    await app.ready();
+    await app.inject({
+      method: 'PUT',
+      url: settingsUrl(),
+      cookies: owner,
+      payload: { datasetId: '1234567890', accessToken: 'EAA-отозванный' },
+    });
+
+    const res = await app.inject({ method: 'GET', url: settingsUrl(), cookies: owner });
+    expect(res.json().error).toContain('Meta не приняла токен доступа.');
+    expect(res.json().error).toContain('Invalid OAuth access token.');
+  });
+
+  it('keeps the remembered refusal free of the token Meta echoed back', async () => {
+    await app.inject({
+      method: 'PUT',
+      url: settingsUrl(),
+      cookies: owner,
+      payload: { datasetId: '1234567890', accessToken: TOKEN },
+    });
+
+    capi = fakeCapi(
+      new CapiError('Meta отклонила событие.', 400, false, `Malformed access token ${TOKEN}`),
+    );
+    app = buildServer(env, db, { graph: fakeGraph(), capi });
+    await app.ready();
+    await app.inject({
+      method: 'PUT',
+      url: settingsUrl(),
+      cookies: owner,
+      payload: { datasetId: '1234567890', accessToken: TOKEN },
+    });
+
+    const stored = (await storedSettings())!.error;
+    expect(stored).not.toContain(TOKEN);
+    expect(stored).toContain(REDACTED);
+  });
+
+  it('clears the remembered refusal once Meta accepts the pair', async () => {
+    await app.inject({
+      method: 'PUT',
+      url: settingsUrl(),
+      cookies: owner,
+      payload: { datasetId: '1234567890', accessToken: TOKEN },
+    });
+    await db
+      .update(capiSettings)
+      .set({ error: 'Meta не приняла токен доступа.' })
+      .where(eq(capiSettings.agentId, agentId));
+
+    await app.inject({
+      method: 'PUT',
+      url: settingsUrl(),
+      cookies: owner,
+      payload: { datasetId: '1234567890', accessToken: TOKEN },
+    });
+
+    expect((await storedSettings())!.error).toBeNull();
+  });
+
+  it('asks Meta nothing when the request only turns sending off', async () => {
+    // An owner whose token has just been revoked must still be able to stop the queue.
+    // Verifying here would refuse the one request that needs no proof, and their only way
+    // out would be to delete the dataset — taking the log's explanation with it.
+    await app.inject({
+      method: 'PUT',
+      url: settingsUrl(),
+      cookies: owner,
+      payload: { datasetId: '1234567890', accessToken: TOKEN, enabled: true },
+    });
+    const before = (await storedSettings())!;
+
+    capi = fakeCapi(new CapiError('Meta не приняла токен доступа.', 400, false));
+    app = buildServer(env, db, { graph: fakeGraph(), capi });
+    await app.ready();
+    const res = await app.inject({
+      method: 'PUT',
+      url: settingsUrl(),
+      cookies: owner,
+      payload: { datasetId: '1234567890', enabled: false },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().enabled).toBe(false);
+    expect(capi.calls).toHaveLength(0);
+    const after = (await storedSettings())!;
+    expect(after.enabled).toBe(false);
+    // Nothing was proved, so nothing claims to have been: the stamp is the old one.
+    expect(after.verifiedAt).toEqual(before.verifiedAt);
+    expect(after.accessToken).toBe(before.accessToken);
+  });
+
+  it('switches off even when the credentials key no longer opens the stored token', async () => {
+    await app.inject({
+      method: 'PUT',
+      url: settingsUrl(),
+      cookies: owner,
+      payload: { datasetId: '1234567890', accessToken: TOKEN, enabled: true },
+    });
+    // The shape of a rotated key: the sealed bytes no longer open under this agent's aad.
+    await db
+      .update(capiSettings)
+      .set({ accessToken: encryptSecret(TOKEN, key, randomUUID()) })
+      .where(eq(capiSettings.agentId, agentId));
+
+    const res = await app.inject({
+      method: 'PUT',
+      url: settingsUrl(),
+      cookies: owner,
+      payload: { datasetId: '1234567890', enabled: false },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect((await storedSettings())!.enabled).toBe(false);
+  });
+
+  it('still proves a new token, even in a request that turns sending off', async () => {
+    await app.inject({
+      method: 'PUT',
+      url: settingsUrl(),
+      cookies: owner,
+      payload: { datasetId: '1234567890', accessToken: TOKEN, enabled: true },
+    });
+
+    const res = await app.inject({
+      method: 'PUT',
+      url: settingsUrl(),
+      cookies: owner,
+      payload: { datasetId: '1234567890', accessToken: 'EAA-новый', enabled: false },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(capi.calls).toHaveLength(2);
+    expect(capi.calls[1]!.token).toBe('EAA-новый');
+  });
+
+  it('still proves a different dataset, even in a request that turns sending off', async () => {
+    await app.inject({
+      method: 'PUT',
+      url: settingsUrl(),
+      cookies: owner,
+      payload: { datasetId: '1234567890', accessToken: TOKEN, enabled: true },
+    });
+
+    await app.inject({
+      method: 'PUT',
+      url: settingsUrl(),
+      cookies: owner,
+      payload: { datasetId: '9999999999', enabled: false },
+    });
+
+    expect(capi.calls).toHaveLength(2);
+    expect(capi.calls[1]!.datasetId).toBe('9999999999');
   });
 
   it('refuses a first save with no token at all', async () => {

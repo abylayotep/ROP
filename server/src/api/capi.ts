@@ -100,13 +100,10 @@ const verificationEvent = () =>
  * on the screen of whoever pressed the button. The client redacts what it produces; this is
  * the second gate, against the token this request is holding.
  */
-function refusal(error: CapiError, token: string): ApiError {
+function refusalText(error: CapiError, token: string): string {
   const text = error.detail ? `${error.message} Ответ Meta: ${error.detail}` : error.message;
 
-  // 502 whatever Meta answered: from the cabinet's side this is an upstream refusal, and
-  // the owner's request was well formed — it is the pair that is wrong, and the message is
-  // what says so.
-  return new ApiError(502, withoutSecret(text, token));
+  return withoutSecret(text, token);
 }
 
 /**
@@ -203,47 +200,101 @@ export function registerCapiRoutes(
 
       const agentId = req.agent!.id;
       const current = await stored(agentId);
+      const now = new Date();
 
-      // The token to prove and to store: the new one, or the one already sealed on the row.
-      // Decryption failing here is a credentials key that no longer matches the row — the
-      // owner's way out is to paste the token again, so that is what they are told.
-      let token: string;
-      if (accessToken !== undefined) {
-        token = accessToken;
-      } else if (!current) {
-        throw new ApiError(400, 'Укажите токен доступа');
+      /**
+       * A request that only switches sending off proves nothing, and must not have to.
+       *
+       * Verification exists to stop a typo being saved as a working pair. Turning sending
+       * off saves no pair — it stops one being used — and an owner whose token has just been
+       * revoked is exactly the owner who most needs the switch: without this, their only way
+       * to stop the queue is to delete the whole dataset, which also takes the log's
+       * explanation with it. Anything else still goes to Meta first: a new token, a
+       * different dataset id, or turning sending back on.
+       */
+      const onlyDisabling =
+        enabled === false &&
+        current !== undefined &&
+        accessToken === undefined &&
+        datasetId === current.datasetId;
+
+      // What will be written: the stored token untouched when nothing is being proved, and
+      // the proof's own timestamp and cleared error when something is.
+      let sealed: string;
+      let verifiedAt: Date | null;
+      let error: string | null;
+
+      if (onlyDisabling) {
+        // Not even decrypted. A credentials key that no longer opens the row would otherwise
+        // fail this request with «введите токен заново» — and block the switch as surely as
+        // a revoked token would.
+        sealed = current.accessToken;
+        verifiedAt = current.verifiedAt;
+        // Nothing was proved, so whatever Meta last said still stands.
+        error = current.error;
       } else {
-        try {
-          token = decryptSecret(current.accessToken, credentialsKey(env), tokenAad(agentId));
-        } catch {
-          throw new ApiError(400, 'Не удалось прочитать сохранённый токен. Введите его заново.');
+        // The token to prove and to store: the new one, or the one already sealed on the
+        // row. Decryption failing here is a credentials key that no longer matches the row —
+        // the owner's way out is to paste the token again, so that is what they are told.
+        let token: string;
+        if (accessToken !== undefined) {
+          token = accessToken;
+        } else if (!current) {
+          throw new ApiError(400, 'Укажите токен доступа');
+        } else {
+          try {
+            token = decryptSecret(current.accessToken, credentialsKey(env), tokenAad(agentId));
+          } catch {
+            throw new ApiError(400, 'Не удалось прочитать сохранённый токен. Введите его заново.');
+          }
         }
+
+        // Proved before anything is written. A dataset id with a typo is accepted in silence
+        // by every part of this system except Meta, and the owner finds out weeks later when
+        // they wonder why their ads got worse. A mistyped replacement must also leave the
+        // working pair in place rather than overwrite it with one Meta will refuse.
+        try {
+          await capi.send({
+            datasetId,
+            token,
+            testEventCode: testEventCode ?? VERIFY_TEST_CODE,
+            events: [verificationEvent()],
+          });
+        } catch (thrown) {
+          if (!(thrown instanceof CapiError)) throw thrown;
+          const text = refusalText(thrown, token);
+
+          // Written down, not merely announced. A toast is gone on the next reload, and the
+          // card's red line is where an owner looks for why their dataset is not working —
+          // the contract's `error`, the screen's block and the spec's promise all depend on
+          // this one write. Only onto a row that already exists: a pair Meta refused is
+          // never stored, so a first save has no row to carry the reason and the toast is
+          // all there is.
+          if (current) {
+            await db
+              .update(capiSettings)
+              .set({ error: text, updatedAt: now })
+              .where(eq(capiSettings.agentId, agentId));
+          }
+
+          // 502 whatever Meta answered: from the cabinet's side this is an upstream refusal,
+          // and the owner's request was well formed — it is the pair that is wrong, and the
+          // message is what says so.
+          throw new ApiError(502, text);
+        }
+
+        // Sealed to the agent's id, which is what `sendPendingCapiEvents` opens it with: a
+        // row copied onto another agent decrypts to nothing rather than to a working token.
+        sealed = encryptSecret(token, credentialsKey(env), tokenAad(agentId));
+        verifiedAt = now;
+        // Whatever Meta refused last time, it has just accepted this pair.
+        error = null;
       }
 
-      // Proved before anything is written. A dataset id with a typo is accepted in silence
-      // by every part of this system except Meta, and the owner finds out weeks later when
-      // they wonder why their ads got worse. A mistyped replacement must also leave the
-      // working pair in place rather than overwrite it with one Meta will refuse.
-      try {
-        await capi.send({
-          datasetId,
-          token,
-          testEventCode: testEventCode ?? VERIFY_TEST_CODE,
-          events: [verificationEvent()],
-        });
-      } catch (error) {
-        if (error instanceof CapiError) throw refusal(error, token);
-        throw error;
-      }
-
-      // Sealed to the agent's id, which is what `sendPendingCapiEvents` opens it with: a row
-      // copied onto another agent decrypts to nothing rather than to a working token.
-      const sealed = encryptSecret(token, credentialsKey(env), tokenAad(agentId));
       // Absent leaves the switch as the owner last set it, and turns a brand-new dataset on:
       // a pair Meta has just accepted, saved on a screen with a switch, is not meant to sit
       // there reporting nothing.
       const on = enabled ?? current?.enabled ?? true;
-      const now = new Date();
 
       const [row] = await db
         .insert(capiSettings)
@@ -253,8 +304,8 @@ export function registerCapiRoutes(
           accessToken: sealed,
           testEventCode,
           enabled: on,
-          verifiedAt: now,
-          error: null,
+          verifiedAt,
+          error,
         })
         .onConflictDoUpdate({
           target: capiSettings.agentId,
@@ -263,9 +314,8 @@ export function registerCapiRoutes(
             accessToken: sealed,
             testEventCode,
             enabled: on,
-            verifiedAt: now,
-            // Whatever Meta refused last time, it has just accepted this pair.
-            error: null,
+            verifiedAt,
+            error,
             updatedAt: now,
           },
         })

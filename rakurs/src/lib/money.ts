@@ -1,20 +1,23 @@
 /**
- * Суммы приходят с сервера строкой: `numeric` не проходит через float ни на одном
- * шаге, потому что 1234567.89 в double уже не 1234567.89.
+ * Amounts arrive from the server as a string: `numeric` never passes through a
+ * float at any step, because 1234567.89 as a double is no longer 1234567.89.
  *
- * Форматируем строку, а не число: разбиваем на рубли и копейки по точке и ставим
- * узкие пробелы между разрядами. Копейки показываем только если они есть — в тенге
- * их не бывает, и «450 000,00 ₸» в списке читается хуже, чем «450 000 ₸».
+ * We format the string, not the number: split into the whole and fractional
+ * parts on the dot and insert thin spaces between digit groups. We show the
+ * fractional part only when it is non-zero — tenge never has one, and
+ * «450 000,00 ₸» in a list reads worse than «450 000 ₸».
  */
 
 /**
- * Пробелы записаны escape-последовательностями, а не самими символами: обычный,
- * узкий и неразрывный пробел в исходнике неразличимы глазом, и один неаккуратный
- * проход форматтера молча превращает их в ASCII, ничего не ломая на типах.
+ * The spaces are written as escape sequences rather than the characters
+ * themselves: a regular, thin, and non-breaking space are indistinguishable
+ * to the eye in source code, and one careless formatter pass silently turns
+ * them into ASCII, breaking nothing at the type level.
  *
- * Узкий (U+2009) — между разрядами: обычный пробел там читается как конец числа.
- * Неразрывный (U+00A0) — перед знаком валюты: иначе на карточке шириной 264 пикселя
- * сумма переносится как «450 000» и «₸» на следующей строке.
+ * Thin space (U+2009) — between digit groups: a regular space there reads as
+ * the end of the number. Non-breaking space (U+00A0) — before the currency
+ * sign: otherwise on a card 264 pixels wide the amount wraps as «450 000»
+ * with «₸» on the next line.
  */
 const THIN_SPACE = '\u2009';
 const NO_BREAK_SPACE = '\u00a0';

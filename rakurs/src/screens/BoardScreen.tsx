@@ -17,10 +17,10 @@ const time = (iso: string) =>
     minute: '2-digit',
   });
 
-/** Колонка без стадии: сюда попадают все, кого ещё никто не разобрал. */
+/** The column without a stage: everyone nobody has sorted yet lands here. */
 const UNSORTED = 'unsorted';
 
-/** Что именно тащат: карточка и колонка, из которой её взяли. */
+/** What exactly is being dragged: the card and the column it was taken from. */
 interface Dragged {
   conversationId: string;
   stageId: string | null;
@@ -36,10 +36,11 @@ export function BoardScreen() {
   const board = useApi<Board>((signal) => api.getBoard(agent.id, signal), [agent.id]);
 
   /**
-   * Конец перетаскивания без броска: Esc или мимо всех колонок.
+   * End of a drag without a drop: Esc, or releasing outside every column.
    *
-   * Без этого `dragging` остаётся заполненным навсегда, и следующее падение чего
-   * угодно на колонку — файла, выделенного текста — молча переставит ту карточку.
+   * Without this, `dragging` stays populated forever, and the next thing
+   * dropped on a column — a file, selected text — would silently move that
+   * card.
    */
   function endDrag() {
     setDragging(null);
@@ -48,19 +49,21 @@ export function BoardScreen() {
 
   async function drop(stageId: string | null) {
     const card = dragging;
-    // Подсветку снимаем всегда и до всех проверок: dragleave на броске не приходит,
-    // и колонка иначе остаётся обведённой пунктиром до следующего наведения.
+    // We always clear the highlight, before any checks: dragleave does not fire
+    // on a drop, and otherwise the column would stay outlined with dashes until
+    // the next hover.
     endDrag();
     if (card === null) return;
-    // Бросок в ту же колонку сервер обработает как отсутствие перехода и ничего не
-    // отправит, но и ходить за этим на сервер незачем.
+    // The server treats a drop into the same column as no transition and sends
+    // nothing back, but there is no reason to make the round trip for that either.
     if (card.stageId === stageId) return;
 
     setMoving(true);
     try {
       await api.setLeadStage(agent.id, card.conversationId, stageId);
-      // Перезагружаем доску целиком, а не переставляем карточку на месте: переход
-      // может отправить автосообщение, а оно меняет и превью карточки, и порядок.
+      // We reload the whole board instead of moving the card in place: the
+      // transition can send an auto-message, and that changes both the card's
+      // preview and its ordering.
       board.reload();
     } catch (error) {
       toast.fail(error);
@@ -73,9 +76,9 @@ export function BoardScreen() {
     <Async state={board} skeleton={<Skeleton height={340} />}>
       {(data) => (
         <>
-          {/* Данные на экране есть, но последняя попытка их обновить не удалась.
-              Async в этом случае оставляет прежний ответ, и без этой строки карточка
-              после неудавшейся перезагрузки просто стоит в старой колонке молча. */}
+          {/* There is data on screen, but the last attempt to refresh it failed.
+              Async keeps the previous response in that case, and without this line
+              a card just sits silently in its old column after a failed reload. */}
           {board.error !== undefined && (
             <div
               style={{
@@ -154,7 +157,7 @@ function Column({
   onDragEnd,
 }: {
   id: string;
-  /** Стадия колонки; null у «Без стадии». `id` от неё отличается только там. */
+  /** The column's stage; null for "No stage". `id` differs from it only there. */
   stageId: string | null;
   title: string;
   color: string;
@@ -168,16 +171,16 @@ function Column({
 }) {
   return (
     <div
-      // preventDefault на dragOver — единственный способ сказать браузеру, что сюда
-      // можно бросать. Без него drop не сработает вообще.
+      // preventDefault on dragOver is the only way to tell the browser that a
+      // drop is allowed here. Without it, drop never fires at all.
       onDragOver={(event: DragEvent) => {
         event.preventDefault();
         onDragOver(id);
       }}
       onDragLeave={(event: DragEvent) => {
-        // dragleave всплывает от карточек внутри колонки, поэтому проход курсора над
-        // ними иначе гасил бы и зажигал подсветку на каждой. Уходом считаем только
-        // выход за пределы самой колонки.
+        // dragleave bubbles up from cards inside the column, so moving the cursor
+        // over them would otherwise toggle the highlight off and on for each one.
+        // We only count it as leaving once the cursor exits the column itself.
         if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
         onDragOver(null);
       }}
@@ -247,14 +250,15 @@ function Lead({
   const navigate = useNavigate();
 
   return (
-    // Карточка без своих отступов: и поля, и курсор, и обработчики живут на элементе
-    // с draggable. Иначе внешняя кромка карточки показывала бы «схватить», но
-    // перетаскивание с неё не начиналось бы.
+    // The card has no padding of its own: the padding, the cursor, and the
+    // handlers all live on the draggable element. Otherwise the card's outer
+    // edge would show a "grab" cursor, but dragging from it would not start.
     <Card pad={false}>
       <div
         draggable
-        // draggable + dataTransfer: без setData Firefox не начинает перетаскивание вовсе.
-        // Значение при этом читаем из состояния экрана — так проще, и оно уже там есть.
+        // draggable + dataTransfer: without setData, Firefox never starts the
+        // drag at all. We read the value from the screen's state instead — it's
+        // simpler, and it's already there.
         onDragStart={(event: DragEvent) => {
           event.dataTransfer.setData('text/plain', card.conversationId);
           event.dataTransfer.effectAllowed = 'move';
@@ -279,9 +283,10 @@ function Lead({
         </div>
 
         <div className="ellipsis" style={{ fontSize: 11.5, color: 'var(--text-dim)', marginTop: 4 }}>
-          {/* Пустое превью значит разное: у диалога без единого сообщения нет и времени
-              последнего, а у сообщения с фотографией нет текста. Разводим по времени, а не
-              по превью — иначе новый лид выглядит как приславший вложение. */}
+          {/* An empty preview means different things: a conversation with not a single
+              message has no last-message time either, while a message with a photo has
+              no text. We branch on the time, not the preview — otherwise a brand-new
+              lead would look like one who sent an attachment. */}
           {card.lastMessageAt === null ? 'Сообщений нет' : (card.preview ?? 'Вложение')}
         </div>
 
@@ -301,7 +306,8 @@ function Lead({
             color: 'var(--text-dim)',
           }}
         >
-          {/* Ноль не показываем: пустое место честнее, чем «0 ₸» у того, кто ещё не покупал. */}
+          {/* We don't show zero: blank space is more honest than «0 ₸» for someone who
+              hasn't bought anything yet. */}
           {card.paidTotal !== '0.00' && (
             <span className="mono" style={{ color: 'var(--accent-2)', fontWeight: 700 }}>
               {formatMoney(card.paidTotal, currency)}

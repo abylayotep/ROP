@@ -15,7 +15,9 @@ docker compose -f deploy/compose.yml --env-file deploy/.env run --rm api npm run
 
 `deploy/.env` must hold:
 
-- `POSTGRES_PASSWORD`, `SESSION_SECRET` — generate each with `head -c 32 /dev/urandom | base64`;
+- `SESSION_SECRET` — generate with `head -c 32 /dev/urandom | base64`;
+- `POSTGRES_PASSWORD` — letters and digits only, it is spliced into `DATABASE_URL`:
+  `head -c 48 /dev/urandom | base64 | tr -dc A-Za-z0-9 | head -c 32`;
 - `META_APP_SECRET` — the Meta app's secret, signs every webhook delivery;
 - `META_WEBHOOK_VERIFY_TOKEN` — the string Meta echoes back during the webhook handshake;
 - `META_APP_ID` — the Meta application's id; the browser starts Embedded Signup with it;

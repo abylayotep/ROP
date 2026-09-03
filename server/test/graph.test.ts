@@ -110,6 +110,49 @@ describe('graph client', () => {
     );
   });
 
+  it('gives every call a deadline', async () => {
+    answerWith({ messages: [{ id: 'wamid.OUT' }] });
+
+    await client.sendText('136', TOKEN, '777', 'hi');
+
+    // Meta is on the request path of an operator's action; a call with no deadline would
+    // hold that request open until the browser gave up.
+    expect(calls[0]!.init.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('says Meta did not answer when the deadline passes', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+      }),
+    );
+
+    // A GraphError, not the raw TimeoutError: every caller branches on GraphError and puts
+    // `message` on a Russian-speaking operator's screen.
+    await expect(client.sendText('136', TOKEN, '777', 'hi')).rejects.toThrow(GraphError);
+    await expect(client.sendText('136', TOKEN, '777', 'hi')).rejects.toThrow('Meta не ответила');
+  });
+
+  it('says Meta did not answer when the deadline passes while the body is read', async () => {
+    // `fetch` resolves as soon as the headers arrive and the signal stays live after that,
+    // so a large download passes its deadline here rather than on the request itself.
+    const response = new Response(Buffer.from([1, 2, 3]), { status: 200 });
+    Object.defineProperty(response, 'arrayBuffer', {
+      value: async () => {
+        throw new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+      },
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => response));
+
+    await expect(client.downloadMedia('https://lookaside.fb/x', TOKEN)).rejects.toThrow(
+      GraphError,
+    );
+    await expect(client.downloadMedia('https://lookaside.fb/x', TOKEN)).rejects.toThrow(
+      'Meta не ответила',
+    );
+  });
+
   it('reports a non-JSON failure without pretending to know why', async () => {
     vi.stubGlobal(
       'fetch',

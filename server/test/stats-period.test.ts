@@ -637,8 +637,10 @@ describe('the sources', () => {
 
     const answer = await body();
     expect(answer.sources[0]!.paidTotal).toBe('150000.00');
-    // And the money card, which counts by `paid_at`, has nothing in this window at all.
-    expect(answer.money).toBeNull();
+    // And the tiles above the table say the same number, because they count the same
+    // population. An owner comparing «Оплачено» with the column under it must not find the
+    // page contradicting itself.
+    expect(answer.money.paidTotal).toBe('150000.00');
   });
 
   it('counts no other agent’s conversations or orders', async () => {
@@ -723,24 +725,67 @@ describe('the money', () => {
     expect(answer.money.otherCurrencyOrders).toBe(1);
   });
 
-  it('leaves the per-lead figure null when the window brought no leads at all', async () => {
-    // The lead is older than the window; the payment is inside it.
-    const lead = await addLead({ createdAt: daysAgo(10) });
-    await addOrder(lead, '400000.00');
+  it('still reports a window whose every paid order is in another currency', async () => {
+    const lead = await addLead();
+    await addOrder(lead, '900000.00', { currency: 'RUB' });
 
     const answer = await body();
-    expect(answer.newLeads).toBe(0);
-    expect(answer.money.paidTotal).toBe('400000.00');
-    // Null, not «0 ₸ с лида»: dividing by no leads has no answer, and zero is not it.
+    // Not null. Null made the screen print «За период нет оплаченных заказов» about a
+    // period that had one, and took the exclusion line down with it — so the owner was
+    // told the opposite of the truth and given nothing to check it against.
+    expect(answer.money).not.toBeNull();
+    expect(answer.money.otherCurrencyOrders).toBe(1);
+    // Zero in the agent's currency is a fact about the currency, not about the business,
+    // and the line naming the excluded order stands directly under it. The average and the
+    // per-lead figure have no numerator at all and say so.
+    expect(answer.money.paidOrders).toBe(0);
+    expect(answer.money.paidTotal).toBe('0.00');
+    expect(answer.money.averageOrder).toBeNull();
     expect(answer.money.revenuePerLead).toBeNull();
   });
 
-  it('counts only payments made inside the window', async () => {
+  it('divides by the leads of the same window it summed', async () => {
+    // Two new leads this week, and one from March paying a million. Counting the March
+    // payment here and dividing by the two new threads printed «На одного лида: 500 000 ₸»
+    // about a week that sold nothing — three populations on one card, one of them made up.
+    const march = await addLead({ createdAt: daysAgo(20) });
+    await addOrder(march, '1000000.00');
+    const first = await addLead();
+    const second = await addLead();
+    await addOrder(first, '150000.00');
+    await addOrder(second, '50000.00');
+
+    const answer = await body();
+    expect(answer.newLeads).toBe(2);
+    // The March lead's million belongs to March, and the per-lead figure is the two new
+    // leads' own money divided by the two of them.
+    expect(answer.money.paidTotal).toBe('200000.00');
+    expect(answer.money.paidOrders).toBe(2);
+    expect(answer.money.revenuePerLead).toBe('100000.00');
+  });
+
+  it('answers null when the window brought leads but none of them paid', async () => {
+    // The payment is inside the window; the lead that made it is not. There is no cohort
+    // money at all, and «нет оплаченных заказов» is the truth about this week's leads.
+    const old = await addLead({ createdAt: daysAgo(10) });
+    await addOrder(old, '400000.00');
+    await addLead();
+
+    const answer = await body();
+    expect(answer.newLeads).toBe(1);
+    expect(answer.money).toBeNull();
+  });
+
+  it('counts every payment of the window’s leads, whenever it landed', async () => {
     const lead = await addLead();
     await addOrder(lead, '100000.00');
+    // Paid before the window opened, by a lead that arrived inside it — the ad that
+    // brought them keeps the credit, and so does the card above the ad table.
     await addOrder(lead, '700000.00', { paidAt: daysAgo(10) });
 
-    expect((await body('?period=week')).money.paidTotal).toBe('100000.00');
+    // Both figures are the same in every window that holds the lead, which is what makes
+    // «сумма за прошлый период может вырасти» the whole of the caveat rather than half.
+    expect((await body('?period=week')).money.paidTotal).toBe('800000.00');
     expect((await body('?period=month')).money.paidTotal).toBe('800000.00');
   });
 });

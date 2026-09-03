@@ -90,6 +90,15 @@ const windowStart = (iso: string) =>
 const historyStart = (iso: string) =>
   new Date(iso).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' });
 
+/** «новый диалог» / «новых диалога» / «новых диалогов» — винительный, после «делённое на». */
+function leads(value: number): string {
+  const hundreds = value % 100;
+  const tens = value % 10;
+  if (tens === 1 && hundreds !== 11) return 'новый диалог';
+  if (tens >= 2 && tens <= 4 && (hundreds < 12 || hundreds > 14)) return 'новых диалога';
+  return 'новых диалогов';
+}
+
 /** «переход» / «перехода» / «переходов». */
 function transitions(value: number): string {
   const hundreds = value % 100;
@@ -464,8 +473,10 @@ function SourcesCard({ state, period }: { state: ApiState<StatsPeriodReport>; pe
               {chosen.plainly}, с {windowStart(report.since)}.
             </div>
 
-            {/* Деньги: `null` — это не строка нулей. За период нет ни одной оплаты, и
-                сказать об этом словами честнее, чем напечатать «0 ₸». */}
+            {/* Деньги: `null` — это не строка нулей. Ни один диалог периода не оплачен —
+                ни в валюте агента, ни в какой-либо другой, — и сказать об этом словами
+                честнее, чем напечатать «0 ₸». Заказ в чужой валюте сюда не приводит:
+                тогда плитки показываются, а под ними стоит строка про исключённые суммы. */}
             {report.money === null ? (
               <EmptyState>
                 За период нет оплаченных заказов. Заказ попадает сюда, когда его отмечают
@@ -506,6 +517,16 @@ function SourcesCard({ state, period }: { state: ApiState<StatsPeriodReport>; pe
                     валюте в эти суммы не входят.
                   </div>
                 )}
+
+                {/* Одно население на всю карточку, и сказать об этом надо там, где стоят
+                    цифры: иначе «Оплачено» сверху и «Оплачено» в таблице снизу читаются
+                    как одно и то же число, а совпадают они только вместе с этой фразой. */}
+                <div style={hint}>
+                  Все четыре цифры — про диалоги, начавшиеся за период, и про все их оплаты,
+                  даже пришедшие позже. Поэтому сумма за прошлый период может вырасти.
+                  «На одного лида» — это «Оплачено», делённое на {count(report.newLeads)}{' '}
+                  {leads(report.newLeads)} за период.
+                </div>
               </>
             )}
 

@@ -17,6 +17,7 @@ import type {
   StatsSource,
 } from '@rakurs/contract';
 import { and, asc, eq, gte, isNotNull, ne, or, sql } from 'drizzle-orm';
+import { alias } from 'drizzle-orm/pg-core';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import type { Db } from '../db/client.js';
 import { conversations, orders, stages, stageTransitions } from '../db/schema.js';
@@ -138,6 +139,17 @@ export function registerStatsRoutes(
       // reaches it as an object it refuses to serialise. The comparison operators below do
       // this conversion themselves, which is why only the fragments say it out loud.
       const sinceText = since.toISOString();
+
+      /**
+       * The cohort under its own name, for the money statement to join to.
+       *
+       * Aliased rather than joined as itself: that statement also carries the scalar
+       * subqueries below, which have their own `from conversations`, and two things called
+       * `conversations` in one query is a shadowing puzzle the next reader should not have
+       * to solve.
+       */
+      const cohort = alias(conversations, 'cohort');
+
       const newLeadsSql = sql`select count(*) from ${conversations}
         where ${conversations.agentId} = ${agentId}
           and ${conversations.createdAt} >= ${sinceText}::timestamptz`;
@@ -290,7 +302,26 @@ export function registerStatsRoutes(
           .orderBy(sql`count(*) desc, ${conversations.adSourceId} asc nulls last`),
 
         /**
-         * The money, and the size of the cohort that produced it.
+         * The money the cohort brought, and the size of the cohort.
+         *
+         * **One population for the whole card, and it is the cohort** — the conversations
+         * created inside the window, the very same set the ad table counts. Money paid in
+         * the window from leads of any age was the other candidate, and it cannot be made
+         * to agree with itself: `revenuePerLead` would then divide a March lead's payment
+         * by this week's new threads and print «На одного лида: 500 000 ₸» off two leads,
+         * while the «Оплачено» tile would name a third population again — one an owner
+         * comparing it against the ad table's «Оплачено» column finds it disagreeing with.
+         * Here every tile, the per-lead figure, the ad table and the card's own subtitle
+         * («по всем диалогам, начавшимся за период») say the same sentence.
+         *
+         * The price of it is stated on the screen rather than hidden: a payment that lands
+         * next month still belongs to the lead that came this week, so a past period's
+         * total can grow after the fact. That is the same rule the ad table's «Оплачено»
+         * column has always followed, which is precisely why the two now match.
+         *
+         * The join is to `conversations` and not a filter on `paid_at`: an order's window
+         * is its thread's window. It is an inner join and needs no tenancy clause of its
+         * own — `orders.agent_id` below already restricts the rows to this agent.
          *
          * Every figure here is computed in Postgres and leaves it as characters. The
          * reasons, because the next reader will want to widen or narrow one of them:
@@ -306,9 +337,10 @@ export function registerStatsRoutes(
          * - `::text` makes the value characters before the driver sees it, so nothing here
          *   relies on how `pg` happens to decode `numeric`.
          * - `round(numeric, int)` is exact decimal rounding, not float rounding.
-         * - `nullif` rather than a guard in Node: no leads yields `null`, where
-         *   `coalesce(…, 0)` would print «0 ₸ с лида» about a period in which nothing was
-         *   sold to nobody.
+         * - `nullif` rather than a guard in Node. It cannot divide by zero here — a paid
+         *   order of the cohort implies a lead in the cohort — but a window whose only
+         *   paid orders are in another currency has a null numerator, and the per-lead
+         *   figure is then `null` rather than the «0 ₸ с лида» a `coalesce` would print.
          *
          * The currency is in the predicate and not assumed, the clause `board.ts` carries:
          * `orders.currency` is a per-row column, and an amount in another currency added
@@ -340,11 +372,12 @@ export function registerStatsRoutes(
                      or ${conversations.ctwaClid} is not null))::int`,
           })
           .from(orders)
+          .innerJoin(cohort, eq(cohort.id, orders.conversationId))
           .where(
             and(
               eq(orders.agentId, agentId),
               eq(orders.status, 'paid'),
-              gte(orders.paidAt, since),
+              gte(cohort.createdAt, since),
             ),
           ),
       ]);
@@ -411,8 +444,15 @@ export function registerStatsRoutes(
       // `AiUsage.total`'s reason: zeros read as a fact about the business, while the
       // absence of any paid order is not one. The screen says which absence it is looking
       // at instead of printing 0 ₸.
+      //
+      // Both counts, not just the one in the agent's currency. A window whose paid orders
+      // are all foreign has `paidOrders = 0` and orders all the same, and answering `null`
+      // there made the screen print «За период нет оплаченных заказов» about a period that
+      // had them — and drop the very line that says how many were left out. Nothing is a
+      // lie here: the sums are zero in the agent's currency, and the exclusion line beneath
+      // them says why.
       const money: StatsMoney | null =
-        totals.paidOrders === 0
+        totals.paidOrders + totals.otherCurrencyOrders === 0
           ? null
           : {
               paidOrders: totals.paidOrders,

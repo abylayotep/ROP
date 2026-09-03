@@ -593,19 +593,40 @@ export interface StatsSource {
   paidTotal: string;
 }
 
-/** What came in over the period, in the agent's own currency. */
+/**
+ * What the window's leads paid, in the agent's own currency.
+ *
+ * One population, and it is the same one `StatsSource` counts: the conversations created
+ * inside the window, with **every** paid order of theirs whenever it was paid. Not the
+ * orders paid inside the window, which would divide a March lead's payment by this week's
+ * new threads and disagree with the ad table standing right beneath it. The cost is stated
+ * on the screen instead of hidden: a past period's total can grow when a payment lands
+ * late.
+ *
+ * Null on the report — never a row of zeros — exactly when the cohort has no paid order at
+ * all, in any currency.
+ */
 export interface StatsMoney {
+  /** Paid orders of the cohort held in the agent's currency. */
   paidOrders: number;
   /** A string, not a number: an amount must not pass through a float. */
   paidTotal: string;
   /** A string, not a number. Null when there is nothing to average. */
   averageOrder: string | null;
-  /** A string, not a number. Null — not «0 ₸ с лида» — when the window brought no leads. */
+  /**
+   * `paidTotal` over every conversation created in the window, a string, not a number.
+   *
+   * Null — not «0 ₸ с лида» — when the cohort paid nothing in the agent's currency, which
+   * is the only way the numerator can be absent: an order of the cohort implies a lead in
+   * it, so the denominator is never zero here.
+   */
   revenuePerLead: string | null;
   /**
-   * Paid orders of the window held in some other currency, excluded from every sum above.
+   * Paid orders of the cohort held in some other currency, excluded from every sum above.
    *
-   * Counted rather than dropped, so an excluded amount is visible instead of merely missing.
+   * Counted rather than dropped, so an excluded amount is visible instead of merely
+   * missing — and so a window whose paid orders are *all* foreign still reports money
+   * rather than «за период нет оплаченных заказов», which would be false.
    */
   otherCurrencyOrders: number;
 }

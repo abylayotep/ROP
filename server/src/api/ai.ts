@@ -62,10 +62,17 @@ const SANDBOX_LIMIT = 4_000;
  * Three is the intent, and the pool is the ceiling: written against `POOL_MAX` so that
  * shrinking the pool cannot silently make this cap the larger of the two.
  *
+ * Floored at one, because the ceiling can reach zero. A pool configured at two or less makes
+ * `POOL_MAX - 2` zero or negative, and a cap of zero is not a small sandbox — it is a sandbox
+ * that answers 429 to every owner, always, for a reason nothing on the screen explains.
+ * Better one at a time on a pool that small than none at all.
+ *
  * The rate limit does not do this job. Twenty a minute is above the pool size to begin with,
  * and a count per minute says nothing about how many are in flight at one instant.
  */
-export const SANDBOX_TURNS = Math.min(3, POOL_MAX - 2);
+export const sandboxTurns = (poolMax: number): number => Math.max(1, Math.min(3, poolMax - 2));
+
+export const SANDBOX_TURNS = sandboxTurns(POOL_MAX);
 
 /**
  * How many are in flight now. Module-level rather than per-server, because what it protects —

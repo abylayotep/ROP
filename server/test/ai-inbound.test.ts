@@ -13,7 +13,7 @@ import { rm } from 'node:fs/promises';
 import { asc, eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { SANDBOX_TURNS } from '../src/api/ai.js';
+import { SANDBOX_TURNS, sandboxTurns } from '../src/api/ai.js';
 import { buildServer } from '../src/api/server.js';
 import type { Db } from '../src/db/client.js';
 import {
@@ -753,6 +753,27 @@ describe('the sandbox', () => {
     const asMember = await login('member@example.com');
     expect((await sandbox({ text: 'Привет' }, asMember)).statusCode).toBe(403);
     expect((await sandbox({ text: '   ' })).statusCode).toBe(400);
+  });
+
+  describe('the cap on turns in flight', () => {
+    it('is three on a pool with room for three', () => {
+      expect(sandboxTurns(10)).toBe(3);
+      expect(SANDBOX_TURNS).toBe(3);
+    });
+
+    it('gives way to a pool too small for three', () => {
+      expect(sandboxTurns(4)).toBe(2);
+      expect(sandboxTurns(3)).toBe(1);
+    });
+
+    it('never reaches zero, which would answer 429 always', () => {
+      // `Math.min(3, poolMax - 2)` alone is zero at a pool of two and negative below it, and
+      // a cap of zero is not a small sandbox: it is one that refuses every owner, forever,
+      // for a reason nothing on the screen explains.
+      expect(sandboxTurns(2)).toBe(1);
+      expect(sandboxTurns(1)).toBe(1);
+      expect(sandboxTurns(0)).toBe(1);
+    });
   });
 });
 

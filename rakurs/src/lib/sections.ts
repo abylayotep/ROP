@@ -1,5 +1,5 @@
 /**
- * The cabinet's seven sections, in menu order.
+ * The cabinet's eight sections, in menu order.
  *
  * One list feeds the routes, the sidebar and the header title, so a section cannot exist
  * in the menu without a route or gain a second name in the header.
@@ -14,16 +14,13 @@ export interface SectionDef {
 }
 
 export const SECTIONS: SectionDef[] = [
-  {
-    path: 'orders',
-    label: 'Заказы',
-    pending: 'Воронка заказов появится на этапе 3 — после того, как заработают диалоги.',
-  },
+  { path: 'orders', label: 'Заказы', pending: '' },
   {
     path: 'dialogs',
     label: 'Диалоги',
     pending: '',
   },
+  { path: 'customers', label: 'Клиенты', pending: '' },
   {
     path: 'knowledge',
     label: 'База знаний',

@@ -1,9 +1,15 @@
 import type {
   Agent,
+  Board,
   ConversationSummary,
   ConversationThread,
+  Customer,
+  Lead,
+  LeadField,
   Me,
+  Member,
   Message,
+  Stage,
   WebhookSetup,
   WhatsappNumber,
 } from '@/types';
@@ -94,3 +100,102 @@ export const sendMessage = (agentId: string, conversationId: string, body: strin
 /** The address of a file inside a message. Access is checked by the session cookie. */
 export const mediaUrl = (agentId: string, messageId: string) =>
   `${API_URL}/agents/${agentId}/messages/${messageId}/media`;
+
+// ── Воронка ──────────────────────────────────────────────────────────────────
+
+export const getBoard = (agentId: string, signal?: AbortSignal) =>
+  request<Board>(`/agents/${agentId}/board`, { signal });
+
+export const listCustomers = (agentId: string, signal?: AbortSignal) =>
+  request<Customer[]>(`/agents/${agentId}/customers`, { signal });
+
+/** Адрес выгрузки. Доступ проверяется той же сессионной кукой, что и всё остальное. */
+export const customersCsvUrl = (agentId: string) => `${API_URL}/agents/${agentId}/customers.csv`;
+
+export const listStages = (agentId: string, signal?: AbortSignal) =>
+  request<Stage[]>(`/agents/${agentId}/stages`, { signal });
+
+export const createStage = (
+  agentId: string,
+  body: { name: string; color: string; kind: Stage['kind'] },
+) => request<Stage>(`/agents/${agentId}/stages`, { method: 'POST', body });
+
+export const updateStage = (
+  agentId: string,
+  stageId: string,
+  body: Partial<Pick<Stage, 'name' | 'color' | 'kind' | 'description' | 'autoMessage'>>,
+) => request<Stage>(`/agents/${agentId}/stages/${stageId}`, { method: 'PATCH', body });
+
+export const deleteStage = (agentId: string, stageId: string) =>
+  request<{ ok: true }>(`/agents/${agentId}/stages/${stageId}`, { method: 'DELETE' });
+
+export const reorderStages = (agentId: string, ids: string[]) =>
+  request<Stage[]>(`/agents/${agentId}/stages/order`, { method: 'POST', body: { ids } });
+
+export const listLeadFields = (agentId: string, signal?: AbortSignal) =>
+  request<LeadField[]>(`/agents/${agentId}/lead-fields`, { signal });
+
+export const createLeadField = (
+  agentId: string,
+  body: { name: string; kind: LeadField['kind']; hint: string },
+) => request<LeadField>(`/agents/${agentId}/lead-fields`, { method: 'POST', body });
+
+export const deleteLeadField = (agentId: string, fieldId: string) =>
+  request<{ ok: true }>(`/agents/${agentId}/lead-fields/${fieldId}`, { method: 'DELETE' });
+
+export const listMembers = (agentId: string, signal?: AbortSignal) =>
+  request<Member[]>(`/agents/${agentId}/members`, { signal });
+
+// ── Карточка лида ────────────────────────────────────────────────────────────
+
+const leadPath = (agentId: string, conversationId: string) =>
+  `/agents/${agentId}/conversations/${conversationId}/lead`;
+
+export const getLead = (agentId: string, conversationId: string, signal?: AbortSignal) =>
+  request<Lead>(leadPath(agentId, conversationId), { signal });
+
+/** `null` убирает лид из воронки; отсутствие поля оставляет стадию как была. */
+export const setLeadStage = (agentId: string, conversationId: string, stageId: string | null) =>
+  request<Lead>(leadPath(agentId, conversationId), { method: 'PATCH', body: { stageId } });
+
+export const assignLead = (agentId: string, conversationId: string, assignedTo: string | null) =>
+  request<Lead>(leadPath(agentId, conversationId), { method: 'PATCH', body: { assignedTo } });
+
+/** Пустая строка стирает ответ: незаполненное поле и поле с пустым ответом — одно и то же. */
+export const setLeadField = (
+  agentId: string,
+  conversationId: string,
+  fieldId: string,
+  value: string,
+) =>
+  request<Lead>(`${leadPath(agentId, conversationId)}/fields/${fieldId}`, {
+    method: 'PUT',
+    body: { value },
+  });
+
+export const addNote = (agentId: string, conversationId: string, body: string) =>
+  request<Lead>(`/agents/${agentId}/conversations/${conversationId}/notes`, {
+    method: 'POST',
+    body: { body },
+  });
+
+// ── Заказы ───────────────────────────────────────────────────────────────────
+
+export const createOrder = (
+  agentId: string,
+  conversationId: string,
+  body: { amount: string; status: 'pending' | 'paid'; comment: string },
+) =>
+  request<Lead>(`/agents/${agentId}/conversations/${conversationId}/orders`, {
+    method: 'POST',
+    body,
+  });
+
+export const updateOrder = (
+  agentId: string,
+  orderId: string,
+  body: { amount?: string; status?: 'pending' | 'paid' | 'cancelled'; comment?: string },
+) => request<Lead>(`/agents/${agentId}/orders/${orderId}`, { method: 'PATCH', body });
+
+export const deleteOrder = (agentId: string, orderId: string) =>
+  request<Lead>(`/agents/${agentId}/orders/${orderId}`, { method: 'DELETE' });

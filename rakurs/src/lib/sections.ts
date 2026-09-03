@@ -21,11 +21,7 @@ export const SECTIONS: SectionDef[] = [
     pending: '',
   },
   { path: 'customers', label: 'Клиенты', pending: '' },
-  {
-    path: 'knowledge',
-    label: 'База знаний',
-    pending: 'Загрузка документов и карточки товаров появятся на этапе 4.',
-  },
+  { path: 'knowledge', label: 'База знаний', pending: '' },
   {
     path: 'agent',
     label: 'Агент',

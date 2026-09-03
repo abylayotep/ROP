@@ -4,6 +4,7 @@ import { Card, CardHead, Segmented, Toggle } from '@/components/ui/primitives';
 import { Async, EmptyState, Skeleton } from '@/components/ui/states';
 import { useToast } from '@/components/ui/Toast';
 import { useApi } from '@/hooks/useApi';
+import { PERIODS } from '@/lib/periods';
 import { useAgent } from '@/store/agent';
 import type { AiModel, AiSettings, AiTurn, AiUsage, AiUsagePeriod } from '@/types';
 
@@ -493,12 +494,6 @@ function ModelCard({
 }
 
 /* ── Расход ──────────────────────────────────────────────────────────────── */
-
-const PERIODS: { id: AiUsagePeriod; label: string; plainly: string }[] = [
-  { id: 'day', label: 'Сутки', plainly: 'За последние сутки' },
-  { id: 'week', label: 'Неделя', plainly: 'За последние 7 дней' },
-  { id: 'month', label: 'Месяц', plainly: 'За последние 30 дней' },
-];
 
 /**
  * Доллары OpenRouter, а не валюта компании: платит владелец им и в них.

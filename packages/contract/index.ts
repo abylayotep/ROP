@@ -355,8 +355,13 @@ export interface AiTurn {
  * Что стоили ответы агента за период — чтобы выбор модели можно было сравнить
  * с ценой, а не только с ощущением. Строится по журналу ответов. */
 
-/** How far back a usage answer looks. The screen offers exactly these three. */
-export type AiUsagePeriod = 'day' | 'week' | 'month';
+/**
+ * How far back a usage answer looks. The screen offers exactly these three.
+ *
+ * Kept as its own name because the AI screen imports it; it is `Period` — the расход card
+ * and the statistics cards ask the same question of the same three buttons.
+ */
+export type AiUsagePeriod = Period;
 
 /** One period's turns, counted by how they ended, with what they spent. */
 export interface AiUsageTotals {
@@ -471,4 +476,202 @@ export interface CapiEvent {
   currency: string | null;
   contactName: string | null;
   contactPhone: string | null;
+}
+
+/* ── Статистика ─────────────────────────────────────────────────────────────
+ * Где сейчас стоят лиды и что с ними происходило за период. Две карточки, не
+ * одна: снимок на сейчас считает всё, что вообще было, а движение по воронке
+ * записывается только с того дня, когда кабинет начал его записывать. */
+
+/**
+ * How far back a report looks. The screen offers exactly these three, everywhere.
+ *
+ * Rolling windows of 1, 7 and 30 days, not calendar ones — `server/src/lib/period.ts` says
+ * why, and is the only place that turns one of these into a date.
+ */
+export type Period = 'day' | 'week' | 'month';
+
+/** One stage of the funnel with how many leads are standing in it right now. */
+export interface StageStanding {
+  stageId: string;
+  name: string;
+  color: string;
+  kind: StageKind;
+  position: number;
+  /** Conversations whose `stageId` is this one. Zero here is a fact, not an absence. */
+  leads: number;
+}
+
+/**
+ * Where every lead of the agent stands at this instant.
+ *
+ * No period, and the absence is load-bearing: this counts every conversation the cabinet
+ * has ever had, including the ones triaged before it began recording movement, and it is
+ * the card that answers «почему воронка пустая, у меня двести лидов».
+ */
+export interface StatsCurrent {
+  /** Every current stage in `position` order, including the ones holding nobody. */
+  stages: StageStanding[];
+  /** Leads nobody has triaged — no stage at all. */
+  unsorted: number;
+  /** Every conversation of the agent: the stages plus `unsorted`, and nothing else. */
+  total: number;
+  // No `stageHistorySince` here, deliberately. This card has no period and never prints
+  // that date; the card that does — the period report — carries its own copy, answered
+  // from the same column in the same request. A second copy nobody renders is a field that
+  // drifts without anyone noticing.
+}
+
+/**
+ * One step of the funnel over a period: how many leads entered it, and out of how many.
+ *
+ * A step counts a lead once, however many times it entered the stage in the window, and it
+ * counts only the leads that actually entered — a lead dragged past a stage is absent from
+ * it. That is why `entered` may rise from one step to the next, and why the chain must not
+ * be read as a set of nested totals.
+ */
+export interface FunnelStep {
+  stageId: string;
+  name: string;
+  kind: StageKind;
+  position: number;
+  /** Distinct conversations that entered this stage inside the window. */
+  entered: number;
+  /**
+   * Share of the nearest earlier step anyone entered — and `null`, never `0`, without one.
+   *
+   * The denominator skips the stages nobody was routed through, because an owner's stage
+   * list is longer than most deals need and a stage nobody used is ordinary. Dividing by
+   * the row above instead would print «0%» on the skipped stage — read as «каждая сделка
+   * умирает здесь» about a stage where nothing was ever attempted — and would then silence
+   * the real stage underneath it.
+   *
+   * Null in exactly two cases: this step has no entries of its own, so there is no share to
+   * state; or nobody entered any earlier step, so there is nothing to be a share of.
+   *
+   * Can exceed 1. A lead dragged straight into this stage past the one above never entered
+   * that one, so a step may hold more leads than its denominator. The screen prints what
+   * happened rather than capping it.
+   */
+  conversion: number | null;
+}
+
+/** One advertisement, with what it brought over the period. */
+export interface StatsSource {
+  /**
+   * The ad this thread came from, or `null` for a click that carried no ad id.
+   *
+   * The `null` row is one row and not a missing one: the click happened and is worth
+   * counting, and the screen labels it «Реклама без идентификатора объявления».
+   */
+  sourceId: string | null;
+  /**
+   * Null unless the whole group agrees.
+   *
+   * The `sourceId: null` row holds clicks from *different* advertisements, and naming one
+   * of them would credit its leads to an ad they never saw. A row that means «клики,
+   * рекламу которых не удалось определить» carries no name at all.
+   */
+  sourceType: string | null;
+  headline: string | null;
+  /** Conversations of this ad created inside the window. */
+  leads: number;
+  /** Of those, the ones carrying a `ctwa_clid` — the id a purchase can be reported against. */
+  withClickId: number;
+  /** Of those, the ones standing right now in a stage of kind `success`. */
+  won: number;
+  /**
+   * A string, not a number: an amount must not pass through a float, for the reason
+   * `Order.amount` is a string.
+   *
+   * Every paid order of those conversations, whenever it was paid — so a lead who clicked
+   * inside the window and paid a month later still credits the ad that brought them.
+   */
+  paidTotal: string;
+}
+
+/**
+ * What the window's leads paid, in the agent's own currency.
+ *
+ * One population, and it is the same one `StatsSource` counts: the conversations created
+ * inside the window, with **every** paid order of theirs whenever it was paid. Not the
+ * orders paid inside the window, which would divide a March lead's payment by this week's
+ * new threads and disagree with the ad table standing right beneath it. The cost is stated
+ * on the screen instead of hidden: a past period's total can grow when a payment lands
+ * late.
+ *
+ * Null on the report — never a row of zeros — exactly when the cohort has no paid order at
+ * all, in any currency.
+ */
+export interface StatsMoney {
+  /** Paid orders of the cohort held in the agent's currency. */
+  paidOrders: number;
+  /** A string, not a number: an amount must not pass through a float. */
+  paidTotal: string;
+  /** A string, not a number. Null when there is nothing to average. */
+  averageOrder: string | null;
+  /**
+   * `paidTotal` over every conversation created in the window, a string, not a number.
+   *
+   * Null — not «0 ₸ с лида» — when the cohort paid nothing in the agent's currency, which
+   * is the only way the numerator can be absent: an order of the cohort implies a lead in
+   * it, so the denominator is never zero here.
+   */
+  revenuePerLead: string | null;
+  /**
+   * Paid orders of the cohort held in some other currency, excluded from every sum above.
+   *
+   * Counted rather than dropped, so an excluded amount is visible instead of merely
+   * missing — and so a window whose paid orders are *all* foreign still reports money
+   * rather than «за период нет оплаченных заказов», which would be false.
+   */
+  otherCurrencyOrders: number;
+}
+
+/**
+ * The funnel, the ad sources and the money for one rolling window.
+ *
+ * Two of the three are honest about the whole history of the agent and one is not, and the
+ * split is the point of `stageHistorySince` being here: sources and money have been recorded
+ * since the number was connected, while movement between stages starts on the day the
+ * cabinet began writing it down.
+ */
+export interface StatsPeriodReport {
+  period: Period;
+  /** The instant the window starts, ISO, computed on the server. */
+  since: string;
+  /** When the cabinet began recording movement, ISO. The funnel knows nothing before it. */
+  stageHistorySince: string;
+  /**
+   * Every current stage of kind other than `failure`, in `position` order — and empty
+   * exactly when nothing moved at all inside the window.
+   *
+   * `failure` is out of the chain deliberately: «Отказ» sits after «Продажа» by position,
+   * and a chain that walked through it would read a refusal as a step towards a sale. It is
+   * reported beside the chain as `failureEntries`.
+   */
+  funnel: FunnelStep[];
+  /**
+   * Distinct conversations that entered a refusal inside the window.
+   *
+   * A stage is a refusal by its **kind now**, which is what keeps it out of `funnel` — the
+   * two read the same source of truth, so a stage the owner re-marks moves between them
+   * rather than falling out of both or being counted by both. A stage that no longer
+   * exists is judged by the kind recorded on the transition, the only truth left about it.
+   */
+  failureEntries: number;
+  /** Moves to an earlier position — per move, because how often it happens is the question. */
+  backwardMoves: number;
+  /** Moves into a stage that has since been deleted, which therefore has no column above. */
+  deletedStageEntries: number;
+  /** The names those deleted stages had, at most ten of them. */
+  deletedStageNames: string[];
+  /** Conversations created inside the window. */
+  newLeads: number;
+  /** Of those, the ones that arrived from an advertisement. */
+  leadsFromAds: number;
+  sources: StatsSource[];
+  /** Null exactly when the window holds no paid order: a row of zeros would read as a fact. */
+  money: StatsMoney | null;
+  currency: string;
 }

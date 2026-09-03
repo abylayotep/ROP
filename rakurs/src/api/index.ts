@@ -20,7 +20,10 @@ import type {
   Me,
   Member,
   Message,
+  Period,
   Stage,
+  StatsCurrent,
+  StatsPeriodReport,
   WebhookSetup,
   WhatsappNumber,
 } from '@/types';
@@ -393,3 +396,35 @@ export const listCapiEvents = (
  */
 export const resendCapiEvent = (agentId: string, eventId: string) =>
   request<CapiEvent>(`${capi(agentId)}/events/${eventId}/resend`, { method: 'POST' });
+
+// ── Статистика ───────────────────────────────────────────────────────────────
+
+/**
+ * Сколько лидов стоит сейчас на каждой стадии. Любому сотруднику.
+ *
+ * Периода здесь нет, и это не упущение: карточка считает все диалоги агента, включая
+ * заведённые до того, как кабинет начал записывать переходы. Именно она отвечает на
+ * «почему воронка пустая, у меня двести лидов».
+ *
+ * Дня, с которого идёт запись переходов, в этом ответе нет: карточка его не печатает, а
+ * та, что печатает, получает его своим запросом.
+ */
+export const getStatsCurrent = (agentId: string, signal?: AbortSignal) =>
+  request<StatsCurrent>(`/agents/${agentId}/stats/current`, { signal });
+
+/**
+ * Воронка, источники и деньги за период. Любому сотруднику.
+ *
+ * Период — тот же, что у расхода на ИИ: сутки, неделя или месяц, скользящим окном.
+ * Сервер отвечает своим `since` — экран показывает именно тот момент, от которого
+ * посчитаны цифры, а не свой собственный.
+ *
+ * Здесь три карточки с разной честностью, и `stageHistorySince` в ответе — про это:
+ * источники и деньги считаются с того дня, как подключили номер, а движение по
+ * воронке — только с того дня, когда кабинет начал его записывать.
+ */
+export const getStatsPeriod = (agentId: string, period: Period, signal?: AbortSignal) =>
+  request<StatsPeriodReport>(`/agents/${agentId}/stats/period`, {
+    query: { period },
+    signal,
+  });

@@ -11,6 +11,7 @@ import { IntegrationsScreen } from '@/screens/IntegrationsScreen';
 import { KnowledgeScreen } from '@/screens/KnowledgeScreen';
 import { LoginScreen } from '@/screens/LoginScreen';
 import { SectionScreen } from '@/screens/SectionScreen';
+import { StatsScreen } from '@/screens/StatsScreen';
 import { AgentProvider } from '@/store/agent';
 import { AuthProvider, useAuth } from '@/store/auth';
 
@@ -63,6 +64,8 @@ function AuthGate() {
                 <KnowledgeScreen />
               ) : section.path === 'agent' ? (
                 <AgentScreen />
+              ) : section.path === 'stats' ? (
+                <StatsScreen />
               ) : (
                 <SectionScreen section={section} />
               )

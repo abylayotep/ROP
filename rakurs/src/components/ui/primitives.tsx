@@ -312,6 +312,11 @@ export interface FunnelStep {
   label: string;
   value: string;
   pct: string;
+  /**
+   * Подсказка к доле. Нужна там, где на месте процента стоит прочерк: «делить не на
+   * что» — это не ноль процентов, и без объяснения прочерк читается как поломка.
+   */
+  pctTitle?: string;
   w: string;
   fill: string;
 }
@@ -364,6 +369,7 @@ export function Funnel({ steps, compact = false }: { steps: FunnelStep[]; compac
             {f.value}
           </div>
           <div
+            title={f.pctTitle}
             style={{
               width: compact ? 40 : 44,
               flex: `0 0 ${compact ? 40 : 44}px`,

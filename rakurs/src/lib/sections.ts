@@ -28,11 +28,7 @@ export const SECTIONS: SectionDef[] = [
     label: 'Интеграции',
     pending: '',
   },
-  {
-    path: 'stats',
-    label: 'Статистика',
-    pending: 'Воронка, конверсия и источники лидов появятся на этапе 7.',
-  },
+  { path: 'stats', label: 'Статистика', pending: '' },
   { path: 'settings', label: 'Настройки', pending: '' },
 ];
 

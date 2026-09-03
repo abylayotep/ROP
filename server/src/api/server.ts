@@ -3,6 +3,7 @@ import rateLimit from '@fastify/rate-limit';
 import Fastify, { type FastifyInstance } from 'fastify';
 import type { Db } from '../db/client.js';
 import type { Env } from '../env.js';
+import { createModelClient, type ModelClient } from '../lib/ai/openrouter.js';
 import { ApiError } from '../lib/errors.js';
 import { createPageFetcher, type PageFetcher } from '../lib/knowledge/fetch-page.js';
 import { credentialsKey } from '../lib/secret-box.js';
@@ -24,6 +25,8 @@ export interface ServerDeps {
   graph?: GraphClient;
   /** The same arrangement for the knowledge base's one outbound fetch. */
   pageFetcher?: PageFetcher;
+  /** And for the model: no test spends a token or depends on a live OpenRouter key. */
+  model?: ModelClient;
 }
 
 /**
@@ -34,6 +37,11 @@ export function buildServer(env: Env, db: Db, deps: ServerDeps = {}): FastifyIns
   const app = Fastify({ logger: env.NODE_ENV !== 'test' });
   const graph = deps.graph ?? createGraphClient();
   const pageFetcher = deps.pageFetcher ?? createPageFetcher();
+  // Resolved here so the AI routes and the turn runner the next tasks add take it the same
+  // way every other outbound client is taken. Nothing registers a route with it yet, and the
+  // `void` says so rather than leaving a reader to wonder whether a wiring line was lost.
+  const model = deps.model ?? createModelClient();
+  void model;
 
   app.register(cookie, { secret: env.SESSION_SECRET });
   app.register(rateLimit, { global: false });

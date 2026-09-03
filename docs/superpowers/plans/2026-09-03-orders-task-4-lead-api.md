@@ -8,7 +8,7 @@
 
 **Interfaces:**
 - Consumes: `requireAgent`, `ApiError`, `isUuid`, the tables `conversations`, `contacts`, `stages`, `leadFields`, `leadValues`, `notes`, `orders`, `users`, `accountMembers`, `agents`.
-- Produces: `registerLeadRoutes(app, db, guard)`, the exported helper `loadLead(db, agentId, conversationId)`, and these routes:
+- Produces: `registerLeadRoutes(app, db, guard)`, the exported helper `loadLead(db, agent, conversationId)` — `agent` is the full row `requireAgent` attaches, so the returned `Lead` already carries the right currency — and these routes:
   - `GET /api/agents/:agentId/conversations/:conversationId/lead` → `Lead`
   - `PATCH /api/agents/:agentId/conversations/:conversationId/lead` → `Lead`
   - `PUT /api/agents/:agentId/conversations/:conversationId/lead/fields/:fieldId` → `Lead`
@@ -167,14 +167,18 @@ export function sumAmounts(values: string[]): string {
  * Exported because every mutation here answers with it, and because tasks 5 and 6 reload
  * it after doing their own work.
  */
-export async function loadLead(db: Db, agentId: string, conversationId: string): Promise<Lead> {
+export async function loadLead(
+  db: Db,
+  agent: { id: string; currency: string },
+  conversationId: string,
+): Promise<Lead> {
   if (!isUuid(conversationId)) throw new ApiError(404, 'Диалог не найден');
 
   const [row] = await db
     .select({ conversation: conversations, contact: contacts })
     .from(conversations)
     .innerJoin(contacts, eq(contacts.id, conversations.contactId))
-    .where(and(eq(conversations.id, conversationId), eq(conversations.agentId, agentId)));
+    .where(and(eq(conversations.id, conversationId), eq(conversations.agentId, agent.id)));
   if (!row) throw new ApiError(404, 'Диалог не найден');
 
   const [assignee] = row.conversation.assignedTo
@@ -220,7 +224,7 @@ export async function loadLead(db: Db, agentId: string, conversationId: string):
     paidTotal: sumAmounts(
       orderRows.filter((order) => order.status === 'paid').map((order) => order.amount),
     ),
-    currency: '',
+    currency: agent.currency,
   };
 }
 
@@ -231,18 +235,12 @@ export function registerLeadRoutes(
 ): void {
   const anyMember = requireAgent(db);
 
-  /** The lead plus the currency, which lives on the agent the guard already loaded. */
-  const lead = async (agentId: string, conversationId: string, currency: string): Promise<Lead> => ({
-    ...(await loadLead(db, agentId, conversationId)),
-    currency,
-  });
-
   app.get(
     '/api/agents/:agentId/conversations/:conversationId/lead',
     { preHandler: [guard, anyMember] },
     async (req): Promise<Lead> => {
       const { conversationId } = req.params as { conversationId: string };
-      return lead(req.agent!.id, conversationId, req.agent!.currency);
+      return loadLead(db, req.agent!, conversationId);
     },
   );
 
@@ -254,7 +252,7 @@ export function registerLeadRoutes(
       const parsed = patchLead.safeParse(req.body);
       if (!parsed.success) throw new ApiError(400, 'Не удалось разобрать карточку');
 
-      const current = await loadLead(db, req.agent!.id, conversationId);
+      const current = await loadLead(db, req.agent!, conversationId);
       const patch: Partial<typeof conversations.$inferInsert> = {};
 
       if (parsed.data.stageId !== undefined && parsed.data.stageId !== current.stageId) {
@@ -292,9 +290,14 @@ export function registerLeadRoutes(
       }
 
       if (Object.keys(patch).length > 0) {
-        await db.update(conversations).set(patch).where(eq(conversations.id, conversationId));
+        await db
+          .update(conversations)
+          .set(patch)
+          .where(
+            and(eq(conversations.id, conversationId), eq(conversations.agentId, req.agent!.id)),
+          );
       }
-      return lead(req.agent!.id, conversationId, req.agent!.currency);
+      return loadLead(db, req.agent!, conversationId);
     },
   );
 
@@ -310,7 +313,7 @@ export function registerLeadRoutes(
       if (!parsed.success) throw new ApiError(400, 'Не удалось разобрать значение');
 
       // Proves the conversation belongs to this agent before anything is written.
-      await loadLead(db, req.agent!.id, conversationId);
+      await loadLead(db, req.agent!, conversationId);
 
       if (!isUuid(fieldId)) throw new ApiError(404, 'Поле не найдено');
       const [field] = await db
@@ -337,7 +340,7 @@ export function registerLeadRoutes(
             set: { value, updatedAt: new Date() },
           });
       }
-      return lead(req.agent!.id, conversationId, req.agent!.currency);
+      return loadLead(db, req.agent!, conversationId);
     },
   );
 
@@ -349,11 +352,11 @@ export function registerLeadRoutes(
       const parsed = addNote.safeParse(req.body);
       if (!parsed.success) throw new ApiError(400, 'Заметка не может быть пустой');
 
-      await loadLead(db, req.agent!.id, conversationId);
+      await loadLead(db, req.agent!, conversationId);
       await db
         .insert(notes)
         .values({ conversationId, authorId: req.user!.id, body: parsed.data.body });
-      return lead(req.agent!.id, conversationId, req.agent!.currency);
+      return loadLead(db, req.agent!, conversationId);
     },
   );
 

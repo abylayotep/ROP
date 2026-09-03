@@ -355,11 +355,6 @@ export function registerOrderRoutes(
   // Any member: recording what a customer paid is the job, not an administrative act.
   const anyMember = requireAgent(db);
 
-  const lead = async (agentId: string, conversationId: string, currency: string): Promise<Lead> => ({
-    ...(await loadLead(db, agentId, conversationId)),
-    currency,
-  });
-
   /** The agent's order, or a 404 that tells a stranger nothing. */
   async function loadOrder(agentId: string, orderId: string) {
     if (!isUuid(orderId)) throw new ApiError(404, 'Заказ не найден');
@@ -382,7 +377,7 @@ export function registerOrderRoutes(
       }
 
       // Proves the conversation belongs to this agent before anything is written.
-      await loadLead(db, req.agent!.id, conversationId);
+      await loadLead(db, req.agent!, conversationId);
 
       await db.insert(orders).values({
         agentId: req.agent!.id,
@@ -395,7 +390,7 @@ export function registerOrderRoutes(
         comment: parsed.data.comment,
         paidAt: parsed.data.status === 'paid' ? new Date() : null,
       });
-      return lead(req.agent!.id, conversationId, req.agent!.currency);
+      return loadLead(db, req.agent!, conversationId);
     },
   );
 
@@ -421,7 +416,7 @@ export function registerOrderRoutes(
 
         await db.update(orders).set(patch).where(eq(orders.id, current.id));
       }
-      return lead(req.agent!.id, current.conversationId, req.agent!.currency);
+      return loadLead(db, req.agent!, current.conversationId);
     },
   );
 
@@ -433,7 +428,7 @@ export function registerOrderRoutes(
       const current = await loadOrder(req.agent!.id, orderId);
 
       await db.delete(orders).where(eq(orders.id, current.id));
-      return lead(req.agent!.id, current.conversationId, req.agent!.currency);
+      return loadLead(db, req.agent!, current.conversationId);
     },
   );
 }

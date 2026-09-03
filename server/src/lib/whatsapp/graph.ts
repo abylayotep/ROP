@@ -7,7 +7,7 @@
  */
 
 /** Pinned deliberately. Meta deprecates versions on a schedule; drifting silently is worse. */
-const GRAPH_VERSION = 'v21.0';
+const GRAPH_VERSION = 'v26.0';
 /**
  * Exported so that the one other place talking to the Graph API — the Conversions API client
  * in `../capi/client.ts` — pins the same version. Two literals would drift, and the one that

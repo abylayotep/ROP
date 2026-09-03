@@ -44,7 +44,7 @@ describe('graph client', () => {
       verifiedName: 'Aisham',
     });
     expect(calls[0]!.url).toBe(
-      'https://graph.facebook.com/v21.0/136?fields=id%2Cdisplay_phone_number%2Cverified_name',
+      'https://graph.facebook.com/v26.0/136?fields=id%2Cdisplay_phone_number%2Cverified_name',
     );
     expect((calls[0]!.init.headers as Record<string, string>).Authorization).toBe(
       `Bearer ${TOKEN}`,
@@ -56,7 +56,7 @@ describe('graph client', () => {
 
     await client.subscribeApp('932', TOKEN);
 
-    expect(calls[0]!.url).toBe('https://graph.facebook.com/v21.0/932/subscribed_apps');
+    expect(calls[0]!.url).toBe('https://graph.facebook.com/v26.0/932/subscribed_apps');
     expect(calls[0]!.init.method).toBe('POST');
   });
 
@@ -66,7 +66,7 @@ describe('graph client', () => {
     const sent = await client.sendText('136', TOKEN, '77771234567', 'Здравствуйте!');
 
     expect(sent).toEqual({ messageId: 'wamid.OUT' });
-    expect(calls[0]!.url).toBe('https://graph.facebook.com/v21.0/136/messages');
+    expect(calls[0]!.url).toBe('https://graph.facebook.com/v26.0/136/messages');
     expect(JSON.parse(String(calls[0]!.init.body))).toEqual({
       messaging_product: 'whatsapp',
       recipient_type: 'individual',

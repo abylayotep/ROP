@@ -57,10 +57,12 @@ npm --prefix rakurs run dev
 перезапуск контейнера. Тестовая база — отдельная (`compose.test.yml`, порт 55432, tmpfs):
 её каждый прогон тестов чистит, и заводить там что-либо бессмысленно.
 
-Для WhatsApp `server/.env` держит пять дополнительных переменных:
+Для WhatsApp `server/.env` держит семь дополнительных переменных:
 
 - `META_APP_SECRET` — секрет приложения Meta, подписывает каждый вебхук;
 - `META_WEBHOOK_VERIFY_TOKEN` — строка, которую Meta присылает при проверке вебхука;
+- `META_APP_ID` — ID приложения Meta; браузер запускает с ним Embedded Signup;
+- `META_ES_CONFIG_ID` — ID конфигурации Facebook Login for Business для Embedded Signup;
 - `CREDENTIALS_KEY` — ключ шифрования токенов в базе, ровно 32 байта в base64, получить:
   `head -c 32 /dev/urandom | base64`;
 - `MEDIA_DIR` — куда сохранять файлы из WhatsApp, по умолчанию `var/media`; в продакшене

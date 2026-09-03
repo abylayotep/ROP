@@ -7,6 +7,7 @@ import { BoardScreen } from '@/screens/BoardScreen';
 import { CustomersScreen } from '@/screens/CustomersScreen';
 import { DialogsScreen } from '@/screens/DialogsScreen';
 import { IntegrationsScreen } from '@/screens/IntegrationsScreen';
+import { KnowledgeScreen } from '@/screens/KnowledgeScreen';
 import { LoginScreen } from '@/screens/LoginScreen';
 import { SectionScreen } from '@/screens/SectionScreen';
 import { AgentProvider } from '@/store/agent';
@@ -57,6 +58,8 @@ function AuthGate() {
                 <BoardScreen />
               ) : section.path === 'customers' ? (
                 <CustomersScreen />
+              ) : section.path === 'knowledge' ? (
+                <KnowledgeScreen />
               ) : (
                 <SectionScreen section={section} />
               )

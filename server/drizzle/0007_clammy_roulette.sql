@@ -1,0 +1,1 @@
+ALTER TABLE "kb_sources" ALTER COLUMN "status" DROP DEFAULT;

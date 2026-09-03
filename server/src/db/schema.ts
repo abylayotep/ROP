@@ -1,5 +1,7 @@
+import { sql } from 'drizzle-orm';
 import {
   boolean,
+  customType,
   index,
   integer,
   jsonb,
@@ -348,6 +350,82 @@ export const notes = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index('notes_conversation_created_idx').on(t.conversationId, t.createdAt)],
+);
+
+/**
+ * Postgres's own search vector. Declared as a custom type because Drizzle has no `tsvector`,
+ * and never written from here — the column is generated, so an item edited through any path
+ * is indexed correctly by definition rather than by remembering to reindex it.
+ */
+const tsvector = customType<{ data: string; notNull: true }>({
+  dataType: () => 'tsvector',
+});
+
+/**
+ * An import: a block of text someone pasted, or a page we fetched.
+ *
+ * It exists so that a reimport can replace what it made. An item written by hand has no
+ * source, which is why `kb_items.source_id` is nullable.
+ */
+export const kbSources = pgTable(
+  'kb_sources',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    agentId: uuid('agent_id')
+      .notNull()
+      .references(() => agents.id, { onDelete: 'cascade' }),
+    // 'text' | 'page'
+    kind: text('kind').notNull(),
+    title: text('title').notNull(),
+    url: text('url'),
+    // 'ready' | 'failed', and no default: both imports are synchronous, so every row is
+    // written by a path that already knows which of the two it is. A default would be the
+    // third value nobody writes, waiting for a screen to render a state that never happens.
+    status: text('status').notNull(),
+    // Why it failed, in the operator's language.
+    error: text('error'),
+    itemCount: integer('item_count').notNull().default(0),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    importedAt: timestamp('imported_at', { withTimezone: true }),
+  },
+  (t) => [index('kb_sources_agent_created_idx').on(t.agentId, t.createdAt)],
+);
+
+/**
+ * One retrievable answer.
+ *
+ * A hand-written fact and a chunk of an imported page are the same thing to the agent, so
+ * they are the same row. Two tables would mean two search paths and two ways to be stale.
+ */
+export const kbItems = pgTable(
+  'kb_items',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    agentId: uuid('agent_id')
+      .notNull()
+      .references(() => agents.id, { onDelete: 'cascade' }),
+    // Set null, not cascade: deleting an import must not delete the corrections someone
+    // made to what it produced.
+    sourceId: uuid('source_id').references(() => kbSources.id, { onDelete: 'set null' }),
+    // 'product' | 'qa' | 'procedure' | 'contact' | 'other'
+    kind: text('kind').notNull().default('other'),
+    title: text('title').notNull(),
+    content: text('content').notNull(),
+    // True once a person has changed it. A reimport replaces what it made, except these:
+    // a price the owner corrected by hand outranks the page it came from.
+    edited: boolean('edited').notNull().default(false),
+    search: tsvector('search')
+      .notNull()
+      .generatedAlwaysAs(
+        sql`setweight(to_tsvector('russian', coalesce(title, '')), 'A') || setweight(to_tsvector('russian', coalesce(content, '')), 'B')`,
+      ),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('kb_items_agent_kind_idx').on(t.agentId, t.kind),
+    index('kb_items_search_idx').using('gin', t.search),
+  ],
 );
 
 /**

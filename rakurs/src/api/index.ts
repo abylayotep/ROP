@@ -4,6 +4,10 @@ import type {
   ConversationSummary,
   ConversationThread,
   Customer,
+  KbImport,
+  KbItem,
+  KbItemKind,
+  KbSource,
   Lead,
   LeadField,
   Me,
@@ -212,3 +216,52 @@ export const updateOrder = (
 
 export const deleteOrder = (agentId: string, orderId: string) =>
   request<Lead>(`/agents/${agentId}/orders/${orderId}`, { method: 'DELETE' });
+
+// ── Knowledge base ───────────────────────────────────────────────────────────
+
+const knowledge = (agentId: string) => `/agents/${agentId}/knowledge`;
+
+/**
+ * With a query it is a search, without one a list. One route for both is deliberate: the
+ * owner has to test exactly the search stage 5's agent uses.
+ */
+export const listKbItems = (
+  agentId: string,
+  params: { kind?: KbItemKind; q?: string },
+  signal?: AbortSignal,
+) => request<KbItem[]>(`${knowledge(agentId)}/items`, { query: params, signal });
+
+export const createKbItem = (
+  agentId: string,
+  body: { kind: KbItemKind; title: string; content: string },
+) => request<KbItem>(`${knowledge(agentId)}/items`, { method: 'POST', body });
+
+export const updateKbItem = (
+  agentId: string,
+  itemId: string,
+  body: { kind?: KbItemKind; title?: string; content?: string },
+) => request<KbItem>(`${knowledge(agentId)}/items/${itemId}`, { method: 'PATCH', body });
+
+export const deleteKbItem = (agentId: string, itemId: string) =>
+  request<{ ok: true }>(`${knowledge(agentId)}/items/${itemId}`, { method: 'DELETE' });
+
+export const listKbSources = (agentId: string, signal?: AbortSignal) =>
+  request<KbSource[]>(`${knowledge(agentId)}/sources`, { signal });
+
+/** Owner only on the server: an import writes a batch nobody has read yet. */
+export const importKbText = (
+  agentId: string,
+  body: { title: string; kind: KbItemKind; text: string },
+) => request<KbImport>(`${knowledge(agentId)}/import/text`, { method: 'POST', body });
+
+/** Owner only. The fetch happens inside the request, so it can take seconds. */
+export const importKbPage = (agentId: string, url: string) =>
+  request<KbImport>(`${knowledge(agentId)}/import/page`, { method: 'POST', body: { url } });
+
+/** Owner only, and only for a page source: it refetches and replaces what it made. */
+export const reimportKbSource = (agentId: string, sourceId: string) =>
+  request<KbImport>(`${knowledge(agentId)}/sources/${sourceId}/reimport`, { method: 'POST' });
+
+/** Owner only. The items stay — only the record of where they came from goes. */
+export const deleteKbSource = (agentId: string, sourceId: string) =>
+  request<{ ok: true }>(`${knowledge(agentId)}/sources/${sourceId}`, { method: 'DELETE' });

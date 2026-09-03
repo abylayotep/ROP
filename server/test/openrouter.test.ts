@@ -7,7 +7,8 @@
  * here, against a stubbed `fetch`. No socket is opened.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { MODELS, ModelError, createModelClient } from '../src/lib/ai/openrouter.js';
+import { MODELS, ModelError, TIMEOUT_MS, createModelClient } from '../src/lib/ai/openrouter.js';
+import { agents } from '../src/db/schema.js';
 
 const client = createModelClient();
 const KEY = 'sk-or-v1-secret-key';
@@ -76,7 +77,7 @@ describe('a completion', () => {
     });
   });
 
-  it('defaults the counts and the cost when the model reported none', async () => {
+  it('defaults the counts and the cost when the model reported no usage at all', async () => {
     answerWith(completion('{"reply":"Да."}'));
 
     const answer = await client.complete(input);
@@ -87,6 +88,37 @@ describe('a completion', () => {
       completionTokens: 0,
       cost: '0',
     });
+  });
+
+  it('counts the tokens of a model that reports usage but no cost', async () => {
+    answerWith(completion('{"reply":"Да."}', { prompt_tokens: 41, completion_tokens: 7 }));
+
+    const answer = await client.complete(input);
+
+    expect(answer).toMatchObject({ promptTokens: 41, completionTokens: 7, cost: '0' });
+  });
+
+  it('writes a numeric cost as a decimal the numeric(12,8) column will take', async () => {
+    // `String(1e-7)` is the string `1e-7`, which that column rejects. Most models report the
+    // cost as a number, and the small ones report numbers this small.
+    answerWith(completion('{}', { prompt_tokens: 3, completion_tokens: 1, cost: 0.0000001 }));
+
+    const answer = await client.complete(input);
+
+    expect(answer.cost).toBe('0.00000010');
+    expect(answer.cost).not.toContain('e');
+  });
+
+  it('survives a model that sends a null cost', async () => {
+    // `String(null)` is the string `null`, and a turn that produced a good answer must not
+    // fail on the reply log over a number nobody reads.
+    answerWith(
+      completion('{"reply":"Да."}', { prompt_tokens: 9, completion_tokens: 2, cost: null }),
+    );
+
+    const answer = await client.complete(input);
+
+    expect(answer).toMatchObject({ promptTokens: 9, cost: '0' });
   });
 
   it('sends the key as a bearer token and the model, temperature and messages in the body', async () => {
@@ -105,12 +137,16 @@ describe('a completion', () => {
     });
   });
 
-  it('carries a deadline on the request', async () => {
+  it('carries the sixty-second deadline on the request', async () => {
     answerWith(completion('{}'));
+    const deadline = vi.spyOn(AbortSignal, 'timeout');
 
     await client.complete(input);
 
+    expect(deadline).toHaveBeenCalledWith(TIMEOUT_MS);
+    expect(TIMEOUT_MS).toBe(60_000);
     expect(calls[0]!.init.signal).toBeInstanceOf(AbortSignal);
+    deadline.mockRestore();
   });
 });
 
@@ -157,14 +193,17 @@ describe('a failure', () => {
     expect((error as ModelError).message).not.toMatch(/Rate limit/);
   });
 
-  it('raises a ModelError rather than a SyntaxError when the body is not JSON', async () => {
-    answerWith('<html><title>502 Bad Gateway</title></html>');
+  it('raises a ModelError rather than a SyntaxError when a 200 body is not JSON', async () => {
+    answerWith(`<html><title>502 Bad Gateway</title><!-- ${KEY} --></html>`);
 
     const error = await failure();
 
     expect(error).toBeInstanceOf(ModelError);
     expect(error).not.toBeInstanceOf(SyntaxError);
+    expect((error as ModelError).status).toBe(502);
     expect((error as ModelError).message).toMatch(/[а-яё]/i);
+    expect((error as ModelError).detail).toContain('Bad Gateway');
+    expect((error as ModelError).detail).not.toContain(KEY);
   });
 
   it('raises a ModelError rather than a SyntaxError when a failing body is not JSON', async () => {
@@ -215,9 +254,46 @@ describe('a failure', () => {
     expect(error).toBeInstanceOf(ModelError);
     expect((error as ModelError).status).toBe(504);
   });
+
+  it('turns an unreachable OpenRouter into a ModelError rather than a TypeError', async () => {
+    // What `fetch` throws for a name that will not resolve or a refused connection. A turn
+    // branches on ModelError, so an escaping TypeError would be logged as a bug in us.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new TypeError('fetch failed');
+      }),
+    );
+
+    const error = await failure();
+
+    expect(error).toBeInstanceOf(ModelError);
+    expect((error as ModelError).status).toBe(502);
+    expect((error as ModelError).message).toMatch(/[а-яё]/i);
+  });
+
+  it('keeps the key out of an error thrown by fetch itself', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new TypeError(`request to https://openrouter.ai failed, key=${KEY}`);
+      }),
+    );
+
+    const error = await failure();
+
+    expect((error as ModelError).message).not.toContain(KEY);
+    expect(String((error as ModelError).detail ?? '')).not.toContain(KEY);
+  });
 });
 
 describe('the model list', () => {
+  it('offers the model the schema starts an agent on', () => {
+    // Task 1 defaults `agents.model` to an id, and an owner who never opens the picker runs
+    // on it. If it drifted out of this list, the picker would open on nothing.
+    expect(MODELS.map((m) => m.id)).toContain(agents.model.default);
+  });
+
   it('offers models an owner may pick', () => {
     expect(MODELS.length).toBeGreaterThan(0);
 

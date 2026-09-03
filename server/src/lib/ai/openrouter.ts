@@ -16,8 +16,10 @@ const BASE = 'https://openrouter.ai/api/v1';
  * milliseconds, and a turn runs on the inbound queue rather than on somebody's request — Meta
  * has already had its 200 and nobody is watching a spinner. Cutting a slow model off at
  * fifteen seconds would throw away answers that were arriving perfectly well.
+ *
+ * Exported so the test can pin the number rather than merely assert that some deadline exists.
  */
-const TIMEOUT_MS = 60_000;
+export const TIMEOUT_MS = 60_000;
 
 /**
  * The models an owner may pick, with the line they read while picking.
@@ -133,39 +135,65 @@ async function failure(response: Response, key: string): Promise<ModelError> {
 }
 
 /**
- * Runs one exchange with OpenRouter under a deadline, so its expiry reads as the model
- * failing rather than as a stray error.
+ * Runs one exchange with OpenRouter under a deadline, and makes every way it can fail a
+ * `ModelError`.
  *
  * Node rejects an expired `AbortSignal.timeout` with a `TimeoutError` that is not a
  * `ModelError` and whose message is English; a turn branches on `ModelError` and writes
  * `message` into a reply log an owner reads. 504, because the request did leave this process.
+ *
+ * Everything else that escapes `fetch` — a name that will not resolve, a refused connection, a
+ * TLS failure — arrives as a `TypeError`. A turn that saw one of those would treat it as a bug
+ * in this process rather than as OpenRouter being unreachable, so it is wrapped too. This
+ * client is the one whose failures a turn has to classify, and «unreachable» is a refusal an
+ * owner can act on, not a stack trace.
  *
  * It wraps the whole exchange rather than the `fetch` alone: `fetch` resolves as soon as the
  * headers arrive, and a model streams its answer, so the deadline is most likely to pass
  * while the body is being read. Parsing sits inside it too, so a truncated body raises this
  * rather than a `SyntaxError` nobody expects.
  */
-async function within<T>(exchange: () => Promise<T>): Promise<T> {
+async function within<T>(key: string, exchange: () => Promise<T>): Promise<T> {
   try {
     return await exchange();
   } catch (error) {
+    if (error instanceof ModelError) throw error;
     if ((error as { name?: string } | null)?.name === 'TimeoutError') {
       throw new ModelError(`Модель не ответила за ${Math.round(TIMEOUT_MS / 1000)} с.`, 504);
     }
-    throw error;
+    const detail = withoutSecret(String((error as { message?: string })?.message ?? error), key);
+    throw new ModelError('Не удалось связаться с OpenRouter.', 502, detail.slice(0, 500));
   }
+}
+
+/**
+ * OpenRouter's cost, in the shape the reply log's `numeric(12,8)` column will accept.
+ *
+ * Most models report a number, some a string, and the rest send `null` or nothing at all.
+ * `String(null)` is `'null'` and `String(1e-7)` is `'1e-7'` — the column rejects both, and a
+ * turn that produced a good answer must not fail over a number nobody is reading. A string is
+ * passed through as it came, because that is already OpenRouter's own decimal notation.
+ */
+function asCost(value: number | string | null | undefined): string {
+  if (value == null) return '0';
+  if (typeof value === 'string') return value;
+  return Number.isFinite(value) ? value.toFixed(8) : '0';
 }
 
 /** OpenRouter's answer, in the parts we read. Everything else is ignored on purpose. */
 interface ChatResponse {
   choices?: { message?: { content?: string | null } }[];
-  usage?: { prompt_tokens?: number; completion_tokens?: number; cost?: number | string };
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    cost?: number | string | null;
+  };
 }
 
 export function createModelClient(): ModelClient {
   return {
     async complete({ key, model, temperature, messages }) {
-      return within(async () => {
+      return within(key, async () => {
         const response = await fetch(`${BASE}/chat/completions`, {
           method: 'POST',
           headers: {
@@ -213,7 +241,7 @@ export function createModelClient(): ModelClient {
           text: content,
           promptTokens: usage.prompt_tokens ?? 0,
           completionTokens: usage.completion_tokens ?? 0,
-          cost: usage.cost === undefined ? '0' : String(usage.cost),
+          cost: asCost(usage.cost),
         };
       });
     },

@@ -455,6 +455,22 @@ describe('the lead total', () => {
     expect(res.json().paidTotal).toBe('170001.00');
     expect(res.json().orders).toHaveLength(4);
   });
+
+  it('leaves an order in another currency out', async () => {
+    // Written straight into the table: the order form only ever offers the agent's own
+    // currency, and this is the row that proves the sum does not merely assume that.
+    await db.insert(orders).values([
+      { agentId, conversationId, amount: '100000', currency: 'KZT', status: 'paid' },
+      { agentId, conversationId, amount: '500', currency: 'USD', status: 'paid' },
+    ]);
+
+    const res = await app.inject({ url: leadUrl(), cookies: jar });
+
+    expect(res.json().paidTotal).toBe('100000.00');
+    // Still listed: the card shows every order it has, with the currency each was in.
+    expect(res.json().orders).toHaveLength(2);
+    expect(res.json().currency).toBe('KZT');
+  });
 });
 
 describe('access', () => {

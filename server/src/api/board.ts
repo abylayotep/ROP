@@ -41,7 +41,7 @@ export function toCsv(rows: string[][]): string {
  * One statement rather than one per column: the board has nine stages before a client adds
  * any, and a query per stage would be nine round trips to draw one screen.
  */
-function selectCards(db: Db, agentId: string) {
+function selectCards(db: Db, agentId: string, currency: string) {
   return db
     .select({
       id: conversations.id,
@@ -67,9 +67,17 @@ function selectCards(db: Db, agentId: string) {
       // customers request rather than one card. numeric(16,2) holds ten thousand amounts at
       // that ceiling, which is far past any real conversation; it is a wider margin, not a
       // proof.
+      //
+      // The currency is in the predicate, not assumed. Every caller prints this total
+      // beside the agent's currency, while `orders.currency` is a per-row column: an
+      // amount in another currency added into the same sum would be a number labelled
+      // with a unit it is not in. Nothing can change an agent's currency today, so this
+      // excludes nothing today — it is one clause now and an audit of every card later.
       paidTotal: sql<string>`coalesce((
         select sum(o.amount) from orders o
-        where o.conversation_id = ${conversations.id} and o.status = 'paid'
+        where o.conversation_id = ${conversations.id}
+          and o.status = 'paid'
+          and o.currency = ${currency}
       ), 0)::numeric(16,2)::text`,
       orderCount: sql<number>`(
         select count(*)::int from orders o where o.conversation_id = ${conversations.id}
@@ -125,7 +133,7 @@ export function registerBoardRoutes(
           .from(stages)
           .where(eq(stages.agentId, req.agent!.id))
           .orderBy(asc(stages.position)),
-        selectCards(db, req.agent!.id),
+        selectCards(db, req.agent!.id, req.agent!.currency),
       ]);
 
       const byStage = new Map<string, BoardCard[]>(funnel.map((stage) => [stage.id, []]));
@@ -146,11 +154,11 @@ export function registerBoardRoutes(
   );
 
   /** The same rows, asked "who bought and who went quiet" instead of "which column". */
-  async function customers(agentId: string): Promise<Customer[]> {
+  async function customers(agentId: string, currency: string): Promise<Customer[]> {
     // Both statements at once, as the board route does: neither reads the other's result.
     const [funnel, rows] = await Promise.all([
       db.select().from(stages).where(eq(stages.agentId, agentId)),
-      selectCards(db, agentId),
+      selectCards(db, agentId, currency),
     ]);
     const byId = new Map(funnel.map((stage) => [stage.id, stage]));
 
@@ -174,14 +182,14 @@ export function registerBoardRoutes(
   app.get(
     '/api/agents/:agentId/customers',
     { preHandler: [guard, anyMember] },
-    async (req): Promise<Customer[]> => customers(req.agent!.id),
+    async (req): Promise<Customer[]> => customers(req.agent!.id, req.agent!.currency),
   );
 
   app.get(
     '/api/agents/:agentId/customers.csv',
     { preHandler: [guard, anyMember] },
     async (req, reply) => {
-      const rows = await customers(req.agent!.id);
+      const rows = await customers(req.agent!.id, req.agent!.currency);
       const date = (iso: string | null) => (iso ? iso.slice(0, 10) : '');
 
       /**

@@ -128,7 +128,14 @@ export async function loadLead(
     notes: noteRows.map(({ note, authorName }) => toNote(note, authorName)),
     orders: orderRows.map(toOrder),
     paidTotal: sumAmounts(
-      orderRows.filter((order) => order.status === 'paid').map((order) => order.amount),
+      orderRows
+        // The currency is checked, not assumed. `paidTotal` is reported next to the agent's
+        // currency, and `orders.currency` is a per-row column: adding an amount held in
+        // another currency into that total would print a number in a unit it is not in.
+        // Nothing can change an agent's currency today, so this excludes nothing today —
+        // it is one line now and an audit of every sum later.
+        .filter((order) => order.status === 'paid' && order.currency === agent.currency)
+        .map((order) => order.amount),
     ),
     currency: agent.currency,
   };

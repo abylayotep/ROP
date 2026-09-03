@@ -307,6 +307,23 @@ describe('the customers table', () => {
     expect(row.firstSeenAt).toBeDefined();
   });
 
+  it('leaves an order in another currency out of the total', async () => {
+    const conversationId = await seedConversation('77000000013', 'Айгуль');
+    // Written straight into the table: the order form only ever offers the agent's own
+    // currency, and this is the row that proves the sum does not merely assume that.
+    await db.insert(orders).values([
+      { agentId, conversationId, amount: '100000', currency: 'KZT', status: 'paid' },
+      { agentId, conversationId, amount: '500', currency: 'USD', status: 'paid' },
+    ]);
+
+    const res = await app.inject({ url: `/api/agents/${agentId}/customers`, cookies: jar });
+
+    const row = res.json()[0];
+    expect(row.paidTotal).toBe('100000.00');
+    // Counted all the same: `orderCount` answers how many orders, not how much money.
+    expect(row.orderCount).toBe(2);
+  });
+
   it('lists a customer who is in no stage', async () => {
     await seedConversation('77000000008', null);
 

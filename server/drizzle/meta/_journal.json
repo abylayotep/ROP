@@ -36,6 +36,13 @@
       "when": 1788396845638,
       "tag": "0004_rich_metal_master",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1788405418575,
+      "tag": "0005_seed_default_funnel",
+      "breakpoints": true
     }
   ]
 }

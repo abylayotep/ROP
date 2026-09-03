@@ -65,10 +65,15 @@ const allEvents = () => db.select().from(capiEvents).orderBy(asc(capiEvents.crea
  *
  * The drain refuses to retry an event whose attempt was seconds ago, and that is the point
  * of the backoff — so a test that wants a second attempt has to move the clock the only way
- * it can: by moving the row into the past.
+ * it can: by moving the row into the past. `last_attempt_at` is what the gap is measured
+ * from; `created_at` moves with it so the row stays coherent.
  */
 const age = () =>
-  db.execute(sql`update capi_events set created_at = now() - interval '1 day'`);
+  db.execute(sql`
+    update capi_events
+       set created_at = now() - interval '1 day',
+           last_attempt_at = last_attempt_at - interval '1 day'
+  `);
 
 /** A second agent with its own account, so one agent's settings cannot answer for the other. */
 async function otherAgent(): Promise<string> {
@@ -125,6 +130,17 @@ describe('sending a pending event', () => {
     expect(row.sentAt).toBeInstanceOf(Date);
     expect(row.error).toBeNull();
     expect(row.attempts).toBe(1);
+    // Dated by the claim itself, which is what the backoff measures from.
+    expect(row.lastAttemptAt).toBeInstanceOf(Date);
+  });
+
+  it('keeps Meta’s trace id, which is what their support asks for', async () => {
+    const id = await pending();
+    const capi = fakeCapi({ received: 1, fbtraceId: 'A7bQ-trace' });
+
+    await sendPendingCapiEvents(db, { capi, key });
+
+    expect((await eventRow(id)).fbtraceId).toBe('A7bQ-trace');
   });
 
   it('gives Meta the dataset, the decrypted token and the stored bytes untouched', async () => {
@@ -263,6 +279,22 @@ describe('what Meta refuses', () => {
     await sendPendingCapiEvents(db, { capi, key });
 
     expect(capi.calls).toHaveLength(1);
+  });
+
+  it('holds the gap after a resend by hand reset the attempts on an old row', async () => {
+    // What task 5's resend leaves behind: a row queued days ago, put back to pending with
+    // its attempts cleared. Measured from `created_at` the gap would already have elapsed
+    // and the whole budget would burn in one second; measured from the attempt it does not.
+    const id = await pending();
+    await db.execute(sql`update capi_events set created_at = now() - interval '3 days'`);
+    const capi = fakeCapi(new CapiError('Meta временно недоступна.', 503, true));
+
+    await sendPendingCapiEvents(db, { capi, key });
+    await sendPendingCapiEvents(db, { capi, key });
+    await sendPendingCapiEvents(db, { capi, key });
+
+    expect(capi.calls).toHaveLength(1);
+    expect((await eventRow(id)).attempts).toBe(1);
   });
 
   it('retries once the widening gap has passed', async () => {

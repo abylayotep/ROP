@@ -582,9 +582,20 @@ export const capiEvents = pgTable(
     // 'pending' | 'sent' | 'failed' | 'skipped'
     status: text('status').notNull().default('pending'),
     attempts: integer('attempts').notNull().default(0),
+    // When the last attempt was claimed, which is what the backoff measures from.
+    //
+    // From the attempt and not from `created_at`: a resend by hand resets `attempts` on a
+    // row that may be days old, and a gap measured from creation would already have elapsed
+    // — the five attempts would then be spent in seconds. Written by the claiming statement
+    // itself, together with the increment, so the two can never disagree.
+    lastAttemptAt: timestamp('last_attempt_at', { withTimezone: true }),
     // What Meta answered when it refused. Redacted of the token before it is written.
     error: text('error'),
     sentAt: timestamp('sent_at', { withTimezone: true }),
+    // Meta's own reference for the accepted send. It is the first thing their support asks
+    // for when a report is missing from Events Manager, and by then the response is gone.
+    // One id per send, so every event of a batch carries the same one.
+    fbtraceId: text('fbtrace_id'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index('capi_events_status_created_idx').on(t.status, t.createdAt)],

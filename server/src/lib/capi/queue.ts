@@ -57,35 +57,34 @@ const AGENTS = 25;
 const MAX_DRAIN_MS = 20_000;
 
 /**
- * When an event may be attempted again: a widening gap, measured from `created_at`.
+ * When an event may be attempted again: a widening gap, measured from the last attempt.
  *
- * The offsets are cumulative, so the gaps between attempts are 1, 5, 25 and 125 minutes —
- * roughly two and a half hours from the first attempt to the last. Long enough for a Meta
- * incident to end, short enough that a sale is reported the same day it was paid.
+ * The gaps are 1, 5, 25 and 125 minutes — about two and a half hours from the first attempt
+ * to the fifth. Long enough for a Meta incident to end, short enough that a sale is reported
+ * the same day it was paid.
  *
- * Measured from `created_at` and the attempt count rather than from a `last_attempt_at`
- * column, because the row already carries both and a column would have to be migrated,
- * written on every attempt, and kept honest by every path that touches the row. The cost is
- * that the gap is computed from when the event was queued rather than from when it was last
- * tried; the two differ only for a row that sat unclaimed, which in this queue means the
- * process was down — and an event queued during an outage is one nobody minds sending
- * promptly once the outage ends.
+ * From `last_attempt_at` and not from `created_at`, which is what the first version of this
+ * did. A resend by hand (task 5) resets `attempts` on a row that may be days old, and a gap
+ * measured from creation has long since elapsed — so the resend's remaining attempts would
+ * all be spent within seconds of each other, which is not a retry budget at all. A rule the
+ * next caller can defeat by touching a column that has nothing to do with it is not a rule.
+ * `coalesce` covers the row that has never been attempted, whose gap is zero anyway.
  *
  * It is also what keeps two passes off one row once the claim's lock is gone. The claim
- * increments `attempts` before any sending starts, exactly as the WhatsApp pass stamps
- * `processed_at` before the agent's turn: the increment moves the row out of this window, so
- * a pass that arrives while Meta is thinking finds nothing to take. That is the whole reason
- * the attempt is counted first rather than after the answer.
+ * stamps `last_attempt_at` and increments `attempts` before any sending starts, exactly as
+ * the WhatsApp pass stamps `processed_at` before the agent's turn: the stamp moves the row
+ * out of this window, so a pass that arrives while Meta is thinking finds nothing to take.
+ * That is the whole reason the attempt is counted first rather than after the answer.
  */
 const READY = sql`
   status = 'pending'
   and attempts < ${MAX_ATTEMPTS}
-  and created_at + (case attempts
+  and coalesce(last_attempt_at, created_at) + (case attempts
         when 0 then interval '0 minutes'
         when 1 then interval '1 minute'
-        when 2 then interval '6 minutes'
-        when 3 then interval '31 minutes'
-        else interval '156 minutes'
+        when 2 then interval '5 minutes'
+        when 3 then interval '25 minutes'
+        else interval '125 minutes'
       end) <= now()
 `;
 
@@ -151,17 +150,17 @@ async function skipAll(db: Db, agentId: string, reason: string): Promise<number>
 }
 
 /**
- * Takes this agent's next batch and counts the attempt in the same statement.
+ * Takes this agent's next batch, and counts and dates the attempt in the same statement.
  *
  * `for update skip locked` keeps two claims that land in the same instant off each other's
- * rows; the increment keeps the pass that arrives a moment later off them too, because it
- * moves the row past its backoff window. Counting the attempt here rather than after the
- * answer is what eventually retires an event Meta always refuses.
+ * rows; the stamp keeps the pass that arrives a moment later off them too, because it moves
+ * the row into its backoff window. Counting the attempt here rather than after the answer is
+ * what eventually retires an event Meta always refuses.
  */
 async function claim(db: Db, agentId: string): Promise<ClaimedEvent[]> {
   const claimed = await db.execute(sql`
     update capi_events
-       set attempts = attempts + 1
+       set attempts = attempts + 1, last_attempt_at = now()
      where id in (
        select id from capi_events
         where agent_id = ${agentId} and ${READY}
@@ -273,10 +272,10 @@ export async function sendPendingCapiEvents(
       // re-serialised anywhere on this path — that is what keeps the order's amount the
       // digits the column holds.
       //
-      // The answer is not kept: an accepted send is a status and a timestamp, and there is
-      // no column for `fbtrace_id`. A batch is one exchange, so a per-event trace id would
-      // be the same value on every row of it anyway.
-      await deps.capi.send({
+      // Meta's `fbtrace_id` is kept: it is the first thing their support asks for when a
+      // report is missing from Events Manager, and by then the response is long gone. A
+      // batch is one exchange, so every event of it carries the same id.
+      const answer = await deps.capi.send({
         datasetId: settings.datasetId,
         token,
         testEventCode: settings.testEventCode,
@@ -285,7 +284,12 @@ export async function sendPendingCapiEvents(
 
       await db
         .update(capiEvents)
-        .set({ status: 'sent', sentAt: new Date(), error: null })
+        .set({
+          status: 'sent',
+          sentAt: new Date(),
+          error: null,
+          fbtraceId: answer.fbtraceId,
+        })
         .where(inArray(capiEvents.id, claimed.map((row) => row.id)));
       result.sent += claimed.length;
     } catch (error) {

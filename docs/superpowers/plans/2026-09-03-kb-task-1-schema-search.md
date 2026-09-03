@@ -11,6 +11,15 @@
 - Consumes: `agents` from the schema.
 - Produces: the tables `kbSources` and `kbItems`; `searchKnowledge(db, agentId, query, limit)` and the constant `TEXT_SEARCH_CONFIG` from `server/src/lib/knowledge/search.ts`.
 
+> **Amended during implementation.** `searchKnowledge` takes two passes, not one:
+> `websearch_to_tsquery` joins terms with AND, so a customer's whole question matches nothing
+> while the item that answers it sits right there. The strict query runs first and, only when
+> it returns nothing, the same terms are retried joined by OR. A query carrying a negated term
+> is not widened — `а & !б` loosened to `а | !б` matches everything that merely lacks `б`.
+> Two test queries were also wrong: the Snowball stemmer maps «Астана» to `аста` and «Астану»
+> to `астан`, so one cannot find the other. The shipped `server/src/lib/knowledge/search.ts`
+> is the authority on all of this.
+
 **Context.** The store the agent will answer from. One row is one retrievable answer; Postgres generates the searchable vector so an item edited through any path is indexed by definition; and every read goes through one function so stage 5 can add a second ranker behind it.
 
 - [ ] **Step 1: Write the failing test**

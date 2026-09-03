@@ -18,3 +18,7 @@ _to_delete/
 
 # Файлы из WhatsApp: приходят от клиентов, в репозитории им не место.
 var/media/
+
+# Working notes from the implementation sessions: useful while the work is live,
+# not part of what the repository documents.
+.superpowers/

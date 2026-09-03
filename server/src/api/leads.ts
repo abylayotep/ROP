@@ -15,6 +15,7 @@ import {
   stages,
   users,
 } from '../db/schema.js';
+import { queueLead } from '../lib/capi/enqueue.js';
 import { ApiError } from '../lib/errors.js';
 import { sendStageMessage } from '../lib/funnel-message.js';
 import { credentialsKey } from '../lib/secret-box.js';
@@ -260,6 +261,14 @@ export function registerLeadRoutes(
           { graph, key: credentialsKey(env) },
           { agentId: req.agent!.id, conversationId, stageId: stagePatch.stageId },
         );
+      }
+
+      // Deliberately outside the guard above: a lead qualified by the very first stage it is
+      // given is still a lead worth reporting, even though it gets no template. Only a move
+      // this request actually made counts — `moved` is what keeps a lost race from reporting
+      // a stage somebody else set.
+      if (moved && stagePatch.stageId != null) {
+        await queueLead(db, { agentId: req.agent!.id, conversationId });
       }
       return loadLead(db, req.agent!, conversationId);
     },

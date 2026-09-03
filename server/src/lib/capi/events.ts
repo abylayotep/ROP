@@ -106,6 +106,20 @@ export const serialiseEvent = (event: CapiEventPayload): CapiEventBody =>
   JSON.stringify(event) as CapiEventBody;
 
 /**
+ * The stored body of a report that could never be built.
+ *
+ * `capi_events.payload` is not null, and a conversation with no `ctwa_clid` has nothing Meta
+ * would accept: the click is captured once, on the first message, and is unrecoverable
+ * afterwards. The row that records why the report was skipped still needs a payload, and an
+ * event carrying an empty click id would read as sendable when it is not.
+ *
+ * It is never sent. The queue drains `pending`, and this only ever appears on a `skipped`
+ * row — which is also why the one cast in this file's contract lives here, next to the brand
+ * it makes an exception to, rather than at a call site where it would look like a shortcut.
+ */
+export const UNREPORTABLE_BODY = '{}' as CapiEventBody;
+
+/**
  * The deduplication scheme, and the one thing in this file that must never change.
  *
  * Meta counts one event per `event_id`, so the id is derived from WHAT is reported and

@@ -34,6 +34,7 @@ import {
   stages,
   whatsappNumbers,
 } from '../../db/schema.js';
+import { queueLead } from '../capi/enqueue.js';
 import { sendStageMessage } from '../funnel-message.js';
 import { searchKnowledge } from '../knowledge/search.js';
 import { decryptSecret } from '../secret-box.js';
@@ -747,6 +748,10 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
           details.push('Перевод на этап не выполнен: сделку уже перевели.');
         } else {
           movedTo = target.id;
+          // Reported whoever moved the lead. This road is the operator's road copied, not
+          // the operator's route called, so the hook in `leads.ts` does not reach here and
+          // the agent's move would otherwise go unreported — see the comment above.
+          await queueLead(db, { agentId: agent.id, conversationId: conversation.id });
           // Never on the first stage a lead is given, the same rule the operator's move
           // follows: a customer who has just written already has an answer coming.
           if (conversation.stageId !== null) {

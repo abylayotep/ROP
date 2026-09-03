@@ -348,7 +348,9 @@ describe('the customers table', () => {
     expect(cells[0]).toBe('Айгуль');
     expect(cells[1]).toBe('77000000009');
     expect(cells[2]).toBe('Продажа');
-    expect(cells[3]).toBe('150000.00');
+    // A comma, not a dot: the Russian-locale Excel this file is written for reads a
+    // dotted number as text, and a column of text cannot be summed.
+    expect(cells[3]).toBe('150000,00');
     expect(cells[4]).toBe('KZT');
     expect(cells[5]).toBe('1');
     expect(cells[8]).toBe('Владелец');

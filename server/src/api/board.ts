@@ -184,13 +184,22 @@ export function registerBoardRoutes(
       const rows = await customers(req.agent!.id);
       const date = (iso: string | null) => (iso ? iso.slice(0, 10) : '');
 
+      /**
+       * `450000.00` becomes `450000,00`.
+       *
+       * The same reader this file already chose `;` and CRLF for: a Russian-locale Excel,
+       * where the decimal separator is a comma. Given a dot it reads the column as text,
+       * and a column of text is a column nobody can sum.
+       */
+      const money = (value: string) => value.replace('.', ',');
+
       const csv = toCsv([
         ['Имя', 'Телефон', 'Стадия', 'Оплачено', 'Валюта', 'Заказов', 'Первое обращение', 'Последняя активность', 'Ответственный'],
         ...rows.map((row) => [
           row.contactName ?? '',
           row.contactPhone,
           row.stageName ?? '',
-          row.paidTotal,
+          money(row.paidTotal),
           req.agent!.currency,
           String(row.orderCount),
           date(row.firstSeenAt),

@@ -4,6 +4,7 @@ import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
 import { orders } from '../db/schema.js';
+import { queuePurchase } from '../lib/capi/enqueue.js';
 import { ApiError } from '../lib/errors.js';
 import { isUuid } from '../lib/uuid.js';
 import { loadLead } from './leads.js';
@@ -86,17 +87,27 @@ export function registerOrderRoutes(
       // Proves the conversation belongs to this agent before anything is written.
       await loadLead(db, req.agent!, conversationId);
 
-      await db.insert(orders).values({
-        agentId: req.agent!.id,
-        conversationId,
-        amount: parsed.data.amount,
-        // Taken from the agent, never from the request: one business, one currency, and a
-        // per-order choice would make every total a question about which rows it summed.
-        currency: req.agent!.currency,
-        status: parsed.data.status,
-        comment: parsed.data.comment,
-        paidAt: parsed.data.status === 'paid' ? new Date() : null,
-      });
+      const [created] = await db
+        .insert(orders)
+        .values({
+          agentId: req.agent!.id,
+          conversationId,
+          amount: parsed.data.amount,
+          // Taken from the agent, never from the request: one business, one currency, and a
+          // per-order choice would make every total a question about which rows it summed.
+          currency: req.agent!.currency,
+          status: parsed.data.status,
+          comment: parsed.data.comment,
+          paidAt: parsed.data.status === 'paid' ? new Date() : null,
+        })
+        .returning({ id: orders.id });
+
+      // An order recorded as paid became paid here, and it is the commonest way a sale is
+      // entered: an operator writes it down after the money has arrived, never passing
+      // through `pending` at all. Reporting only the PATCH would leave most sales unreported.
+      if (parsed.data.status === 'paid' && created) {
+        await queuePurchase(db, { agentId: req.agent!.id, orderId: created.id });
+      }
       return loadLead(db, req.agent!, conversationId);
     },
   );
@@ -127,6 +138,12 @@ export function registerOrderRoutes(
           .update(orders)
           .set(patch)
           .where(and(eq(orders.id, current.id), eq(orders.agentId, req.agent!.id)));
+
+        // Became paid, rather than was saved while paid: the comparison against the row read
+        // above is the whole difference between one report and one per edit of the comment.
+        if (parsed.data.status === 'paid' && current.status !== 'paid') {
+          await queuePurchase(db, { agentId: req.agent!.id, orderId: current.id });
+        }
       }
       return loadLead(db, req.agent!, current.conversationId);
     },

@@ -8,7 +8,12 @@
 
 /** Pinned deliberately. Meta deprecates versions on a schedule; drifting silently is worse. */
 const GRAPH_VERSION = 'v21.0';
-const GRAPH_ROOT = `https://graph.facebook.com/${GRAPH_VERSION}`;
+/**
+ * Exported so that the one other place talking to the Graph API — the Conversions API client
+ * in `../capi/client.ts` — pins the same version. Two literals would drift, and the one that
+ * drifted would be found by Meta turning it off.
+ */
+export const GRAPH_ROOT = `https://graph.facebook.com/${GRAPH_VERSION}`;
 
 /**
  * Meta sits on the request path of an operator's action — sending a reply, or moving a lead

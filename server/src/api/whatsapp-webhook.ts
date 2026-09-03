@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import type { Db } from '../db/client.js';
 import { whatsappEvents } from '../db/schema.js';
 import type { Env } from '../env.js';
+import { sendPendingCapiEvents, type CapiQueueDeps } from '../lib/capi/queue.js';
 import { type InboundDeps, processPendingEvents } from '../lib/whatsapp/inbound.js';
 import { verifySignature } from '../lib/whatsapp/signature.js';
 
@@ -21,6 +22,7 @@ export function registerWhatsappWebhook(
   db: Db,
   env: Env,
   deps: InboundDeps,
+  capiDeps: CapiQueueDeps,
 ): void {
   app.register(async (scope) => {
     scope.addContentTypeParser(
@@ -66,10 +68,28 @@ export function registerWhatsappWebhook(
 
       // Answer first, work second. Meta retries only on a non-200, and the event is already
       // stored, so nothing is lost if this throws — the row keeps its error for a re-run.
+      //
+      // The Conversions API drain rides here too, behind the response and after the pass,
+      // rather than on the path of the operator's own action: this is the one thing in the
+      // product that runs often enough to be a schedule. After the pass and not before it,
+      // because the pass is what queues a lead — the agent moving a conversation into a
+      // qualified stage is a turn that runs inside it — so a report queued by this delivery
+      // goes out in this drain rather than waiting for the next customer to write.
       setImmediate(() => {
-        void processPendingEvents(db, deps).catch((error) => {
-          app.log.error({ error }, 'whatsapp: processing pending events failed');
-        });
+        void (async () => {
+          try {
+            await processPendingEvents(db, deps);
+          } catch (error) {
+            app.log.error({ error }, 'whatsapp: processing pending events failed');
+          }
+          try {
+            await sendPendingCapiEvents(db, capiDeps);
+          } catch (error) {
+            // Caught separately: a delivery this process could not apply must not also cost
+            // every already-queued sale its report.
+            app.log.error({ error }, 'capi: draining pending events failed');
+          }
+        })();
       });
 
       return reply.code(200).send();

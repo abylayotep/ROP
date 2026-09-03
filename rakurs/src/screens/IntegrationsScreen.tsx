@@ -1,11 +1,15 @@
-import { useState, type CSSProperties, type FormEvent } from 'react';
+import { useEffect, useState, type CSSProperties, type FormEvent } from 'react';
 import * as api from '@/api';
-import { Card } from '@/components/ui/primitives';
-import { Async, EmptyState, Skeleton } from '@/components/ui/states';
+import { CapiEventRow } from '@/components/capi/EventRow';
+import { Card, CardHead, Toggle } from '@/components/ui/primitives';
+import { Async, EmptyState, RowsSkeleton, Skeleton } from '@/components/ui/states';
 import { useToast } from '@/components/ui/Toast';
 import { useApi } from '@/hooks/useApi';
 import { useAgent } from '@/store/agent';
-import type { WebhookSetup, WhatsappNumber } from '@/types';
+import type { CapiEvent, CapiSettings, WebhookSetup, WhatsappNumber } from '@/types';
+
+/** Where an owner takes the dataset id and the token. Linked rather than described twice. */
+const EVENTS_MANAGER_URL = 'https://business.facebook.com/events_manager2';
 
 const field: CSSProperties = {
   width: '100%',
@@ -22,6 +26,15 @@ const field: CSSProperties = {
 
 const label: CSSProperties = { fontSize: 12.5, color: 'var(--text-dim)' };
 const hint: CSSProperties = { fontSize: 11.5, color: 'var(--text-dim)', marginTop: 4 };
+
+const when = (iso: string) =>
+  new Date(iso).toLocaleString('ru-RU', {
+    day: '2-digit',
+    month: '2-digit',
+    year: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
 
 interface Loaded {
   numbers: WhatsappNumber[];
@@ -58,6 +71,9 @@ export function IntegrationsScreen() {
               <EmptyState>Номер подключает владелец компании.</EmptyState>
             </Card>
           )}
+          {/* Beside the number it depends on: a purchase can only be attributed to a click
+              that arrived on this WhatsApp number, and the two are set up together. */}
+          <CapiSection agentId={agent.id} owner={owner} />
         </div>
       )}
     </Async>
@@ -327,6 +343,388 @@ function ConnectForm({ agentId, onConnected }: { agentId: string; onConnected: (
           </button>
         </div>
       </form>
+    </Card>
+  );
+}
+
+/* ── Meta Conversions API ──────────────────────────────────────────────────
+ * Куда уходят покупки из переписки, и что с ними стало. */
+
+/**
+ * The settings and the log together, because they are one question.
+ *
+ * The settings are held in state rather than reread: `PUT` answers with the row as stored,
+ * and that answer is what goes on screen. Reloading instead would show the previous values
+ * for as long as the request took, which on this card means showing «токена нет» a moment
+ * after one was saved.
+ */
+function CapiSection({ agentId, owner }: { agentId: string; owner: boolean }) {
+  const query = useApi<CapiSettings>((signal) => api.getCapiSettings(agentId, signal), [agentId]);
+  const [settings, setSettings] = useState<CapiSettings | null>(null);
+
+  // Another agent's dataset must not sit under this agent's heading for even a frame.
+  // Declared before the effect below so the two run in that order.
+  useEffect(() => {
+    setSettings(null);
+  }, [agentId]);
+
+  useEffect(() => {
+    if (query.data) setSettings(query.data);
+  }, [query.data]);
+
+  return (
+    <Async state={query} skeleton={<Skeleton height={220} />}>
+      {() =>
+        settings === null ? (
+          <Skeleton height={220} />
+        ) : (
+          <>
+            {owner ? (
+              // Keyed on the agent so the drafts inside are seeded from that agent's row:
+              // the form initialises its fields once, and switching agents is a different
+              // form, not the same one with new props.
+              <CapiForm
+                key={agentId}
+                agentId={agentId}
+                settings={settings}
+                onSaved={setSettings}
+                onRemoved={query.reload}
+              />
+            ) : (
+              <CapiState settings={settings} />
+            )}
+            <CapiLog agentId={agentId} />
+          </>
+        )
+      }
+    </Async>
+  );
+}
+
+/** Что этот раздел делает и чего он не сделает — словами владельца, до всякой формы. */
+function CapiIntro() {
+  return (
+    <>
+      <div style={{ ...hint, marginTop: 0 }}>
+        Покупки из переписки уходят в Meta, чтобы реклама искала похожих покупателей.
+      </div>
+      <div style={{ ...hint, marginTop: 6 }}>
+        Отчёты уходят только по диалогам, которые начались с клика по рекламе
+        Click-to-WhatsApp. Диалог, в котором клиент написал сам, отправить нельзя: Meta
+        не с чем сопоставить покупку.
+      </div>
+    </>
+  );
+}
+
+/** Строка состояния для сотрудника: настраивает владелец, но видеть должны все. */
+function CapiState({ settings }: { settings: CapiSettings }) {
+  const on = settings.enabled && settings.tokenSet;
+
+  return (
+    <Card>
+      <CardHead
+        title="Отправка покупок в Meta"
+        gap={10}
+        right={
+          <span style={{ fontSize: 11.5, color: on ? 'var(--accent-2)' : 'var(--text-dim)' }}>
+            {on ? 'Включена' : 'Выключена'}
+          </span>
+        }
+      />
+      <CapiIntro />
+      <div style={{ ...hint, marginTop: 6 }}>Набор данных подключает владелец компании.</div>
+    </Card>
+  );
+}
+
+/**
+ * Набор данных, токен и переключатель.
+ *
+ * Токен уходит на сервер и обратно не возвращается — экран знает только, есть он или нет,
+ * ровно как с ключом OpenRouter и токеном WhatsApp. Пустое поле токена при сохранении
+ * означает «оставить сохранённый»: владелец, который правит тестовый код или щёлкает
+ * переключателем, не должен из-за этого лезть в Meta за токеном системного пользователя.
+ *
+ * Сервер проверяет пару в Meta до записи, поэтому «Сохранить» может занять секунду и
+ * может вернуть отказ Meta целиком. Отказ ничего не перезаписывает: рабочая пара
+ * остаётся на месте.
+ */
+function CapiForm({
+  agentId,
+  settings,
+  onSaved,
+  onRemoved,
+}: {
+  agentId: string;
+  settings: CapiSettings;
+  onSaved: (settings: CapiSettings) => void;
+  onRemoved: () => void;
+}) {
+  const toast = useToast();
+
+  const [datasetId, setDatasetId] = useState(settings.datasetId);
+  const [accessToken, setAccessToken] = useState('');
+  const [testEventCode, setTestEventCode] = useState(settings.testEventCode ?? '');
+  const [saving, setSaving] = useState(false);
+
+  const configured = settings.datasetId !== '' && settings.tokenSet;
+
+  async function save(event: FormEvent) {
+    event.preventDefault();
+    if (saving || datasetId.trim() === '') return;
+
+    setSaving(true);
+    try {
+      onSaved(
+        await api.saveCapiSettings(agentId, {
+          datasetId: datasetId.trim(),
+          // Пустое поле — «оставить сохранённый токен». Для агента, у которого токена ещё
+          // нет, сервер на это ответит «Укажите токен доступа», и это правильный ответ.
+          accessToken: accessToken.trim() === '' ? undefined : accessToken.trim(),
+          testEventCode: testEventCode.trim() === '' ? null : testEventCode.trim(),
+        }),
+      );
+      // Очищается только на успехе: токен, который Meta не приняла, стоит оставить на
+      // экране, чтобы его поправили, а не искали в Meta заново.
+      setAccessToken('');
+      toast.ok('Meta приняла набор данных');
+    } catch (error) {
+      toast.fail(error);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function toggle() {
+    if (saving) return;
+    setSaving(true);
+    try {
+      onSaved(
+        await api.saveCapiSettings(agentId, {
+          datasetId: settings.datasetId,
+          // Отправляется тем, что сохранено: отсутствие поля сервер понимает как «кода
+          // нет» и стёр бы его заодно с переключением.
+          testEventCode: settings.testEventCode,
+          enabled: !settings.enabled,
+        }),
+      );
+    } catch (error) {
+      toast.fail(error);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function remove() {
+    if (
+      !window.confirm(
+        'Убрать набор данных? Отчёты о покупках перестанут уходить в Meta, а те, ' +
+          'что стоят в очереди, будут помечены как неотправленные.',
+      )
+    ) {
+      return;
+    }
+
+    setSaving(true);
+    try {
+      await api.deleteCapiSettings(agentId);
+      // Поля очищаются вместе с настройкой: оставленный в форме идентификатор набора
+      // читался бы как «он ещё подключён», хотя рядом уже написано «Токена нет».
+      setDatasetId('');
+      setTestEventCode('');
+      toast.ok('Набор данных убран');
+      onRemoved();
+    } catch (error) {
+      toast.fail(error);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Card>
+      <form onSubmit={save}>
+        <CardHead
+          title="Отправка покупок в Meta"
+          gap={10}
+          right={
+            <span
+              style={{
+                fontSize: 11.5,
+                color: settings.tokenSet ? 'var(--accent-2)' : 'var(--text-dim)',
+              }}
+            >
+              {settings.tokenSet ? 'Токен сохранён' : 'Токена нет'}
+            </span>
+          }
+        />
+
+        <CapiIntro />
+
+        <div style={{ marginTop: 12 }}>
+          <div style={label}>Идентификатор набора данных</div>
+          <input
+            style={field}
+            value={datasetId}
+            autoComplete="off"
+            placeholder="1234567890123456"
+            onChange={(e) => setDatasetId(e.target.value)}
+          />
+          <div style={hint}>
+            Берётся в{' '}
+            <a href={EVENTS_MANAGER_URL} target="_blank" rel="noreferrer">
+              Meta Events Manager
+            </a>
+            : Data sources → набор данных → Settings. Как это сделать по шагам — в
+            docs/meta-capi.md.
+          </div>
+        </div>
+
+        <div style={{ marginTop: 12 }}>
+          <div style={label}>Токен доступа</div>
+          <input
+            style={field}
+            type="password"
+            value={accessToken}
+            autoComplete="off"
+            placeholder={settings.tokenSet ? 'Введите новый токен, чтобы заменить' : 'EAAG…'}
+            onChange={(e) => setAccessToken(e.target.value)}
+          />
+          <div style={hint}>
+            Постоянный токен системного пользователя с правом на этот набор данных.
+            Хранится в зашифрованном виде и обратно не показывается.
+          </div>
+        </div>
+
+        <div style={{ marginTop: 12 }}>
+          <div style={label}>Тестовый код события — необязательно</div>
+          <input
+            style={field}
+            value={testEventCode}
+            autoComplete="off"
+            placeholder="TEST12345"
+            onChange={(e) => setTestEventCode(e.target.value)}
+          />
+          <div style={hint}>
+            Пока он указан, события видны во вкладке Test Events и не идут в оптимизацию
+            рекламы. Уберите его, когда проверите, что события доходят.
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
+          <button type="submit" className="btn" disabled={saving || datasetId.trim() === ''}>
+            {saving ? 'Проверяем в Meta…' : configured ? 'Сохранить' : 'Подключить'}
+          </button>
+          {configured && (
+            <button type="button" className="btn" disabled={saving} onClick={remove}>
+              Убрать набор данных
+            </button>
+          )}
+        </div>
+
+        {/* Проверка идёт до записи, поэтому эта дата означает: именно эта пара
+            в этот момент была принята Meta, а не «когда-то что-то сохранили». */}
+        {settings.verifiedAt && (
+          <div style={{ ...hint, marginTop: 10 }}>
+            Проверено в Meta {when(settings.verifiedAt)}.
+          </div>
+        )}
+        {settings.error && (
+          <div style={{ ...hint, color: 'var(--danger)', marginTop: 6 }}>{settings.error}</div>
+        )}
+
+        {configured && (
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+              marginTop: 14,
+              paddingTop: 12,
+              borderTop: '1px solid var(--line-soft)',
+            }}
+          >
+            <span style={{ fontSize: 12, fontWeight: 650 }}>Отправлять покупки в Meta</span>
+            <button
+              type="button"
+              className="btn-quiet"
+              aria-pressed={settings.enabled}
+              disabled={saving}
+              style={{ marginLeft: 'auto', display: 'flex', opacity: saving ? 0.5 : 1 }}
+              onClick={toggle}
+            >
+              <Toggle on={settings.enabled} />
+            </button>
+          </div>
+        )}
+        {configured && (
+          <div style={{ ...hint, marginTop: 6 }}>
+            {settings.enabled
+              ? 'Продажа уходит в Meta примерно за минуту после отметки об оплате.'
+              : 'Пока выключено, продажи копятся в журнале с пометкой «Не отправлено».'}
+          </div>
+        )}
+      </form>
+    </Card>
+  );
+}
+
+/**
+ * Журнал: последние пятьдесят событий агента.
+ *
+ * Любому сотруднику, потому что заметит неотправленный отчёт тот, кто смотрит на лида, а
+ * не владелец. Строка, отправленная заново, заменяется тем, чем ответил сервер.
+ */
+function CapiLog({ agentId }: { agentId: string }) {
+  const query = useApi<CapiEvent[]>(
+    (signal) => api.listCapiEvents(agentId, {}, signal),
+    [agentId],
+  );
+  const [events, setEvents] = useState<CapiEvent[] | null>(null);
+
+  // Same reason as above: the previous agent's log is an answer to a different question.
+  useEffect(() => {
+    setEvents(null);
+  }, [agentId]);
+
+  useEffect(() => {
+    if (query.data) setEvents(query.data);
+  }, [query.data]);
+
+  return (
+    <Card>
+      <CardHead title="Что ушло в Meta" gap={10} />
+      <Async state={query} skeleton={<RowsSkeleton rows={3} />}>
+        {() =>
+          // «Пока ничего не отправлялось» — утверждение о данных, а не состояние загрузки:
+          // список копируется в состояние эффектом, то есть кадром позже, и без этой ветки
+          // владелец успел бы увидеть эту фразу над непустым журналом.
+          events === null ? (
+            <RowsSkeleton rows={3} />
+          ) : events.length === 0 ? (
+            <EmptyState>
+              Пока ничего не отправлялось. Событие появится здесь, когда заказ отметят
+              оплаченным или лид дойдёт до квалифицирующей стадии.
+            </EmptyState>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+              {events.map((event) => (
+                <CapiEventRow
+                  key={event.id}
+                  agentId={agentId}
+                  event={event}
+                  onResent={(next) =>
+                    setEvents((rows) =>
+                      (rows ?? []).map((row) => (row.id === next.id ? next : row)),
+                    )
+                  }
+                />
+              ))}
+            </div>
+          )
+        }
+      </Async>
     </Card>
   );
 }

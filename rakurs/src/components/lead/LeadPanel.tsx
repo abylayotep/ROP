@@ -1,5 +1,6 @@
 import { useEffect, useState, type CSSProperties, type FormEvent } from 'react';
 import * as api from '@/api';
+import { CapiEventRow } from '@/components/capi/EventRow';
 import { OrderDialog } from '@/components/lead/OrderDialog';
 import { Card, Divider, Toggle } from '@/components/ui/primitives';
 import { Async, Skeleton } from '@/components/ui/states';
@@ -7,7 +8,7 @@ import { useToast } from '@/components/ui/Toast';
 import { useApi } from '@/hooks/useApi';
 import { formatMoney } from '@/lib/money';
 import { countOrders } from '@/lib/orders';
-import type { Lead, LeadField, Member, Order, Stage } from '@/types';
+import type { CapiEvent, Lead, LeadField, Member, Order, Stage } from '@/types';
 
 const label: CSSProperties = { fontSize: 11.5, color: 'var(--text-dim)', marginBottom: 5 };
 
@@ -33,6 +34,13 @@ const when = (iso: string) =>
     hour: '2-digit',
     minute: '2-digit',
   });
+
+/** The paid orders of a lead, as one string, so a change to them can be a dependency. */
+const paidIds = (lead: Lead) =>
+  lead.orders
+    .filter((order) => order.status === 'paid')
+    .map((order) => order.id)
+    .join(',');
 
 const STATUS: Record<Order['status'], string> = {
   pending: 'Ожидает оплаты',
@@ -185,6 +193,18 @@ export function LeadPanel({
               onAdd={() => setPrompting(true)}
               onEdit={setEditing}
               onDelete={(orderId) => apply(() => api.deleteOrder(agentId, orderId))}
+            />
+
+            <Divider />
+
+            <CapiReport
+              agentId={agentId}
+              conversationId={conversationId}
+              fromAd={lead.fromAd}
+              // Reread when the things that produce a report change: the stage the lead is
+              // in and which of its orders are paid. Without this the panel would go on
+              // saying «пока ничего не отправлялось» right after a payment was recorded.
+              trigger={`${lead.stageId ?? ''}|${paidIds(lead)}`}
             />
 
             <Divider />
@@ -507,6 +527,95 @@ function Notes({
           {saving ? 'Сохраняем…' : 'Добавить'}
         </button>
       </form>
+    </div>
+  );
+}
+
+/**
+ * «Отчёт в Meta» — ушла ли эта продажа в рекламный кабинет, и если нет, почему.
+ *
+ * Диалог, который не начался с клика по рекламе, не может быть отправлен никогда: Meta
+ * сопоставляет покупку с кликом по `ctwa_clid`, а он приходит один раз, в первом
+ * сообщении такого диалога, и восстановить его потом нечем. Поэтому здесь пишется
+ * фраза, а не заблокированная кнопка без объяснения: кнопка молчит, а фраза отвечает.
+ */
+function CapiReport({
+  agentId,
+  conversationId,
+  fromAd,
+  trigger,
+}: {
+  agentId: string;
+  conversationId: string;
+  fromAd: boolean;
+  /** Changes when something happened that could have produced a report. */
+  trigger: string;
+}) {
+  const query = useApi<CapiEvent[]>(
+    // A conversation with no click has nothing to fetch: the answer is the sentence below,
+    // and it does not depend on any row.
+    (signal) =>
+      fromAd
+        ? api.listCapiEvents(agentId, { conversationId }, signal)
+        : Promise.resolve<CapiEvent[]>([]),
+    [agentId, conversationId, fromAd, trigger],
+  );
+  const [events, setEvents] = useState<CapiEvent[] | null>(null);
+
+  // The panel stays mounted while the operator moves between threads, so the previous
+  // conversation's report must go before the new one's arrives. Declared before the effect
+  // below so the two run in that order.
+  useEffect(() => {
+    setEvents(null);
+  }, [agentId, conversationId, fromAd, trigger]);
+
+  useEffect(() => {
+    if (query.data) setEvents(query.data);
+  }, [query.data]);
+
+  return (
+    <div>
+      <div style={{ fontSize: 12, fontWeight: 650, marginBottom: 6 }}>Отчёт в Meta</div>
+
+      {!fromAd ? (
+        <div style={{ fontSize: 11.5, color: 'var(--text-dim)', lineHeight: 1.45 }}>
+          Этот диалог начался не с рекламы, поэтому Meta не с чем сопоставить покупку —
+          отправлять пока нечего. Метка клика может появиться позже: она приходит с
+          сообщением, которое клиент отправил из объявления Click-to-WhatsApp. Уже
+          записанные события она не догонит.
+        </div>
+      ) : (
+        <Async state={query} skeleton={<Skeleton height={CONTROL_HEIGHT} />} compactError>
+          {() =>
+            // The list reaches state an effect later, so «отправлять пока нечего» would
+            // otherwise flash for a frame above a report that exists.
+            events === null ? (
+              <Skeleton height={CONTROL_HEIGHT} />
+            ) : events.length === 0 ? (
+              <div style={{ fontSize: 11.5, color: 'var(--text-dim)', lineHeight: 1.45 }}>
+                Диалог пришёл из рекламы, но отправлять пока нечего. Событие появится, когда
+                заказ отметят оплаченным или лид дойдёт до квалифицирующей стадии.
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+                {events.map((event) => (
+                  <CapiEventRow
+                    key={event.id}
+                    agentId={agentId}
+                    event={event}
+                    who={false}
+                    onResent={(next) =>
+                      setEvents((rows) =>
+                        (rows ?? []).map((row) => (row.id === next.id ? next : row)),
+                      )
+                    }
+                  />
+                ))}
+              </div>
+            )
+          }
+        </Async>
+      )}
     </div>
   );
 }

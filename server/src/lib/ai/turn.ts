@@ -34,6 +34,7 @@ import {
   stages,
   whatsappNumbers,
 } from '../../db/schema.js';
+import { queueLead } from '../capi/enqueue.js';
 import { sendStageMessage } from '../funnel-message.js';
 import { searchKnowledge } from '../knowledge/search.js';
 import { decryptSecret } from '../secret-box.js';
@@ -731,6 +732,10 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
         // stage's template once rather than twice.
         const stageMoved = await db
           .update(conversations)
+          // Deliberately the same shape as an operator's move in `leads.ts` — the guarded
+          // UPDATE, the auto-message, the queued conversion — but a COPY of it, not a call to
+          // it. A change to one has to be made to the other; the tests that pin the auto-message
+          // and the CAPI hook exist on both sides for that reason.
           .set({ stageId: target.id, stageSetAt: new Date(), stageSetBy: 'ai' })
           .where(
             and(
@@ -747,6 +752,10 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
           details.push('Перевод на этап не выполнен: сделку уже перевели.');
         } else {
           movedTo = target.id;
+          // Reported whoever moved the lead. This road is the operator's road copied, not
+          // the operator's route called, so the hook in `leads.ts` does not reach here and
+          // the agent's move would otherwise go unreported — see the comment above.
+          await queueLead(db, { agentId: agent.id, conversationId: conversation.id });
           // Never on the first stage a lead is given, the same rule the operator's move
           // follows: a customer who has just written already has an answer coming.
           if (conversation.stageId !== null) {

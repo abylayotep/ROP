@@ -4,6 +4,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import type { Db } from '../db/client.js';
 import type { Env } from '../env.js';
 import { createModelClient, type ModelClient } from '../lib/ai/openrouter.js';
+import { createCapiClient, type CapiClient } from '../lib/capi/client.js';
 import { ApiError } from '../lib/errors.js';
 import { createPageFetcher, type PageFetcher } from '../lib/knowledge/fetch-page.js';
 import { credentialsKey } from '../lib/secret-box.js';
@@ -12,6 +13,7 @@ import { registerAgentRoutes } from './agents.js';
 import { registerAiRoutes } from './ai.js';
 import { registerAuthRoutes } from './auth.js';
 import { registerBoardRoutes } from './board.js';
+import { registerCapiRoutes } from './capi.js';
 import { registerConversationRoutes } from './conversations.js';
 import { registerKnowledgeRoutes } from './knowledge.js';
 import { registerLeadRoutes } from './leads.js';
@@ -28,6 +30,8 @@ export interface ServerDeps {
   pageFetcher?: PageFetcher;
   /** And for the model: no test spends a token or depends on a live OpenRouter key. */
   model?: ModelClient;
+  /** And for Meta's Conversions API: no test reports a conversion to a real dataset. */
+  capi?: CapiClient;
 }
 
 /**
@@ -41,6 +45,9 @@ export function buildServer(env: Env, db: Db, deps: ServerDeps = {}): FastifyIns
   // Taken the same way every other outbound client is: the AI routes and the inbound queue
   // both answer with it, and a test replaces it once for both.
   const model = deps.model ?? createModelClient();
+  // Resolved here, alongside every other outbound client, so the settings routes and the
+  // queue drain share one instance and a test replaces it once for all of them.
+  const capi = deps.capi ?? createCapiClient();
 
   app.register(cookie, { secret: env.SESSION_SECRET });
   app.register(rateLimit, { global: false });
@@ -93,14 +100,19 @@ export function buildServer(env: Env, db: Db, deps: ServerDeps = {}): FastifyIns
     registerBoardRoutes(app, db, guard);
     registerKnowledgeRoutes(app, db, guard, pageFetcher);
     registerAiRoutes(app, db, env, guard, { model, graph });
+    // The same client the drain sends with, so a save is verified against the Meta a
+    // report will actually reach.
+    registerCapiRoutes(app, db, env, guard, capi);
     // Meta calls the webhook directly with no session of its own, so it takes no guard —
     // the request signature is the check instead.
-    registerWhatsappWebhook(app, db, env, {
-      graph,
-      key: credentialsKey(env),
-      mediaDir: env.MEDIA_DIR,
-      model,
-    });
+    registerWhatsappWebhook(
+      app,
+      db,
+      env,
+      { graph, key: credentialsKey(env), mediaDir: env.MEDIA_DIR, model },
+      // The Conversions API queue is drained by the same delivery, once Meta has its 200.
+      { capi, key: credentialsKey(env) },
+    );
     // Later plans register their routes here, reusing the same guard.
   });
 

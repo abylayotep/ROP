@@ -15,6 +15,7 @@ import {
   stages,
   users,
 } from '../db/schema.js';
+import { queueLead } from '../lib/capi/enqueue.js';
 import { ApiError } from '../lib/errors.js';
 import { sendStageMessage } from '../lib/funnel-message.js';
 import { credentialsKey } from '../lib/secret-box.js';
@@ -124,6 +125,10 @@ export async function loadLead(
     assignedTo: row.conversation.assignedTo,
     assigneeName: assignee?.name ?? null,
     adHeadline: row.conversation.adHeadline,
+    // Whether, not what. The click identifier is what Meta matches a purchase against and
+    // it is captured once, from the first message; the lead card needs to know it exists so
+    // it can say why a sale can — or can never — be reported, and nothing more.
+    fromAd: row.conversation.ctwaClid !== null,
     aiEnabled: row.conversation.aiEnabled,
     values,
     notes: noteRows.map(({ note, authorName }) => toNote(note, authorName)),
@@ -188,6 +193,9 @@ export function registerLeadRoutes(
         stagePatch.stageId = parsed.data.stageId;
         stagePatch.stageSetAt = new Date();
         // Stage 5 writes 'ai' here through the same column.
+        // The agent's own move in `lib/ai/turn.ts` is a COPY of this path, not a call to it:
+        // the same guarded UPDATE, the same auto-message, the same queued conversion, with
+        // `ai` in place of `operator`. A change here has to be made there too.
         stagePatch.stageSetBy = 'operator';
       }
 
@@ -260,6 +268,14 @@ export function registerLeadRoutes(
           { graph, key: credentialsKey(env) },
           { agentId: req.agent!.id, conversationId, stageId: stagePatch.stageId },
         );
+      }
+
+      // Deliberately outside the guard above: a lead qualified by the very first stage it is
+      // given is still a lead worth reporting, even though it gets no template. Only a move
+      // this request actually made counts — `moved` is what keeps a lost race from reporting
+      // a stage somebody else set.
+      if (moved && stagePatch.stageId != null) {
+        await queueLead(db, { agentId: req.agent!.id, conversationId });
       }
       return loadLead(db, req.agent!, conversationId);
     },

@@ -6,6 +6,8 @@ import type {
   AiUsage,
   AiUsagePeriod,
   Board,
+  CapiEvent,
+  CapiSettings,
   ConversationSummary,
   ConversationThread,
   Customer,
@@ -331,3 +333,63 @@ export const setConversationAi = (agentId: string, conversationId: string, aiEna
     method: 'PATCH',
     body: { aiEnabled },
   });
+
+// ── Meta Conversions API ─────────────────────────────────────────────────────
+
+const capi = (agentId: string) => `/agents/${agentId}/capi`;
+
+/**
+ * Любому сотруднику: оператор, который видит неотправленный отчёт, должен понимать,
+ * настроен ли набор данных вообще. Токена в ответе нет — только признак, что он есть.
+ *
+ * Агент, у которого ничего не настроено, отвечает пустой карточкой (`datasetId: ''`),
+ * а не `null`: форме есть что показать в обоих случаях.
+ */
+export const getCapiSettings = (agentId: string, signal?: AbortSignal) =>
+  request<CapiSettings>(capi(agentId), { signal });
+
+/**
+ * Сохранить набор данных и токен. Только владельцу.
+ *
+ * Сервер сначала проверяет пару в Meta и лишь потом пишет её: набор с опечаткой примут
+ * молча все, кроме Meta. Поэтому 502 здесь — это отказ Meta, и его текст показывается
+ * целиком.
+ *
+ * `accessToken` необязателен: без него проверяется и остаётся сохранённый токен, так что
+ * переключатель и тестовый код правятся, не доставая токен из Meta заново.
+ */
+export const saveCapiSettings = (
+  agentId: string,
+  body: {
+    datasetId: string;
+    accessToken?: string;
+    testEventCode?: string | null;
+    enabled?: boolean;
+  },
+) => request<CapiSettings>(capi(agentId), { method: 'PUT', body });
+
+/**
+ * Убрать набор данных. Только владельцу.
+ *
+ * Уже поставленные в очередь события остаются: слив пометит их как неотправленные и
+ * напишет почему — удалять их вместе с настройкой значило бы забрать и объяснение.
+ */
+export const deleteCapiSettings = (agentId: string) =>
+  request<{ ok: true }>(capi(agentId), { method: 'DELETE' });
+
+/** Журнал: последние пятьдесят событий агента, либо все события одного диалога. */
+export const listCapiEvents = (
+  agentId: string,
+  params: { conversationId?: string } = {},
+  signal?: AbortSignal,
+) => request<CapiEvent[]>(`${capi(agentId)}/events`, { query: params, signal });
+
+/**
+ * Отправить событие ещё раз. Любому сотруднику — и это безопасно.
+ *
+ * `event_id` при повторе не меняется, а Meta считает одну конверсию на `event_id`:
+ * сколько бы раз кнопку ни нажали, покупка засчитается один раз. Событие диалога,
+ * пришедшего не из рекламы, сервер отправлять откажется — отправлять нечего.
+ */
+export const resendCapiEvent = (agentId: string, eventId: string) =>
+  request<CapiEvent>(`${capi(agentId)}/events/${eventId}/resend`, { method: 'POST' });

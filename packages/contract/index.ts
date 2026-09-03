@@ -46,12 +46,36 @@ export interface WhatsappNumber {
   /** False means Meta accepted the number but will not deliver anything yet. */
   subscribed: boolean;
   connectedAt: string;
+  /** 'manual' — pasted ids and token. 'coexistence' — the phone's number via Embedded Signup. */
+  connectionKind: 'manual' | 'coexistence';
+  /** 0..100. Meaningful for coexistence only; manual numbers stay at 0. */
+  historyProgress: number;
+  /** The owner turned history sharing off on the phone. */
+  historyDeclined: boolean;
+  /** Meta's words when a sync request was refused, else null. */
+  syncError: string | null;
+  /** The phone disconnected the API; reconnect happens on the phone, not here. */
+  offboarded: boolean;
 }
 
 /** What to paste into the Meta application's webhook settings. */
 export interface WebhookSetup {
   url: string;
   verifyToken: string;
+}
+
+/** What the browser needs to start Embedded Signup. Nothing secret. */
+export interface EmbeddedSignupSetup {
+  appId: string;
+  configId: string;
+}
+
+/** What Embedded Signup hands back, forwarded to the server within the code's 30 seconds. */
+export interface CoexistenceConnection {
+  code: string;
+  wabaId: string;
+  phoneNumberId?: string;
+  businessId?: string;
 }
 
 export interface Message {

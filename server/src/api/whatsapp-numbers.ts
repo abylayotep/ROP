@@ -32,7 +32,7 @@ const settings = z
   .refine((body) => body.enabled !== undefined || body.accessToken !== undefined);
 
 /** The access token is never part of this. It goes in and it does not come out. */
-const toApi = (row: typeof whatsappNumbers.$inferSelect): WhatsappNumber => ({
+export const toApi = (row: typeof whatsappNumbers.$inferSelect): WhatsappNumber => ({
   id: row.id,
   phoneNumberId: row.phoneNumberId,
   wabaId: row.wabaId,
@@ -40,6 +40,11 @@ const toApi = (row: typeof whatsappNumbers.$inferSelect): WhatsappNumber => ({
   enabled: row.enabled,
   subscribed: row.subscribedAt !== null,
   connectedAt: row.createdAt.toISOString(),
+  connectionKind: row.connectionKind === 'coexistence' ? 'coexistence' : 'manual',
+  historyProgress: row.historyProgress,
+  historyDeclined: row.historyDeclinedAt !== null,
+  syncError: row.syncError,
+  offboarded: row.offboardedAt !== null,
 });
 
 /**

@@ -141,6 +141,22 @@ export const whatsappNumbers = pgTable(
     // Set when Meta confirms our application is subscribed to the WABA. Until then the
     // number is connected but silent, which is the failure this column makes visible.
     subscribedAt: timestamp('subscribed_at', { withTimezone: true }),
+    // 'manual' — ids and a system-user token pasted by the owner (stage 2).
+    // 'coexistence' — the phone's own number, onboarded through Embedded Signup; the token
+    // came from Meta, registration was skipped, and the phone keeps working (stage 7).
+    connectionKind: text('connection_kind').notNull().default('manual'),
+    // The customer's business portfolio id, as Embedded Signup reported it. Informational.
+    businessId: text('business_id'),
+    // Both one-shot `smb_app_data` requests were accepted. Null with `syncError` set means
+    // at least one was refused; Meta allows each exactly once, so nothing retries them.
+    syncRequestedAt: timestamp('sync_requested_at', { withTimezone: true }),
+    syncError: text('sync_error'),
+    // 0..100 from `history.metadata.progress`; only ever grows.
+    historyProgress: integer('history_progress').notNull().default(0),
+    // Meta reported error 2593109: the owner turned history sharing off on the phone.
+    historyDeclinedAt: timestamp('history_declined_at', { withTimezone: true }),
+    // `account_update` said the phone disconnected the API. Cleared on reconnect.
+    offboardedAt: timestamp('offboarded_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index('whatsapp_numbers_agent_id_idx').on(t.agentId)],
@@ -229,7 +245,8 @@ export const messages = pgTable(
     waMessageId: text('wa_message_id').unique(),
     // 'in' | 'out'
     direction: text('direction').notNull(),
-    // 'client' | 'operator' | 'ai' — stage 5 adds a value here, not a column.
+    // 'client' | 'operator' | 'ai' | 'system' | 'phone' — 'phone' is the operator answering
+    // from the WhatsApp Business app; the cabinet only ever sees its echo.
     author: text('author').notNull(),
     // WhatsApp's own type: text, image, audio, video, document, sticker, location,
     // contacts, or unsupported for anything we do not render.

@@ -256,7 +256,7 @@ describe('the customers table', () => {
     expect(row.contactName).toBe('Айгуль');
     expect(row.stageName).toBe('Продажа');
     expect(row.stageKind).toBe('success');
-    expect(row.paidTotal).toBe('171001.00');
+    expect(row.paidTotal).toBe('170001.00');
     // Every order, not only the paid ones: three were recorded against this customer.
     expect(row.orderCount).toBe(3);
     expect(row.firstSeenAt).toBeDefined();

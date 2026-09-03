@@ -238,7 +238,13 @@ export interface KbSource {
   kind: KbSourceKind;
   title: string;
   url: string | null;
-  status: 'pending' | 'ready' | 'failed';
+  /**
+   * Both imports are synchronous: the request fetches, splits and writes before it answers,
+   * so a source is `ready` or it is `failed` and there is no moment in between for a third
+   * value to describe. A `pending` nobody writes is a state the screen would have to render
+   * and nobody would ever see.
+   */
+  status: 'ready' | 'failed';
   /** Why it failed, in the operator's language. Null when it did not. */
   error: string | null;
   itemCount: number;

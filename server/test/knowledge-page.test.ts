@@ -319,6 +319,20 @@ describe('importing a page', () => {
     expect(await db.select().from(kbItems)).toHaveLength(3);
   });
 
+  it('gives the status column no default, because no path writes a third value', async () => {
+    // Both imports are synchronous: the request fetches, splits and writes before it
+    // answers. `pending` was a state nothing could ever be in, and a default is how a state
+    // like that survives — one insert that forgets the column and the screen has to render
+    // it.
+    const rows = await db.execute(sql`
+      select column_default from information_schema.columns
+      where table_name = 'kb_sources' and column_name = 'status'
+    `);
+
+    expect([...rows]).toHaveLength(1);
+    expect([...rows][0]?.column_default).toBeNull();
+  });
+
   it('is refused for a member', async () => {
     setFetcher(fakeFetcher({ 'https://safina.kz/': PAGE }));
     const memberJar = await login('member@example.com');

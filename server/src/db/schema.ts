@@ -378,8 +378,10 @@ export const kbSources = pgTable(
     kind: text('kind').notNull(),
     title: text('title').notNull(),
     url: text('url'),
-    // 'pending' | 'ready' | 'failed'
-    status: text('status').notNull().default('pending'),
+    // 'ready' | 'failed', and no default: both imports are synchronous, so every row is
+    // written by a path that already knows which of the two it is. A default would be the
+    // third value nobody writes, waiting for a screen to render a state that never happens.
+    status: text('status').notNull(),
     // Why it failed, in the operator's language.
     error: text('error'),
     itemCount: integer('item_count').notNull().default(0),

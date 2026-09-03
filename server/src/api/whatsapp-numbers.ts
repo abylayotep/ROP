@@ -171,6 +171,12 @@ export function registerWhatsappNumberRoutes(
       const [current] = await db.select().from(whatsappNumbers).where(owned);
       if (!current) throw new ApiError(404, 'Номер не найден');
 
+      if (accessToken !== undefined && current.connectionKind === 'coexistence') {
+        // Meta issued this token during Embedded Signup; a pasted one would belong to a
+        // different app or user and stop the phone's mirror from working.
+        throw new ApiError(400, 'Токен этого номера выдаёт Meta при подключении с телефона, вручную его не заменить');
+      }
+
       const changes: Partial<typeof whatsappNumbers.$inferInsert> = {};
       if (enabled !== undefined) changes.enabled = enabled;
 

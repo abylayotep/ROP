@@ -302,6 +302,20 @@ describe('listing and changing a number', () => {
     expect(res.json().message).toContain('<токен скрыт>');
   });
 
+  it('refuses a pasted token for a coexistence number', async () => {
+    await connect(valid);
+    const [row] = await db
+      .update(whatsappNumbers)
+      .set({ connectionKind: 'coexistence' })
+      .where(eq(whatsappNumbers.phoneNumberId, '136'))
+      .returning();
+
+    const res = await patch(row!.id, { accessToken: 'EAAG-new' });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().message).toBe('Токен этого номера выдаёт Meta при подключении с телефона, вручную его не заменить');
+  });
+
   it('refuses a body that asks for nothing', async () => {
     const { id } = (await connect(valid)).json();
 

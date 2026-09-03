@@ -20,6 +20,7 @@ import { registerLeadRoutes } from './leads.js';
 import { registerOrderRoutes } from './orders.js';
 import { requireSession } from './require-session.js';
 import { registerStageRoutes } from './stages.js';
+import { registerWhatsappCoexistenceRoutes } from './whatsapp-coexistence.js';
 import { registerWhatsappNumberRoutes } from './whatsapp-numbers.js';
 import { registerWhatsappWebhook } from './whatsapp-webhook.js';
 
@@ -93,6 +94,7 @@ export function buildServer(env: Env, db: Db, deps: ServerDeps = {}): FastifyIns
     registerAuthRoutes(app, db, env, guard);
     registerAgentRoutes(app, db, guard);
     registerWhatsappNumberRoutes(app, db, env, guard, graph);
+    registerWhatsappCoexistenceRoutes(app, db, env, guard, graph);
     registerConversationRoutes(app, db, env, guard, graph);
     registerStageRoutes(app, db, guard);
     registerLeadRoutes(app, db, env, guard, graph);

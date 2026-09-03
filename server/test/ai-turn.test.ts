@@ -824,6 +824,9 @@ describe('a dry run', () => {
       usedItemIds: [itemId],
       stageId: second.id,
       fields: { [cityFieldId]: 'Алматы' },
+      // The reason travels with the result: it is what the sandbox shows an owner, and the
+      // note that would carry it in a real turn is exactly what a dry run does not write.
+      handoff: 'нужен человек',
       detail: null,
     });
 

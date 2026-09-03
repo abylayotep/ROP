@@ -270,3 +270,68 @@ export interface KbImport {
    */
   keptEdited: number;
 }
+
+/* ── Агент ──────────────────────────────────────────────────────────────────
+ * What the owner may set about the model, what they may pick, and what one
+ * sandbox turn answers back. The key is not here: it goes in and never out. */
+
+export interface AiSettings {
+  /** The agent answers customers only when this is on. A new agent starts off. */
+  aiEnabled: boolean;
+  /** An OpenRouter model id, one of `AiModel.id`. */
+  model: string;
+  /**
+   * 0…2. A number rather than a string: a temperature is a dial, not an amount, so
+   * nothing is lost by passing it through a float the way an order's sum would be.
+   */
+  temperature: number;
+  /** What the owner wrote about how their business sells. The agent's whole character. */
+  instructions: string;
+  /** 'auto' answers in the customer's own language; anything else names one. */
+  replyLanguage: string;
+  /** Whether a key is stored. The key itself never leaves the server. */
+  keySet: boolean;
+}
+
+/** A model the owner may pick, with the line they read while picking. */
+export interface AiModel {
+  id: string;
+  label: string;
+  description: string;
+}
+
+/** A knowledge record an answer was built from, named so the screen can show which. */
+export interface AiTurnItem {
+  id: string;
+  title: string;
+}
+
+/** A lead field the turn filled, or would have filled. */
+export interface AiTurnField {
+  id: string;
+  name: string;
+  value: string;
+}
+
+/**
+ * What a sandbox turn would have done. Nothing in it has happened: no message was sent,
+ * no lead was touched, and the conversation it ran on no longer exists.
+ */
+export interface AiTurn {
+  /** Null when the agent produced no reply, or when the reply was withheld. */
+  reply: string | null;
+  usedItems: AiTurnItem[];
+  /** The stage the lead would be moved to. Null when it would not move. */
+  stageName: string | null;
+  fields: AiTurnField[];
+  /**
+   * Why the turn would leave the conversation to a person, or null when it would not. The
+   * reason and not a flag: «передал человеку» with no «почему» is the one answer an owner
+   * tuning instructions cannot act on.
+   */
+  handoff: string | null;
+  /** 'sent' | 'unrecorded' | 'applied' | 'handoff' | 'failed' | 'skipped'. */
+  outcome: string;
+  /** Why it ended that way, when that is worth telling the owner. Never carries a key. */
+  detail: string | null;
+}

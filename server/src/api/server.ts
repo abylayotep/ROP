@@ -9,6 +9,7 @@ import { createPageFetcher, type PageFetcher } from '../lib/knowledge/fetch-page
 import { credentialsKey } from '../lib/secret-box.js';
 import { createGraphClient, type GraphClient } from '../lib/whatsapp/graph.js';
 import { registerAgentRoutes } from './agents.js';
+import { registerAiRoutes } from './ai.js';
 import { registerAuthRoutes } from './auth.js';
 import { registerBoardRoutes } from './board.js';
 import { registerConversationRoutes } from './conversations.js';
@@ -37,11 +38,9 @@ export function buildServer(env: Env, db: Db, deps: ServerDeps = {}): FastifyIns
   const app = Fastify({ logger: env.NODE_ENV !== 'test' });
   const graph = deps.graph ?? createGraphClient();
   const pageFetcher = deps.pageFetcher ?? createPageFetcher();
-  // Resolved here so the AI routes and the turn runner the next tasks add take it the same
-  // way every other outbound client is taken. Nothing registers a route with it yet, and the
-  // `void` says so rather than leaving a reader to wonder whether a wiring line was lost.
+  // Taken the same way every other outbound client is: the AI routes and the inbound queue
+  // both answer with it, and a test replaces it once for both.
   const model = deps.model ?? createModelClient();
-  void model;
 
   app.register(cookie, { secret: env.SESSION_SECRET });
   app.register(rateLimit, { global: false });
@@ -77,12 +76,14 @@ export function buildServer(env: Env, db: Db, deps: ServerDeps = {}): FastifyIns
   registerOrderRoutes(app, db, guard);
   registerBoardRoutes(app, db, guard);
   registerKnowledgeRoutes(app, db, guard, pageFetcher);
+  registerAiRoutes(app, db, env, guard, { model, graph });
   // Meta calls the webhook directly with no session of its own, so it takes no guard —
   // the request signature is the check instead.
   registerWhatsappWebhook(app, db, env, {
     graph,
     key: credentialsKey(env),
     mediaDir: env.MEDIA_DIR,
+    model,
   });
   // Later plans register their routes here, reusing the same guard.
 

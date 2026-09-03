@@ -7,6 +7,8 @@ import {
   whatsappEvents,
   whatsappNumbers,
 } from '../../db/schema.js';
+import type { ModelClient } from '../ai/openrouter.js';
+import { runTurn } from '../ai/turn.js';
 import { decryptSecret } from '../secret-box.js';
 import { withoutSecret, type GraphClient } from './graph.js';
 import { downloadInboundMedia } from './media.js';
@@ -21,9 +23,14 @@ import { downloadInboundMedia } from './media.js';
 
 export interface InboundDeps {
   graph: GraphClient;
-  /** Decrypts a number's access token; media downloads need it. */
+  /** Decrypts a number's access token; media downloads and the agent's own send need it. */
   key: Buffer;
   mediaDir: string;
+  /**
+   * The agent answers here, once the messages of a delivery are stored. Meta has already had
+   * its 200 by then, so a model that thinks for a minute cannot make it retry the webhook.
+   */
+  model: ModelClient;
 }
 
 /** The referral block Meta attaches to the first message of a click-to-WhatsApp conversation. */
@@ -187,18 +194,61 @@ export async function processPendingEvents(
   return { processed, failed };
 }
 
+/**
+ * Every conversation a delivery put a new message on, and the agent it belongs to.
+ *
+ * A map rather than a list, because one turn per conversation is the whole point: a customer
+ * who sends three lines in one delivery is asking one question and gets one answer.
+ */
+type Touched = Map<string, string>;
+
 /** Returns the media download errors collected while applying the payload, if any. */
 async function applyPayload(db: Db, deps: InboundDeps, payload: unknown): Promise<string[]> {
   const entries = (payload as { entry?: unknown }).entry;
   if (!Array.isArray(entries)) throw new Error('entry is not an array');
 
   const errors: string[] = [];
+  const touched: Touched = new Map();
   for (const entry of entries) {
     const changes = (entry as { changes?: unknown }).changes;
     if (!Array.isArray(changes)) throw new Error('changes is not an array');
 
     for (const change of changes) {
-      errors.push(...(await applyChange(db, deps, (change as { value?: ChangeValue }).value ?? {})));
+      errors.push(
+        ...(await applyChange(db, deps, (change as { value?: ChangeValue }).value ?? {}, touched)),
+      );
+    }
+  }
+  // After every message of the delivery is stored, so the turn reads the whole of what the
+  // customer just said and answers the last line rather than the first.
+  errors.push(...(await runTurns(db, deps, touched)));
+  return errors;
+}
+
+/**
+ * The agent's answer to what this delivery brought, one turn per conversation.
+ *
+ * Nothing here may throw. A turn is the slowest and least predictable thing this queue does,
+ * and an exception escaping it would leave the event unprocessed — which poisons the queue
+ * for every later delivery and, worse, invites a retry. A retry is the one thing a turn
+ * cannot survive: `unrecorded` means Meta accepted the reply and only our own row failed, so
+ * running the turn again would send the customer the same sentence twice. Hence a turn runs
+ * exactly once per stored message, a redelivered message is not a stored message, and an
+ * outcome is never a reason to fail the event. Only a raised error is worth writing down,
+ * and it goes where the media download's does: onto the event, which is already processed.
+ */
+async function runTurns(db: Db, deps: InboundDeps, touched: Touched): Promise<string[]> {
+  const errors: string[] = [];
+  for (const [conversationId, agentId] of touched) {
+    try {
+      const turnDeps = { model: deps.model, graph: deps.graph, key: deps.key };
+      await runTurn(db, turnDeps, { agentId, conversationId });
+    } catch (error) {
+      // One conversation's failure must not cost the others theirs: the next entry in the
+      // map is somebody else's live thread.
+      errors.push(
+        `ответ агента не удался: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
   return errors;
@@ -234,7 +284,12 @@ async function recordReferral(
 }
 
 /** Returns the media download errors collected while applying this change, if any. */
-async function applyChange(db: Db, deps: InboundDeps, value: ChangeValue): Promise<string[]> {
+async function applyChange(
+  db: Db,
+  deps: InboundDeps,
+  value: ChangeValue,
+  touched: Touched,
+): Promise<string[]> {
   const phoneNumberId = value.metadata?.phone_number_id;
   if (!phoneNumberId) return [];
 
@@ -307,7 +362,22 @@ async function applyChange(db: Db, deps: InboundDeps, value: ChangeValue): Promi
       }
     }
 
-    if (!known) await storeMessage(db, conversationId, incoming, media);
+    // Only a message this pass actually stored earns an answer, and `storeMessage` says so
+    // from the insert itself rather than from the read above. Meta redelivers by design and
+    // two passes can claim one event, so the unique index is the only thing that can tell
+    // «we stored it» from «somebody already had it» — and the customer already has the
+    // reply to the copy that was stored first.
+    //
+    // What this gives up: if something below throws after the message is stored, the event
+    // is retried, the message is `known` by then, and that one line is never answered. The
+    // alternative — answering a known message on a retry — cannot be made safe, because the
+    // reply may already have gone out and only its row have failed (`unrecorded` in
+    // `TurnResult`), and answering twice is worse for the customer than answering once late.
+    // The customer's next message runs a turn on the whole thread, which is how the missed
+    // line is picked up; a customer who never writes again was leaving anyway.
+    if (!known && (await storeMessage(db, conversationId, incoming, media))) {
+      touched.set(conversationId, number.agentId);
+    }
     if (incoming.referral) await recordReferral(db, conversationId, incoming.referral);
 
     const sentAt = at(incoming.timestamp);
@@ -367,13 +437,14 @@ async function upsertConversation(
   return created!.id;
 }
 
+/** True when this call is the one that stored the message, false when it was already there. */
 async function storeMessage(
   db: Db,
   conversationId: string,
   incoming: InboundMessage,
   media: { path: string; mime: string } | null,
-): Promise<void> {
-  await db
+): Promise<boolean> {
+  const stored = await db
     .insert(messages)
     .values({
       conversationId,
@@ -388,5 +459,8 @@ async function storeMessage(
     })
     // Meta delivers the same message more than once by design. The unique index on
     // wa_message_id is the defence; this clause is how we accept the duplicate quietly.
-    .onConflictDoNothing({ target: messages.waMessageId });
+    .onConflictDoNothing({ target: messages.waMessageId })
+    // Empty when the conflict fired, which is what makes the answer above trustworthy.
+    .returning({ id: messages.id });
+  return stored.length > 0;
 }

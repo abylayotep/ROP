@@ -92,6 +92,16 @@ export interface TurnResult {
   stageId: string | null;
   /** The fields that were filled, or would have been. Unknown ids are already gone. */
   fields: Record<string, string>;
+  /**
+   * Why the thread was left to a person, or null when it was not. Set exactly when `outcome`
+   * is `handoff`, and it is the same sentence the note on the conversation carries.
+   *
+   * Separate from `detail`, which stays null on a handoff the model asked for: `detail`
+   * explains an ending the reader did not expect, and a handoff is a decision. An owner
+   * reading a sandbox turn needs the reason more than any other line it produces — «передал
+   * человеку» with no «почему» is the one answer they cannot act on.
+   */
+  handoff: string | null;
   /** Why it ended the way it did, when that is worth telling anyone. Never carries a key. */
   detail: string | null;
 }
@@ -123,12 +133,17 @@ const DETAIL_LIMIT = 500;
  */
 const UNSOURCED = 'в ответе есть число, но модель не назвала ни одной записи базы знаний';
 
-const empty = (outcome: TurnOutcome, detail: string | null): TurnResult => ({
+const empty = (
+  outcome: TurnOutcome,
+  detail: string | null,
+  handoff: string | null = null,
+): TurnResult => ({
   outcome,
   reply: null,
   usedItemIds: [],
   stageId: null,
   fields: {},
+  handoff,
   detail,
 });
 
@@ -527,7 +542,7 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
     if (!dryRun) {
       await db.insert(aiReplies).values({ ...spend(), outcome: 'handoff', detail });
     }
-    return empty('handoff', detail);
+    return empty('handoff', detail, detail);
   }
 
   // A citation of a record the model was never given is a citation of nothing: stored, it
@@ -635,6 +650,9 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
       usedItemIds,
       stageId: movedTo,
       fields: applied,
+      // The handoff, if there was to be one, is applied after the stage move and so has not
+      // happened: this returns before it.
+      handoff: null,
       detail,
     };
   }
@@ -704,6 +722,7 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
     usedItemIds,
     stageId: movedTo,
     fields: applied,
+    handoff: handoffReason,
     detail,
   };
 }

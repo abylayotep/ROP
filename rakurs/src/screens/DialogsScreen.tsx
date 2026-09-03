@@ -270,7 +270,9 @@ function Bubble({ agentId, message }: { agentId: string; message: Message }) {
       )}
       <div style={{ fontSize: 10.5, color: 'var(--text-dim)', marginTop: 4 }}>
         {time(message.sentAt)}
-        {mine ? ` · ${message.author === 'ai' ? 'ИИ' : 'оператор'}` : ''}
+        {mine
+          ? ` · ${message.author === 'ai' ? 'ИИ' : message.author === 'phone' ? 'с телефона' : 'оператор'}`
+          : ''}
         {message.status ? ` · ${message.status}` : ''}
       </div>
     </div>

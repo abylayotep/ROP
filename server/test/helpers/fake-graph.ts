@@ -27,6 +27,8 @@ export function fakeGraph(overrides: Partial<GraphClient> = {}): FakeGraph {
       id,
       displayPhoneNumber: '+7 708 580 79 32',
       verifiedName: 'Aisham',
+      platformType: 'CLOUD_API',
+      isOnBizApp: true,
     })),
     subscribeApp: record('subscribeApp', async () => undefined),
     sendText: record('sendText', async () => ({ messageId: `wamid.${calls.length}` })),
@@ -36,5 +38,21 @@ export function fakeGraph(overrides: Partial<GraphClient> = {}): FakeGraph {
       fileSize: 3,
     })),
     downloadMedia: record('downloadMedia', async () => Buffer.from([1, 2, 3])),
+    exchangeCode: record('exchangeCode', async () => 'EAAB-business-token'),
+    listPhoneNumbers: record('listPhoneNumbers', async () => [
+      {
+        id: '136',
+        displayPhoneNumber: '+7 708 580 79 32',
+        verifiedName: 'Aisham',
+        platformType: 'CLOUD_API',
+        isOnBizApp: true,
+      },
+    ]),
+    requestSmbAppData: record(
+      'requestSmbAppData',
+      async (_id: unknown, _t: unknown, syncType: unknown) => ({
+        requestId: `req-${String(syncType)}`,
+      }),
+    ),
   };
 }

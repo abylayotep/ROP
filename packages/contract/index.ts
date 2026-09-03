@@ -516,13 +516,10 @@ export interface StatsCurrent {
   unsorted: number;
   /** Every conversation of the agent: the stages plus `unsorted`, and nothing else. */
   total: number;
-  /**
-   * When the cabinet began recording stage movement, ISO.
-   *
-   * Carried by this card so it can print the sentence that explains the card below it,
-   * whose numbers start on that date rather than at the beginning of the business.
-   */
-  stageHistorySince: string;
+  // No `stageHistorySince` here, deliberately. This card has no period and never prints
+  // that date; the card that does — the period report — carries its own copy, answered
+  // from the same column in the same request. A second copy nobody renders is a field that
+  // drifts without anyone noticing.
 }
 
 /**

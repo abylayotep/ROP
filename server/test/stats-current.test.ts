@@ -188,10 +188,12 @@ describe('where the leads stand now', () => {
     expect(body.total).toBe(0);
   });
 
-  it('names when the cabinet began recording stage movement', async () => {
+  it('does not repeat the day recording began, which this card never prints', async () => {
     const body = (await current()).json();
-    expect(typeof body.stageHistorySince).toBe('string');
-    expect(Number.isNaN(Date.parse(body.stageHistorySince))).toBe(false);
+    // The snapshot has no period and says nothing about when recording started; the period
+    // report, which does print that date, answers it from the same column in the same
+    // request. A second copy nobody renders drifts from the first without anyone noticing.
+    expect(body).not.toHaveProperty('stageHistorySince');
   });
 
   it('counts only this agent, not another account with leads of its own', async () => {

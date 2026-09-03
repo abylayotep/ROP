@@ -98,7 +98,6 @@ export function registerStatsRoutes(
         // disagree with the two above it, and a total that does not equal its parts is
         // worse than no total.
         total: standings.reduce((sum, stage) => sum + stage.leads, 0) + unsorted,
-        stageHistorySince: req.agent!.stageHistorySince.toISOString(),
       };
     },
   );

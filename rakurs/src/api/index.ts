@@ -405,6 +405,9 @@ export const resendCapiEvent = (agentId: string, eventId: string) =>
  * Периода здесь нет, и это не упущение: карточка считает все диалоги агента, включая
  * заведённые до того, как кабинет начал записывать переходы. Именно она отвечает на
  * «почему воронка пустая, у меня двести лидов».
+ *
+ * Дня, с которого идёт запись переходов, в этом ответе нет: карточка его не печатает, а
+ * та, что печатает, получает его своим запросом.
  */
 export const getStatsCurrent = (agentId: string, signal?: AbortSignal) =>
   request<StatsCurrent>(`/agents/${agentId}/stats/current`, { signal });

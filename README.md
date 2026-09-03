@@ -78,6 +78,7 @@ npm --prefix rakurs run dev
 ```bash
 npm --prefix server test        # нужна тестовая база: docker compose -f deploy/compose.test.yml up -d
 npm --prefix server run typecheck
+npm --prefix rakurs test          # чистые функции экранов: базы не нужно
 npm --prefix rakurs run typecheck
 npm --prefix rakurs run build
 ```

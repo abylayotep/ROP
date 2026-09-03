@@ -5,6 +5,7 @@ import { Async, EmptyState, Skeleton } from '@/components/ui/states';
 import { useApi, type ApiState } from '@/hooks/useApi';
 import { formatMoney } from '@/lib/money';
 import { PERIODS } from '@/lib/periods';
+import { chainAbsence, percent } from '@/lib/stats';
 import { useAgent } from '@/store/agent';
 import type { Period, StageKind, StatsCurrent, StatsPeriodReport } from '@/types';
 
@@ -65,22 +66,10 @@ const headCell: CSSProperties = { padding: '6px 8px', fontWeight: 500 };
  */
 const NO_VALUE = '—';
 
-/**
- * Written as an escape rather than the character, for `lib/money.ts`'s reason: a
- * non-breaking space is indistinguishable from an ordinary one in source, and one careless
- * formatter pass turns «12 %» into a line that may break between number and sign.
- */
-const NO_BREAK_SPACE = '\u00a0';
-
 const count = (value: number) => value.toLocaleString('ru-RU');
 
-/**
- * Доля предыдущего шага, целыми процентами.
- *
- * Числами, а не строками, и это не оговорка: конверсия — отношение двух счётчиков, а не
- * деньги. Округлять её до целого можно, а сумму — нельзя.
- */
-const percent = (share: number) => `${Math.round(share * 100)}${NO_BREAK_SPACE}%`;
+/** Размещение из `referral.source_type` — реклама или органическая публикация. */
+const PLACEMENT: Record<string, string> = { ad: 'Реклама', post: 'Публикация' };
 
 /** Начало скользящего окна — всегда в пределах тридцати дней, год не нужен. */
 const windowStart = (iso: string) =>
@@ -304,7 +293,11 @@ function MovementCard({
           const since = new Date(report.since);
           const recordedFrom = new Date(report.stageHistorySince);
           const older = since.getTime() < recordedFrom.getTime();
-          const nothingMoved = report.funnel.every((step) => step.entered === 0);
+          // Пустая цепочка и «никого не двигали» — не одно и то же: за период могли двигать
+          // только в «Отказ» или в удалённую стадию, у которых колонки в цепочке нет. Тогда
+          // фраза «лидов по воронке не двигали» стояла бы прямо над плиткой «Отказов: 12».
+          const absence = chainAbsence(report);
+          const nothingMoved = absence !== null;
           // Доля больше единицы законна с тех пор, как знаменателем стала ближайшая
           // непустая стадия выше, а не строка над шагом. Объяснение показывается только
           // тогда, когда объяснять есть что.
@@ -329,7 +322,12 @@ function MovementCard({
                 </div>
               )}
 
-              {nothingMoved ? (
+              {absence === 'off-chain' ? (
+                <EmptyState>
+                  За этот период по цепочке не продвинулся никто: все переходы были в «Отказ»
+                  или в стадии, которых больше нет. Сколько их было — в цифрах ниже.
+                </EmptyState>
+              ) : absence === 'nothing-moved' ? (
                 <EmptyState>
                   За этот период лидов по воронке не двигали. Переходы записываются с{' '}
                   {historyStart(report.stageHistorySince)} — всё, что было раньше, в этой
@@ -579,6 +577,17 @@ function SourcesCard({ state, period }: { state: ApiState<StatsPeriodReport>; pe
                                 </div>
                               )}
                             </>
+                          )}
+                          {/* Размещение — то, чем строка «Реклама» отличается от строки
+                              «Публикация»: клик из органического поста не куплен, и читать
+                              его как оплаченную рекламу нельзя. Показывается только когда
+                              все клики строки сошлись на одном размещении. */}
+                          {source.sourceType !== null && (
+                            <div
+                              style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 2 }}
+                            >
+                              {PLACEMENT[source.sourceType] ?? source.sourceType}
+                            </div>
                           )}
                         </td>
                         <td className="mono" style={{ padding: '8px' }}>

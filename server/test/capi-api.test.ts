@@ -479,9 +479,11 @@ describe('the log', () => {
     expect(res.json()).toEqual([
       {
         id: row.id,
+        conversationId,
         kind: 'purchase',
         status: 'sent',
         attempts: 0,
+        resendable: true,
         error: null,
         sentAt: '2026-09-01T10:05:00.000Z',
         createdAt: row.createdAt.toISOString(),

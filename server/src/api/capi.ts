@@ -122,9 +122,15 @@ async function readEvents(db: Db, where: SQL | undefined, limit: number): Promis
   const rows = await db
     .select({
       id: capiEvents.id,
+      conversationId: capiEvents.conversationId,
       kind: capiEvents.kind,
       status: capiEvents.status,
       attempts: capiEvents.attempts,
+      // Read to be compared, never to be shown or parsed. It is the same test the resend
+      // route makes, so the screen and the route cannot disagree about which rows have
+      // anything to send — and a plain string comparison is not a `JSON.parse`, so the
+      // amount inside is still the digits the column holds.
+      payload: capiEvents.payload,
       error: capiEvents.error,
       sentAt: capiEvents.sentAt,
       createdAt: capiEvents.createdAt,
@@ -145,9 +151,11 @@ async function readEvents(db: Db, where: SQL | undefined, limit: number): Promis
 
   return rows.map((row) => ({
     id: row.id,
+    conversationId: row.conversationId,
     kind: row.kind,
     status: row.status,
     attempts: row.attempts,
+    resendable: row.payload !== UNREPORTABLE_BODY,
     error: row.error,
     sentAt: row.sentAt?.toISOString() ?? null,
     createdAt: row.createdAt.toISOString(),
@@ -288,8 +296,26 @@ export function registerCapiRoutes(
     '/api/agents/:agentId/capi/events',
     // Any member: the operator watching a lead is the one who notices a report failed.
     { preHandler: [guard, anyMember] },
-    async (req): Promise<CapiEvent[]> =>
-      readEvents(db, eq(capiEvents.agentId, req.agent!.id), LOG_LIMIT),
+    async (req): Promise<CapiEvent[]> => {
+      const agentId = req.agent!.id;
+      const { conversationId } = req.query as { conversationId?: string };
+
+      // Narrowed to one conversation for the lead card, which asks about the thread it is
+      // open on. Filtered here rather than in the browser: the full log stops at fifty rows,
+      // so a lead whose sale was reported a month ago would read as never reported at all.
+      // A malformed identifier answers with nothing rather than raising — comparing
+      // non-uuid text against a uuid column makes Postgres throw.
+      if (conversationId !== undefined) {
+        if (!isUuid(conversationId)) return [];
+        return readEvents(
+          db,
+          and(eq(capiEvents.agentId, agentId), eq(capiEvents.conversationId, conversationId)),
+          LOG_LIMIT,
+        );
+      }
+
+      return readEvents(db, eq(capiEvents.agentId, agentId), LOG_LIMIT);
+    },
   );
 
   app.post(

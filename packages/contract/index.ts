@@ -156,6 +156,15 @@ export interface Lead {
   assigneeName: string | null;
   adHeadline: string | null;
   /**
+   * Whether this conversation carries the click identifier Meta attributes a purchase to.
+   *
+   * Not the same question as `adHeadline`: a referral without a `ctwa_clid` still names the
+   * ad for a human reading the thread, and it is exactly that case — an ad is named, nothing
+   * can be reported — that the lead card would otherwise get wrong. The identifier itself
+   * never leaves the server; whether there is one is all a screen needs.
+   */
+  fromAd: boolean;
+  /**
    * Whether the agent still answers on this thread. On by default, and off the moment a
    * handoff or an operator takes it — which is why it travels with the lead: the panel that
    * offers the switch is the one that has to show it already flipped.
@@ -429,11 +438,26 @@ export interface CapiSettings {
  */
 export interface CapiEvent {
   id: string;
+  /**
+   * The conversation the report is about, so the lead card can ask for its own events
+   * instead of scanning the agent's log for a row that may have fallen off the end of it.
+   * Null for a report whose conversation has since been deleted — the report still happened.
+   */
+  conversationId: string | null;
   /** 'purchase' | 'lead' */
   kind: string;
   /** 'pending' | 'sent' | 'failed' | 'skipped' */
   status: string;
   attempts: number;
+  /**
+   * Whether pressing «Отправить снова» has anything to send.
+   *
+   * False for the one row that can never go: a conversation that did not come from an ad
+   * has no click identifier, nothing could be built for it, and the click is captured once
+   * on the first message and cannot be recovered afterwards. The resend route refuses such
+   * a row; this is what lets a screen explain that instead of offering a button that fails.
+   */
+  resendable: boolean;
   /**
    * Why it has not gone. Meta's own words for a refusal, in Meta's own English, because
    * «Invalid access token» is the whole answer and only the owner can act on it; ours, in

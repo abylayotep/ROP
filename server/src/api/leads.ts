@@ -125,6 +125,10 @@ export async function loadLead(
     assignedTo: row.conversation.assignedTo,
     assigneeName: assignee?.name ?? null,
     adHeadline: row.conversation.adHeadline,
+    // Whether, not what. The click identifier is what Meta matches a purchase against and
+    // it is captured once, from the first message; the lead card needs to know it exists so
+    // it can say why a sale can — or can never — be reported, and nothing more.
+    fromAd: row.conversation.ctwaClid !== null,
     aiEnabled: row.conversation.aiEnabled,
     values,
     notes: noteRows.map(({ note, authorName }) => toNote(note, authorName)),

@@ -539,7 +539,7 @@ async function applyEchoes(
       }
     }
 
-    await db
+    const stored = await db
       .insert(messages)
       .values({
         conversationId,
@@ -553,16 +553,28 @@ async function applyEchoes(
         mediaPath: media?.path ?? null,
         mediaMime: media?.mime ?? null,
       })
-      .onConflictDoNothing({ target: messages.waMessageId });
+      .onConflictDoNothing({ target: messages.waMessageId })
+      // Empty when the conflict fired, which is what tells a first delivery from a redelivery.
+      .returning({ id: messages.id });
 
     const sentAtParam = sql`${at(echo.timestamp).toISOString()}::timestamptz`;
     await db
       .update(conversations)
       .set({
-        aiEnabled: false,
+        // Only ever forward, and a `greatest`, so a redelivery costs nothing.
         lastMessageAt: sql`greatest(coalesce(${conversations.lastMessageAt}, to_timestamp(0)), ${sentAtParam})`,
       })
       .where(eq(conversations.id, conversationId));
+
+    // Switching the agent off is the operator taking the thread, and that happens once — on
+    // the delivery that actually stored this echo. Meta redelivers by design, and doing it
+    // again would silence a thread the operator has since re-enabled in the cabinet.
+    if (stored.length > 0) {
+      await db
+        .update(conversations)
+        .set({ aiEnabled: false })
+        .where(eq(conversations.id, conversationId));
+    }
   }
   return errors;
 }

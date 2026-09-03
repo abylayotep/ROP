@@ -91,6 +91,21 @@ describe('a message the operator sent from the phone', () => {
     expect(await db.select().from(messages)).toHaveLength(1);
   });
 
+  it('does not silence the AI again when the same echo is redelivered', async () => {
+    await store(echo());
+    await processPendingEvents(db, deps());
+
+    // The operator handed the thread back to the agent in the cabinet.
+    await db.update(conversations).set({ aiEnabled: true });
+
+    await store(echo());
+    await processPendingEvents(db, deps());
+
+    const [conversation] = await db.select().from(conversations);
+    expect(conversation!.aiEnabled).toBe(true);
+    expect(await db.select().from(messages)).toHaveLength(1);
+  });
+
   it('does not open a reply window', async () => {
     await store(echo());
     await processPendingEvents(db, deps());

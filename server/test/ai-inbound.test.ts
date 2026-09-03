@@ -473,6 +473,43 @@ describe('answering an inbound message', () => {
     expect(await processPendingEvents(db, deps())).toEqual({ processed: 0, failed: 0 });
     expect(sends()).toHaveLength(1);
   });
+
+  it('is processed before the turn runs, so a pass in that window cannot claim it', async () => {
+    // The turns used to run inside `applyPayload`, before `processed_at` was written, so the
+    // event stayed claimable for the whole turn — up to two model deadlines. Every webhook
+    // arriving in that window started a pass that claimed it again and burned an attempt;
+    // five of those and a restart retired the event with the customer's message unanswered.
+    let reentered = false;
+    let inFlight: { processed: number; failed: number } | null = null;
+    const calls: FakeModel['calls'] = [];
+    model = {
+      calls,
+      async complete(input): Promise<Completion> {
+        calls.push(input);
+        // A second webhook lands while the model is thinking, and its route runs a pass.
+        if (!reentered) {
+          reentered = true;
+          inFlight = await processPendingEvents(db, deps());
+        }
+        return {
+          text: answer(),
+          promptTokens: 100,
+          completionTokens: 20,
+          cost: '0.00010000',
+        };
+      },
+    };
+    await store(asks());
+
+    expect(await processPendingEvents(db, deps())).toEqual({ processed: 1, failed: 0 });
+
+    // The pass that ran mid-turn found nothing to take, and the event kept its one attempt.
+    expect(inFlight).toEqual({ processed: 0, failed: 0 });
+    const [event] = await db.select().from(whatsappEvents);
+    expect(event!.attempts).toBe(1);
+    expect(model.calls).toHaveLength(1);
+    expect(sends()).toHaveLength(1);
+  });
 });
 
 describe('the settings routes', () => {

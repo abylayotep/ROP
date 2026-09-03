@@ -150,6 +150,10 @@ export async function processPendingEvents(
   // same path, and the timestamp update is a `greatest`. The cost is a duplicated download
   // and an attempt burned twice. Real exclusivity would need a `processing_at` column or a
   // transaction spanning the whole of the work; neither is here.
+  //
+  // What keeps that window narrow is that `processed_at` is stamped as soon as the messages
+  // are stored, before the agent's turns run. A turn is minutes wide; storing a delivery is
+  // milliseconds.
   const claimed = await db.execute(sql`
     update whatsapp_events
        set attempts = attempts + 1
@@ -173,13 +177,9 @@ export async function processPendingEvents(
   let failed = 0;
 
   for (const event of pending) {
+    let applied: Applied;
     try {
-      const mediaErrors = await applyPayload(db, deps, event.payload);
-      await db
-        .update(whatsappEvents)
-        .set({ processedAt: new Date(), error: mediaErrors.length ? mediaErrors.join('; ') : null })
-        .where(eq(whatsappEvents.id, event.id));
-      processed += 1;
+      applied = await applyPayload(db, deps, event.payload);
     } catch (error) {
       // The row keeps its payload and gains a reason. One bad delivery must not stop the
       // queue: the next message in line is someone's live conversation.
@@ -188,6 +188,42 @@ export async function processPendingEvents(
         .set({ error: error instanceof Error ? error.message : String(error) })
         .where(eq(whatsappEvents.id, event.id));
       failed += 1;
+      continue;
+    }
+
+    // Stamped the moment the messages are stored, and **before** the turns run.
+    //
+    // A turn takes up to two model deadlines — two minutes — and while `processed_at` is
+    // null the event is still claimable. Every webhook arriving inside that window started a
+    // pass that claimed this event again and burned an attempt; five of those and a restart
+    // retired the event with the customer's message neither stored nor answered, in silence.
+    // Before the agent existed the window was milliseconds wide, which is why the claim was
+    // written to tolerate it.
+    //
+    // Stamping first rather than holding a claim across the turn, because the turn is
+    // already built to survive being abandoned: it runs exactly once per stored message
+    // (`storeMessage` says which messages this pass stored, from the insert itself), and
+    // `runTurns` treats no outcome as a reason to fail the event. A lease that outlived the
+    // turn would need a column, an expiry, and a decision about what to do with a lease held
+    // by a process that has died — all to protect work that is not retried anyway.
+    await db
+      .update(whatsappEvents)
+      .set({
+        processedAt: new Date(),
+        error: applied.errors.length ? applied.errors.join('; ') : null,
+      })
+      .where(eq(whatsappEvents.id, event.id));
+    processed += 1;
+
+    // Never throws; see `runTurns`. Its errors land on the row that is already processed,
+    // beside the media downloads', because they are worth reading and not worth retrying.
+    const turnErrors = await runTurns(db, deps, applied.touched);
+    if (turnErrors.length > 0) {
+      const all = [...applied.errors, ...turnErrors];
+      await db
+        .update(whatsappEvents)
+        .set({ error: all.join('; ') })
+        .where(eq(whatsappEvents.id, event.id));
     }
   }
 
@@ -202,8 +238,20 @@ export async function processPendingEvents(
  */
 type Touched = Map<string, string>;
 
-/** Returns the media download errors collected while applying the payload, if any. */
-async function applyPayload(db: Db, deps: InboundDeps, payload: unknown): Promise<string[]> {
+/**
+ * What one delivery left behind: what went wrong storing it, and who now owes an answer.
+ *
+ * The two are separated because they happen at different times. The errors belong on the
+ * event as it is stamped processed; the conversations are answered afterwards, once the
+ * event can no longer be claimed by a pass that arrives while the model is thinking.
+ */
+interface Applied {
+  /** Media download errors collected while applying the payload, if any. */
+  errors: string[];
+  touched: Touched;
+}
+
+async function applyPayload(db: Db, deps: InboundDeps, payload: unknown): Promise<Applied> {
   const entries = (payload as { entry?: unknown }).entry;
   if (!Array.isArray(entries)) throw new Error('entry is not an array');
 
@@ -219,19 +267,19 @@ async function applyPayload(db: Db, deps: InboundDeps, payload: unknown): Promis
       );
     }
   }
-  // After every message of the delivery is stored, so the turn reads the whole of what the
-  // customer just said and answers the last line rather than the first.
-  errors.push(...(await runTurns(db, deps, touched)));
-  return errors;
+  // The turns are the caller's to run, after this delivery is stamped processed — and after
+  // every message of it is stored, so a turn reads the whole of what the customer just said
+  // and answers the last line rather than the first.
+  return { errors, touched };
 }
 
 /**
  * The agent's answer to what this delivery brought, one turn per conversation.
  *
- * Nothing here may throw. A turn is the slowest and least predictable thing this queue does,
- * and an exception escaping it would leave the event unprocessed — which poisons the queue
- * for every later delivery and, worse, invites a retry. A retry is the one thing a turn
- * cannot survive: `unrecorded` means Meta accepted the reply and only our own row failed, so
+ * Nothing here may throw. This runs after the event is stamped processed, so an exception
+ * escaping it would not lose the customer's message — but it would abandon the turns of
+ * every conversation after this one in the batch. A retry is the one thing a turn cannot
+ * survive: `unrecorded` means Meta accepted the reply and only our own row failed, so
  * running the turn again would send the customer the same sentence twice. Hence a turn runs
  * exactly once per stored message, a redelivered message is not a stored message, and an
  * outcome is never a reason to fail the event. Only a raised error is worth writing down,

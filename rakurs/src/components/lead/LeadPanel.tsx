@@ -6,6 +6,7 @@ import { Async, Skeleton } from '@/components/ui/states';
 import { useToast } from '@/components/ui/Toast';
 import { useApi } from '@/hooks/useApi';
 import { formatMoney } from '@/lib/money';
+import { countOrders } from '@/lib/orders';
 import type { Lead, LeadField, Member, Order, Stage } from '@/types';
 
 const label: CSSProperties = { fontSize: 11.5, color: 'var(--text-dim)', marginBottom: 5 };
@@ -38,10 +39,6 @@ const STATUS: Record<Order['status'], string> = {
   paid: 'Оплачен',
   cancelled: 'Отменён',
 };
-
-/** Orders that still stand. A cancelled one is not a purchase this lead made. */
-const countOrders = (lead: Lead): number =>
-  lead.orders.filter((order) => order.status !== 'cancelled').length;
 
 export function LeadPanel({
   agentId,

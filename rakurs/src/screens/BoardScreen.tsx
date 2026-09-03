@@ -1,13 +1,15 @@
 import { useState, type DragEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import * as api from '@/api';
+import { OrderDialog } from '@/components/lead/OrderDialog';
 import { Card } from '@/components/ui/primitives';
 import { Async, Skeleton } from '@/components/ui/states';
 import { useToast } from '@/components/ui/Toast';
 import { useApi } from '@/hooks/useApi';
 import { formatMoney } from '@/lib/money';
+import { countOrders } from '@/lib/orders';
 import { useAgent } from '@/store/agent';
-import type { Board, BoardCard } from '@/types';
+import type { Board, BoardCard, StageKind } from '@/types';
 
 const time = (iso: string) =>
   new Date(iso).toLocaleString('ru-RU', {
@@ -32,6 +34,8 @@ export function BoardScreen() {
   const [dragging, setDragging] = useState<Dragged | null>(null);
   const [over, setOver] = useState<string | null>(null);
   const [moving, setMoving] = useState(false);
+  /** The conversation whose order form is open, or null. Set only by a landed sale. */
+  const [prompting, setPrompting] = useState<string | null>(null);
 
   const board = useApi<Board>((signal) => api.getBoard(agent.id, signal), [agent.id]);
 
@@ -47,7 +51,26 @@ export function BoardScreen() {
     setOver(null);
   }
 
-  async function drop(stageId: string | null) {
+  /**
+   * Whether to ask for the money after a card has landed in the sale column.
+   *
+   * The board's cards do not carry their orders, so the count comes from a read of the
+   * lead — the same test the lead card makes: a lead that already recorded a purchase is
+   * not asked again, and a cancelled order does not count as one.
+   *
+   * When that read fails we ask anyway. The form records nothing until a person types an
+   * amount into it, so a needless prompt costs one «Не сейчас», while staying quiet costs
+   * the sale its money — and that money is what stage 6 reports to Meta.
+   */
+  async function shouldPrompt(conversationId: string): Promise<boolean> {
+    try {
+      return countOrders(await api.getLead(agent.id, conversationId)) === 0;
+    } catch {
+      return true;
+    }
+  }
+
+  async function drop(stageId: string | null, kind: StageKind | null) {
     const card = dragging;
     // We always clear the highlight, before any checks: dragleave does not fire
     // on a drop, and otherwise the column would stay outlined with dashes until
@@ -65,6 +88,12 @@ export function BoardScreen() {
       // transition can send an auto-message, and that changes both the card's
       // preview and its ordering.
       board.reload();
+      // Only after the server confirms the move. A form opened over a drop the server
+      // refused — the board says so with a toast — would have the operator record real
+      // money against a lead that never left its column.
+      if (kind === 'success' && (await shouldPrompt(card.conversationId))) {
+        setPrompting(card.conversationId);
+      }
     } catch (error) {
       toast.fail(error);
     } finally {
@@ -116,7 +145,7 @@ export function BoardScreen() {
               currency={data.currency}
               over={over === UNSORTED}
               onDragOver={setOver}
-              onDrop={() => drop(null)}
+              onDrop={() => drop(null, null)}
               onDragStart={(conversationId, stageId) => setDragging({ conversationId, stageId })}
               onDragEnd={endDrag}
             />
@@ -131,12 +160,30 @@ export function BoardScreen() {
                 currency={data.currency}
                 over={over === column.stage.id}
                 onDragOver={setOver}
-                onDrop={() => drop(column.stage.id)}
+                onDrop={() => drop(column.stage.id, column.stage.kind)}
                 onDragStart={(conversationId, stageId) => setDragging({ conversationId, stageId })}
                 onDragEnd={endDrag}
               />
             ))}
           </div>
+
+          {prompting !== null && (
+            <OrderDialog
+              agentId={agent.id}
+              conversationId={prompting}
+              currency={data.currency}
+              order={null}
+              // Zero by design: the form is only offered to a lead that has no order
+              // standing, so the «уже есть заказы» line has nothing to say here.
+              existingOrders={0}
+              onClose={() => setPrompting(null)}
+              onSaved={() => {
+                // The card carries the lead's total, and the order just changed it.
+                board.reload();
+                setPrompting(null);
+              }}
+            />
+          )}
         </>
       )}
     </Async>

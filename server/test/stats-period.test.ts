@@ -158,6 +158,17 @@ async function walk(conversationId: string, names: string[]) {
   for (const name of names) await move(conversationId, fixture.stage(name).id);
 }
 
+/** The owner re-marks an existing stage, through the route the settings screen calls. */
+async function remark(name: string, kind: string) {
+  const res = await app.inject({
+    method: 'PATCH',
+    url: `/api/agents/${agentId()}/stages/${fixture.stage(name).id}`,
+    cookies: jar,
+    payload: { kind },
+  });
+  expect(res.statusCode).toBe(200);
+}
+
 async function addOrder(
   conversationId: string,
   amount: string,
@@ -415,6 +426,59 @@ describe('the funnel over a period', () => {
     expect(answer.funnel.map((row: { name: string }) => row.name)).not.toContain(
       'Интерес проявлен',
     );
+  });
+
+  it('counts a move into a re-marked stage as a refusal, not as nothing at all', async () => {
+    const lead = await addLead();
+    await walk(lead, ['Новый лид', 'Интерес проявлен']);
+    // The owner decides that stage means the deal died, and re-marks it. The move is
+    // already recorded with `to_kind = 'active'`, and the chain reads the live kind — so
+    // the two have to be asked the same question or the move falls between them.
+    await remark('Интерес проявлен', 'failure');
+
+    const answer = await body();
+    // Out of the chain, because a refusal is not a step towards a sale...
+    expect(answer.funnel.map((row: { name: string }) => row.name)).not.toContain(
+      'Интерес проявлен',
+    );
+    // ...and therefore into «Отказов». It is one move and it is counted exactly once; the
+    // stage still exists, so it is not a deleted-stage entry either.
+    expect(answer.failureEntries).toBe(1);
+    expect(answer.deletedStageEntries).toBe(0);
+  });
+
+  it('stops counting a refusal the owner has turned back into an ordinary stage', async () => {
+    const lead = await addLead();
+    await walk(lead, ['Новый лид', 'Отказ']);
+    await remark('Отказ', 'active');
+
+    const answer = await body();
+    // The live kind says it is an ordinary stage now, so it has a column of its own — and
+    // the recorded `to_kind = 'failure'` must not also report it beside the chain. Counted
+    // in both places, the same twelve moves would be twelve refusals *and* twelve steps.
+    expect(step(answer, 'Отказ')).toMatchObject({ entered: 1 });
+    expect(answer.failureEntries).toBe(0);
+  });
+
+  it('still counts a refusal into a stage the owner has deleted', async () => {
+    const lead = await addLead();
+    const doomed = fixture.stage('Отказ');
+    await move(lead, doomed.id);
+    // Emptied first: the delete route refuses a stage that still holds leads.
+    await move(lead, fixture.stage('Новый лид').id);
+    const deleted = await app.inject({
+      method: 'DELETE',
+      url: `/api/agents/${agentId()}/stages/${doomed.id}`,
+      cookies: jar,
+    });
+    expect(deleted.statusCode).toBe(200);
+
+    const answer = await body();
+    // There is no live stage left to ask, and the snapshot on the transition is the only
+    // truth about it. A join alone would quietly stop counting the refusal.
+    expect(answer.failureEntries).toBe(1);
+    expect(answer.deletedStageEntries).toBe(1);
+    expect(answer.deletedStageNames).toEqual(['Отказ']);
   });
 
   it('excludes a move older than the window and keeps the one inside it', async () => {

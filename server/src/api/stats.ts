@@ -149,6 +149,10 @@ export function registerStatsRoutes(
         // «Продажа», and a chain that walked through it would read a refusal as a step
         // towards a sale; it is counted beside the chain, as `failureEntries`.
         //
+        // The kind read here is the stage's **live** one, and `failureEntries` below reads
+        // the same one. Two different answers to «is this a refusal» — the live kind here
+        // and the recorded `to_kind` there — is how a re-marked stage falls out of both.
+        //
         // `count(distinct …)` is the whole defence against a lead sent back for a second
         // attempt inflating the column it returned to: a lead dragged out of «В диалоге»
         // and back three times entered it once as far as this period is concerned.
@@ -182,9 +186,16 @@ export function registerStatsRoutes(
         // The three figures that stand beside the chain, plus the count that says whether
         // anything moved at all.
         //
-        // `failureEntries` reads the snapshot `to_kind` rather than joining `stages`: a
-        // refusal into a stage the owner has since deleted still happened, and a join would
-        // quietly stop counting it.
+        // `failureEntries` asks the **live** stage what kind it is, and falls back to the
+        // recorded `to_kind` only when there is no live stage left to ask —
+        // `coalesce(stages.kind, to_kind)`. That is the same source of truth the chain
+        // above uses, and using it in both places is the whole point: the chain filters on
+        // `stages.kind`, so an owner who re-marks an existing stage as `failure` (which
+        // `api/stages.ts` permits) would otherwise make every move into it vanish — out of
+        // the chain by its live kind, out of «Отказов» by its recorded `to_kind`, and out
+        // of `deletedStageEntries` by its non-null `to_stage_id`. The reverse edit would
+        // count those moves twice. A stage the owner deleted has no live row at all, and
+        // the snapshot is then the only truth about it, which is what the fallback is for.
         //
         // `backwardMoves` is not distinct, deliberately — the question it answers is how
         // often leads are sent back, not how many leads were.
@@ -192,11 +203,15 @@ export function registerStatsRoutes(
         // The names of deleted stages are capped and the tail dropped: this line exists so
         // a funnel whose totals do not add up says why, and ten names say that as well as
         // fifty would.
+        //
+        // The join needs no tenancy clause of its own, for the chain's reason in reverse:
+        // the `where` below restricts the transitions to this agent, and a transition's
+        // `to_stage_id` points at a stage of the agent that recorded it.
         db
           .select({
             moves: sql<number>`count(*)::int`,
             failureEntries: sql<number>`(count(distinct ${stageTransitions.conversationId})
-              filter (where ${stageTransitions.toKind} = 'failure'))::int`,
+              filter (where coalesce(${stages.kind}, ${stageTransitions.toKind}) = 'failure'))::int`,
             backwardMoves: sql<number>`(count(*)
               filter (where ${stageTransitions.toPosition} < ${stageTransitions.fromPosition}))::int`,
             deletedStageEntries: sql<number>`(count(*)
@@ -207,6 +222,7 @@ export function registerStatsRoutes(
               '{}'::text[])`,
           })
           .from(stageTransitions)
+          .leftJoin(stages, eq(stages.id, stageTransitions.toStageId))
           .where(
             and(eq(stageTransitions.agentId, agentId), gte(stageTransitions.occurredAt, since)),
           ),

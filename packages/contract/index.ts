@@ -633,7 +633,14 @@ export interface StatsPeriodReport {
    * reported beside the chain as `failureEntries`.
    */
   funnel: FunnelStep[];
-  /** Distinct conversations that entered any `failure` stage inside the window. */
+  /**
+   * Distinct conversations that entered a refusal inside the window.
+   *
+   * A stage is a refusal by its **kind now**, which is what keeps it out of `funnel` — the
+   * two read the same source of truth, so a stage the owner re-marks moves between them
+   * rather than falling out of both or being counted by both. A stage that no longer
+   * exists is judged by the kind recorded on the transition, the only truth left about it.
+   */
   failureEntries: number;
   /** Moves to an earlier position — per move, because how often it happens is the question. */
   backwardMoves: number;

@@ -397,6 +397,50 @@ describe('stages', () => {
 
     expect(res.statusCode).toBe(404);
   });
+
+  it('leaves one sale stage when two promotions race', async () => {
+    const dialog = await stageNamed('В диалоге');
+    const interest = await stageNamed('Интерес проявлен');
+
+    // Both in flight at once. Without the row lock on the agent neither transaction sees
+    // the other's uncommitted demotion, both commit, and the funnel keeps two sale stages
+    // — a state the cabinet cannot leave, since demoting or deleting either is a 409.
+    await Promise.all(
+      [dialog, interest].map((stage) =>
+        app.inject({
+          method: 'PATCH',
+          url: `/api/agents/${agentId}/stages/${stage.id}`,
+          cookies: jar,
+          payload: { kind: 'success' },
+        }),
+      ),
+    );
+
+    const rows = await db.select().from(stages).where(eq(stages.agentId, agentId));
+    expect(rows.filter((row) => row.kind === 'success')).toHaveLength(1);
+  });
+
+  it('leaves one sale stage when a promotion races a create', async () => {
+    const dialog = await stageNamed('В диалоге');
+
+    await Promise.all([
+      app.inject({
+        method: 'PATCH',
+        url: `/api/agents/${agentId}/stages/${dialog.id}`,
+        cookies: jar,
+        payload: { kind: 'success' },
+      }),
+      app.inject({
+        method: 'POST',
+        url: `/api/agents/${agentId}/stages`,
+        cookies: jar,
+        payload: { name: 'Оплачено', color: '#0d9668', kind: 'success' },
+      }),
+    ]);
+
+    const rows = await db.select().from(stages).where(eq(stages.agentId, agentId));
+    expect(rows.filter((row) => row.kind === 'success')).toHaveLength(1);
+  });
 });
 
 describe('lead fields', () => {

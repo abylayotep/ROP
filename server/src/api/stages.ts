@@ -3,7 +3,7 @@ import { and, asc, count, eq, ne } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
-import { conversations, leadFields, stages } from '../db/schema.js';
+import { agents, conversations, leadFields, stages } from '../db/schema.js';
 import { ApiError } from '../lib/errors.js';
 import type { Executor } from '../lib/funnel.js';
 import { isUuid } from '../lib/uuid.js';
@@ -85,8 +85,30 @@ export function registerStageRoutes(
   const anyMember = requireAgent(db);
   const ownerOnly = requireAgent(db, { role: 'owner' });
 
-  const listStages = (agentId: string) =>
-    db.select().from(stages).where(eq(stages.agentId, agentId)).orderBy(asc(stages.position));
+  const listStages = (agentId: string, tx: Executor = db) =>
+    tx.select().from(stages).where(eq(stages.agentId, agentId)).orderBy(asc(stages.position));
+
+  /**
+   * Locks the agent's row until the transaction ends.
+   *
+   * Serialises every transaction that can change a stage's `kind` or remove a stage — the
+   * create, the patch and the delete — because the invariant those three share is "exactly
+   * one stage of this agent has kind `success`", and that is a statement about the whole
+   * funnel rather than about the row each of them writes. Under READ COMMITTED two owner
+   * requests in flight (two promotions, or a promotion and a create) each fail to see the
+   * other's uncommitted demotion, both commit, and the agent ends with two sale stages —
+   * from which the cabinet cannot recover, because demoting either is then a 409 and
+   * deleting either is a 409.
+   *
+   * The invariant is not a database constraint: a partial unique index on `agent_id` where
+   * `kind = 'success'` would fire in the middle of a promotion, which demotes the incumbent
+   * only after inserting or updating the new sale stage, and in the middle of the seeding
+   * and the reorder — failing an owner's request with a Postgres message nobody can read
+   * instead of the Russian sentence these routes answer with.
+   */
+  async function lockAgent(tx: Executor, agentId: string): Promise<void> {
+    await tx.select({ id: agents.id }).from(agents).where(eq(agents.id, agentId)).for('update');
+  }
 
   /** The agent's stage, or a 404 that tells a stranger nothing. */
   async function loadStage(agentId: string, stageId: string, tx: Executor = db) {
@@ -127,8 +149,11 @@ export function registerStageRoutes(
       const parsed = createStage.safeParse(req.body);
       if (!parsed.success) throw new ApiError(400, 'Укажите название, цвет и тип стадии');
 
-      const existing = await listStages(req.agent!.id);
       const row = await db.transaction(async (tx) => {
+        await lockAgent(tx, req.agent!.id);
+        // Read after the lock: the last position, like the sale stage, is a fact about the
+        // whole funnel, and one read outside the transaction would let two creates agree.
+        const existing = await listStages(req.agent!.id, tx);
         if (parsed.data.kind === 'success') await takeSaleStage(tx, req.agent!.id);
         const [created] = await tx
           .insert(stages)
@@ -153,26 +178,30 @@ export function registerStageRoutes(
     { preHandler: [guard, ownerOnly] },
     async (req): Promise<Stage> => {
       const { stageId } = req.params as { stageId: string };
-      const current = await loadStage(req.agent!.id, stageId);
 
       const parsed = patchStage.safeParse(req.body);
       if (!parsed.success) throw new ApiError(400, 'Не удалось разобрать стадию');
-      if (Object.keys(parsed.data).length === 0) return toStage(current);
-
-      if (
-        parsed.data.kind !== undefined &&
-        parsed.data.kind !== current.kind &&
-        current.kind === 'success'
-      ) {
-        // Refused rather than allowed and warned about: with no sale stage the board
-        // still works, but every number stage 6 and stage 7 report becomes a zero.
-        throw new ApiError(
-          409,
-          'У воронки должна быть стадия продажи. Сначала назначьте продажей другую стадию.',
-        );
-      }
 
       const row = await db.transaction(async (tx) => {
+        await lockAgent(tx, req.agent!.id);
+        // Read after the lock, not before: a `kind` read outside the transaction is a
+        // guess about a funnel another request may already have reshaped.
+        const current = await loadStage(req.agent!.id, stageId, tx);
+        if (Object.keys(parsed.data).length === 0) return current;
+
+        if (
+          parsed.data.kind !== undefined &&
+          parsed.data.kind !== current.kind &&
+          current.kind === 'success'
+        ) {
+          // Refused rather than allowed and warned about: with no sale stage the board
+          // still works, but every number stage 6 and stage 7 report becomes a zero.
+          throw new ApiError(
+            409,
+            'У воронки должна быть стадия продажи. Сначала назначьте продажей другую стадию.',
+          );
+        }
+
         if (parsed.data.kind === 'success' && current.kind !== 'success') {
           await takeSaleStage(tx, req.agent!.id, current.id);
         }
@@ -196,6 +225,7 @@ export function registerStageRoutes(
       // Every check and the delete share one transaction: read outside it and a promotion
       // landing in between would let this delete take the funnel's last sale stage.
       await db.transaction(async (tx) => {
+        await lockAgent(tx, req.agent!.id);
         const current = await loadStage(req.agent!.id, stageId, tx);
 
         if (current.kind === 'success') {

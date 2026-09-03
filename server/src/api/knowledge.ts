@@ -1,5 +1,5 @@
 import type { KbImport, KbItem, KbSource } from '@rakurs/contract';
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, sql } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
@@ -401,6 +401,9 @@ export function registerKnowledgeRoutes(
       return {
         source: toKbSource(created!),
         items: rows.map((row) => toKbItem(row, created!.title)),
+        // A source that did not exist a moment ago has nothing kept and nothing edited.
+        reimported: false,
+        keptEdited: 0,
       };
     });
   }
@@ -437,6 +440,69 @@ export function registerKnowledgeRoutes(
     return row;
   }
 
+  /**
+   * A refetched page written onto the source it belongs to.
+   *
+   * The rule is short on purpose: **every unedited item of this source goes, every part the
+   * page now yields is written, and what a person edited is left alone.** No part of the
+   * fresh page is ever dropped, and no title is ever compared with another.
+   *
+   * Matching fresh parts against the titles of the kept items — which is what this did — was
+   * an attempt to guess which fresh part «is» a kept one, and it guessed wrong in every way
+   * a real page moves. Two sections called «Цены» produced two items; the owner edited one;
+   * the title filter then discarded BOTH fresh sections and the other section's prices left
+   * the base with nothing to say they had gone. A renamed section left the correction under
+   * the old name beside a fresh item under the new one. A long section whose numbering
+   * changed left «Прайс (2)» behind as a fragment of a page that no longer exists.
+   *
+   * So it does not guess. An edited item and a fresh item may now say different things about
+   * the same subject, and `keptEdited` is how the owner is told to go and look: that is a
+   * question about the world — has the page moved on, or was the correction right? — and it
+   * is theirs to answer, not ours to answer for them by deleting one of the two.
+   */
+  async function applyReimport(
+    agentId: string,
+    source: typeof kbSources.$inferSelect,
+    page: FetchedPage,
+    parts: SplitPart[],
+  ): Promise<KbImport> {
+    return db.transaction(async (tx) => {
+      const mine = and(eq(kbItems.sourceId, source.id), eq(kbItems.agentId, agentId));
+
+      // Read before the delete, and by `edited`: these rows are a person's work, not the
+      // page's, and this import has no claim on them.
+      const kept = await tx
+        .select(kbItemColumns)
+        .from(kbItems)
+        .where(and(mine, eq(kbItems.edited, true)));
+      await tx.delete(kbItems).where(and(mine, eq(kbItems.edited, false)));
+
+      const written = await insertItems(tx, agentId, source.id, 'other', parts);
+
+      const [updated] = await tx
+        .update(kbSources)
+        .set({
+          title: pageTitle(page.html, page.finalUrl),
+          url: page.finalUrl,
+          status: 'ready',
+          // Cleared, not left behind: this attempt succeeded, and a stale reason beside a
+          // ready source reads as a failure that is still happening.
+          error: null,
+          itemCount: kept.length + written.length,
+          importedAt: new Date(),
+        })
+        .where(and(eq(kbSources.id, source.id), eq(kbSources.agentId, agentId)))
+        .returning();
+
+      return {
+        source: toKbSource(updated!),
+        items: [...kept, ...written].map((row) => toKbItem(row, updated!.title)),
+        reimported: true,
+        keptEdited: kept.length,
+      };
+    });
+  }
+
   /** Why this source's last attempt did not work. Its items are not touched. */
   async function markFailed(sourceId: string, agentId: string, reason: string): Promise<void> {
     await db
@@ -449,6 +515,31 @@ export function registerKnowledgeRoutes(
   const partsOf = (page: FetchedPage): SplitPart[] => splitByHeadings(htmlToText(page.html));
 
   /**
+   * The one row this agent already has for a page address, whatever state it is in.
+   *
+   * One row per address is the promise the sources list makes, and it has to hold across
+   * outcomes, not only within one: a failed attempt followed by a success used to leave two
+   * rows for the same page, because only the failure path looked for an existing row. The
+   * second row then had the items and the first still said «не удалось», and the next
+   * failure — which found rows in an order Postgres never promised — could mark either.
+   *
+   * Hence: no status in the `where`, an order that is the same on every call, and one row.
+   * The oldest wins, because that is the row the owner has been looking at; a database that
+   * still carries a pair from before this fix converges on it rather than alternating.
+   */
+  async function findPageSource(agentId: string, url: string) {
+    const [row] = await db
+      .select()
+      .from(kbSources)
+      .where(
+        and(eq(kbSources.agentId, agentId), eq(kbSources.kind, 'page'), eq(kbSources.url, url)),
+      )
+      .orderBy(asc(kbSources.createdAt), asc(kbSources.id))
+      .limit(1);
+    return row;
+  }
+
+  /**
    * Records a failed attempt against the address, reusing the row if there already is one.
    *
    * One row per address, not one per attempt: an owner whose site is down presses the button
@@ -457,18 +548,10 @@ export function registerKnowledgeRoutes(
    * address», so it is overwritten rather than added to.
    */
   async function recordFailure(agentId: string, url: string, reason: string): Promise<void> {
-    const [existing] = await db
-      .select({ id: kbSources.id })
-      .from(kbSources)
-      .where(
-        and(eq(kbSources.agentId, agentId), eq(kbSources.kind, 'page'), eq(kbSources.url, url)),
-      );
+    const existing = await findPageSource(agentId, url);
 
     if (existing) {
-      await db
-        .update(kbSources)
-        .set({ status: 'failed', error: reason })
-        .where(and(eq(kbSources.id, existing.id), eq(kbSources.agentId, agentId)));
+      await markFailed(existing.id, agentId, reason);
       return;
     }
 
@@ -505,12 +588,32 @@ export function registerKnowledgeRoutes(
         throw new ApiError(502, PAGE_REFUSED);
       }
 
+      // The address this agent already has, if it has it. Pasting a URL a second time is
+      // «Обновить» spelled another way — the owner means «read this page again» either way —
+      // and without this it was a second source and a second copy of every item, with the
+      // two drifting apart from the next reimport onwards.
+      //
+      // Both the typed address and where it ended up are looked for: the row stores the
+      // final URL, so a page that redirects would otherwise be found by neither the address
+      // the owner keeps typing nor, on the first pass, by anything else.
+      const existing =
+        (await findPageSource(req.agent!.id, url.href)) ??
+        (await findPageSource(req.agent!.id, page.finalUrl));
+
       const parts = partsOf(page);
       // Refused before anything is written: a source with no items is a row that says an
       // import happened and shows nothing for it. More often than not this is a page whose
       // text arrives from JavaScript, and the honest answer is that we read it and there was
       // nothing there — which is the owner's to act on, so it says so.
-      if (parts.length === 0) throw new ApiError(400, NOTHING_TO_SAVE);
+      //
+      // An address we already have is marked failed instead, exactly as «Обновить» does: its
+      // items stay, and the row has to stop claiming a success that this attempt was not.
+      if (parts.length === 0) {
+        if (existing) await markFailed(existing.id, req.agent!.id, NOTHING_TO_SAVE);
+        throw new ApiError(400, NOTHING_TO_SAVE);
+      }
+
+      if (existing) return applyReimport(req.agent!.id, existing, page, parts);
 
       return storeImport(
         req.agent!.id,
@@ -557,43 +660,7 @@ export function registerKnowledgeRoutes(
         throw new ApiError(400, NOTHING_TO_SAVE);
       }
 
-      return db.transaction(async (tx) => {
-        const mine = and(eq(kbItems.sourceId, source.id), eq(kbItems.agentId, req.agent!.id));
-
-        // What a person corrected outranks the page it came from. Those items are read
-        // first, kept, and then their titles are what the fresh parts are filtered against
-        // — otherwise the reimport would put the page's own wording back beside the
-        // correction and the agent would have both to choose from.
-        const kept = await tx
-          .select(kbItemColumns)
-          .from(kbItems)
-          .where(and(mine, eq(kbItems.edited, true)));
-        await tx.delete(kbItems).where(and(mine, eq(kbItems.edited, false)));
-
-        const keptTitles = new Set(kept.map((row) => row.title));
-        const fresh = parts.filter((part) => !keptTitles.has(part.title));
-        const written = await insertItems(tx, req.agent!.id, source.id, 'other', fresh);
-
-        const [updated] = await tx
-          .update(kbSources)
-          .set({
-            title: pageTitle(page.html, page.finalUrl),
-            url: page.finalUrl,
-            status: 'ready',
-            // Cleared, not left behind: this attempt succeeded, and a stale reason beside a
-            // ready source reads as a failure that is still happening.
-            error: null,
-            itemCount: kept.length + written.length,
-            importedAt: new Date(),
-          })
-          .where(and(eq(kbSources.id, source.id), eq(kbSources.agentId, req.agent!.id)))
-          .returning();
-
-        return {
-          source: toKbSource(updated!),
-          items: [...kept, ...written].map((row) => toKbItem(row, updated!.title)),
-        };
-      });
+      return applyReimport(req.agent!.id, source, page, parts);
     },
   );
 

@@ -249,4 +249,18 @@ export interface KbSource {
 export interface KbImport {
   source: KbSource;
   items: KbItem[];
+  /**
+   * True when this went onto a source that already existed — «Обновить», or a page address
+   * this agent had already imported. The screen words those two outcomes apart: a first
+   * import created its items, an update answers with everything the source holds now.
+   */
+  reimported: boolean;
+  /**
+   * How many of `items` a person had edited, which an update keeps untouched.
+   *
+   * Answered rather than inferred from `items`, because the screen must say it in words: a
+   * kept item and a fresh one from the same page can now contradict each other, and the only
+   * honest thing to do is name how many records the owner should go and check.
+   */
+  keptEdited: number;
 }

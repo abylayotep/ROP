@@ -24,18 +24,6 @@ const SEARCH_LIMIT = 20;
 /** How many titles an import result names before it starts counting. */
 const TITLES_SHOWN = 12;
 
-/**
- * The outcome of the last import, and which of the two it was.
- *
- * A first import answers with everything it created. A reimport answers with everything the
- * source now holds — including the items a person had edited, which it kept rather than
- * made. Those are different facts and only one sentence can be true of each.
- */
-interface ImportOutcome {
-  result: KbImport;
-  reimported: boolean;
-}
-
 type Filter = 'all' | KbItemKind;
 
 const FILTERS: SegmentItem<Filter>[] = [
@@ -108,7 +96,10 @@ export function KnowledgeScreen() {
   const [items, setItems] = useState<KbItem[] | null>(null);
   const [open, setOpen] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
-  const [imported, setImported] = useState<ImportOutcome | null>(null);
+  // The outcome of the last import. Whether it created a source or updated one the agent
+  // already had is the server's to say — pasting an address twice is an update too, and the
+  // screen cannot tell that from which button was pressed.
+  const [imported, setImported] = useState<KbImport | null>(null);
 
   const list = useApi<KbItem[]>(
     (signal) =>
@@ -144,8 +135,8 @@ export function KnowledgeScreen() {
     list.reload();
   }
 
-  function handleImported(result: KbImport, reimported = false) {
-    setImported({ result, reimported });
+  function handleImported(result: KbImport) {
+    setImported(result);
     setOpen(null);
     reloadItems();
     sources.reload();
@@ -155,7 +146,7 @@ export function KnowledgeScreen() {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       {owner && <ImportPanel agentId={agent.id} onImported={handleImported} />}
 
-      {imported && <ImportResult outcome={imported} onHide={() => setImported(null)} />}
+      {imported && <ImportResult result={imported} onHide={() => setImported(null)} />}
 
       <Card pad={false}>
         <div style={{ padding: '16px 18px 12px' }}>
@@ -316,7 +307,7 @@ export function KnowledgeScreen() {
                   agentId={agent.id}
                   sources={loaded}
                   onChanged={sources.reload}
-                  onReimported={(result) => handleImported(result, true)}
+                  onReimported={handleImported}
                 />
               )
             }
@@ -331,12 +322,12 @@ export function KnowledgeScreen() {
  * What the last import produced, named, before the owner walks away from the screen.
  *
  * The two cases are worded apart. A first import answers with the items it created, so it
- * says how many were created. A reimport answers with everything the source holds
+ * says how many were created. An update answers with everything the source holds
  * afterwards — the fresh items plus the ones a person had edited, which it kept and did not
  * make — so «Создано N записей» would be a false count of a true list.
  */
-function ImportResult({ outcome, onHide }: { outcome: ImportOutcome; onHide: () => void }) {
-  const { result, reimported } = outcome;
+function ImportResult({ result, onHide }: { result: KbImport; onHide: () => void }) {
+  const { reimported, keptEdited } = result;
   const shown = result.items.slice(0, TITLES_SHOWN);
   const rest = result.items.length - shown.length;
   const box = useRef<HTMLDivElement>(null);
@@ -368,11 +359,22 @@ function ImportResult({ outcome, onHide }: { outcome: ImportOutcome; onHide: () 
 
         {/* The count and the titles, at once. A price list pasted without blank lines
             becomes ONE record by design, and «Создана 1 запись» read straight away is the
-            only thing that saves the owner from finding that out a week later. */}
+            only thing that saves the owner from finding that out a week later.
+
+            An update says the same kind of thing about the records it kept. Everything the
+            page yields is written, and a hand-corrected record is never one of the things
+            replaced — so the two can now sit side by side saying different things about the
+            same subject. That is a question about the world, not about the data: has the
+            page moved on, or was the correction right? Nobody here can answer it, so the
+            owner is told how many records to go and look at. */}
         <div style={{ fontSize: 11.5, color: 'var(--text-dim)', marginTop: 6, lineHeight: 1.45 }}>
-          {reimported
-            ? 'Записи, которые правили руками, остались как были — заменилось только то, что пришло со страницы.'
-            : 'Проверьте, что текст разбился так, как вы ожидали.'}
+          {!reimported
+            ? 'Проверьте, что текст разбился так, как вы ожидали.'
+            : keptEdited === 0
+              ? 'Все записи источника заменены свежими со страницы.'
+              : `Записи со страницы загружены заново. Исправленных вручную записей: ` +
+                `${keptEdited} — их не трогали, они остались как были. Страница могла с тех ` +
+                'пор измениться: проверьте их и удалите то, что устарело.'}
         </div>
 
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 10 }}>

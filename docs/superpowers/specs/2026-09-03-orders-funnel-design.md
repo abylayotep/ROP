@@ -87,6 +87,11 @@ The owner renames, reorders, adds and removes them. Two rules are enforced by th
 an agent has exactly one stage of kind `success`, and a stage holding conversations cannot be
 deleted until they are moved.
 
+Marking a stage as the sale moves the sale: whichever stage held that role becomes an ordinary
+active stage in the same write. Demoting the only sale stage is refused, and so is deleting it.
+Refusing the promotion as well would leave no way to move the sale at all, which is a funnel an
+owner cannot rename.
+
 The description on each stage is free text, empty by default, and unused in this stage. It is
 written for stage 5: it is the sentence the agent reads to decide whether a conversation
 belongs here.

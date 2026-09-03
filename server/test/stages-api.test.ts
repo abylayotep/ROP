@@ -1,14 +1,3 @@
-### Task 3 — the test file
-
-This is step 1 of [task 3](2026-09-03-orders-task-3-stages-api.md). It lives in its own
-document so that neither crosses the five-hundred-line limit this repository keeps. Copy it
-verbatim; the values in it are the task's requirements.
-
-- [ ] **Step 1: Write the failing test**
-
-Create `server/test/stages-api.test.ts`:
-
-```ts
 import { eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -230,7 +219,7 @@ describe('stages', () => {
     });
 
     expect(res.statusCode).toBe(409);
-    expect(res.json().message).toContain('1');
+    expect(res.json().message).toContain('1 диалог');
   });
 
   it('deletes an empty stage', async () => {
@@ -293,19 +282,90 @@ describe('stages', () => {
     expect(res.statusCode).toBe(400);
   });
 
+  it("refuses a reorder carrying another agent's stage", async () => {
+    const [other] = await db.insert(agents).values({
+      accountId: (await db.select().from(agents).where(eq(agents.id, agentId)))[0]!.accountId,
+      name: 'Другая',
+    }).returning();
+    const [foreign] = await db
+      .insert(stages)
+      .values({ agentId: other!.id, name: 'Чужая', color: '#fff', kind: 'active', position: 0 })
+      .returning();
+    const list = (await app.inject({ url: `/api/agents/${agentId}/stages`, cookies: jar })).json() as {
+      id: string;
+    }[];
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/agents/${agentId}/stages/order`,
+      cookies: jar,
+      payload: { ids: [foreign!.id, ...list.slice(1).map((stage) => stage.id)] },
+    });
+
+    expect(res.statusCode).toBe(400);
+    // The funnel is untouched: a refused reorder must not half-apply.
+    const after = (await app.inject({ url: `/api/agents/${agentId}/stages`, cookies: jar })).json() as {
+      id: string;
+    }[];
+    expect(after.map((stage) => stage.id)).toEqual(list.map((stage) => stage.id));
+  });
+
+  it('refuses a reorder that names one stage twice', async () => {
+    const list = (await app.inject({ url: `/api/agents/${agentId}/stages`, cookies: jar })).json() as {
+      id: string;
+    }[];
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/agents/${agentId}/stages/order`,
+      cookies: jar,
+      payload: { ids: [list[0]!.id, ...list.map((stage) => stage.id)] },
+    });
+
+    expect(res.statusCode).toBe(400);
+  });
+
   it('lets a member read but not change the funnel', async () => {
     const memberJar = await login('member@example.com');
+    const stage = await stageNamed('В диалоге');
 
     const read = await app.inject({ url: `/api/agents/${agentId}/stages`, cookies: memberJar });
-    const write = await app.inject({
+    const create = await app.inject({
       method: 'POST',
       url: `/api/agents/${agentId}/stages`,
       cookies: memberJar,
       payload: { name: 'Своя', color: '#4b8ef0', kind: 'active' },
     });
+    const rename = await app.inject({
+      method: 'PATCH',
+      url: `/api/agents/${agentId}/stages/${stage.id}`,
+      cookies: memberJar,
+      payload: { name: 'Своя' },
+    });
+    const remove = await app.inject({
+      method: 'DELETE',
+      url: `/api/agents/${agentId}/stages/${stage.id}`,
+      cookies: memberJar,
+    });
+    const order = await app.inject({
+      method: 'POST',
+      url: `/api/agents/${agentId}/stages/order`,
+      cookies: memberJar,
+      payload: { ids: [stage.id] },
+    });
+    const field = await app.inject({
+      method: 'POST',
+      url: `/api/agents/${agentId}/lead-fields`,
+      cookies: memberJar,
+      payload: { name: 'Город', kind: 'text' },
+    });
 
     expect(read.statusCode).toBe(200);
-    expect(write.statusCode).toBe(403);
+    expect(create.statusCode).toBe(403);
+    expect(rename.statusCode).toBe(403);
+    expect(remove.statusCode).toBe(403);
+    expect(order.statusCode).toBe(403);
+    expect(field.statusCode).toBe(403);
   });
 
   it("answers 404 for another agent's stage", async () => {
@@ -392,6 +452,81 @@ describe('lead fields', () => {
     expect(res.statusCode).toBe(400);
   });
 
+  it('renames a field', async () => {
+    const created = await app.inject({
+      method: 'POST',
+      url: `/api/agents/${agentId}/lead-fields`,
+      cookies: jar,
+      payload: { name: 'Город', kind: 'text' },
+    });
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/api/agents/${agentId}/lead-fields/${created.json().id}`,
+      cookies: jar,
+      payload: { name: 'Город клиента', hint: 'Откуда он пишет' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().name).toBe('Город клиента');
+    expect(res.json().hint).toBe('Откуда он пишет');
+  });
+
+  it('refuses a rename onto another field of the same name', async () => {
+    await app.inject({
+      method: 'POST',
+      url: `/api/agents/${agentId}/lead-fields`,
+      cookies: jar,
+      payload: { name: 'Город', kind: 'text' },
+    });
+    const budget = await app.inject({
+      method: 'POST',
+      url: `/api/agents/${agentId}/lead-fields`,
+      cookies: jar,
+      payload: { name: 'Бюджет', kind: 'number' },
+    });
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/api/agents/${agentId}/lead-fields/${budget.json().id}`,
+      cookies: jar,
+      payload: { name: 'Город' },
+    });
+
+    expect(res.statusCode).toBe(409);
+  });
+
+  it('answers 404 for a field id that is not a uuid', async () => {
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/api/agents/${agentId}/lead-fields/не-uuid`,
+      cookies: jar,
+      payload: { name: 'Взлом' },
+    });
+
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("answers 404 for another agent's field", async () => {
+    const [other] = await db.insert(agents).values({
+      accountId: (await db.select().from(agents).where(eq(agents.id, agentId)))[0]!.accountId,
+      name: 'Другая',
+    }).returning();
+    const [foreign] = await db
+      .insert(leadFields)
+      .values({ agentId: other!.id, name: 'Чужое', kind: 'text', position: 0 })
+      .returning();
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/api/agents/${agentId}/lead-fields/${foreign!.id}`,
+      cookies: jar,
+      payload: { name: 'Взлом' },
+    });
+
+    expect(res.statusCode).toBe(404);
+  });
+
   it('deletes a field', async () => {
     const created = await app.inject({
       method: 'POST',
@@ -410,5 +545,3 @@ describe('lead fields', () => {
     expect(await db.select().from(leadFields)).toHaveLength(0);
   });
 });
-```
-

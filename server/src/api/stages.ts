@@ -1,49 +1,3 @@
-### Task 3: Stages and lead fields over the API
-
-**Files:**
-- Create: `server/src/api/stages.ts`
-- Modify: `server/src/api/server.ts` (register the routes)
-- Modify: `packages/contract/index.ts` (nothing new — task 2 added `Stage` and `LeadField`)
-- Create: `server/test/stages-api.test.ts` (its contents are in [task-3-stages-test.md](2026-09-03-orders-task-3-stages-test.md))
-
-**Interfaces:**
-- Consumes: `requireAgent` from `server/src/api/require-agent.ts`, `ApiError` from `server/src/lib/errors.ts`, `isUuid` from `server/src/lib/uuid.ts`, `stages` / `leadFields` / `conversations` from the schema, the contract types `Stage` and `LeadField`.
-- Produces: `registerStageRoutes(app, db, guard)` and these routes:
-  - `GET /api/agents/:agentId/stages` → `Stage[]`, any member
-  - `POST /api/agents/:agentId/stages` → `Stage`, owner
-  - `PATCH /api/agents/:agentId/stages/:stageId` → `Stage`, owner
-  - `DELETE /api/agents/:agentId/stages/:stageId` → `{ ok: true }`, owner
-  - `POST /api/agents/:agentId/stages/order` → `Stage[]`, owner
-  - `GET /api/agents/:agentId/lead-fields` → `LeadField[]`, any member
-  - `POST /api/agents/:agentId/lead-fields` → `LeadField`, owner
-  - `PATCH /api/agents/:agentId/lead-fields/:fieldId` → `LeadField`, owner
-  - `DELETE /api/agents/:agentId/lead-fields/:fieldId` → `{ ok: true }`, owner
-
-**Context.** Task 2 seeds a funnel. This makes it the client's: renamed, recoloured, reordered, extended. Two rules are the reason this is a task rather than plain CRUD — an agent has exactly one sale stage, and a stage still holding conversations cannot be deleted.
-
-**Moving the sale.** Marking a stage as `success`, on create or on patch, demotes whichever stage held that role to `active`, in one transaction. Demoting the only sale stage is refused, and so is deleting it. Refusing the promotion too would make the sale stage immovable, which is a funnel an owner cannot rename.
-
-**Ordering.** Both tables carry an integer `position`. New rows go to the end (`max + 1`). The reorder route takes the full list of ids and rewrites every position from its index, which is the only form that cannot leave two rows sharing a place.
-
-- [ ] **Step 1: Write the failing test**
-
-The test is long enough to live in its own document:
-[task-3-stages-test.md](2026-09-03-orders-task-3-stages-test.md). Create
-`server/test/stages-api.test.ts` with exactly the contents given there.
-
-- [ ] **Step 2: Run it and watch it fail**
-
-```bash
-npm --prefix server test -- stages-api
-```
-
-Expected: every case fails with 404 — no route is registered yet.
-
-- [ ] **Step 3: Write the routes**
-
-Create `server/src/api/stages.ts`:
-
-```ts
 import type { LeadField, Stage } from '@rakurs/contract';
 import { and, asc, count, eq, ne } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
@@ -113,6 +67,16 @@ const toField = (row: typeof leadFields.$inferSelect): LeadField => ({
 const template = (value: string | undefined): string | null | undefined =>
   value === undefined ? undefined : value.trim() === '' ? null : value;
 
+/** Russian counts three ways: 1 диалог, 2 диалога, 5 диалогов. */
+const plural = (n: number, one: string, few: string, many: string): string => {
+  const teens = n % 100;
+  if (teens >= 11 && teens <= 14) return many;
+  const last = n % 10;
+  if (last === 1) return one;
+  if (last >= 2 && last <= 4) return few;
+  return many;
+};
+
 export function registerStageRoutes(
   app: FastifyInstance,
   db: Db,
@@ -125,9 +89,9 @@ export function registerStageRoutes(
     db.select().from(stages).where(eq(stages.agentId, agentId)).orderBy(asc(stages.position));
 
   /** The agent's stage, or a 404 that tells a stranger nothing. */
-  async function loadStage(agentId: string, stageId: string) {
+  async function loadStage(agentId: string, stageId: string, tx: Executor = db) {
     if (!isUuid(stageId)) throw new ApiError(404, 'Стадия не найдена');
-    const [row] = await db
+    const [row] = await tx
       .select()
       .from(stages)
       .where(and(eq(stages.id, stageId), eq(stages.agentId, agentId)));
@@ -200,9 +164,8 @@ export function registerStageRoutes(
         parsed.data.kind !== current.kind &&
         current.kind === 'success'
       ) {
-        // Refused rather than allowed and warned about: with no sale stage the board still
-        // works, but every number stage 6 and stage 7 report becomes a zero. The way to move
-        // the sale is to promote another stage, which demotes this one.
+        // Refused rather than allowed and warned about: with no sale stage the board
+        // still works, but every number stage 6 and stage 7 report becomes a zero.
         throw new ApiError(
           409,
           'У воронки должна быть стадия продажи. Сначала назначьте продажей другую стадию.',
@@ -229,27 +192,32 @@ export function registerStageRoutes(
     { preHandler: [guard, ownerOnly] },
     async (req): Promise<{ ok: true }> => {
       const { stageId } = req.params as { stageId: string };
-      const current = await loadStage(req.agent!.id, stageId);
 
-      if (current.kind === 'success') {
-        throw new ApiError(409, 'Это стадия продажи. Назначьте продажей другую и повторите.');
-      }
+      // Every check and the delete share one transaction: read outside it and a promotion
+      // landing in between would let this delete take the funnel's last sale stage.
+      await db.transaction(async (tx) => {
+        const current = await loadStage(req.agent!.id, stageId, tx);
 
-      // Deleting would set every conversation's stage to null and silently empty a
-      // column of the board. Refused with the number, so the owner knows what is at stake.
-      const [holders] = await db
-        .select({ held: count() })
-        .from(conversations)
-        .where(eq(conversations.stageId, current.id));
-      const held = holders?.held ?? 0;
-      if (held > 0) {
-        throw new ApiError(
-          409,
-          `В стадии ${held} диалогов. Перенесите их в другую стадию и повторите.`,
-        );
-      }
+        if (current.kind === 'success') {
+          throw new ApiError(409, 'Это стадия продажи. Назначьте продажей другую и повторите.');
+        }
 
-      await db.delete(stages).where(eq(stages.id, current.id));
+        // Deleting would set every conversation's stage to null and silently empty a
+        // column of the board. Refused with the number, so the owner knows what is at stake.
+        const [holders] = await tx
+          .select({ held: count() })
+          .from(conversations)
+          .where(eq(conversations.stageId, current.id));
+        const held = holders?.held ?? 0;
+        if (held > 0) {
+          throw new ApiError(
+            409,
+            `В стадии ${held} ${plural(held, 'диалог', 'диалога', 'диалогов')}. Перенесите их в другую стадию и повторите.`,
+          );
+        }
+
+        await tx.delete(stages).where(eq(stages.id, current.id));
+      });
       return { ok: true };
     },
   );
@@ -274,7 +242,10 @@ export function registerStageRoutes(
 
       await db.transaction(async (tx) => {
         for (const [position, id] of parsed.data.ids.entries()) {
-          await tx.update(stages).set({ position }).where(eq(stages.id, id));
+          await tx
+            .update(stages)
+            .set({ position })
+            .where(and(eq(stages.id, id), eq(stages.agentId, req.agent!.id)));
         }
       });
       return (await listStages(req.agent!.id)).map(toStage);
@@ -371,33 +342,3 @@ export function registerStageRoutes(
     },
   );
 }
-```
-
-- [ ] **Step 4: Register the routes**
-
-In `server/src/api/server.ts`, add the import and the registration line after
-`registerConversationRoutes(...)`:
-
-```ts
-import { registerStageRoutes } from './stages.js';
-```
-
-```ts
-  registerStageRoutes(app, db, guard);
-```
-
-- [ ] **Step 5: Run the tests**
-
-```bash
-npm --prefix server test
-npm --prefix server run typecheck
-```
-
-Expected: green, including the twenty-one files that were already there.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add server/src/api/stages.ts server/src/api/server.ts server/test/stages-api.test.ts
-git commit -m "Let an owner shape the funnel and the lead fields"
-```

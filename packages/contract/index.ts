@@ -116,3 +116,57 @@ export interface LeadField {
   hint: string;
   position: number;
 }
+
+/* ── Лид ────────────────────────────────────────────────────────────────────
+ * A conversation seen as a sale in progress. */
+
+export interface LeadFieldValue {
+  fieldId: string;
+  value: string;
+}
+
+export interface Note {
+  id: string;
+  body: string;
+  /** Null for the lines the cabinet writes itself. */
+  authorName: string | null;
+  createdAt: string;
+}
+
+export interface Order {
+  id: string;
+  /** A string, not a number: an amount must not pass through a float. */
+  amount: string;
+  currency: string;
+  status: 'pending' | 'paid' | 'cancelled';
+  comment: string;
+  paidAt: string | null;
+  createdAt: string;
+}
+
+export interface Lead {
+  conversationId: string;
+  contactName: string | null;
+  contactPhone: string;
+  stageId: string | null;
+  stageSetAt: string | null;
+  /** 'operator' | 'ai' | 'scenario' | 'system' */
+  stageSetBy: string | null;
+  assignedTo: string | null;
+  assigneeName: string | null;
+  adHeadline: string | null;
+  values: LeadFieldValue[];
+  notes: Note[];
+  orders: Order[];
+  /** The sum of this lead's paid orders, as a string with two decimals. */
+  paidTotal: string;
+  currency: string;
+}
+
+/** Someone in the account, for the assignee list. */
+export interface Member {
+  id: string;
+  name: string;
+  initials: string;
+  role: Role;
+}

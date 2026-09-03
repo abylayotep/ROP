@@ -382,6 +382,12 @@ describe('the stage auto-message', () => {
     expect(res.json().stageId).toBe(stageId);
     expect(graph.calls.filter((call) => call.method === 'sendText')).toHaveLength(0);
     expect(res.json().notes).toHaveLength(1);
+    // The note is read by an operator, so it says what to do rather than repeating the
+    // crypto library's English complaint about a malformed secret.
+    const body = res.json().notes[0].body as string;
+    expect(body).toContain('не удалось прочитать токен номера');
+    expect(body).toContain('Подключите номер заново');
+    expect(body).not.toMatch(/[A-Za-z]{4}/);
   });
 
   it('sends nothing when the lead is taken out of its stage', async () => {

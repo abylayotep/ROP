@@ -372,6 +372,22 @@ describe('answering', () => {
     expect(res.json().message).not.toContain('EAAG-token');
     expect(res.json().message).toContain('<токен скрыт>');
   });
+
+  it('says in Russian that the number has to be reconnected when the token will not decrypt', async () => {
+    // A rotated credentials key, or a row someone edited by hand. The crypto library's own
+    // complaint is English and the frontend renders `message` verbatim.
+    await db
+      .update(whatsappNumbers)
+      .set({ accessToken: 'not-a-packed-secret' })
+      .where(eq(whatsappNumbers.id, numberId));
+
+    const res = await answer({ body: 'привет' });
+
+    expect(res.statusCode).toBe(409);
+    expect(res.json().message).toContain('Подключите номер заново');
+    expect(res.json().message).not.toMatch(/[A-Za-z]{4}/);
+    expect(graph.calls.filter((call) => call.method === 'sendText')).toHaveLength(0);
+  });
 });
 
 describe('media', () => {

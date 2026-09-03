@@ -71,14 +71,25 @@ export async function sendStageMessage(
     }
 
     const body = renderTemplate(text, row.contact.name);
-    let token = '';
+
+    // Decrypted on its own, ahead of the send, so its failure gets its own sentence. A key
+    // that no longer matches the stored token throws an English developer message, and this
+    // note is read by an operator who needs to be told what to do about it instead.
+    let token: string;
+    try {
+      token = decryptSecret(row.number.accessToken, deps.key, row.number.phoneNumberId);
+    } catch {
+      await note(
+        `Автосообщение стадии «${stage!.name}» не отправлено: не удалось прочитать токен ` +
+          'номера. Подключите номер заново в интеграциях.',
+      );
+      return;
+    }
+
     // Set the instant Meta accepts the message, before any write of our own. It is the only
     // thing that can tell a failed send apart from a send we failed to record.
     let sent = false;
     try {
-      // Decrypted inside the try on purpose, the same way the inbound path does it: a key
-      // that no longer matches must cost this one message, not raise past this function.
-      token = decryptSecret(row.number.accessToken, deps.key, row.number.phoneNumberId);
       const { messageId } = await deps.graph.sendText(
         row.number.phoneNumberId,
         token,

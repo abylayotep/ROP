@@ -1,4 +1,5 @@
 import { useEffect, useState, type CSSProperties, type FormEvent } from 'react';
+import { Link } from 'react-router-dom';
 import * as api from '@/api';
 import { CapiEventRow } from '@/components/capi/EventRow';
 import { Card, CardHead, Toggle } from '@/components/ui/primitives';
@@ -260,7 +261,8 @@ function WebhookCard({ setup }: { setup: WebhookSetup }) {
       <div style={{ fontSize: 13.5, fontWeight: 650, marginBottom: 8 }}>Вебхук в Meta</div>
       <div style={hint}>
         Вставьте это в настройках приложения Meta: WhatsApp → Configuration → Webhook. Затем
-        подпишитесь на поле messages.
+        подпишитесь на поле messages. Весь путь по шагам — в разделе{' '}
+        <Link to="../setup">«Запуск»</Link>.
       </div>
       <div style={{ marginTop: 10 }}>
         <div style={label}>Callback URL</div>
@@ -311,7 +313,8 @@ function ConnectForm({ agentId, onConnected }: { agentId: string; onConnected: (
         <div style={{ fontSize: 13.5, fontWeight: 650 }}>Подключить номер WhatsApp</div>
         <div style={hint}>
           Значения берутся в Meta: WhatsApp → API Setup. Токен — постоянный, от системного
-          пользователя.
+          пользователя. Где именно их взять и что нажать в Meta — по шагам в разделе{' '}
+          <Link to="../setup">«Запуск»</Link>.
         </div>
 
         <div>
@@ -576,8 +579,8 @@ function CapiForm({
             <a href={EVENTS_MANAGER_URL} target="_blank" rel="noreferrer">
               Meta Events Manager
             </a>
-            : Data sources → набор данных → Settings. Как это сделать по шагам — в
-            docs/meta-capi.md.
+            : Data sources → набор данных → Settings. Как это сделать по шагам — в разделе{' '}
+            <Link to="../setup">«Запуск»</Link>.
           </div>
         </div>
 

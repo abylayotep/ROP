@@ -11,6 +11,7 @@ import { IntegrationsScreen } from '@/screens/IntegrationsScreen';
 import { KnowledgeScreen } from '@/screens/KnowledgeScreen';
 import { LoginScreen } from '@/screens/LoginScreen';
 import { SectionScreen } from '@/screens/SectionScreen';
+import { SetupScreen } from '@/screens/SetupScreen';
 import { StatsScreen } from '@/screens/StatsScreen';
 import { AgentProvider } from '@/store/agent';
 import { AuthProvider, useAuth } from '@/store/auth';
@@ -50,7 +51,9 @@ function AuthGate() {
             key={section.path}
             path={section.path}
             element={
-              section.path === 'settings' ? (
+              section.path === 'setup' ? (
+                <SetupScreen />
+              ) : section.path === 'settings' ? (
                 <AgentSettingsScreen />
               ) : section.path === 'integrations' ? (
                 <IntegrationsScreen />

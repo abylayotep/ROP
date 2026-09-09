@@ -1,7 +1,6 @@
 import type {
   KbGraph,
   KbImport,
-  KbLinkRef,
   KbNote,
   KbNoteDetail,
   KbNoteKind,

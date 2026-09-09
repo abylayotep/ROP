@@ -49,26 +49,47 @@ CREATE INDEX "kb_links_agent_target_idx" ON "kb_links" USING btree ("agent_id","
 CREATE INDEX "kb_links_from_idx" ON "kb_links" USING btree ("from_note_id");--> statement-breakpoint
 CREATE INDEX "kb_notes_agent_updated_idx" ON "kb_notes" USING btree ("agent_id","updated_at");
 --> statement-breakpoint
--- Every record becomes one note in the folder its kind named, and one section.
-INSERT INTO kb_notes (id, agent_id, source_id, path, title, body, kind, edited, created_at, updated_at)
-SELECT i.id, i.agent_id, i.source_id,
-       CASE i.kind
-         WHEN 'product'   THEN 'Товары/'
-         WHEN 'qa'        THEN 'Вопросы-ответы/'
-         WHEN 'procedure' THEN 'Процедуры/'
-         WHEN 'contact'   THEN 'Контакты/'
-         ELSE 'Прочее/'
-       END || replace(i.title, '/', '∕')
-       -- A title colliding inside its folder gets its ordinal, so no record is lost to the
-       -- unique index. Ordered by creation so the oldest keeps the bare name.
-       || CASE WHEN row_number() OVER (
-              PARTITION BY i.agent_id, i.kind, replace(i.title, '/', '∕')
-              ORDER BY i.created_at, i.id) = 1
-          THEN '' ELSE ' (' || row_number() OVER (
-              PARTITION BY i.agent_id, i.kind, replace(i.title, '/', '∕')
-              ORDER BY i.created_at, i.id) || ')' END,
-       i.title, i.content, i.kind, i.edited, i.created_at, i.updated_at
-FROM kb_items i;
+-- Every record becomes one note in the folder its kind named, and one section. A loop, not
+-- a window function: row_number() computes every record's suffix from its own title group in
+-- one pass and cannot see the paths that pass is producing, so a record already titled
+-- «Дверь (2)» and a second record titled «Дверь» can both compute to «Товары/Дверь (2)» and
+-- abort the migration on the unique index. Walking the rows in order and probing kb_notes for
+-- a free path before each insert is the row-by-row equivalent of "already taken, try the next
+-- ordinal" — the loop runs once, on at most a few thousand rows, and correctness here matters
+-- more than doing it set-wise.
+DO $$
+DECLARE
+  item RECORD;
+  folder text;
+  base_path text;
+  candidate_path text;
+  suffix integer;
+BEGIN
+  FOR item IN SELECT * FROM kb_items ORDER BY created_at, id LOOP
+    folder := CASE item.kind
+      WHEN 'product'   THEN 'Товары/'
+      WHEN 'qa'        THEN 'Вопросы-ответы/'
+      WHEN 'procedure' THEN 'Процедуры/'
+      WHEN 'contact'   THEN 'Контакты/'
+      ELSE 'Прочее/'
+    END;
+    base_path := folder || replace(item.title, '/', '∕');
+    candidate_path := base_path;
+    suffix := 2;
+    WHILE EXISTS (
+      SELECT 1 FROM kb_notes WHERE agent_id = item.agent_id AND path = candidate_path
+    ) LOOP
+      candidate_path := base_path || ' (' || suffix || ')';
+      suffix := suffix + 1;
+    END LOOP;
+
+    INSERT INTO kb_notes (id, agent_id, source_id, path, title, body, kind, edited, created_at, updated_at)
+    VALUES (
+      item.id, item.agent_id, item.source_id, candidate_path, item.title, item.content,
+      item.kind, item.edited, item.created_at, item.updated_at
+    );
+  END LOOP;
+END $$;
 --> statement-breakpoint
 INSERT INTO kb_chunks (agent_id, note_id, ordinal, heading, title, content, kind, created_at, updated_at)
 SELECT n.agent_id, n.id, 0, '', n.title, n.body, n.kind, n.created_at, n.updated_at

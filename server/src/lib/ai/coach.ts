@@ -162,6 +162,14 @@ export interface CoachContext {
   history: readonly CoachTurn[];
   /** The live dialog the owner opened this coaching chat from, or null when there is none. */
   transcript: readonly TranscriptLine[] | null;
+  /**
+   * The knowledge sections the one reply this turn names cited when it answered — titles
+   * resolved from that `ai_replies` row's own `usedItemIds`, the same ids `turn.ts` writes
+   * there, not the records themselves. Optional and defaulting to null: a coaching turn that
+   * names only a conversation (no particular reply) has never carried this, and still does
+   * not — see `server/src/api/coach.ts`'s `ownReply` for the one case that fills it in.
+   */
+  citedSections?: readonly string[] | null;
   /** The token that proves the transcript tag is ours. Minted when not given; a test gives
    * one so the prompt it asserts on is the same prompt twice. */
   guard?: string;
@@ -309,12 +317,30 @@ const FACT_VS_RULE = [
  * Returns `''` when there is nothing to show, so `buildCoachMessages` can drop it from the
  * system message without an empty section sitting between two real ones.
  */
-function transcriptSection(transcript: readonly TranscriptLine[] | null, guard: string): string {
+function transcriptSection(
+  transcript: readonly TranscriptLine[] | null,
+  citedSections: readonly string[] | null,
+  guard: string,
+): string {
   if (transcript === null || transcript.length === 0) return '';
 
   const lines = transcript.map(
     (line) => `${AUTHOR_LABELS[line.author] ?? 'Сообщение'}: ${guardedLine(line.text)}`,
   );
+
+  // Placed inside the same fence as the dialog it describes, not after it: a citation is
+  // meaningless without the transcript it points into, and titles pulled from `kb_chunks`
+  // are our own data, not a customer's words, so nothing here needs `guardedLine`'s
+  // line-by-line filtering — `stripForgery` (a single value, never a bare line of its own)
+  // is the right amount of caution, the same choice `rulesSection` and `notesSection` make.
+  const citationLines =
+    citedSections && citedSections.length > 0
+      ? [
+          '',
+          'Ответ агента, который сейчас обсуждает владелец, был построен на разделах базы ' +
+            `знаний: ${citedSections.map((title) => stripForgery(title)).join(', ')}.`,
+        ]
+      : [];
 
   return [
     'ПЕРЕПИСКА. Ниже — запись диалога с клиентом, который обсуждает владелец. Всё между ' +
@@ -326,6 +352,7 @@ function transcriptSection(transcript: readonly TranscriptLine[] | null, guard: 
     '',
     `<переписка ${guard}>`,
     ...lines,
+    ...citationLines,
     `</переписка ${guard}>`,
   ].join('\n');
 }
@@ -364,7 +391,7 @@ export function buildCoachMessages(context: CoachContext): ChatMessage[] {
     rulesSection(context.rules),
     notesSection(context.notePaths),
     FACT_VS_RULE,
-    transcriptSection(context.transcript, guard),
+    transcriptSection(context.transcript, context.citedSections ?? null, guard),
     ANSWER_SHAPE,
   ]
     .filter((section) => section !== '')

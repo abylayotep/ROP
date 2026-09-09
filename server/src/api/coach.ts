@@ -40,22 +40,41 @@
  * shared with the sandbox. A busy sandbox now leaves the coach exactly as little room as it
  * would leave a fourth sandbox call, and the other way round.
  *
- * ## Why a coach message may carry `aiReplyId`
+ * ## Why a coach message may carry `aiReplyId`, and why only a client-given one reaches the prompt
  *
  * When a coaching turn names a conversation, the owner is very likely coaching about
  * something the agent just did — including a turn that never became a message (a handoff, a
  * failed send). `ai_replies` is where that turn is recorded even when `messages` has nothing
- * to show for it, so this file loads the conversation's most recent `ai_replies` row and
- * stamps its id onto both `coach_messages` rows this turn writes. That id is bookkeeping for
- * now — a link a later drafts screen can use to show "this coaching thread was about that
- * reply" — and not fed into the prompt itself: the transcript already carries whatever the
- * agent actually sent, and `ai_replies` has no column with the text of a turn that failed to.
+ * to show for it, so every coaching turn on a named conversation stamps a reply id onto both
+ * `coach_messages` rows it writes — bookkeeping a later drafts screen can use to show "this
+ * coaching thread was about that reply".
+ *
+ * By default that id is the conversation's *most recent* reply (`latestReplyId`), the same
+ * guess this file always made. A request may instead name one particular reply — the exact
+ * turn a «Так нельзя» button sat on, which need not be the dialog's latest at all, since the
+ * button reaches into a transcript the owner may be scrolled well past the end of. Only that
+ * case is worth the extra query and the extra prompt text: `ownReply` checks the id actually
+ * belongs to the named conversation and this agent, and its `usedItemIds` are resolved to
+ * `kb_chunks` titles and handed to `buildCoachMessages` as `citedSections`, so the model can
+ * say "he answered from «Доставка › По городу»" instead of guessing which part of a
+ * twenty-line transcript produced a number. A conversation named with no particular reply
+ * still gets the transcript and the bookkeeping id, exactly as before this field mattered to
+ * the prompt — the transcript already carries whatever the agent actually sent, and guessing
+ * which section produced a *correct* answer is not this feature's job.
  */
-import { and, asc, desc, eq } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
-import { agentRules, aiReplies, coachMessages, conversations, kbNotes, messages } from '../db/schema.js';
+import {
+  agentRules,
+  aiReplies,
+  coachMessages,
+  conversations,
+  kbChunks,
+  kbNotes,
+  messages,
+} from '../db/schema.js';
 import { releaseTurnSlot, tryTakeTurnSlot } from '../db/turn-cap.js';
 import type { Env } from '../env.js';
 import {
@@ -95,6 +114,10 @@ const postBody = z.object({
   // A UUID we look up, not one we trust: an unknown or foreign id answers 404 below, the same
   // way a mistyped conversation id already does on `PATCH …/conversations/:conversationId/ai`.
   conversationId: z.string().trim().min(1).optional(),
+  // The particular reply this turn is about, named by whoever clicked «Так нельзя» on a
+  // dialog's message — see the file comment for why this, and not `conversationId` alone,
+  // is what lets the prompt say which section a wrong answer came from.
+  aiReplyId: z.string().trim().min(1).optional(),
 });
 
 const toMessage = (row: typeof coachMessages.$inferSelect) => ({
@@ -159,6 +182,43 @@ async function latestReplyId(db: Db, conversationId: string): Promise<string | n
     .orderBy(desc(aiReplies.createdAt))
     .limit(1);
   return row?.id ?? null;
+}
+
+/** The named reply, only if it belongs to this agent's named conversation — 404 either way,
+ * the same reason `ownConversation` treats a foreign or mismatched id as not found at all. */
+async function ownReply(
+  db: Db,
+  agentId: string,
+  conversationId: string,
+  aiReplyId: string,
+): Promise<{ id: string; usedItemIds: string[] }> {
+  if (!isUuid(aiReplyId)) throw new ApiError(404, 'Ответ агента не найден');
+  const [row] = await db
+    .select({ id: aiReplies.id, usedItemIds: aiReplies.usedItemIds })
+    .from(aiReplies)
+    .where(
+      and(
+        eq(aiReplies.id, aiReplyId),
+        eq(aiReplies.agentId, agentId),
+        eq(aiReplies.conversationId, conversationId),
+      ),
+    );
+  if (!row) throw new ApiError(404, 'Ответ агента не найден');
+  return row;
+}
+
+/** The titles of the sections a reply cited, in the order `usedItemIds` names them —
+ * `kb_chunks.title` is «Заметка › Раздел», the string a wrong answer needs pointed at. An id
+ * a reimport or an edit has since removed is simply dropped, not replaced by a placeholder:
+ * a citation that no longer resolves is worth less than one, not worth a broken one. */
+async function sectionTitlesFor(db: Db, agentId: string, itemIds: readonly string[]): Promise<string[]> {
+  if (itemIds.length === 0) return [];
+  const rows = await db
+    .select({ id: kbChunks.id, title: kbChunks.title })
+    .from(kbChunks)
+    .where(and(eq(kbChunks.agentId, agentId), inArray(kbChunks.id, itemIds)));
+  const titleById = new Map(rows.map((row) => [row.id, row.title]));
+  return itemIds.map((id) => titleById.get(id)).filter((title): title is string => title !== undefined);
 }
 
 /** The named conversation's id, only if it belongs to this agent — 404 either way, so a
@@ -230,12 +290,27 @@ export function registerCoachRoutes(
       }
 
       try {
-        const [rules, notePaths, history, transcript, replyId] = await Promise.all([
+        // The reply this turn is about, and — only when the request named one specifically
+        // rather than just the conversation — the sections it cited. Resolved ahead of the
+        // `Promise.all` below because `citedSections` reads `ownReply`'s own result; asking
+        // for the same row twice in parallel would be one query this route does not need.
+        let replyId: string | null = null;
+        let citedSections: string[] | null = null;
+        if (conversationId !== null) {
+          if (parsed.data.aiReplyId === undefined) {
+            replyId = await latestReplyId(db, conversationId);
+          } else {
+            const reply = await ownReply(db, agentId, conversationId, parsed.data.aiReplyId);
+            replyId = reply.id;
+            citedSections = await sectionTitlesFor(db, agentId, reply.usedItemIds);
+          }
+        }
+
+        const [rules, notePaths, history, transcript] = await Promise.all([
           allRules(db, agentId),
           notePathsFor(db, agentId),
           recentHistory(db, agentId),
           conversationId === null ? Promise.resolve(null) : transcriptFor(db, conversationId),
-          conversationId === null ? Promise.resolve(null) : latestReplyId(db, conversationId),
         ]);
 
         await db.insert(coachMessages).values({
@@ -254,6 +329,7 @@ export function registerCoachRoutes(
           // for a row this request just wrote — see `recentHistory`.
           history: [...history, { role: 'owner', text: parsed.data.text }],
           transcript,
+          citedSections,
         };
 
         const result = await runCoach(db, { model: deps.model, key }, { agentId, context });

@@ -418,7 +418,7 @@ export interface AiTurn {
   /**
    * Why the turn would leave the conversation to a person, or null when it would not. The
    * reason and not a flag: «передал человеку» with no «почему» is the one answer an owner
-   * tuning instructions cannot act on.
+   * writing rules cannot act on.
    */
   handoff: string | null;
   /** 'sent' | 'unrecorded' | 'applied' | 'handoff' | 'failed' | 'skipped'. */

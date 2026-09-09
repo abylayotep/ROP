@@ -21,7 +21,7 @@ import {
   aiReplies,
   contacts,
   conversations,
-  kbItems,
+  kbChunks,
   leadFields,
   leadValues,
   messages,
@@ -33,6 +33,7 @@ import {
 import { ModelError, type Completion, type ModelClient } from '../src/lib/ai/openrouter.js';
 import { keyAad } from '../src/lib/ai/turn.js';
 import { seedFunnel } from '../src/lib/funnel.js';
+import { saveNote } from '../src/lib/knowledge/notes.js';
 import { addMember, createAccountWithOwner } from '../src/lib/provision.js';
 import { decryptSecret, encryptSecret } from '../src/lib/secret-box.js';
 import { processPendingEvents, type InboundDeps } from '../src/lib/whatsapp/inbound.js';
@@ -268,16 +269,15 @@ beforeEach(async () => {
     .returning();
   cityFieldId = field!.id;
 
-  const [item] = await db
-    .insert(kbItems)
-    .values({
-      agentId,
-      kind: 'product',
-      title: 'Доставка',
-      content: 'Доставка по Алматы — 1500 ₸, от 20 000 ₸ бесплатно.',
-    })
-    .returning();
-  itemId = item!.id;
+  // One note, one lead section with no heading: the chunk it produces carries the note's own
+  // title, so the fixture reads exactly as the flat `kbItems` row it replaces did.
+  const note = await saveNote(db, {
+    agentId,
+    path: 'Доставка',
+    body: '---\nkind: product\n---\nДоставка по Алматы — 1500 ₸, от 20 000 ₸ бесплатно.',
+  });
+  const [chunk] = await db.select().from(kbChunks).where(eq(kbChunks.noteId, note.id));
+  itemId = chunk!.id;
 
   await db.insert(whatsappNumbers).values({
     agentId,

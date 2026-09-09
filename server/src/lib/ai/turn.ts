@@ -554,10 +554,10 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
       hint: field.hint,
     })),
     knowledge: hits.map((hit) => ({
-      id: hit.item.id,
-      kind: hit.item.kind,
-      title: hit.item.title,
-      content: hit.item.content,
+      id: hit.chunk.id,
+      kind: hit.chunk.kind,
+      title: hit.chunk.title,
+      content: hit.chunk.content,
     })),
     history: history.map((message) => ({
       author: message.author,

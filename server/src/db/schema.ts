@@ -579,11 +579,14 @@ export const aiReplies = pgTable(
     outcome: text('outcome').notNull(),
     // Why it ended that way, when it was not 'sent'. Never carries a key.
     detail: text('detail'),
-    // The knowledge records the reply was built from, so a wrong answer leads to the record
-    // that produced it.
+    // The knowledge chunks — sections of a note, since the vault replaced flat records — the
+    // reply was built from, so a wrong answer leads to the section that produced it.
+    // The column keeps the name `used_item_ids` rather than being renamed to match: it reads
+    // fine either way ("the knowledge items a reply used"), and a rename would buy nothing
+    // behavioural while touching every reader of this table, statistics included.
     // Typed at the column rather than cast at every read: the only thing that ever goes in
-    // here is a list of knowledge item ids, and an `unknown` would make each caller assert
-    // that separately.
+    // here is a list of chunk ids, and an `unknown` would make each caller assert that
+    // separately.
     usedItemIds: jsonb('used_item_ids').$type<string[]>().notNull().default([]),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },

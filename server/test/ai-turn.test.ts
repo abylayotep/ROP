@@ -6,7 +6,7 @@ import {
   aiReplies,
   contacts,
   conversations,
-  kbItems,
+  kbChunks,
   leadFields,
   leadValues,
   messages,
@@ -16,6 +16,7 @@ import {
 } from '../src/db/schema.js';
 import type { Db } from '../src/db/client.js';
 import { seedFunnel } from '../src/lib/funnel.js';
+import { deleteNote, saveNote } from '../src/lib/knowledge/notes.js';
 import { createAccountWithOwner } from '../src/lib/provision.js';
 import { encryptSecret } from '../src/lib/secret-box.js';
 import {
@@ -51,6 +52,7 @@ let conversationId: string;
 let cityFieldId: string;
 let budgetFieldId: string;
 let itemId: string;
+let noteId: string;
 
 /** The five keys a model is asked for, with only the ones a test cares about overridden. */
 function answer(over: Record<string, unknown> = {}): string {
@@ -176,16 +178,16 @@ beforeEach(async () => {
   cityFieldId = fields[0]!.id;
   budgetFieldId = fields[1]!.id;
 
-  const [item] = await db
-    .insert(kbItems)
-    .values({
-      agentId,
-      kind: 'product',
-      title: 'Доставка',
-      content: 'Доставка по Алматы — 1500 ₸, от 20 000 ₸ бесплатно.',
-      })
-    .returning();
-  itemId = item!.id;
+  // One note, one lead section with no heading: the chunk it produces carries the note's own
+  // title, so the fixture reads exactly as the flat `kbItems` row it replaces did.
+  const note = await saveNote(db, {
+    agentId,
+    path: 'Доставка',
+    body: '---\nkind: product\n---\nДоставка по Алматы — 1500 ₸, от 20 000 ₸ бесплатно.',
+  });
+  noteId = note.id;
+  const [chunk] = await db.select().from(kbChunks).where(eq(kbChunks.noteId, note.id));
+  itemId = chunk!.id;
 
   const [number] = await db
     .insert(whatsappNumbers)
@@ -423,6 +425,27 @@ describe('a turn that answers', () => {
     expect(result.usedItemIds).toEqual([itemId]);
     const [log] = await replyLog();
     expect(log?.usedItemIds).toEqual([itemId]);
+  });
+
+  it('records the sections an answer was built from', async () => {
+    // A section is a chunk of its own note, so the id a reply cites is `kb_chunks.id` — not
+    // an id invented for the occasion, and not the note's own id, which no reply ever names.
+    const note = await saveNote(db, {
+      agentId,
+      path: 'Доставка/Астана',
+      body: '## По городу\nДоставка по Астане — 2500 ₸.',
+    });
+    const [chunk] = await db.select().from(kbChunks).where(eq(kbChunks.noteId, note.id));
+    const model = fakeModel(
+      answer({ reply: 'Доставка по Астане — 2500 ₸.', usedItemIds: [chunk!.id] }),
+    );
+
+    const result = await turn(model);
+
+    expect(result.outcome).toBe('sent');
+    expect(result.usedItemIds).toEqual([chunk!.id]);
+    const [log] = await replyLog();
+    expect(log?.usedItemIds).toEqual([chunk!.id]);
   });
 });
 
@@ -728,7 +751,9 @@ describe('handing off', () => {
   });
 
   it('hands off with no price in the reply when the knowledge base found nothing', async () => {
-    await db.delete(kbItems).where(eq(kbItems.agentId, agentId));
+    // Only `saveNote`/`deleteNote` may touch `kb_chunks`, so an empty knowledge base is a
+    // deleted note rather than a row deleted out from under it.
+    await deleteNote(db, agentId, noteId);
     const model = fakeModel(
       answer({
         reply: 'Уточню у коллеги и вернусь с ответом.',

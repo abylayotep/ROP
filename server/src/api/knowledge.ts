@@ -27,7 +27,7 @@ import { kbChunkColumns, searchKnowledge, type KbRow } from '../lib/knowledge/se
 // pleep's own limits, and they are the right shape: a fact, not an essay. They live beside
 // the splitter because that is the code that has to cut to fit them; a second copy here
 // would be one edit away from letting the splitter produce what this route rejects.
-import { CONTENT_MAX, TITLE_MAX, splitBlocks, splitByHeadings, type SplitPart } from '../lib/knowledge/split.js';
+import { TITLE_MAX, splitBlocks, splitByHeadings, type SplitPart } from '../lib/knowledge/split.js';
 import { isUuid } from '../lib/uuid.js';
 import { requireAgent } from './require-agent.js';
 

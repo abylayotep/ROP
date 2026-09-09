@@ -496,7 +496,10 @@ export interface CoachReply {
  * One turn of the coaching chat. Costs money — an OpenRouter call runs on the other end —
  * and can hold a turn slot as long as a sandbox call, hence the same long deadline.
  */
-export const sendCoachMessage = (agentId: string, body: { text: string; conversationId?: string }) =>
+export const sendCoachMessage = (
+  agentId: string,
+  body: { text: string; conversationId?: string; aiReplyId?: string },
+) =>
   request<CoachReply>(`/agents/${agentId}/coach/messages`, {
     method: 'POST',
     body,

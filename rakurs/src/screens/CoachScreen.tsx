@@ -93,6 +93,9 @@ function Coach({ agentId, loaded }: { agentId: string; loaded: Loaded }) {
   // brings them back here later. Reading the param itself means there is nothing to go stale.
   const [params, setParams] = useSearchParams();
   const conversationId = params.get('conversation');
+  // The particular reply «Так нельзя» sat on, when the button carried one — read the same
+  // way and for the same reason as `conversationId` itself, right above.
+  const aiReplyId = params.get('reply');
   const detach = () => setParams({}, { replace: true });
 
   useEffect(() => {
@@ -131,6 +134,7 @@ function Coach({ agentId, loaded }: { agentId: string; loaded: Loaded }) {
       const reply = await api.sendCoachMessage(agentId, {
         text: value,
         conversationId: conversationId ?? undefined,
+        aiReplyId: aiReplyId ?? undefined,
       });
       setMessages((prev) => [
         ...prev,

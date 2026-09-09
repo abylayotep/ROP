@@ -108,11 +108,13 @@ function say(text: string, conversationId?: string, aiReplyId?: string) {
 
 /**
  * A conversation of this agent's own, with a real number and contact behind it, holding the
- * given lines in order. Returns the id a request names as `conversationId`.
+ * given lines in order. Returns the id a request names as `conversationId`, and each line's
+ * own message id in the same order — `agentAnswered` below needs the latter to link an
+ * `ai_replies` row to the message it actually produced.
  */
 async function dialogWith(
   lines: { author: 'client' | 'operator' | 'ai'; body: string }[],
-): Promise<{ conversationId: string }> {
+): Promise<{ conversationId: string; messageIds: string[] }> {
   const [number] = await db
     .insert(whatsappNumbers)
     .values({
@@ -130,17 +132,22 @@ async function dialogWith(
     .returning();
 
   const start = Date.now();
+  const messageIds: string[] = [];
   for (const [i, line] of lines.entries()) {
-    await db.insert(messages).values({
-      conversationId: conversation!.id,
-      direction: line.author === 'client' ? 'in' : 'out',
-      author: line.author,
-      kind: 'text',
-      body: line.body,
-      sentAt: new Date(start + i * 1_000),
-    });
+    const [stored] = await db
+      .insert(messages)
+      .values({
+        conversationId: conversation!.id,
+        direction: line.author === 'client' ? 'in' : 'out',
+        author: line.author,
+        kind: 'text',
+        body: line.body,
+        sentAt: new Date(start + i * 1_000),
+      })
+      .returning();
+    messageIds.push(stored!.id);
   }
-  return { conversationId: conversation!.id };
+  return { conversationId: conversation!.id, messageIds };
 }
 
 /** A conversation holding one client message, named so a test reads what it is testing
@@ -155,7 +162,7 @@ async function customerSaid(text: string): Promise<{ conversationId: string }> {
  * ids a coaching request can name.
  */
 async function agentAnswered(body: string): Promise<{ conversationId: string; aiReplyId: string }> {
-  const { conversationId } = await dialogWith([{ author: 'ai', body }]);
+  const { conversationId, messageIds } = await dialogWith([{ author: 'ai', body }]);
 
   const [note] = await db
     .insert(kbNotes)
@@ -172,9 +179,19 @@ async function agentAnswered(body: string): Promise<{ conversationId: string; ai
       content: body,
     })
     .returning();
+  // Linked to the message it actually produced — the same column `conversations.ts`'s own
+  // route reads to answer a message's `aiReplyId`, so a test built through this helper
+  // exercises the real join, not just a row that happens to share a conversation.
   const [reply] = await db
     .insert(aiReplies)
-    .values({ agentId, conversationId, model: 'test-model', outcome: 'sent', usedItemIds: [chunk!.id] })
+    .values({
+      agentId,
+      conversationId,
+      messageId: messageIds[0],
+      model: 'test-model',
+      outcome: 'sent',
+      usedItemIds: [chunk!.id],
+    })
     .returning();
 
   return { conversationId, aiReplyId: reply!.id };
@@ -288,6 +305,63 @@ describe('the coaching conversation', () => {
 
     expect(res.statusCode).toBe(404);
     expect(model.calls).toHaveLength(0);
+  });
+
+  // `ownReply` pins both `agentId` and `conversationId` — the test above proves the
+  // conversation dimension; this one proves the agent dimension is pinned too. Nothing
+  // stops the two ids in `ai_replies` from disagreeing at the database level (they are two
+  // independent foreign keys), so a reply row is inserted directly, naming a *different*
+  // agent than the one running this conversation while still pointing at this very
+  // conversation id. A query that checked `conversationId` alone would happily accept it.
+  it('refuses a reply id that belongs to a different agent', async () => {
+    const { conversationId } = await dialogWith([{ author: 'ai', body: 'Доставка 1500 ₸.' }]);
+
+    const stranger = await createAccountWithOwner(db, {
+      company: 'Чужая',
+      email: 'stranger@example.com',
+      name: 'Чужой',
+      initials: 'ЧУ',
+      password: PASSWORD,
+    });
+    const [foreignAgent] = await db
+      .insert(agents)
+      .values({ accountId: stranger.accountId, name: 'Чужой' })
+      .returning();
+    const [foreignReply] = await db
+      .insert(aiReplies)
+      .values({ agentId: foreignAgent!.id, conversationId, model: 'test-model', outcome: 'sent' })
+      .returning();
+
+    const res = await say('Так нельзя.', conversationId, foreignReply!.id);
+
+    expect(res.statusCode).toBe(404);
+    expect(model.calls).toHaveLength(0);
+  });
+
+  // The id a real «Так нельзя» click carries never comes from a direct database read the
+  // way `agentAnswered` builds it above — it comes back from `GET …/conversations/:id`, the
+  // same route `DialogsScreen` calls. This test goes through that route rather than around
+  // it, so a wiring mistake in `conversations.ts` (the field left off the response, or
+  // filled from the wrong column) fails here even though `ownReply` and `sectionTitlesFor`
+  // themselves are correct.
+  it('reaches the prompt using the reply id the conversations route itself hands back', async () => {
+    const { conversationId } = await agentAnswered('Доставка стоит 1500 ₸.');
+    model.reply({ message: 'Понял.', proposal: null });
+
+    const convRes = await app.inject({
+      method: 'GET',
+      url: `/api/agents/${agentId}/conversations/${conversationId}`,
+      cookies: jar,
+    });
+    expect(convRes.statusCode).toBe(200);
+    const aiMessage = convRes.json().messages.find((m: { author: string }) => m.author === 'ai');
+    expect(aiMessage.aiReplyId).toBeTruthy();
+
+    await say('Так нельзя.', conversationId, aiMessage.aiReplyId);
+
+    const system = model.lastMessages[0]!.content;
+    expect(system).toContain('Доставка стоит 1500 ₸.');
+    expect(system).toContain('Доставка › По городу');
   });
 
   // The transcript is the one place a customer's own words reach the model on this route —

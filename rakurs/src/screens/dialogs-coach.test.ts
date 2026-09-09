@@ -12,6 +12,7 @@ const aiMessage: Message = {
   mediaMime: null,
   status: 'sent',
   sentAt: '2026-09-08T10:00:00.000Z',
+  aiReplyId: null,
 };
 
 describe('canCoachFrom', () => {
@@ -35,5 +36,13 @@ describe('canCoachFrom', () => {
 describe('coachLink', () => {
   it('carries the conversation id and nothing else — never the message text', () => {
     expect(coachLink('c1')).toBe('../coach?conversation=c1');
+  });
+
+  it('carries the exact reply the button sat on, when the message has one', () => {
+    expect(coachLink('c1', 'r1')).toBe('../coach?conversation=c1&reply=r1');
+  });
+
+  it('carries no reply for a message with none — an ai message from before the column existed', () => {
+    expect(coachLink('c1', null)).toBe('../coach?conversation=c1');
   });
 });

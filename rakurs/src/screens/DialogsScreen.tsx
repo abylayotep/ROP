@@ -38,12 +38,16 @@ export function canCoachFrom(message: Message, role: Role): boolean {
 
 /**
  * Where «Так нельзя» sends the owner: «Обучение», with this dialog's id in the query string
- * so the coach can load its transcript. An id, never the message itself — the fence
+ * so the coach can load its transcript, and — when the clicked message carries one — the
+ * exact `ai_replies` id it came from, so the coach names *that* turn instead of falling back
+ * to the conversation's latest reply (which need not be the one the owner is complaining
+ * about at all). Both are ids, never the message itself — the fence
  * `server/src/lib/ai/coach.ts` builds around a transcript is not something a link built here
  * may hand a way around.
  */
-export function coachLink(conversationId: string): string {
-  return `../coach?conversation=${conversationId}`;
+export function coachLink(conversationId: string, aiReplyId?: string | null): string {
+  const reply = aiReplyId ? `&reply=${aiReplyId}` : '';
+  return `../coach?conversation=${conversationId}${reply}`;
 }
 
 export function DialogsScreen() {
@@ -312,7 +316,7 @@ function Bubble({
         {canCoachFrom(message, role) && (
           <button
             type="button"
-            onClick={() => navigate(coachLink(conversationId))}
+            onClick={() => navigate(coachLink(conversationId, message.aiReplyId))}
             style={{
               marginLeft: 'auto',
               fontSize: 10.5,

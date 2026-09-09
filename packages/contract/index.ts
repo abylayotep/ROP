@@ -69,6 +69,12 @@ export interface Message {
   /** Outbound only: sent, delivered, read, failed. */
   status: string | null;
   sentAt: string;
+  /** The `ai_replies` row this message was the agent's output of. Null for an inbound
+   * customer message and for an operator's own line — neither is a reply `coach.ts`'s
+   * `ownReply` would ever resolve — and null for an AI message from before this column
+   * existed. Carried so «Так нельзя» can name the exact turn a wrong answer came from,
+   * rather than the coach guessing the conversation's latest reply. */
+  aiReplyId: string | null;
 }
 
 export interface ConversationSummary {

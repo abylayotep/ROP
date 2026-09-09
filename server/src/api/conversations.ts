@@ -5,7 +5,7 @@ import { and, eq, sql } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
-import { contacts, conversations, messages, whatsappNumbers } from '../db/schema.js';
+import { aiReplies, contacts, conversations, messages, whatsappNumbers } from '../db/schema.js';
 import type { Env } from '../env.js';
 import { ApiError } from '../lib/errors.js';
 import { credentialsKey, decryptSecret } from '../lib/secret-box.js';
@@ -25,7 +25,7 @@ export const windowOpen = (lastInboundAt: Date | null, now = new Date()): boolea
 
 const outgoing = z.object({ body: z.string() });
 
-const toMessage = (row: typeof messages.$inferSelect): Message => ({
+const toMessage = (row: typeof messages.$inferSelect, aiReplyId: string | null): Message => ({
   id: row.id,
   direction: row.direction,
   author: row.author,
@@ -37,6 +37,7 @@ const toMessage = (row: typeof messages.$inferSelect): Message => ({
   mediaMime: row.mediaMime,
   status: row.status,
   sentAt: row.sentAt.toISOString(),
+  aiReplyId,
 });
 
 export function registerConversationRoutes(
@@ -87,9 +88,14 @@ export function registerConversationRoutes(
       const { conversationId } = req.params as { conversationId: string };
       const { conversation, contact } = await loadConversation(db, req.agent!.id, conversationId);
 
+      // A left join, not a second query per message: `ai_replies.message_id` points back at
+      // the message it produced (at most one row ever does, since a turn stamps it once,
+      // when it sends), so one query already carries every message's reply id, if it has
+      // one, the same way it already carried everything else about the message.
       const thread = await db
-        .select()
+        .select({ message: messages, aiReplyId: aiReplies.id })
         .from(messages)
+        .leftJoin(aiReplies, eq(aiReplies.messageId, messages.id))
         .where(eq(messages.conversationId, conversation.id))
         .orderBy(messages.sentAt);
 
@@ -98,10 +104,10 @@ export function registerConversationRoutes(
         contactName: contact.name,
         contactPhone: contact.phone,
         lastMessageAt: conversation.lastMessageAt?.toISOString() ?? null,
-        preview: thread.at(-1)?.body ?? null,
+        preview: thread.at(-1)?.message.body ?? null,
         windowOpen: windowOpen(conversation.lastInboundAt),
         adHeadline: conversation.adHeadline,
-        messages: thread.map(toMessage),
+        messages: thread.map((row) => toMessage(row.message, row.aiReplyId)),
       };
     },
   );
@@ -180,7 +186,9 @@ export function registerConversationRoutes(
         .set({ lastMessageAt: sentAt })
         .where(eq(conversations.id, conversation.id));
 
-      return toMessage(stored!);
+      // An operator's own line, sent by a person through this very route — never an ai
+      // reply, so there is nothing to look up.
+      return toMessage(stored!, null);
     },
   );
 

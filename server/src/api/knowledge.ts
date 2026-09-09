@@ -74,17 +74,22 @@ const notePath = z
 const createNote = z.object({ path: notePath, body: z.string().max(BODY_MAX).default('') });
 const updateNote = z.object({ path: notePath.optional(), body: z.string().max(BODY_MAX).optional() });
 
-/** The message for the field that actually failed a note write. */
+/**
+ * The message for the field that actually failed a note write.
+ *
+ * `issue.message` is passed through only for `custom` — our own `refine`s above, which
+ * already wrote it in Russian. Every other zod code (`too_small`, `invalid_type`, and
+ * whatever a future zod version adds) falls back to one of the two messages below instead of
+ * leaking zod's own English text to a cabinet user.
+ */
 function noteError(issue: { code: string; path: readonly PropertyKey[]; message: string } | undefined): ApiError {
   if (!issue) return new ApiError(400, 'Не удалось разобрать заметку');
   if (issue.path[0] === 'body') {
     return new ApiError(400, `Текст длиннее ${BODY_MAX} символов`);
   }
-  // The three built-in checks on `path` (missing, too long) get a message of their own;
-  // every `refine` above already carries the right one in `issue.message`.
-  if (issue.code === 'too_small') return new ApiError(400, 'Укажите название');
+  if (issue.code === 'custom') return new ApiError(400, issue.message);
   if (issue.code === 'too_big') return new ApiError(400, 'Название длиннее 400 символов');
-  return new ApiError(400, issue.message);
+  return new ApiError(400, 'Укажите название');
 }
 
 const queryParam = z.object({ q: z.string().optional() });

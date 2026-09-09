@@ -64,6 +64,8 @@ DECLARE
   base_path text;
   candidate_path text;
   suffix integer;
+  note_title text;
+  note_body text;
 BEGIN
   FOR item IN SELECT * FROM kb_items ORDER BY created_at, id LOOP
     folder := CASE item.kind
@@ -83,9 +85,28 @@ BEGIN
       suffix := suffix + 1;
     END LOOP;
 
+    -- A note's title is its path's last segment -- what `saveNote`'s `titleOf` derives on the
+    -- very next save. `item.title` disagrees with that segment exactly when the numbering
+    -- above added a "(n)" suffix or the escaping above turned a literal "/" into "∕": leaving
+    -- `title` as `item.title` there would have the first save of a numbered duplicate rename
+    -- it out from under itself and re-title every one of its chunks along with it.
+    note_title := substring(candidate_path from position('/' in candidate_path) + 1);
+
+    -- Frontmatter, not only the `kind` column: `saveNote`'s `parseNote` reads a note's kind
+    -- from its body, not from `kb_notes.kind`, so a kind that lives only in the column is the
+    -- kind this note has until anyone next saves it -- at which point `parseNote` finds no
+    -- frontmatter and calls it `other`, silently reclassifying every migrated note the moment
+    -- it is touched. Written exactly as the paste importer writes it (`insertPasteNotes`), so
+    -- a migrated note and a freshly pasted one of the same kind look identical to every later
+    -- save.
+    note_body := CASE
+      WHEN item.kind = 'other' THEN item.content
+      ELSE '---' || chr(10) || 'kind: ' || item.kind || chr(10) || '---' || chr(10) || chr(10) || item.content
+    END;
+
     INSERT INTO kb_notes (id, agent_id, source_id, path, title, body, kind, edited, created_at, updated_at)
     VALUES (
-      item.id, item.agent_id, item.source_id, candidate_path, item.title, item.content,
+      item.id, item.agent_id, item.source_id, candidate_path, note_title, note_body,
       item.kind, item.edited, item.created_at, item.updated_at
     );
   END LOOP;

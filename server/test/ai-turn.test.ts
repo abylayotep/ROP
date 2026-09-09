@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { and, asc, eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
+  agentRules,
   agents,
   aiReplies,
   contacts,
@@ -163,9 +164,14 @@ beforeEach(async () => {
     accountId,
     name: 'Сафина',
     aiEnabled: true,
-    instructions: 'Продавай двери. Будь краток.',
     openrouterKey: encryptSecret(OPENROUTER_KEY, key, agentId),
   });
+  // Replaces the old `instructions: 'Продавай двери. Будь краток.'` column value: one rule
+  // per sentence, which is what the owner would actually have typed as two rules.
+  await db.insert(agentRules).values([
+    { agentId, category: 'business', text: 'Продавай двери.', position: 0 },
+    { agentId, category: 'tone', text: 'Будь краток.', position: 0 },
+  ]);
   await seedFunnel(db, agentId);
 
   const fields = await db
@@ -1182,10 +1188,12 @@ describe('a number nothing the agent read contains', () => {
     // Rule 9 tells the agent it may and should repeat the owner's words, and the guide's own
     // example instructions say «Работаем с 2015 года». A greeting written from the guide must
     // not hand the conversation to a human.
-    await db
-      .update(agents)
-      .set({ instructions: 'Мы ставим двери в Алматы. Работаем с 2015 года.' })
-      .where(eq(agents.id, agentId));
+    await db.insert(agentRules).values({
+      agentId,
+      category: 'business',
+      text: 'Мы ставим двери в Алматы. Работаем с 2015 года.',
+      position: 1,
+    });
     const model = fakeModel(
       answer({ reply: 'Здравствуйте! Мы работаем с 2015 года. Какие двери нужны?' }),
     );

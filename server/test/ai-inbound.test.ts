@@ -17,6 +17,7 @@ import { SANDBOX_TURNS, sandboxTurns } from '../src/api/ai.js';
 import { buildServer } from '../src/api/server.js';
 import type { Db } from '../src/db/client.js';
 import {
+  agentRules,
   agents,
   aiReplies,
   contacts,
@@ -258,9 +259,14 @@ beforeEach(async () => {
     accountId,
     name: 'Сафина',
     aiEnabled: true,
-    instructions: 'Продавай двери. Будь краток.',
     openrouterKey: encryptSecret(OPENROUTER_KEY, key, keyAad(agentId)),
   });
+  // Replaces the old `instructions: 'Продавай двери. Будь краток.'` column value: one rule
+  // per sentence, which is what the owner would actually have typed as two rules.
+  await db.insert(agentRules).values([
+    { agentId, category: 'business', text: 'Продавай двери.', position: 0 },
+    { agentId, category: 'tone', text: 'Будь краток.', position: 0 },
+  ]);
   await seedFunnel(db, agentId);
 
   const [field] = await db
@@ -521,7 +527,6 @@ describe('the settings routes', () => {
       aiEnabled: true,
       model: 'openai/gpt-4o-mini',
       temperature: 0.3,
-      instructions: 'Продавай двери. Будь краток.',
       replyLanguage: 'auto',
       keySet: true,
     });
@@ -535,7 +540,7 @@ describe('the settings routes', () => {
     const read = await app.inject({ method: 'GET', url: settingsUrl(), cookies: asMember });
     expect(read.statusCode).toBe(200);
 
-    expect((await patchSettings({ instructions: 'Иначе' }, asMember)).statusCode).toBe(403);
+    expect((await patchSettings({ aiEnabled: false }, asMember)).statusCode).toBe(403);
   });
 
   it('stores the key sealed against the agent and answers without it', async () => {

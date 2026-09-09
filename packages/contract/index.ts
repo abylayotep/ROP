@@ -334,8 +334,6 @@ export interface AiSettings {
    * nothing is lost by passing it through a float the way an order's sum would be.
    */
   temperature: number;
-  /** What the owner wrote about how their business sells. The agent's whole character. */
-  instructions: string;
   /** 'auto' answers in the customer's own language; anything else names one. */
   replyLanguage: string;
   /** Whether a key is stored. The key itself never leaves the server. */

@@ -55,7 +55,6 @@ describe('ai schema', () => {
     expect(row?.model).toBe('openai/gpt-4o-mini');
     // numeric arrives as a string on purpose: a temperature must not drift through a float.
     expect(row?.temperature).toBe('0.30');
-    expect(row?.instructions).toBe('');
     expect(row?.replyLanguage).toBe('auto');
     expect(row?.openrouterKey).toBeNull();
   });

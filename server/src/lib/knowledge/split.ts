@@ -49,8 +49,13 @@ function cutAt(window: string): number {
   return candidates.find((at) => at > CONTENT_MAX / 2) ?? CONTENT_MAX;
 }
 
-/** Cuts a body too long for its column into pieces, each one cut where it costs least. */
-function cut(content: string): string[] {
+/**
+ * Cuts a body too long for its column into pieces, each one cut where it costs least.
+ *
+ * Shared with the note splitter (`note.ts`): a note section is cut on the same rule as a
+ * record's content, so a price list reads the same whether it lives in a note or a record.
+ */
+export function splitLongText(content: string): string[] {
   if (content.length <= CONTENT_MAX) return [content];
 
   const pieces: string[] = [];
@@ -66,7 +71,7 @@ function cut(content: string): string[] {
 
 /** One part per piece, numbered when there is more than one so a hit still reads sensibly. */
 function toParts(title: string, content: string): SplitPart[] {
-  const pieces = cut(content);
+  const pieces = splitLongText(content);
   if (pieces.length === 1) return [{ title: clampTitle(title), content: pieces[0]! }];
   return pieces.map((piece, index) => {
     // The number is appended after the clamp, not clamped with it: a title that already

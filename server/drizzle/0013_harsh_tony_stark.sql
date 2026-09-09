@@ -50,11 +50,26 @@ CREATE INDEX "coach_messages_agent_created_idx" ON "coach_messages" USING btree 
 -- version restarted its own counter at 1000 inside every paragraph, so two long paragraphs on
 -- the same agent produced colliding positions and an order the prompt would not have shown
 -- the owner. A single ordered sequence cannot collide.
-WITH fragments AS (
+--
+-- `normalized_agents` collapses every line ending to a bare `\n` before anything is split.
+-- Without it, a Windows-authored field joins its paragraphs with `\r\n\r\n`; the splitter's
+-- `\n\s*\n` lets `\s*` eat the second pair's `\r\n` and then backtrack to the shortest match
+-- `\n\r\n`, so the separator's leading `\r` is stranded on the end of the *first* paragraph
+-- instead of being consumed by the separator. Postgres's no-argument `trim()` strips only
+-- spaces, not `\r`, so that character would otherwise survive into the row and reach the
+-- model inside the rule's own text. Normalizing first means every branch below sees the same
+-- one kind of newline, so this can't happen down any of the three paths.
+WITH normalized_agents AS (
+  SELECT a.id,
+         regexp_replace(regexp_replace(a.instructions, E'\r\n', E'\n', 'g'), E'\r', E'\n', 'g')
+           AS instructions
+  FROM agents a
+),
+fragments AS (
   -- A paragraph that already fits becomes one rule, whole.
   SELECT a.id AS agent_id, p.ord AS para_ord, 0 AS sentence_ord, 0 AS piece_ord,
          trim(p.para) AS text
-  FROM agents a,
+  FROM normalized_agents a,
        LATERAL regexp_split_to_table(a.instructions, '\n\s*\n') WITH ORDINALITY AS p(para, ord)
   WHERE trim(p.para) <> '' AND length(trim(p.para)) <= 500
 
@@ -63,7 +78,7 @@ WITH fragments AS (
   -- A sentence of an over-long paragraph that fits on its own.
   SELECT a.id, p.ord, s.ord, 0,
          trim(s.sentence)
-  FROM agents a,
+  FROM normalized_agents a,
        LATERAL regexp_split_to_table(a.instructions, '\n\s*\n') WITH ORDINALITY AS p(para, ord),
        LATERAL regexp_split_to_table(trim(p.para), '(?<=[.!?])\s+') WITH ORDINALITY AS s(sentence, ord)
   WHERE length(trim(p.para)) > 500 AND trim(s.sentence) <> '' AND length(trim(s.sentence)) <= 500
@@ -74,7 +89,7 @@ WITH fragments AS (
   -- 500-character pieces, in order, rather than being dropped.
   SELECT a.id, p.ord, s.ord, piece.ord,
          substring(trim(s.sentence) FROM piece.start FOR 500)
-  FROM agents a,
+  FROM normalized_agents a,
        LATERAL regexp_split_to_table(a.instructions, '\n\s*\n') WITH ORDINALITY AS p(para, ord),
        LATERAL regexp_split_to_table(trim(p.para), '(?<=[.!?])\s+') WITH ORDINALITY AS s(sentence, ord),
        LATERAL generate_series(1, length(trim(s.sentence)), 500) WITH ORDINALITY AS piece(start, ord)

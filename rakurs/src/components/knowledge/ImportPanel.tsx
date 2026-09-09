@@ -45,18 +45,18 @@ export const KIND_LABELS: { id: KbNoteKind; label: string }[] = [
 export const kindLabel = (kind: KbNoteKind): string =>
   KIND_LABELS.find((entry) => entry.id === kind)?.label ?? kind;
 
-/** «запись» / «записи» / «записей». Russian counts three ways and this panel shows numbers. */
-function records(count: number): string {
+/** «заметка» / «заметки» / «заметок». Russian counts three ways and this panel shows numbers. */
+function notesWord(count: number): string {
   const hundreds = count % 100;
   const tens = count % 10;
-  if (tens === 1 && hundreds !== 11) return 'запись';
-  if (tens >= 2 && tens <= 4 && (hundreds < 12 || hundreds > 14)) return 'записи';
-  return 'записей';
+  if (tens === 1 && hundreds !== 11) return 'заметка';
+  if (tens >= 2 && tens <= 4 && (hundreds < 12 || hundreds > 14)) return 'заметки';
+  return 'заметок';
 }
 
-/** «Создана 1 запись» · «Создано 3 записи» · «Создано 12 записей». */
+/** «Создана 1 заметка» · «Создано 3 заметки» · «Создано 12 заметок». */
 const createdLine = (count: number) =>
-  `${count % 10 === 1 && count % 100 !== 11 ? 'Создана' : 'Создано'} ${count} ${records(count)}`;
+  `${count % 10 === 1 && count % 100 !== 11 ? 'Создана' : 'Создано'} ${count} ${notesWord(count)}`;
 
 const when = (iso: string) =>
   new Date(iso).toLocaleString('ru-RU', {
@@ -189,11 +189,11 @@ function PasteForm({
           />
         </div>
         <div>
-          <div style={label}>Тип записей</div>
+          <div style={label}>Тип заметок</div>
           <select
             style={control}
             value={kind}
-            aria-label="Тип записей"
+            aria-label="Тип заметок"
             onChange={(e) => setKind(e.target.value as KbNoteKind)}
           >
             {KIND_LABELS.map((entry) => (
@@ -214,7 +214,7 @@ function PasteForm({
           onChange={(e) => setText(e.target.value)}
         />
         <div style={{ ...hint, marginTop: 5 }}>
-          Пустая строка разделяет записи, первая строка каждой — заголовок.
+          Пустая строка начинает новую заметку, первая строка каждой — её название.
         </div>
       </div>
 
@@ -270,9 +270,9 @@ function PageForm({
           onChange={(e) => setUrl(e.target.value)}
         />
         <div style={{ ...hint, marginTop: 5 }}>
-          Заголовки страницы становятся заголовками записей. Страницу можно обновить позже —
-          то, что вы поправите руками, при обновлении сохранится. Уже загруженный адрес не
-          продублируется: страница просто прочитается заново.
+          Страница станет одной заметкой, а её заголовки — разделами внутри неё. Страницу
+          можно обновить позже — то, что вы поправите руками, при обновлении сохранится. Уже
+          загруженный адрес не продублируется: страница просто прочитается заново.
         </div>
       </div>
 
@@ -294,7 +294,7 @@ function PageForm({
  * The two cases are worded apart. A first import answers with the notes it created, so it
  * says how many were created. An update answers with everything the source holds
  * afterwards — the fresh notes plus the ones a person had edited, which it kept and did not
- * make — so «Создано N записей» would be a false count of a true list.
+ * make — so «Создано N заметок» would be a false count of a true list.
  */
 function ImportResult({ result, onHide }: { result: KbImport; onHide: () => void }) {
   const { reimported, keptEdited } = result;
@@ -312,7 +312,7 @@ function ImportResult({ result, onHide }: { result: KbImport; onHide: () => void
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
         <span style={{ fontSize: 12.5, fontWeight: 650 }}>
           {reimported
-            ? `В источнике «${result.source.title}» теперь ${result.notes.length} ${records(result.notes.length)}`
+            ? `В источнике «${result.source.title}» теперь ${result.notes.length} ${notesWord(result.notes.length)}`
             : `${createdLine(result.notes.length)} из «${result.source.title}»`}
         </span>
         <button
@@ -434,7 +434,7 @@ function SourceList({
               )}
               <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 4 }}>
                 {source.kind === 'page' ? 'Страница' : 'Текст'} · {when(source.createdAt)} ·{' '}
-                {source.itemCount} {records(source.itemCount)}
+                {source.itemCount} {notesWord(source.itemCount)}
               </div>
               {source.error && (
                 <div style={{ fontSize: 11.5, color: 'var(--danger)', marginTop: 4 }}>

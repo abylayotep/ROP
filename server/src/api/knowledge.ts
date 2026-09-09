@@ -1,9 +1,18 @@
-import type { KbImport, KbItem, KbSource } from '@rakurs/contract';
-import { and, asc, desc, eq, sql } from 'drizzle-orm';
+import type {
+  KbGraph,
+  KbImport,
+  KbLinkRef,
+  KbNote,
+  KbNoteDetail,
+  KbNoteKind,
+  KbSection,
+  KbSource,
+} from '@rakurs/contract';
+import { and, asc, desc, eq, inArray, isNotNull } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
-import { kbItems, kbSources } from '../db/schema.js';
+import { kbChunks, kbLinks, kbNotes, kbSources } from '../db/schema.js';
 import { ApiError } from '../lib/errors.js';
 import {
   PAGE_REFUSED,
@@ -13,17 +22,13 @@ import {
   type FetchedPage,
   type PageFetcher,
 } from '../lib/knowledge/fetch-page.js';
-import { kbItemColumns, searchKnowledge, type KbRow } from '../lib/knowledge/search.js';
+import { BODY_MAX } from '../lib/knowledge/note.js';
+import { deleteNote, saveNote } from '../lib/knowledge/notes.js';
+import { kbChunkColumns, searchKnowledge, type KbRow } from '../lib/knowledge/search.js';
 // pleep's own limits, and they are the right shape: a fact, not an essay. They live beside
 // the splitter because that is the code that has to cut to fit them; a second copy here
 // would be one edit away from letting the splitter produce what this route rejects.
-import {
-  CONTENT_MAX,
-  TITLE_MAX,
-  splitBlocks,
-  splitByHeadings,
-  type SplitPart,
-} from '../lib/knowledge/split.js';
+import { CONTENT_MAX, TITLE_MAX, splitBlocks, splitByHeadings, type SplitPart } from '../lib/knowledge/split.js';
 import { isUuid } from '../lib/uuid.js';
 import { requireAgent } from './require-agent.js';
 
@@ -31,57 +36,62 @@ const KINDS = ['product', 'qa', 'procedure', 'contact', 'other'] as const;
 
 /** A paste bigger than this is a file, not a note, and files are not this stage. */
 const PASTE_MAX = 200_000;
-/**
- * How many items go into one INSERT.
- *
- * A statement carries at most 65534 bound parameters and each item row spends five, so one
- * statement holds 13106 rows. A paste of eighty thousand characters — comfortably inside
- * `PASTE_MAX` — split into twenty thousand one-line blocks is past that, and the owner got
- * «Внутренняя ошибка сервера» for a price list the product had promised to accept. A
- * thousand a statement is far under the cap with room for the row to grow columns, and the
- * chunks run inside the import's transaction, so it is still all of the items or none.
- */
-const INSERT_CHUNK = 1000;
 /** A search nobody scrolls past. Stage 5 asks for far fewer. */
 const SEARCH_LIMIT = 20;
 /**
  * The browse list is capped separately, and higher.
  *
  * Twenty is right for a search, where the ranker has put the answer near the top; browsing
- * the store is the other thing this route does, and cutting it at twenty would hide most of
+ * the vault is the other thing this route does, and cutting it at twenty would hide most of
  * what a site import produced. Unbounded is not the alternative: an import yields dozens of
- * chunks per page, and `SELECT *` over all of them is a response that grows with the
+ * notes per page, and `SELECT *` over all of them is a response that grows with the
  * customer's website. A hundred is a screen's worth of scrolling, and the search box — the
  * same route with `q` — is how the rest is reached until the screen paginates.
  */
 const LIST_LIMIT = 100;
-
-const createItem = z.object({
-  kind: z.enum(KINDS).default('other'),
-  title: z.string().trim().min(1).max(TITLE_MAX),
-  content: z.string().trim().min(1).max(CONTENT_MAX),
-});
-
-const patchItem = z.object({
-  kind: z.enum(KINDS).optional(),
-  title: z.string().trim().min(1).max(TITLE_MAX).optional(),
-  content: z.string().trim().min(1).max(CONTENT_MAX).optional(),
-});
-
-const listQuery = z.object({
-  kind: z.enum(KINDS).optional(),
-  q: z.string().optional(),
-});
+/**
+ * The graph tab is a picture, not a table: a thousand nodes on one canvas stops being
+ * readable long before it stops being fast to fetch. 500 is a vault a small business could
+ * plausibly write by hand; past that the tab should say so rather than pretend to draw it.
+ */
+const GRAPH_LIMIT = 500;
 
 /**
- * Long enough for the query string of a real catalogue page and far short of anything a
- * person typed. An address is checked properly by `URL` below; this only keeps a megabyte of
- * paste out of the parser.
+ * A path is folders and a name. Bounded because it is an identity people type: a leading
+ * slash, an empty segment or a tenth folder is a mistake we can name rather than store.
  */
-const URL_MAX = 2048;
+const notePath = z
+  .string()
+  .trim()
+  .min(1)
+  .max(400)
+  .refine(
+    (path) => !path.startsWith('/') && !path.endsWith('/'),
+    'Название не может начинаться или заканчиваться косой чертой',
+  )
+  .refine((path) => path.split('/').every((part) => part.trim() !== ''), 'В названии есть пустая папка')
+  .refine((path) => path.split('/').length <= 10, 'Слишком глубокая вложенность');
+
+const createNote = z.object({ path: notePath, body: z.string().max(BODY_MAX).default('') });
+const updateNote = z.object({ path: notePath.optional(), body: z.string().max(BODY_MAX).optional() });
+
+/** The message for the field that actually failed a note write. */
+function noteError(issue: { code: string; path: readonly PropertyKey[]; message: string } | undefined): ApiError {
+  if (!issue) return new ApiError(400, 'Не удалось разобрать заметку');
+  if (issue.path[0] === 'body') {
+    return new ApiError(400, `Текст длиннее ${BODY_MAX} символов`);
+  }
+  // The three built-in checks on `path` (missing, too long) get a message of their own;
+  // every `refine` above already carries the right one in `issue.message`.
+  if (issue.code === 'too_small') return new ApiError(400, 'Укажите название');
+  if (issue.code === 'too_big') return new ApiError(400, 'Название длиннее 400 символов');
+  return new ApiError(400, issue.message);
+}
+
+const queryParam = z.object({ q: z.string().optional() });
 
 const importPage = z.object({
-  url: z.string().trim().min(1).max(URL_MAX),
+  url: z.string().trim().min(1).max(2048),
 });
 
 const importText = z.object({
@@ -91,15 +101,12 @@ const importText = z.object({
 });
 
 /**
- * The message for the field that actually failed.
+ * The message for the field that actually failed an import.
  *
  * One message for the whole body would answer an unknown `kind` by talking about the length
- * of a title the sender got right, and would say the same thing again for a body that is not
- * an object at all. The reader has to be told which of the three it was.
+ * of a title the sender got right. The reader has to be told which field it was.
  */
-function knowledgeError(
-  issue: { code: string; path: readonly PropertyKey[] } | undefined,
-): ApiError {
+function importError(issue: { code: string; path: readonly PropertyKey[] } | undefined): ApiError {
   const tooBig = issue?.code === 'too_big';
   switch (issue?.path[0]) {
     case 'kind':
@@ -108,13 +115,9 @@ function knowledgeError(
       return tooBig
         ? new ApiError(400, `Заголовок длиннее ${TITLE_MAX} символов`)
         : new ApiError(400, 'Укажите заголовок');
-    case 'content':
-      return tooBig
-        ? new ApiError(400, `Текст длиннее ${CONTENT_MAX} символов`)
-        : new ApiError(400, 'Укажите текст записи');
     // The pasted body of an import. It has its own limit — a paste is allowed to be far
-    // longer than one item, because the splitter is about to cut it into several — and it
-    // branches for the same reason the two above do: a body with no `text` at all told the
+    // longer than one note, because the splitter is about to cut it into several — and it
+    // branches for the same reason the others do: a body with no `text` at all told the
     // sender its text was too long, which is precisely the confusion this helper exists for.
     case 'text':
       return tooBig
@@ -122,22 +125,40 @@ function knowledgeError(
         : new ApiError(400, 'Вставьте текст для импорта');
     case 'url':
       return tooBig
-        ? new ApiError(400, `Адрес длиннее ${URL_MAX} символов`)
+        ? new ApiError(400, `Адрес длиннее 2048 символов`)
         : new ApiError(400, 'Укажите адрес страницы');
     default:
       return new ApiError(400, 'Не удалось разобрать запись');
   }
 }
 
-export const toKbItem = (row: KbRow, sourceTitle: string | null): KbItem => ({
+/**
+ * Postgres reports a unique violation with this code. Drizzle wraps the driver error in
+ * its own `DrizzleQueryError`, so the code sits on `.cause`, not on the error itself.
+ */
+function isDuplicate(error: unknown): boolean {
+  const cause = error instanceof Error ? error.cause : undefined;
+  return typeof cause === 'object' && cause !== null && (cause as { code?: string }).code === '23505';
+}
+
+const toKbNote = (row: typeof kbNotes.$inferSelect, sourceTitle: string | null): KbNote => ({
   id: row.id,
-  kind: row.kind as KbItem['kind'],
+  path: row.path,
   title: row.title,
-  content: row.content,
+  kind: row.kind as KbNoteKind,
+  tags: row.tags,
   edited: row.edited,
   sourceId: row.sourceId,
   sourceTitle,
   updatedAt: row.updatedAt.toISOString(),
+});
+
+const toKbSection = (chunk: KbRow): KbSection => ({
+  id: chunk.id,
+  noteId: chunk.noteId,
+  title: chunk.title,
+  heading: chunk.heading,
+  content: chunk.content,
 });
 
 const toKbSource = (row: typeof kbSources.$inferSelect): KbSource => ({
@@ -182,7 +203,7 @@ function targetUrl(raw: string): URL {
  * bare to `www`, which is most real sites — could not find the row the successful import had
  * written under the final URL, so it inserted a second one. The next success rewrote that
  * row's url to the final URL, and the sources list held two rows for one address with the
- * items split between them and the younger one unreachable for good. The typed address is
+ * notes split between them and the younger one unreachable for good. The typed address is
  * known before the fetch, after a failed fetch, and after a successful one, and it is also
  * the thing the owner will paste again.
  *
@@ -190,7 +211,7 @@ function targetUrl(raw: string): URL {
  * redirect is for.
  *
  * Tidied, because three spellings of one page are one page and were three sources with a
- * full duplicate set of items each:
+ * full duplicate set of notes each:
  *
  * - the fragment goes: `#top` is a position in a page, and it never reaches the server;
  * - a trailing slash goes, except on the root: `/prices` and `/prices/` are one page
@@ -242,7 +263,7 @@ export function registerKnowledgeRoutes(
   // deleting the source takes the batch away again. That is the owner's decision.
   const ownerOnly = requireAgent(db, { role: 'owner' });
 
-  /** The titles of the sources these items came from, in one query rather than per row. */
+  /** The titles of the sources these notes came from, in one query rather than per row. */
   async function sourceTitles(agentId: string): Promise<Map<string, string>> {
     const rows = await db
       .select({ id: kbSources.id, title: kbSources.title })
@@ -251,106 +272,229 @@ export function registerKnowledgeRoutes(
     return new Map(rows.map((row) => [row.id, row.title]));
   }
 
-  async function loadItem(agentId: string, itemId: string) {
-    if (!isUuid(itemId)) throw new ApiError(404, 'Запись не найдена');
+  /** One agent's source's title, or null for a hand-written note. A single lookup for one row. */
+  async function sourceTitleOf(sourceId: string | null): Promise<string | null> {
+    if (sourceId === null) return null;
+    const [row] = await db.select({ title: kbSources.title }).from(kbSources).where(eq(kbSources.id, sourceId));
+    return row?.title ?? null;
+  }
+
+  /** One agent's note, or 404 — never another agent's, and never a bare 500. */
+  async function loadNote(agentId: string, noteId: string): Promise<typeof kbNotes.$inferSelect> {
+    if (!isUuid(noteId)) throw new ApiError(404, 'Заметка не найдена');
     const [row] = await db
-      .select(kbItemColumns)
-      .from(kbItems)
-      .where(and(eq(kbItems.id, itemId), eq(kbItems.agentId, agentId)));
-    if (!row) throw new ApiError(404, 'Запись не найдена');
+      .select()
+      .from(kbNotes)
+      .where(and(eq(kbNotes.id, noteId), eq(kbNotes.agentId, agentId)));
+    if (!row) throw new ApiError(404, 'Заметка не найдена');
     return row;
   }
 
+  /** A note opened: its text, its sections, and what points at it, joined in three queries. */
+  async function loadNoteDetail(agentId: string, noteId: string): Promise<KbNoteDetail> {
+    const note = await loadNote(agentId, noteId);
+
+    const [sourceTitle, chunkRows, backlinkRows, linkRows] = await Promise.all([
+      sourceTitleOf(note.sourceId),
+      db.select(kbChunkColumns).from(kbChunks).where(eq(kbChunks.noteId, note.id)).orderBy(asc(kbChunks.ordinal)),
+      // Notes that link here: the title shown is the linking note's own, not the text it
+      // wrote inside `[[...]]` — those can disagree once either note is renamed.
+      db
+        .select({ noteId: kbLinks.fromNoteId, title: kbNotes.title })
+        .from(kbLinks)
+        .innerJoin(kbNotes, eq(kbNotes.id, kbLinks.fromNoteId))
+        .where(and(eq(kbLinks.agentId, agentId), eq(kbLinks.toNoteId, note.id))),
+      // What this note links to: the text it wrote, resolved if it matched a title.
+      db
+        .select({ noteId: kbLinks.toNoteId, title: kbLinks.target })
+        .from(kbLinks)
+        .where(and(eq(kbLinks.agentId, agentId), eq(kbLinks.fromNoteId, note.id))),
+    ]);
+
+    return {
+      ...toKbNote(note, sourceTitle),
+      body: note.body,
+      sections: chunkRows.map(toKbSection),
+      backlinks: backlinkRows,
+      links: linkRows,
+    };
+  }
+
   app.get(
-    '/api/agents/:agentId/knowledge/items',
+    '/api/agents/:agentId/knowledge/notes',
     { preHandler: [guard, anyMember] },
-    async (req): Promise<KbItem[]> => {
-      const parsed = listQuery.safeParse(req.query);
-      if (!parsed.success) throw knowledgeError(parsed.error.issues[0]);
-      const { kind, q } = parsed.data;
+    async (req): Promise<KbNote[]> => {
+      const parsed = queryParam.safeParse(req.query);
+      if (!parsed.success) throw new ApiError(400, 'Не удалось разобрать запрос');
+      const { q } = parsed.data;
       const titles = await sourceTitles(req.agent!.id);
 
-      // With a query the list IS the search: the owner's box and stage 5's agent must go
-      // through the same ranker, or the owner is testing something the agent never sees.
-      //
-      // `kind` goes to the ranker rather than to a `.filter()` on what it returns: the
-      // ranker cuts at SEARCH_LIMIT, so filtering afterwards would drop the items the caller
-      // asked for whenever more than twenty match the words — ordinary after a site import,
-      // and silent when it happens.
+      // With a query the list IS the search: the owner's box and the agent must go through
+      // the same ranker, or the owner is testing something the agent never sees.
       if (q !== undefined && q.trim() !== '') {
-        const hits = await searchKnowledge(db, req.agent!.id, q, SEARCH_LIMIT, { kind });
-        return hits.map((hit) => toKbItem(hit.item, titles.get(hit.item.sourceId ?? '') ?? null));
+        const hits = await searchKnowledge(db, req.agent!.id, q, SEARCH_LIMIT);
+
+        // The distinct notes of the hits, in the ranker's own order. Deduplicating with a
+        // second, differently-ordered query — `SELECT DISTINCT noteId ... ORDER BY updatedAt`,
+        // say — would show the owner a list that agrees with the ranker on membership and
+        // disagrees with it on order, which is worse than not deduplicating at all: the
+        // point of asking the same ranker the agent uses is to see what it saw, in the order
+        // it saw it. So the order is read off `hits`, which `searchKnowledge` has already cut
+        // at `SEARCH_LIMIT` — deduplicating a *second* time at that limit would be sound, but
+        // deduplicating before it (a `DISTINCT` inside the ranker's own query) is not: it would
+        // let one match per note through the cut instead of the best `SEARCH_LIMIT` sections,
+        // silently hiding a note whose only good match ranked just below a worse section of
+        // a note already counted.
+        const noteIds: string[] = [];
+        const seen = new Set<string>();
+        for (const hit of hits) {
+          if (!seen.has(hit.chunk.noteId)) {
+            seen.add(hit.chunk.noteId);
+            noteIds.push(hit.chunk.noteId);
+          }
+        }
+        if (noteIds.length === 0) return [];
+
+        const rows = await db
+          .select()
+          .from(kbNotes)
+          .where(and(eq(kbNotes.agentId, req.agent!.id), inArray(kbNotes.id, noteIds)));
+        const byId = new Map(rows.map((row) => [row.id, row]));
+        return noteIds.flatMap((id) => {
+          const row = byId.get(id);
+          return row ? [toKbNote(row, titles.get(row.sourceId ?? '') ?? null)] : [];
+        });
       }
 
       const rows = await db
-        .select(kbItemColumns)
-        .from(kbItems)
-        .where(
-          kind === undefined
-            ? eq(kbItems.agentId, req.agent!.id)
-            : and(eq(kbItems.agentId, req.agent!.id), eq(kbItems.kind, kind)),
-        )
-        .orderBy(desc(kbItems.updatedAt))
+        .select()
+        .from(kbNotes)
+        .where(eq(kbNotes.agentId, req.agent!.id))
+        .orderBy(desc(kbNotes.updatedAt))
         .limit(LIST_LIMIT);
-      return rows.map((row) => toKbItem(row, titles.get(row.sourceId ?? '') ?? null));
+      return rows.map((row) => toKbNote(row, titles.get(row.sourceId ?? '') ?? null));
     },
   );
 
   app.post(
-    '/api/agents/:agentId/knowledge/items',
+    '/api/agents/:agentId/knowledge/notes',
     { preHandler: [guard, anyMember] },
-    async (req): Promise<KbItem> => {
-      const parsed = createItem.safeParse(req.body);
-      if (!parsed.success) throw knowledgeError(parsed.error.issues[0]);
+    async (req): Promise<KbNoteDetail> => {
+      const parsed = createNote.safeParse(req.body);
+      if (!parsed.success) throw noteError(parsed.error.issues[0]);
 
-      const [row] = await db
-        .insert(kbItems)
-        .values({ agentId: req.agent!.id, ...parsed.data })
-        .returning(kbItemColumns);
-      return toKbItem(row!, null);
+      let noteId: string;
+      try {
+        noteId = await db.transaction(async (tx) => {
+          const note = await saveNote(tx as unknown as Db, {
+            agentId: req.agent!.id,
+            path: parsed.data.path,
+            body: parsed.data.body,
+          });
+          return note.id;
+        });
+      } catch (error) {
+        if (isDuplicate(error)) throw new ApiError(409, 'Заметка с таким названием уже есть');
+        throw error;
+      }
+      return loadNoteDetail(req.agent!.id, noteId);
+    },
+  );
+
+  app.get(
+    '/api/agents/:agentId/knowledge/notes/:noteId',
+    { preHandler: [guard, anyMember] },
+    async (req): Promise<KbNoteDetail> => {
+      const { noteId } = req.params as { noteId: string };
+      return loadNoteDetail(req.agent!.id, noteId);
     },
   );
 
   app.patch(
-    '/api/agents/:agentId/knowledge/items/:itemId',
+    '/api/agents/:agentId/knowledge/notes/:noteId',
     { preHandler: [guard, anyMember] },
-    async (req): Promise<KbItem> => {
-      const { itemId } = req.params as { itemId: string };
-      const current = await loadItem(req.agent!.id, itemId);
+    async (req): Promise<KbNoteDetail> => {
+      const { noteId } = req.params as { noteId: string };
+      const current = await loadNote(req.agent!.id, noteId);
 
-      const parsed = patchItem.safeParse(req.body);
-      if (!parsed.success) throw knowledgeError(parsed.error.issues[0]);
+      const parsed = updateNote.safeParse(req.body);
+      if (!parsed.success) throw noteError(parsed.error.issues[0]);
 
-      const titles = await sourceTitles(req.agent!.id);
-      if (Object.keys(parsed.data).length === 0) {
-        return toKbItem(current, titles.get(current.sourceId ?? '') ?? null);
+      try {
+        await db.transaction((tx) =>
+          saveNote(tx as unknown as Db, {
+            agentId: req.agent!.id,
+            noteId: current.id,
+            path: parsed.data.path ?? current.path,
+            body: parsed.data.body ?? current.body,
+            sourceId: current.sourceId,
+            // Set here and only here. It is what a reimport reads to decide what it may
+            // replace: a page the owner corrected by hand outranks the page it came from.
+            edited: true,
+          }),
+        );
+      } catch (error) {
+        if (isDuplicate(error)) throw new ApiError(409, 'Заметка с таким названием уже есть');
+        throw error;
       }
-
-      const [row] = await db
-        .update(kbItems)
-        // `edited` is set here and only here. It is what a reimport reads to decide what
-        // it may replace: a price the owner corrected outranks the page it came from.
-        // `now()`, not `new Date()`: `createdAt` and the default `updatedAt` are written by
-        // Postgres, and the two clocks disagree by tens of milliseconds. Stamping an edit
-        // from this process can therefore date it before the insert it edits.
-        .set({ ...parsed.data, edited: true, updatedAt: sql`now()` })
-        .where(and(eq(kbItems.id, current.id), eq(kbItems.agentId, req.agent!.id)))
-        .returning(kbItemColumns);
-      return toKbItem(row!, titles.get(row!.sourceId ?? '') ?? null);
+      return loadNoteDetail(req.agent!.id, current.id);
     },
   );
 
   app.delete(
-    '/api/agents/:agentId/knowledge/items/:itemId',
+    '/api/agents/:agentId/knowledge/notes/:noteId',
     { preHandler: [guard, anyMember] },
     async (req): Promise<{ ok: true }> => {
-      const { itemId } = req.params as { itemId: string };
-      const current = await loadItem(req.agent!.id, itemId);
-
-      await db
-        .delete(kbItems)
-        .where(and(eq(kbItems.id, current.id), eq(kbItems.agentId, req.agent!.id)));
+      const { noteId } = req.params as { noteId: string };
+      const current = await loadNote(req.agent!.id, noteId);
+      await db.transaction((tx) => deleteNote(tx as unknown as Db, req.agent!.id, current.id));
       return { ok: true };
+    },
+  );
+
+  app.get(
+    '/api/agents/:agentId/knowledge/search',
+    { preHandler: [guard, anyMember] },
+    async (req): Promise<KbSection[]> => {
+      const parsed = queryParam.safeParse(req.query);
+      if (!parsed.success) throw new ApiError(400, 'Не удалось разобрать запрос');
+      const { q } = parsed.data;
+      // A blank query is answered with nothing rather than sent to the ranker: see
+      // `searchKnowledge`'s own note on why a blank tsquery is not "everything".
+      if (q === undefined || q.trim() === '') return [];
+
+      const hits = await searchKnowledge(db, req.agent!.id, q, SEARCH_LIMIT);
+      return hits.map((hit) => toKbSection(hit.chunk));
+    },
+  );
+
+  app.get(
+    '/api/agents/:agentId/knowledge/graph',
+    { preHandler: [guard, anyMember] },
+    async (req): Promise<KbGraph> => {
+      const rows = await db
+        .select({ id: kbNotes.id, title: kbNotes.title, path: kbNotes.path })
+        .from(kbNotes)
+        .where(eq(kbNotes.agentId, req.agent!.id))
+        .orderBy(asc(kbNotes.createdAt), asc(kbNotes.id))
+        // One past the cap, purely to tell a vault of exactly 500 notes apart from one of
+        // 5000: the response would look identical at the cap alone.
+        .limit(GRAPH_LIMIT + 1);
+      const truncated = rows.length > GRAPH_LIMIT;
+      const notes = truncated ? rows.slice(0, GRAPH_LIMIT) : rows;
+
+      // Only links whose target resolved: a link to a title nothing carries is shown on the
+      // note itself (`KbNoteDetail.links`), not as an edge to a node the graph does not draw.
+      const linkRows = await db
+        .select({ from: kbLinks.fromNoteId, to: kbLinks.toNoteId })
+        .from(kbLinks)
+        .where(and(eq(kbLinks.agentId, req.agent!.id), isNotNull(kbLinks.toNoteId)));
+
+      return {
+        notes,
+        links: linkRows.map((row) => ({ from: row.from, to: row.to! })),
+        truncated,
+      };
     },
   );
 
@@ -368,50 +512,41 @@ export function registerKnowledgeRoutes(
   );
 
   /**
-   * The items of one import, written in chunks inside the caller's transaction.
+   * One import's parts, each written as a flat note under the import's own title.
    *
-   * Shared by the first import and the reimport, and chunked because a statement carries at
-   * most 65534 bound parameters: `INSERT_CHUNK` is what keeps a site with thousands of
-   * headings from becoming «Внутренняя ошибка сервера». It is still all of them or none —
-   * the chunks run inside the transaction the caller opened.
+   * A stand-in for what Task 8 owns: turning a page or a paste into a vault's worth of
+   * folders is a design question — where a catalogue's sections become notes, what becomes a
+   * folder — and answering it here would be guessing at that task's shape rather than making
+   * this one compile. Until then every part becomes one note, named after itself, with the
+   * chosen `kind` carried as frontmatter so `saveNote` reads it back the same way a person's
+   * own note would. Two parts of one import that share a title collide on `(agent_id, path)`
+   * exactly as two hand-written notes would, and the caller sees the 409 that already exists
+   * for that — a real gap for a page whose headings repeat, and Task 8's to close.
    */
-  async function insertItems(
+  async function insertNotes(
     tx: Tx,
     agentId: string,
     sourceId: string,
     kind: (typeof KINDS)[number],
     parts: SplitPart[],
-  ): Promise<KbRow[]> {
-    const rows: KbRow[] = [];
-    for (let from = 0; from < parts.length; from += INSERT_CHUNK) {
-      const written = await tx
-        .insert(kbItems)
-        .values(
-          parts.slice(from, from + INSERT_CHUNK).map((part) => ({
-            agentId,
-            sourceId,
-            kind,
-            title: part.title,
-            content: part.content,
-          })),
-        )
-        // Named columns, like every other read of an item: `returning()` would fetch the
-        // generated tsvector and hand it straight to the response.
-        .returning(kbItemColumns);
-      rows.push(...written);
+  ): Promise<(typeof kbNotes.$inferSelect)[]> {
+    const rows: (typeof kbNotes.$inferSelect)[] = [];
+    for (const part of parts) {
+      const body = kind === 'other' ? part.content : `---\nkind: ${kind}\n---\n\n${part.content}`;
+      rows.push(await saveNote(tx as unknown as Db, { agentId, path: part.title, body, sourceId }));
     }
     return rows;
   }
 
   /**
-   * Writes a finished import: the source, then its items, in one transaction.
+   * Writes a finished import: the source, then its notes, in one transaction.
    *
-   * Shared with task 4's page import, which differs only in where the parts came from.
+   * Shared with the page import, which differs only in where the parts came from.
    *
    * The caller describes the source — what kind it is, what it is called, where it came
    * from — and nothing else: the tenancy, the outcome and the count are this function's to
-   * write, and a caller that could pass its own `itemCount` could disagree with the items
-   * it just handed us.
+   * write, and a caller that could pass its own `itemCount` could disagree with the notes it
+   * just handed us.
    */
   async function storeImport(
     agentId: string,
@@ -431,11 +566,11 @@ export function registerKnowledgeRoutes(
         })
         .returning();
 
-      const rows = await insertItems(tx, agentId, created!.id, kind, parts);
+      const rows = await insertNotes(tx, agentId, created!.id, kind, parts);
 
       return {
         source: toKbSource(created!),
-        items: rows.map((row) => toKbItem(row, created!.title)),
+        notes: rows.map((row) => toKbNote(row, created!.title)),
         // A source that did not exist a moment ago has nothing kept and nothing edited.
         reimported: false,
         keptEdited: 0,
@@ -448,10 +583,10 @@ export function registerKnowledgeRoutes(
     { preHandler: [guard, ownerOnly] },
     async (req): Promise<KbImport> => {
       const parsed = importText.safeParse(req.body);
-      if (!parsed.success) throw knowledgeError(parsed.error.issues[0]);
+      if (!parsed.success) throw importError(parsed.error.issues[0]);
 
       const parts = splitBlocks(parsed.data.text);
-      // Refused before anything is written: a source with no items is a row that says an
+      // Refused before anything is written: a source with no notes is a row that says an
       // import happened and shows nothing for it.
       if (parts.length === 0) throw new ApiError(400, 'В тексте нечего сохранить');
 
@@ -478,22 +613,15 @@ export function registerKnowledgeRoutes(
   /**
    * A refetched page written onto the source it belongs to.
    *
-   * The rule is short on purpose: **every unedited item of this source goes, every part the
+   * The rule is short on purpose: **every unedited note of this source goes, every part the
    * page now yields is written, and what a person edited is left alone.** No part of the
    * fresh page is ever dropped, and no title is ever compared with another.
    *
-   * Matching fresh parts against the titles of the kept items — which is what this did — was
-   * an attempt to guess which fresh part «is» a kept one, and it guessed wrong in every way
-   * a real page moves. Two sections called «Цены» produced two items; the owner edited one;
-   * the title filter then discarded BOTH fresh sections and the other section's prices left
-   * the base with nothing to say they had gone. A renamed section left the correction under
-   * the old name beside a fresh item under the new one. A long section whose numbering
-   * changed left «Прайс (2)» behind as a fragment of a page that no longer exists.
-   *
-   * So it does not guess. An edited item and a fresh item may now say different things about
-   * the same subject, and `keptEdited` is how the owner is told to go and look: that is a
-   * question about the world — has the page moved on, or was the correction right? — and it
-   * is theirs to answer, not ours to answer for them by deleting one of the two.
+   * Matching fresh parts against the titles of the kept notes was an attempt to guess which
+   * fresh part «is» a kept one, and it guessed wrong in every way a real page moves — see the
+   * long version of this note in the item-based predecessor of this function. So it does not
+   * guess. An edited note and a fresh note may now say different things about the same
+   * subject, and `keptEdited` is how the owner is told to go and look.
    */
   async function applyReimport(
     agentId: string,
@@ -504,17 +632,17 @@ export function registerKnowledgeRoutes(
     parts: SplitPart[],
   ): Promise<KbImport> {
     return db.transaction(async (tx) => {
-      const mine = and(eq(kbItems.sourceId, source.id), eq(kbItems.agentId, agentId));
+      const mine = and(eq(kbNotes.sourceId, source.id), eq(kbNotes.agentId, agentId));
 
       // Read before the delete, and by `edited`: these rows are a person's work, not the
       // page's, and this import has no claim on them.
-      const kept = await tx
-        .select(kbItemColumns)
-        .from(kbItems)
-        .where(and(mine, eq(kbItems.edited, true)));
-      await tx.delete(kbItems).where(and(mine, eq(kbItems.edited, false)));
+      const kept = await tx.select().from(kbNotes).where(and(mine, eq(kbNotes.edited, true)));
+      const stale = await tx.select({ id: kbNotes.id }).from(kbNotes).where(and(mine, eq(kbNotes.edited, false)));
+      // Through `deleteNote`, not a bulk delete: a note's chunks and the links it resolves
+      // are derived from it, and only `deleteNote` knows to take them with it.
+      for (const row of stale) await deleteNote(tx as unknown as Db, agentId, row.id);
 
-      const written = await insertItems(tx, agentId, source.id, 'other', parts);
+      const written = await insertNotes(tx, agentId, source.id, 'other', parts);
 
       const [updated] = await tx
         .update(kbSources)
@@ -535,14 +663,14 @@ export function registerKnowledgeRoutes(
 
       return {
         source: toKbSource(updated!),
-        items: [...kept, ...written].map((row) => toKbItem(row, updated!.title)),
+        notes: [...kept, ...written].map((row) => toKbNote(row, updated!.title)),
         reimported: true,
         keptEdited: kept.length,
       };
     });
   }
 
-  /** Why this source's last attempt did not work. Its items are not touched. */
+  /** Why this source's last attempt did not work. Its notes are not touched. */
   async function markFailed(sourceId: string, agentId: string, reason: string): Promise<void> {
     await db
       .update(kbSources)
@@ -550,7 +678,7 @@ export function registerKnowledgeRoutes(
       .where(and(eq(kbSources.id, sourceId), eq(kbSources.agentId, agentId)));
   }
 
-  /** The page's text as items — empty when there was nothing on it worth keeping. */
+  /** The page's text as parts — empty when there was nothing on it worth keeping. */
   const partsOf = (page: FetchedPage): SplitPart[] => splitByHeadings(htmlToText(page.html));
 
   /**
@@ -559,7 +687,7 @@ export function registerKnowledgeRoutes(
    * One row per address is the promise the sources list makes, and it has to hold across
    * outcomes, not only within one: a failed attempt followed by a success used to leave two
    * rows for the same page, because only the failure path looked for an existing row. The
-   * second row then had the items and the first still said «не удалось», and the next
+   * second row then had the notes and the first still said «не удалось», and the next
    * failure — which found rows in an order Postgres never promised — could mark either.
    *
    * Hence: no status in the `where`, an order that is the same on every call, and one row.
@@ -609,7 +737,7 @@ export function registerKnowledgeRoutes(
     { preHandler: [guard, ownerOnly] },
     async (req): Promise<KbImport> => {
       const parsed = importPage.safeParse(req.body);
-      if (!parsed.success) throw knowledgeError(parsed.error.issues[0]);
+      if (!parsed.success) throw importError(parsed.error.issues[0]);
       // One key, from the address itself, so every path below — the failure, the lookup, the
       // insert and the reimport — names this source the same way. See `pageKey`.
       const url = pageKey(targetUrl(parsed.data.url));
@@ -628,18 +756,18 @@ export function registerKnowledgeRoutes(
 
       // The address this agent already has, if it has it. Pasting a URL a second time is
       // «Обновить» spelled another way — the owner means «read this page again» either way —
-      // and without this it was a second source and a second copy of every item, with the
+      // and without this it was a second source and a second copy of every note, with the
       // two drifting apart from the next reimport onwards.
       const existing = await findPageSource(req.agent!.id, url);
 
       const parts = partsOf(page);
-      // Refused before anything is written: a source with no items is a row that says an
+      // Refused before anything is written: a source with no notes is a row that says an
       // import happened and shows nothing for it. More often than not this is a page whose
       // text arrives from JavaScript, and the honest answer is that we read it and there was
       // nothing there — which is the owner's to act on, so it says so.
       //
       // An address we already have is marked failed instead, exactly as «Обновить» does: its
-      // items stay, and the row has to stop claiming a success that this attempt was not.
+      // notes stay, and the row has to stop claiming a success that this attempt was not.
       if (parts.length === 0) {
         if (existing) await markFailed(existing.id, req.agent!.id, NOTHING_TO_SAVE);
         throw new ApiError(400, NOTHING_TO_SAVE);
@@ -682,7 +810,7 @@ export function registerKnowledgeRoutes(
       }
 
       const parts = partsOf(page);
-      // Marked failed before answering, exactly as a failed fetch is. The items stay — they
+      // Marked failed before answering, exactly as a failed fetch is. The notes stay — they
       // are still the best answer we have — but leaving the source `ready` with the
       // `itemCount` of the previous import would have it claim a success that did not
       // happen, and the owner would have no idea the page had stopped yielding anything.
@@ -702,7 +830,7 @@ export function registerKnowledgeRoutes(
       const { sourceId } = req.params as { sourceId: string };
       const source = await loadSource(req.agent!.id, sourceId);
 
-      // Only the source row goes. Its items stay, with `sourceId` set to null by the
+      // Only the source row goes. Its notes stay, with `sourceId` set to null by the
       // schema's `on delete set null` — they are the facts the agent answers from and the
       // corrections someone made to them, and forgetting the address they came from is not
       // a decision to forget those.

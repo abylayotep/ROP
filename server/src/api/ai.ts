@@ -22,7 +22,7 @@ import {
   aiReplies,
   contacts,
   conversations,
-  kbItems,
+  kbChunks,
   leadFields,
   messages,
   stages,
@@ -418,16 +418,16 @@ export function registerAiRoutes(
         sandboxTurnsInFlight -= 1;
       }
 
-      // Ids become names here rather than on the screen: the records and the fields are the
-      // owner's own, and «Прайс на 2026» is what tells them whether the answer used the
-      // right one.
+      // Ids become names here rather than on the screen: the sections and the fields are
+      // the owner's own, and «Прайс на 2026 › Двери» is what tells them whether the answer
+      // used the right one.
       const itemRows =
         result.usedItemIds.length === 0
           ? []
           : await db
-              .select({ id: kbItems.id, title: kbItems.title })
-              .from(kbItems)
-              .where(inArray(kbItems.id, result.usedItemIds));
+              .select({ id: kbChunks.id, title: kbChunks.title })
+              .from(kbChunks)
+              .where(inArray(kbChunks.id, result.usedItemIds));
       const fieldIds = Object.keys(result.fields);
       const fieldRows =
         fieldIds.length === 0

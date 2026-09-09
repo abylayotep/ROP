@@ -2,7 +2,7 @@ import { eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildServer } from '../src/api/server.js';
-import { agents, kbItems, kbSources } from '../src/db/schema.js';
+import { kbChunks } from '../src/db/schema.js';
 import { addMember, createAccountWithOwner } from '../src/lib/provision.js';
 import { withDb } from './helpers/db.js';
 import { testEnv } from './helpers/env.js';
@@ -27,10 +27,15 @@ async function login(email = 'owner@example.com') {
   return { [cookie.name]: cookie.value };
 }
 
-const items = () => `/api/agents/${agentId}/knowledge/items`;
+const notes = () => `/api/agents/${agentId}/knowledge/notes`;
+const search = () => `/api/agents/${agentId}/knowledge/search`;
+const graph = () => `/api/agents/${agentId}/knowledge/graph`;
+// Named for what the routes underneath it are, not for the segment: `${sources()}/text` is
+// `.../knowledge/import/text`, the same base the sandbox test hits for its 403.
+const sources = () => `/api/agents/${agentId}/knowledge/import`;
 
 async function add(payload: Record<string, unknown>) {
-  return app.inject({ method: 'POST', url: items(), cookies: jar, payload });
+  return app.inject({ method: 'POST', url: notes(), cookies: jar, payload });
 }
 
 beforeEach(async () => {
@@ -68,224 +73,135 @@ afterEach(async () => {
   await app.close();
 });
 
-describe('writing knowledge', () => {
-  it('stores an item and defaults its kind', async () => {
-    const res = await add({ title: 'Доставка', content: 'Возим по Алматы бесплатно.' });
-
-    expect(res.statusCode).toBe(200);
-    expect(res.json().kind).toBe('other');
-    expect(res.json().edited).toBe(false);
-    expect(res.json().sourceId).toBeNull();
-    expect(res.json().sourceTitle).toBeNull();
-  });
-
-  it('refuses an item with no title or no content', async () => {
-    expect((await add({ title: '  ', content: 'что-то' })).statusCode).toBe(400);
-    expect((await add({ title: 'Доставка', content: '  ' })).statusCode).toBe(400);
-  });
-
-  it('refuses a kind nobody defined', async () => {
-    expect((await add({ title: 'Т', content: 'С', kind: 'video' })).statusCode).toBe(400);
-  });
-
-  it('refuses a title or a content past the limits', async () => {
-    expect((await add({ title: 'т'.repeat(201), content: 'С' })).statusCode).toBe(400);
-    expect((await add({ title: 'Т', content: 'с'.repeat(8001) })).statusCode).toBe(400);
-  });
-
-  it('marks an item edited when a person changes it', async () => {
-    const created = await add({ title: 'Доставка', content: 'Возим по Алматы.' });
-
+describe('notes', () => {
+  it('creates a note and answers it with its sections', async () => {
     const res = await app.inject({
-      method: 'PATCH',
-      url: `${items()}/${created.json().id}`,
+      method: 'POST',
+      url: notes(),
       cookies: jar,
-      payload: { content: 'Возим по Алматы и в Астану.' },
+      payload: { path: 'Товары/Двери', body: '## Цена\n80 000 ₸.' },
     });
-
     expect(res.statusCode).toBe(200);
-    expect(res.json().edited).toBe(true);
-    expect(res.json().content).toBe('Возим по Алматы и в Астану.');
+    expect(res.json().sections.map((s: { title: string }) => s.title)).toEqual(['Двери › Цена']);
   });
 
-  it('moves updatedAt when it changes', async () => {
-    const created = await add({ title: 'Доставка', content: 'Возим по Алматы.' });
-    const before = created.json().updatedAt;
-
+  it('refuses a second note at the same path in the operator language', async () => {
+    await app.inject({ method: 'POST', url: notes(), cookies: jar, payload: { path: 'Двери', body: 'Раз.' } });
     const res = await app.inject({
-      method: 'PATCH',
-      url: `${items()}/${created.json().id}`,
+      method: 'POST',
+      url: notes(),
       cookies: jar,
-      payload: { title: 'Доставка по Казахстану' },
+      payload: { path: 'Двери', body: 'Два.' },
     });
-
-    // Strictly greater: both stamps are written by the database's clock, so an edit that
-    // left `updatedAt` alone would be caught here rather than passing on equality.
-    expect(new Date(res.json().updatedAt).getTime()).toBeGreaterThan(new Date(before).getTime());
+    expect(res.statusCode).toBe(409);
+    expect(res.json().message).toBe('Заметка с таким названием уже есть');
   });
 
-  it('deletes an item', async () => {
-    const created = await add({ title: 'Доставка', content: 'Возим по Алматы.' });
+  it('refuses a path that is empty, absolute or too deep', async () => {
+    for (const path of ['', '/Двери', 'а/б/в/г/д/е/ж/з/и/к/л']) {
+      const res = await app.inject({ method: 'POST', url: notes(), cookies: jar, payload: { path, body: 'Раз.' } });
+      expect(res.statusCode).toBe(400);
+    }
+  });
 
-    const res = await app.inject({
-      method: 'DELETE',
-      url: `${items()}/${created.json().id}`,
+  it('searches sections and names the note each belongs to', async () => {
+    await add({ path: 'Доставка', body: '## По городу\n1500 ₸.\n\n## Возврат\n14 дней.' });
+
+    const res = await app.inject({ method: 'GET', url: `${search()}?q=возврат`, cookies: jar });
+
+    expect(res.json().map((s: { title: string }) => s.title)).toEqual(['Доставка › Возврат']);
+    expect(res.json()[0]!.noteId).toBeTruthy();
+  });
+
+  it('lists the newest notes first, capped at the list limit', async () => {
+    await add({ path: 'Старая', body: 'Раз.' });
+    await add({ path: 'Новая', body: 'Два.' });
+
+    const res = await app.inject({ method: 'GET', url: notes(), cookies: jar });
+
+    expect(res.json()[0]!.path).toBe('Новая');
+    expect(res.json().length).toBeLessThanOrEqual(100);
+  });
+
+  it('answers backlinks and broken links on a note', async () => {
+    const target = (await add({ path: 'Гарантия', body: 'Год.' })).json();
+    await add({ path: 'Двери', body: 'Смотри [[Гарантия]] и [[Монтаж]].' });
+
+    const res = await app.inject({ method: 'GET', url: `${notes()}/${target.id}`, cookies: jar });
+    expect(res.json().backlinks.map((l: { title: string }) => l.title)).toEqual(['Двери']);
+
+    const from = await app.inject({
+      method: 'GET',
+      url: `${notes()}/${res.json().backlinks[0]!.noteId}`,
       cookies: jar,
     });
-
-    expect(res.statusCode).toBe(200);
-    expect(await db.select().from(kbItems)).toHaveLength(0);
+    expect(from.json().links).toContainEqual({ noteId: null, title: 'Монтаж' });
   });
 
-  it('lets a member add and correct an item', async () => {
+  it('deletes a note and its sections', async () => {
+    const note = (await add({ path: 'Двери', body: '## Цена\n80 000 ₸.' })).json();
+
+    expect((await app.inject({ method: 'DELETE', url: `${notes()}/${note.id}`, cookies: jar })).statusCode).toBe(
+      200,
+    );
+    expect(await db.select().from(kbChunks).where(eq(kbChunks.noteId, note.id))).toEqual([]);
+    expect((await app.inject({ method: 'GET', url: `${notes()}/${note.id}`, cookies: jar })).statusCode).toBe(404);
+  });
+
+  it('answers the graph with notes and resolved links only', async () => {
+    await add({ path: 'Гарантия', body: 'Год.' });
+    await add({ path: 'Двери', body: '[[Гарантия]] и [[Монтаж]]' });
+
+    const res = await app.inject({ method: 'GET', url: graph(), cookies: jar });
+
+    expect(res.json().notes).toHaveLength(2);
+    expect(res.json().links).toHaveLength(1);
+    expect(res.json().truncated).toBe(false);
+  });
+
+  it('lets a member write a note and refuses them a source', async () => {
     const memberJar = await login('member@example.com');
 
-    const created = await app.inject({
+    const note = await app.inject({
       method: 'POST',
-      url: items(),
+      url: notes(),
       cookies: memberJar,
-      payload: { title: 'Гарантия', content: 'Двенадцать месяцев.' },
+      payload: { path: 'Двери', body: 'Металл.' },
     });
-    const patched = await app.inject({
-      method: 'PATCH',
-      url: `${items()}/${created.json().id}`,
+    expect(note.statusCode).toBe(200);
+
+    const source = await app.inject({
+      method: 'POST',
+      url: `${sources()}/text`,
       cookies: memberJar,
-      payload: { content: 'Двадцать четыре месяца.' },
+      payload: { title: 'Прайс', text: 'Двери\n80 000 ₸.' },
     });
-
-    expect(created.statusCode).toBe(200);
-    expect(patched.statusCode).toBe(200);
-  });
-});
-
-describe('reading knowledge', () => {
-  it('lists the newest first without a query', async () => {
-    await add({ title: 'Первый', content: 'Один.' });
-    await add({ title: 'Второй', content: 'Два.' });
-
-    const res = await app.inject({ url: items(), cookies: jar });
-
-    expect(res.json().map((row: { title: string }) => row.title)).toEqual(['Второй', 'Первый']);
+    expect(source.statusCode).toBe(403);
   });
 
-  it('ranks by relevance with a query and returns only matches', async () => {
-    await add({ title: 'Доставка в Астану', content: 'Доставка в Астану два дня.' });
-    await add({ title: 'Гарантия', content: 'Действует по всему Казахстану.' });
-    await add({ title: 'Оплата', content: 'Картой или наличными.' });
+  it('refuses a note belonging to another agent with 404', async () => {
+    const note = (await add({ path: 'Двери', body: 'Металл.' })).json();
 
-    const res = await app.inject({ url: `${items()}?q=доставка`, cookies: jar });
-
-    const titles = res.json().map((row: { title: string }) => row.title);
-    expect(titles[0]).toBe('Доставка в Астану');
-    expect(titles).not.toContain('Оплата');
-  });
-
-  it('filters by kind', async () => {
-    await add({ title: 'Дверь', content: 'От 90 000 тенге.', kind: 'product' });
-    await add({ title: 'Как заказать', content: 'Напишите нам.', kind: 'qa' });
-
-    const res = await app.inject({ url: `${items()}?kind=product`, cookies: jar });
-
-    expect(res.json()).toHaveLength(1);
-    expect(res.json()[0].kind).toBe('product');
-  });
-
-  it('filters by kind and query together', async () => {
-    await add({ title: 'Дверь входная', content: 'Металл, Алматы.', kind: 'product' });
-    await add({ title: 'Доставка', content: 'По Алматы бесплатно.', kind: 'procedure' });
-
-    const res = await app.inject({ url: `${items()}?kind=product&q=Алматы`, cookies: jar });
-
-    expect(res.json()).toHaveLength(1);
-    expect(res.json()[0].title).toBe('Дверь входная');
-  });
-
-  it('finds a kind that ranks below the search limit', async () => {
-    // More matches for one word than the ranker returns, with the only item of the wanted
-    // kind ranking last: the word is in every other item's title, which carries weight 'A',
-    // and only in this one's content, which carries 'B'. Filtering the ranker's twenty rows
-    // in JavaScript loses it; asking the ranker for `product` finds it.
-    await db.insert(kbItems).values([
-      ...Array.from({ length: 24 }, (_, i) => ({
-        agentId,
-        kind: 'qa',
-        title: `Доставка, вопрос ${i + 1}`,
-        content: 'Доставка по городу, доставка в регионы.',
-      })),
-      { agentId, kind: 'product', title: 'Дверь входная', content: 'Цена включает доставку.' },
-    ]);
-
-    const res = await app.inject({ url: `${items()}?kind=product&q=доставка`, cookies: jar });
-
-    expect(res.json()).toHaveLength(1);
-    expect(res.json()[0].title).toBe('Дверь входная');
-  });
-
-  it('answers nothing for a query that matches nothing', async () => {
-    await add({ title: 'Доставка', content: 'По Алматы.' });
-
-    expect((await app.inject({ url: `${items()}?q=вертолёт`, cookies: jar })).json()).toEqual([]);
-  });
-
-  it('names the source an item came from', async () => {
-    const [source] = await db
-      .insert(kbSources)
-      .values({ agentId, kind: 'text', title: 'Прайс-лист', status: 'ready' })
-      .returning();
-    await db
-      .insert(kbItems)
-      .values({ agentId, sourceId: source!.id, kind: 'product', title: 'Дверь', content: 'Цена.' });
-
-    const res = await app.inject({ url: items(), cookies: jar });
-
-    expect(res.json()[0].sourceTitle).toBe('Прайс-лист');
-  });
-
-  it('lists the sources', async () => {
-    await db
-      .insert(kbSources)
-      .values({ agentId, kind: 'page', title: 'safina.kz', url: 'https://safina.kz', status: 'ready', itemCount: 4 });
-
-    const res = await app.inject({ url: `/api/agents/${agentId}/knowledge/sources`, cookies: jar });
-
-    expect(res.json()).toHaveLength(1);
-    expect(res.json()[0].itemCount).toBe(4);
-    expect(res.json()[0].url).toBe('https://safina.kz');
-  });
-});
-
-describe('access', () => {
-  it("answers 404 for another agent's item", async () => {
-    const [other] = await db.insert(agents).values({ accountId, name: 'Другая' }).returning();
-    const [item] = await db
-      .insert(kbItems)
-      .values({ agentId: other!.id, kind: 'other', title: 'Чужое', content: 'Секрет.' })
-      .returning();
+    const other = await createAccountWithOwner(db, {
+      company: 'Другая',
+      email: 'other@example.com',
+      name: 'Другой',
+      initials: 'ДР',
+      password: PASSWORD,
+    });
+    const otherJar = await login('other@example.com');
+    const otherAgent = await app.inject({
+      method: 'POST',
+      url: `/api/accounts/${other.accountId}/agents`,
+      cookies: otherJar,
+      payload: { name: 'Другая' },
+    });
 
     const res = await app.inject({
-      method: 'PATCH',
-      url: `${items()}/${item!.id}`,
-      cookies: jar,
-      payload: { title: 'Взлом' },
+      method: 'GET',
+      cookies: otherJar,
+      url: `/api/agents/${otherAgent.json().id}/knowledge/notes/${note.id}`,
     });
-
-    expect(res.statusCode).toBe(404);
-    const [row] = await db.select().from(kbItems).where(eq(kbItems.id, item!.id));
-    expect(row?.title).toBe('Чужое');
-  });
-
-  it("never returns another agent's item in a search", async () => {
-    const [other] = await db.insert(agents).values({ accountId, name: 'Другая' }).returning();
-    await db
-      .insert(kbItems)
-      .values({ agentId: other!.id, kind: 'other', title: 'Доставка', content: 'По Алматы.' });
-
-    expect((await app.inject({ url: `${items()}?q=Алматы`, cookies: jar })).json()).toEqual([]);
-  });
-
-  it('answers 404 for an item id that is not a uuid', async () => {
-    const res = await app.inject({ method: 'DELETE', url: `${items()}/не-uuid`, cookies: jar });
-
     expect(res.statusCode).toBe(404);
   });
 });

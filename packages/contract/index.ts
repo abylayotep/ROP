@@ -229,21 +229,55 @@ export interface Customer {
 }
 
 /* ── База знаний ────────────────────────────────────────────────────────────
- * What the agent answers from. One row is one retrievable answer. */
+ * What the agent answers from: a vault of notes, the sections they split into,
+ * and the links between them. */
 
-export type KbItemKind = 'product' | 'qa' | 'procedure' | 'contact' | 'other';
+export type KbNoteKind = 'product' | 'qa' | 'procedure' | 'contact' | 'other';
 
-export interface KbItem {
+/** A note as a list or a tree shows it: enough to draw a row, not the body. */
+export interface KbNote {
   id: string;
-  kind: KbItemKind;
+  /** «Товары/Двери входные». Folders are the segments before the last slash. */
+  path: string;
   title: string;
-  content: string;
-  /** True once a person has changed it. A reimport keeps these and replaces the rest. */
+  kind: KbNoteKind;
+  tags: string[];
   edited: boolean;
   sourceId: string | null;
-  /** The import this came from, for the screen. Null for a hand-written item. */
   sourceTitle: string | null;
   updatedAt: string;
+}
+
+/** One section of a note: what search ranks and what the agent quotes. */
+export interface KbSection {
+  id: string;
+  noteId: string;
+  /** «Доставка › По городу», so an answer says where in the note to look. */
+  title: string;
+  heading: string;
+  content: string;
+}
+
+export interface KbLinkRef {
+  noteId: string | null;
+  title: string;
+}
+
+/** A note opened: its text, its sections, and what points at it. */
+export interface KbNoteDetail extends KbNote {
+  body: string;
+  sections: KbSection[];
+  /** Notes that link here. */
+  backlinks: KbLinkRef[];
+  /** What this note links to. `noteId` null is a link whose target does not exist. */
+  links: KbLinkRef[];
+}
+
+/** The graph tab. Capped at 500 notes; `truncated` says the cap was hit. */
+export interface KbGraph {
+  notes: { id: string; title: string; path: string }[];
+  links: { from: string; to: string }[];
+  truncated: boolean;
 }
 
 export type KbSourceKind = 'text' | 'page';
@@ -269,18 +303,18 @@ export interface KbSource {
 /** What an import produced, answered by the import routes so the owner sees it at once. */
 export interface KbImport {
   source: KbSource;
-  items: KbItem[];
+  notes: KbNote[];
   /**
    * True when this went onto a source that already existed — «Обновить», or a page address
    * this agent had already imported. The screen words those two outcomes apart: a first
-   * import created its items, an update answers with everything the source holds now.
+   * import created its notes, an update answers with everything the source holds now.
    */
   reimported: boolean;
   /**
-   * How many of `items` a person had edited, which an update keeps untouched.
+   * How many of `notes` a person had edited, which an update keeps untouched.
    *
-   * Answered rather than inferred from `items`, because the screen must say it in words: a
-   * kept item and a fresh one from the same page can now contradict each other, and the only
+   * Answered rather than inferred from `notes`, because the screen must say it in words: a
+   * kept note and a fresh one from the same page can now contradict each other, and the only
    * honest thing to do is name how many records the owner should go and check.
    */
   keptEdited: number;

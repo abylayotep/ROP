@@ -1,4 +1,4 @@
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import { kbChunks, kbLinks, kbNotes } from '../../db/schema.js';
 import { parseLinks } from './links.js';
@@ -138,8 +138,25 @@ export async function saveNote(tx: Db, input: SaveNoteInput): Promise<typeof kbN
   return note;
 }
 
+/**
+ * Deleting a batch of notes at once takes their chunks and their outgoing links with them —
+ * the FK cascades on `kb_chunks.note_id` and `kb_links.from_note_id` do that for however many
+ * ids are in one `DELETE` — and links pointing at any of them go broken, resolved once for
+ * the whole batch rather than once per note.
+ *
+ * `applyReimport` used to call `deleteNote` in a loop, one `resolveLinks` per stale note: a
+ * legacy page source can own hundreds of those after migration `0012`, and `resolveLinks`
+ * scans every note and every link this agent has, so a loop of them turned one reimport into
+ * O(stale notes × agent size) work for no reason the single bulk delete below doesn't already
+ * cover.
+ */
+export async function deleteNotes(tx: Db, agentId: string, noteIds: string[]): Promise<void> {
+  if (noteIds.length === 0) return;
+  await tx.delete(kbNotes).where(and(eq(kbNotes.agentId, agentId), inArray(kbNotes.id, noteIds)));
+  await resolveLinks(tx, agentId);
+}
+
 /** Deleting a note takes its chunks and its outgoing links; links pointing at it go broken. */
 export async function deleteNote(tx: Db, agentId: string, noteId: string): Promise<void> {
-  await tx.delete(kbNotes).where(and(eq(kbNotes.id, noteId), eq(kbNotes.agentId, agentId)));
-  await resolveLinks(tx, agentId);
+  await deleteNotes(tx, agentId, [noteId]);
 }

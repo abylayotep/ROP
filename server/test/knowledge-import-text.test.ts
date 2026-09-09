@@ -200,4 +200,34 @@ describe('importing pasted text', () => {
 
     expect(found.json()).toHaveLength(1);
   });
+
+  /**
+   * A regression guard for the shape, not the number: `saveNoteAtUniquePath` used to write
+   * every note inside its own `SAVEPOINT`, so a bulk import paid one subtransaction per note.
+   * Postgres caches only about 64 subtransaction ids per backend, and past that the cost of
+   * every later visibility check in the same transaction goes up — a 1 500-block paste (this
+   * size, 38 655 characters) measured at 16.1s under that shape on this test database, and a
+   * 5 400-block paste (198 688 characters, near the 200 000-character limit
+   * `docs/knowledge-base.md` advertises) at 233.7s, well past `deploy/nginx.conf`'s 120s
+   * `proxy_read_timeout` — a paste at the documented limit reliably timed out.
+   *
+   * Writing straight to the transaction (see `saveNoteAtUniquePath`'s comment) measured 8.3s
+   * for this same size, and grows linearly rather than the old shape's super-linear blowup —
+   * 3 000 blocks went from 55.9s to 17.8s. 1 500 is large enough to be well past the 64-note
+   * cliff and small enough that this test costs single-digit seconds rather than the tens a
+   * size nearer the real limit would; 12s is comfortably above the measured 8.3s and
+   * comfortably under the old shape's 16.1s at the same size, so a regression here fails this
+   * test long before a customer would see a 504.
+   */
+  it('completes a bulk paste past the old savepoint-per-note cliff well inside a timeout', async () => {
+    const blocks = Array.from({ length: 1500 }, (_, i) => `Позиция ${i}\nЦена ${i} ₸.`);
+
+    const startedAt = Date.now();
+    const res = await paste(blocks.join('\n\n'));
+    const elapsedMs = Date.now() - startedAt;
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().notes).toHaveLength(1500);
+    expect(elapsedMs).toBeLessThan(12_000);
+  }, 30_000);
 });

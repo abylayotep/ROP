@@ -22,7 +22,7 @@ import {
   type PageMarkdown,
 } from '../lib/knowledge/fetch-page.js';
 import { BODY_MAX } from '../lib/knowledge/note.js';
-import { deleteNote, saveNote, type SaveNoteInput } from '../lib/knowledge/notes.js';
+import { deleteNote, deleteNotes, saveNote, type SaveNoteInput } from '../lib/knowledge/notes.js';
 import { kbChunkColumns, searchKnowledge, type KbRow } from '../lib/knowledge/search.js';
 // pleep's own limits, and they are the right shape: a fact, not an essay. They live beside
 // the splitter because that is the code that has to cut to fit them; a second copy here
@@ -143,6 +143,29 @@ function importError(issue: { code: string; path: readonly PropertyKey[] } | und
 function isDuplicate(error: unknown): boolean {
   const cause = error instanceof Error ? error.cause : undefined;
   return typeof cause === 'object' && cause !== null && (cause as { code?: string }).code === '23505';
+}
+
+/**
+ * Runs a bulk-import transaction, retrying the whole thing once if it collided with another
+ * import writing the same title at the same instant.
+ *
+ * The import this wraps writes every note it will ever write inside one transaction, probing
+ * `uniquePath` before each insert rather than paying for a `SAVEPOINT` per note (see
+ * `saveNoteAtUniquePath`): that probe already sees every note this same transaction has
+ * written, uncommitted, so the only way it can still be wrong is a second import — in a
+ * different transaction — committing the identical title in the gap between the probe and
+ * this transaction's own commit. That is rare enough to retry the entire attempt for rather
+ * than isolate against on every single note: retrying re-runs the probes against whatever the
+ * other import just committed and lands on the next free path, and the import is already
+ * all-or-nothing, so redoing it from scratch changes nothing about what the caller sees.
+ */
+async function withImportRetry<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    if (!isDuplicate(error)) throw error;
+    return await run();
+  }
 }
 
 const toKbNote = (row: typeof kbNotes.$inferSelect, sourceTitle: string | null): KbNote => ({
@@ -548,18 +571,20 @@ export function registerKnowledgeRoutes(
   }
 
   /**
-   * `uniquePath` followed by the write it was computed for, with the one race that can still
-   * happen between them covered.
+   * `uniquePath` followed by the write it was computed for.
    *
-   * The probe above answers correctly for everything writing inside this same transaction —
-   * that is what "inside the caller's own transaction" on `uniquePath` buys — but not for a
-   * second import racing it from a different transaction: both can probe the same free
-   * candidate before either commits, and one of the two inserts then hits the `kb_notes_agent_
-   * path_key` unique index. Rather than serializing every write behind a lock for a
-   * collision that needs two imports of the same title landing at the same instant, the write
-   * runs inside its own savepoint (`tx.transaction`, which `PostgresJsTransaction` turns into a
-   * real `SAVEPOINT`): a `23505` rolls back just that attempt, `uniquePath` is asked again
-   * against whatever just committed, and the next candidate is tried.
+   * A bulk import calls this once per note, all inside the same outer transaction — and it
+   * used to give each of those writes its own `SAVEPOINT` so a collision could be retried
+   * without losing the notes already written. That protected against a race that needs two
+   * imports of the same title landing at the same instant, and the price was real: Postgres
+   * caches only about 64 subtransaction ids per backend, so an import past a few dozen notes
+   * overflowed that cache and every later visibility check fell back to `pg_subtrans` — a
+   * 3 000-block paste went from 55.9s to 17.8s the moment this stopped happening. The race
+   * this guarded is now caught one level up, by `withImportRetry` around the whole transaction:
+   * `uniquePath`'s probe already sees every note this same transaction wrote, so nothing but
+   * that cross-transaction race can still produce a `23505` here, and letting it escape and
+   * abort the whole attempt — then redoing the whole attempt — costs nothing extra in the
+   * common case where it never fires.
    */
   async function saveNoteAtUniquePath(
     tx: Tx,
@@ -568,14 +593,8 @@ export function registerKnowledgeRoutes(
     title: string,
     rest: Omit<SaveNoteInput, 'agentId' | 'path'>,
   ): Promise<typeof kbNotes.$inferSelect> {
-    for (;;) {
-      const path = await uniquePath(tx, agentId, folder, title);
-      try {
-        return await tx.transaction((inner) => saveNote(inner as unknown as Db, { agentId, path, ...rest }));
-      } catch (error) {
-        if (!isDuplicate(error)) throw error;
-      }
-    }
+    const path = await uniquePath(tx, agentId, folder, title);
+    return saveNote(tx as unknown as Db, { agentId, path, ...rest });
   }
 
   /** One pasted block, written as its own note under `Вставки/`, numbered clear of collisions. */
@@ -601,7 +620,7 @@ export function registerKnowledgeRoutes(
     kind: (typeof KINDS)[number],
     parts: SplitPart[],
   ): Promise<KbImport> {
-    return db.transaction(async (tx) => {
+    return withImportRetry(() => db.transaction(async (tx) => {
       const [created] = await tx
         .insert(kbSources)
         .values({ kind: 'text', title, agentId, status: 'ready', itemCount: parts.length, importedAt: new Date() })
@@ -616,7 +635,7 @@ export function registerKnowledgeRoutes(
         reimported: false,
         keptEdited: 0,
       };
-    });
+    }));
   }
 
   app.post(
@@ -664,16 +683,20 @@ export function registerKnowledgeRoutes(
     source: typeof kbSources.$inferSelect,
     page: PageMarkdown,
   ): Promise<KbImport> {
-    return db.transaction(async (tx) => {
+    return withImportRetry(() => db.transaction(async (tx) => {
       const mine = and(eq(kbNotes.sourceId, source.id), eq(kbNotes.agentId, agentId));
 
       // Read before the delete, and by `edited`: this row is a person's work, not the
       // page's, and this import has no claim on it.
       const kept = await tx.select().from(kbNotes).where(and(mine, eq(kbNotes.edited, true)));
       const stale = await tx.select({ id: kbNotes.id }).from(kbNotes).where(and(mine, eq(kbNotes.edited, false)));
-      // Through `deleteNote`, not a bulk delete: a note's chunks and the links it resolves
-      // are derived from it, and only `deleteNote` knows to take them with it.
-      for (const row of stale) await deleteNote(tx as unknown as Db, agentId, row.id);
+      // Through `deleteNotes`, not a raw `DELETE`: a note's chunks and the links it resolves
+      // are derived from it, and only `deleteNotes` knows to take them with it — in one
+      // statement plus one link resolution for the whole stale set, rather than the
+      // one-`deleteNote`-per-note loop this replaced, which cost a full whole-agent
+      // `resolveLinks` scan per stale note on top of whatever a migrated source's hundreds of
+      // legacy notes already cost to write.
+      await deleteNotes(tx as unknown as Db, agentId, stale.map((row) => row.id));
 
       // Written unconditionally, even beside a kept, edited note: a duplicate beside an
       // edited note is the honest answer here, and a page silently withheld because its slot
@@ -710,7 +733,7 @@ export function registerKnowledgeRoutes(
         reimported: true,
         keptEdited: kept.length,
       };
-    });
+    }));
   }
 
   /** Why this source's last attempt did not work. Its notes are not touched. */
@@ -839,7 +862,7 @@ export function registerKnowledgeRoutes(
 
       if (existing) return applyReimport(req.agent!.id, existing, page);
 
-      return db.transaction(async (tx) => {
+      return withImportRetry(() => db.transaction(async (tx) => {
         const [created] = await tx
           .insert(kbSources)
           .values({
@@ -864,7 +887,7 @@ export function registerKnowledgeRoutes(
           reimported: false,
           keptEdited: 0,
         };
-      });
+      }));
     },
   );
 

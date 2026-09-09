@@ -1,6 +1,6 @@
 import { and, desc, eq, sql, type SQL } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
-import { kbItems } from '../../db/schema.js';
+import { kbChunks } from '../../db/schema.js';
 
 /**
  * Russian, not the default.
@@ -26,7 +26,7 @@ export const TEXT_SEARCH_CONFIG = 'russian';
  * The tsvector is machinery, not content. It is large, it is derivable, and on its way to
  * stage 5 it would otherwise travel through the API route into the agent's prompt.
  */
-export type KbRow = Omit<typeof kbItems.$inferSelect, 'search'>;
+export type KbRow = Omit<typeof kbChunks.$inferSelect, 'search'>;
 
 /**
  * The columns a `KbRow` is made of, for every query that reads an item.
@@ -36,20 +36,21 @@ export type KbRow = Omit<typeof kbItems.$inferSelect, 'search'>;
  * away from the wire. Naming the columns in one place is what makes `KbRow`'s promise true
  * of every reader rather than only of this file.
  */
-export const kbItemColumns = {
-  id: kbItems.id,
-  agentId: kbItems.agentId,
-  sourceId: kbItems.sourceId,
-  kind: kbItems.kind,
-  title: kbItems.title,
-  content: kbItems.content,
-  edited: kbItems.edited,
-  createdAt: kbItems.createdAt,
-  updatedAt: kbItems.updatedAt,
+export const kbChunkColumns = {
+  id: kbChunks.id,
+  agentId: kbChunks.agentId,
+  noteId: kbChunks.noteId,
+  ordinal: kbChunks.ordinal,
+  heading: kbChunks.heading,
+  title: kbChunks.title,
+  content: kbChunks.content,
+  kind: kbChunks.kind,
+  createdAt: kbChunks.createdAt,
+  updatedAt: kbChunks.updatedAt,
 } as const;
 
 export interface KnowledgeHit {
-  item: KbRow;
+  chunk: KbRow;
   rank: number;
 }
 
@@ -114,22 +115,22 @@ export async function searchKnowledge(
   // for can be present in the store, ranked below the cut, and silently absent from what it
   // gets back. Both passes carry it for the same reason.
   const scope = and(
-    eq(kbItems.agentId, agentId),
-    options.kind === undefined ? undefined : eq(kbItems.kind, options.kind),
+    eq(kbChunks.agentId, agentId),
+    options.kind === undefined ? undefined : eq(kbChunks.kind, options.kind),
   );
 
   // Both passes read the same rows and differ only in the tsquery they are asked for.
   const run = async (tsquery: SQL): Promise<KnowledgeHit[]> => {
-    const rank = sql<number>`ts_rank_cd(${kbItems.search}, ${tsquery})`;
+    const rank = sql<number>`ts_rank_cd(${kbChunks.search}, ${tsquery})`;
 
     const rows = await db
-      .select({ item: kbItemColumns, rank })
-      .from(kbItems)
-      .where(and(scope, sql`${kbItems.search} @@ ${tsquery}`))
+      .select({ chunk: kbChunkColumns, rank })
+      .from(kbChunks)
+      .where(and(scope, sql`${kbChunks.search} @@ ${tsquery}`))
       .orderBy(desc(rank))
       .limit(limit);
 
-    return rows.map(({ item, rank: value }) => ({ item, rank: Number(value) }));
+    return rows.map(({ chunk, rank: value }) => ({ chunk, rank: Number(value) }));
   };
 
   const strict = sql`websearch_to_tsquery(${TEXT_SEARCH_CONFIG}, ${text})`;

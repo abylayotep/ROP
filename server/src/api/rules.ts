@@ -4,6 +4,7 @@ import { z } from 'zod';
 import type { Db } from '../db/client.js';
 import { agentRules } from '../db/schema.js';
 import { ApiError } from '../lib/errors.js';
+import { RULE_CATEGORY_ORDER } from '../lib/ai/rules.js';
 import { isUuid } from '../lib/uuid.js';
 import { requireAgent } from './require-agent.js';
 
@@ -70,21 +71,83 @@ async function categorySize(tx: Tx, agentId: string, category: string): Promise<
   return row?.n ?? 0;
 }
 
+/**
+ * Locks every row of one agent's category for the rest of this transaction.
+ *
+ * `categorySize` and `current.position` are both reads of a snapshot — under Postgres's
+ * default READ COMMITTED, two transactions each take their own snapshot, so two `PATCH`
+ * requests moving *different* rules of the same category can both read the same
+ * `categorySize`, compute the same target, and then each write their own row by primary
+ * key. Those writes never block each other (different rows), so both commit, and the
+ * category ends with a duplicated position and a gap where one used to be — this is the
+ * bug a reviewer reproduced (3 of 20 concurrent trials) against these routes.
+ *
+ * `SELECT … FOR UPDATE` over the category's rows closes that: a second transaction that
+ * also needs this category blocks here until the first commits, and only then reads
+ * `categorySize`/`current.position` — against what the first transaction actually left
+ * behind, not a snapshot from before either held the lock. An empty category has nothing to
+ * lock, which leaves the *very first* row ever created in a brand-new category exposed to
+ * the same race (two concurrent `POST`s with nothing yet to serialize against) — a
+ * narrower case than the one reported, and not one a row lock can close without a
+ * placeholder row or an advisory lock; see the task-3 report for why it was left as a known
+ * limit rather than solved here.
+ */
+async function lockCategory(tx: Tx, agentId: string, category: string): Promise<void> {
+  await tx
+    .select({ id: agentRules.id })
+    .from(agentRules)
+    .where(and(eq(agentRules.agentId, agentId), eq(agentRules.category, category)))
+    .for('update');
+}
+
+/**
+ * Locks one or two categories, always in the same fixed order — ascending by category
+ * name — regardless of which is "old" and which is "new" for the caller's move.
+ *
+ * A `PATCH` that changes category locks both the rule's old category and its new one. A
+ * second `PATCH` moving a different rule the opposite way (old and new swapped) would, left
+ * to its own order, lock them old-then-new too — the *same two* categories, but potentially
+ * requested in the opposite order, which is exactly the setup for an AB-BA deadlock. Sorting
+ * the category names before locking means every transaction that ever needs this pair of
+ * categories asks for them in the same order, so no cycle can form: the standard
+ * resource-ordering argument for deadlock freedom applies directly, and it doesn't matter
+ * which direction any individual move runs in.
+ */
+async function lockCategories(tx: Tx, agentId: string, categories: readonly string[]): Promise<void> {
+  for (const category of [...new Set(categories)].sort()) {
+    await lockCategory(tx, agentId, category);
+  }
+}
+
 export function registerRuleRoutes(app: FastifyInstance, db: Db, guard: preHandlerHookHandler): void {
   // Rules shape what the agent is and what it costs to run; changing them is the owner's
   // call, not an operator's — every route below, the read included.
   const ownerOnly = requireAgent(db, { role: 'owner' });
 
-  /** One agent's rule, or 404 — never another agent's, and never a bare 500. */
-  async function loadRule(agentId: string, ruleId: string): Promise<typeof agentRules.$inferSelect> {
+  /**
+   * One agent's rule, or 404 — never another agent's, and never a bare 500.
+   *
+   * `executor` defaults to `db` for the plain, unlocked lookups (the initial 404 check
+   * before a route even opens a transaction), and is passed as `tx` wherever a caller has
+   * already locked this row's category and needs an authoritative re-read against that
+   * lock rather than a fresh, separately-snapshotted query.
+   */
+  async function loadRule(
+    agentId: string,
+    ruleId: string,
+    executor: Db | Tx = db,
+  ): Promise<typeof agentRules.$inferSelect> {
     if (!isUuid(ruleId)) throw new ApiError(404, 'Правило не найдено');
-    const [row] = await db
+    const [row] = await executor
       .select()
       .from(agentRules)
       .where(and(eq(agentRules.id, ruleId), eq(agentRules.agentId, agentId)));
     if (!row) throw new ApiError(404, 'Правило не найдено');
     return row;
   }
+
+  /** Where a category ranks in the order `assembleRules` (lib/ai/rules.ts) renders it in. */
+  const categoryRank = new Map(RULE_CATEGORY_ORDER.map((category, i) => [category, i]));
 
   app.get(
     '/api/agents/:agentId/rules',
@@ -94,8 +157,16 @@ export function registerRuleRoutes(app: FastifyInstance, db: Db, guard: preHandl
         .select()
         .from(agentRules)
         .where(eq(agentRules.agentId, req.agent!.id))
-        .orderBy(asc(agentRules.category), asc(agentRules.position));
-      return rows.map(toRule);
+        .orderBy(asc(agentRules.position));
+      // Sorted here rather than by the query, in the order `assembleRules` defines
+      // (`RULE_CATEGORY_ORDER`) rather than SQL's alphabetical `asc(category)` — the model
+      // reads business, tone, order, forbid, and a screen showing the wire order otherwise
+      // would show the owner a sequence the agent never uses. `Array.sort` is stable, and
+      // the query above already orders by `position`, so rows sharing a category keep the
+      // order the owner arranged them in.
+      return rows
+        .map(toRule)
+        .sort((a, b) => (categoryRank.get(a.category) ?? 99) - (categoryRank.get(b.category) ?? 99));
     },
   );
 
@@ -109,6 +180,11 @@ export function registerRuleRoutes(app: FastifyInstance, db: Db, guard: preHandl
       const agentId = req.agent!.id;
 
       const row = await db.transaction(async (tx) => {
+        // Locks the category before counting it, so a concurrent create (or move, or
+        // delete) in the same category waits here and then counts what this transaction
+        // actually leaves behind. See `lockCategory` for what breaks without this and why
+        // an empty category is the one case it can't close.
+        await lockCategory(tx, agentId, category);
         // A new rule joins the end of its category. `categorySize` is the count of rows
         // already there, which — because every write here keeps positions dense and
         // starting at 0 — is exactly the next free slot.
@@ -171,13 +247,40 @@ export function registerRuleRoutes(app: FastifyInstance, db: Db, guard: preHandl
     async (req) => {
       const { ruleId } = req.params as { ruleId: string };
       const agentId = req.agent!.id;
-      const current = await loadRule(agentId, ruleId);
+      // Fast 404 before opening a transaction — but only ever used below to know *which*
+      // category(ies) to lock. Everything that actually reads position or category uses
+      // the re-read taken after the lock, not this one: this snapshot is taken before any
+      // lock exists, so a concurrent request could have already moved this exact row by
+      // the time the transaction below starts.
+      const probe = await loadRule(agentId, ruleId);
 
       const parsed = updateRule.safeParse(req.body);
       if (!parsed.success) throw ruleError(parsed.error.issues[0]);
       const { category, text, enabled, position } = parsed.data;
 
       const row = await db.transaction(async (tx) => {
+        const categoriesToLock =
+          category !== undefined && category !== probe.category ? [probe.category, category] : [probe.category];
+        // Locks the category (both of them, for a move) before this transaction reads
+        // anything position-shaped. A second PATCH touching the same category blocks here
+        // — see `lockCategory` — and `lockCategories` fixes the lock order across the pair
+        // so two moves running in opposite directions can never deadlock against each
+        // other.
+        await lockCategories(tx, agentId, categoriesToLock);
+
+        // Re-read now that the lock is held, rather than trusting `probe`: the lock makes
+        // this read authoritative for anything still inside `categoriesToLock`.
+        const current = await loadRule(agentId, ruleId, tx);
+        if (!categoriesToLock.includes(current.category)) {
+          // Between `probe` and the lock above, some other transaction already committed a
+          // move of this *exact* rule to a category neither lock covers — only possible
+          // when two requests race to move the same rule (not the reported scenario, which
+          // moves two different rules), and too rare to guess our way through: proceeding
+          // would mean writing against a category this transaction never locked, which is
+          // the same unprotected write the lock exists to prevent.
+          throw new ApiError(409, 'Правило уже изменили, повторите запрос');
+        }
+
         const movingCategory = category !== undefined && category !== current.category;
 
         if (movingCategory) {
@@ -267,9 +370,25 @@ export function registerRuleRoutes(app: FastifyInstance, db: Db, guard: preHandl
     async (req) => {
       const { ruleId } = req.params as { ruleId: string };
       const agentId = req.agent!.id;
-      const current = await loadRule(agentId, ruleId);
+      // Fast 404 before opening a transaction — see the PATCH route's `probe` for why this
+      // isn't the read the delete itself relies on.
+      const probe = await loadRule(agentId, ruleId);
 
       await db.transaction(async (tx) => {
+        // Locks the category before touching any position in it, for the same reason the
+        // PATCH route does: a concurrent create, delete, or move in this category needs to
+        // wait here rather than race this transaction's shift.
+        await lockCategory(tx, agentId, probe.category);
+
+        const current = await loadRule(agentId, ruleId, tx);
+        if (current.category !== probe.category) {
+          // A concurrent PATCH already moved this exact row out of the category this
+          // transaction locked, in the gap between `probe` and the lock. See the PATCH
+          // route's identical check for why this is answered with a retry rather than a
+          // guess.
+          throw new ApiError(409, 'Правило уже изменили, повторите запрос');
+        }
+
         await tx.delete(agentRules).where(eq(agentRules.id, current.id));
         // The hole a delete leaves is closed immediately, not left for the next create to
         // trip over: `categorySize` hands a new rule the category's row count as its

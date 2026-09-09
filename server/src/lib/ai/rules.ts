@@ -33,6 +33,14 @@ const GROUPS: readonly { category: RuleCategory; heading: string }[] = [
 ];
 
 /**
+ * The four categories, in the same order `assembleRules` renders them in — derived from
+ * `GROUPS` rather than repeated, so a screen that lists an agent's rules by category (the
+ * `GET /rules` route in `api/rules.ts`) shows the owner the sequence the prompt actually
+ * reads, without a second table that could drift from this one.
+ */
+export const RULE_CATEGORY_ORDER: readonly RuleCategory[] = GROUPS.map((g) => g.category);
+
+/**
  * The rules as one string, which is what the prompt has always carried.
  *
  * One string rather than a new prompt section, because the number guard verifies a number

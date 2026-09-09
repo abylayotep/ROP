@@ -173,4 +173,110 @@ describe('rules', () => {
     const list = (await app.inject({ method: 'GET', url: rules(), cookies: jar })).json();
     expect(list).toEqual([]);
   });
+
+  // `assembleRules` (lib/ai/rules.ts) renders business, then tone, then order, then forbid —
+  // the order the model actually reads. SQL `asc(category)` gives business, forbid, order,
+  // tone (alphabetical) instead: harmless today only because `assembleRules` re-groups from
+  // scratch, but a screen rendering the wire order would show the owner a sequence the agent
+  // never uses.
+  it('returns categories in the order the prompt reads them, not alphabetically', async () => {
+    await post({ category: 'forbid', text: 'Не давай скидку.' });
+    await post({ category: 'business', text: 'Мы продаём двери.' });
+    await post({ category: 'tone', text: 'На «вы».' });
+    await post({ category: 'order', text: 'Сначала район.' });
+
+    const list = (await app.inject({ method: 'GET', url: rules(), cookies: jar })).json();
+    expect(list.map((r: { category: string }) => r.category)).toEqual(['business', 'tone', 'order', 'forbid']);
+  });
+
+  // The reviewer's repro: two concurrent PATCHes, each moving a *different* rule of the same
+  // category to the same target position. Under READ COMMITTED, both requests can read
+  // `categorySize`/`current.position` from a snapshot taken before either wrote anything,
+  // compute the same target, and then write their own row by primary key — writes that never
+  // block each other because they touch different rows. Both commit, and the category ends
+  // with a duplicated position and a gap where one used to be.
+  //
+  // Inherently probabilistic — whether the two `app.inject` calls actually overlap inside
+  // Postgres depends on scheduling — so this runs 20 trials, each against a fresh trio of
+  // rules, and asserts the *whole* category is left dense and unique (no duplicate position,
+  // no gap) after every single one. The reviewer's own repro against these same routes hit
+  // the duplicate in 3 of 20 trials before the fix below; running fewer trials risked a clean
+  // pass by luck rather than by correctness.
+  it('keeps positions dense and unique under two concurrent moves in one category', async () => {
+    const TRIALS = 20;
+    for (let trial = 0; trial < TRIALS; trial++) {
+      const a = (await post({ category: 'business', text: `A${trial}` })).json();
+      const b = (await post({ category: 'business', text: `B${trial}` })).json();
+      const c = (await post({ category: 'business', text: `C${trial}` })).json();
+      const mid = b.position; // the middle slot of this trial's fresh trio
+
+      const [resA, resC] = await Promise.all([
+        app.inject({
+          method: 'PATCH',
+          url: `${rules()}/${a.id}`,
+          cookies: jar,
+          payload: { position: mid },
+        }),
+        app.inject({
+          method: 'PATCH',
+          url: `${rules()}/${c.id}`,
+          cookies: jar,
+          payload: { position: mid },
+        }),
+      ]);
+      expect(resA.statusCode).toBe(200);
+      expect(resC.statusCode).toBe(200);
+
+      const list = (await app.inject({ method: 'GET', url: rules(), cookies: jar })).json();
+      const positions = list
+        .filter((r: { category: string }) => r.category === 'business')
+        .map((r: { position: number }) => r.position)
+        .sort((x: number, y: number) => x - y);
+      expect(positions).toEqual(Array.from({ length: positions.length }, (_, i) => i));
+    }
+  });
+
+  // A PATCH that changes `category` locks both the rule's old and new category. Two such
+  // moves running in opposite directions at once — one from `business` to `tone`, the other
+  // from `tone` to `business` — are exactly the shape an AB-BA deadlock needs if each move
+  // locked its own "old, then new" without agreeing on an order. `lockCategories` sorts the
+  // two names before locking, so both requests always ask for `business` before `tone`
+  // regardless of which way they're moving.
+  //
+  // 10 trials, each against a fresh pair of rules: neither request should ever time out or
+  // 500 with a Postgres deadlock error, and both categories should stay dense and unique
+  // afterward.
+  it('moves rules between two categories in opposite directions without deadlocking', async () => {
+    const TRIALS = 10;
+    for (let trial = 0; trial < TRIALS; trial++) {
+      const x = (await post({ category: 'business', text: `X${trial}` })).json();
+      const y = (await post({ category: 'tone', text: `Y${trial}` })).json();
+
+      const [resX, resY] = await Promise.all([
+        app.inject({
+          method: 'PATCH',
+          url: `${rules()}/${x.id}`,
+          cookies: jar,
+          payload: { category: 'tone' },
+        }),
+        app.inject({
+          method: 'PATCH',
+          url: `${rules()}/${y.id}`,
+          cookies: jar,
+          payload: { category: 'business' },
+        }),
+      ]);
+      expect(resX.statusCode).toBe(200);
+      expect(resY.statusCode).toBe(200);
+
+      const list = (await app.inject({ method: 'GET', url: rules(), cookies: jar })).json();
+      for (const category of ['business', 'tone']) {
+        const positions = list
+          .filter((r: { category: string }) => r.category === category)
+          .map((r: { position: number }) => r.position)
+          .sort((a: number, b: number) => a - b);
+        expect(positions).toEqual(Array.from({ length: positions.length }, (_, i) => i));
+      }
+    }
+  });
 });

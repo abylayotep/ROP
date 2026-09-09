@@ -179,6 +179,56 @@ describe('notes', () => {
     expect(from.json().links).toContainEqual({ noteId: null, title: 'Монтаж' });
   });
 
+  it('renames a note through the route, re-pointing links that named it', async () => {
+    const target = (await add({ path: 'Гарантия', body: 'Год.' })).json();
+    await add({ path: 'Двери', body: 'Смотри [[Гарантия]].' });
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `${notes()}/${target.id}`,
+      cookies: jar,
+      payload: { path: 'Сервис/Гарантия' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().path).toBe('Сервис/Гарантия');
+    expect(res.json().edited).toBe(true);
+
+    const from = await app.inject({ method: 'GET', url: `${notes()}/${target.id}`, cookies: jar });
+    expect(from.json().backlinks.map((l: { title: string }) => l.title)).toEqual(['Двери']);
+  });
+
+  it('refuses a PATCH rename onto an occupied path in the operator language', async () => {
+    await add({ path: 'Двери', body: 'Раз.' });
+    const other = (await add({ path: 'Окна', body: 'Два.' })).json();
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `${notes()}/${other.id}`,
+      cookies: jar,
+      payload: { path: 'Двери' },
+    });
+
+    expect(res.statusCode).toBe(409);
+    expect(res.json().message).toBe('Заметка с таким названием уже есть');
+  });
+
+  it('marks a body-only PATCH as edited', async () => {
+    const note = (await add({ path: 'Двери', body: 'Металл.' })).json();
+    expect(note.edited).toBe(false);
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `${notes()}/${note.id}`,
+      cookies: jar,
+      payload: { body: 'Дерево.' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().edited).toBe(true);
+    expect(res.json().body).toBe('Дерево.');
+  });
+
   it('deletes a note and its sections', async () => {
     const note = (await add({ path: 'Двери', body: '## Цена\n80 000 ₸.' })).json();
 

@@ -190,8 +190,12 @@ const OUR_TAGS = /<\s*\/?\s*(запись|инструкции)[^>]*>/gi;
  * Four bytes rather than sixteen: this has to be guessed inside one prompt by someone who
  * never sees the result, not survive cryptanalysis, and eight characters repeated on every
  * record is already paid for in tokens.
+ *
+ * Exported so `coach.ts` mints the same shape of token for the transcript it fences, rather
+ * than inventing a second guard scheme that a reviewer has to convince themselves is just as
+ * safe as this one.
  */
-function mintGuard(): string {
+export function mintGuard(): string {
   return randomBytes(4).toString('hex');
 }
 

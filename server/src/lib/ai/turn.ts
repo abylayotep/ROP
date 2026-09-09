@@ -352,8 +352,11 @@ function retryMessage(kind: string): ChatMessage {
  * A retry is two calls and one bill. Scaled to integers rather than added as floats: the
  * numbers are eight decimal places wide and a float sum of two of them prints as
  * `0.00019999999999999998`, which the column rounds and an owner reads as a typo.
+ *
+ * Exported so `coach.ts`'s own retry totals the same two bills the same way, rather than a
+ * second adder that rounds a different way on the same numbers.
  */
-function addCost(a: string, b: string): string {
+export function addCost(a: string, b: string): string {
   const scaled = (value: string): number => {
     const parsed = Number(value);
     return Number.isFinite(parsed) ? Math.round(parsed * 1e8) : 0;

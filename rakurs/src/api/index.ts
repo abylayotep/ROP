@@ -12,8 +12,10 @@ import type {
   ConversationThread,
   Customer,
   KbImport,
-  KbItem,
-  KbItemKind,
+  KbNote,
+  KbNoteDetail,
+  KbNoteKind,
+  KbSection,
   KbSource,
   Lead,
   LeadField,
@@ -233,27 +235,33 @@ const knowledge = (agentId: string) => `/agents/${agentId}/knowledge`;
 
 /**
  * With a query it is a search, without one a list. One route for both is deliberate: the
- * owner has to test exactly the search stage 5's agent uses.
+ * owner has to test exactly the search stage 5's agent uses, and the tree pane's own search
+ * box calls this rather than filtering a cached list — the distinct notes of the ranker's
+ * hits, in the ranker's own order, is not something the browser can reproduce from a plain
+ * list of notes.
  */
-export const listKbItems = (
-  agentId: string,
-  params: { kind?: KbItemKind; q?: string },
-  signal?: AbortSignal,
-) => request<KbItem[]>(`${knowledge(agentId)}/items`, { query: params, signal });
+export const listKbNotes = (agentId: string, params: { q?: string } = {}, signal?: AbortSignal) =>
+  request<KbNote[]>(`${knowledge(agentId)}/notes`, { query: params, signal });
 
-export const createKbItem = (
-  agentId: string,
-  body: { kind: KbItemKind; title: string; content: string },
-) => request<KbItem>(`${knowledge(agentId)}/items`, { method: 'POST', body });
+export const getKbNote = (agentId: string, noteId: string, signal?: AbortSignal) =>
+  request<KbNoteDetail>(`${knowledge(agentId)}/notes/${noteId}`, { signal });
 
-export const updateKbItem = (
-  agentId: string,
-  itemId: string,
-  body: { kind?: KbItemKind; title?: string; content?: string },
-) => request<KbItem>(`${knowledge(agentId)}/items/${itemId}`, { method: 'PATCH', body });
+export const createKbNote = (agentId: string, body: { path: string; body: string }) =>
+  request<KbNoteDetail>(`${knowledge(agentId)}/notes`, { method: 'POST', body });
 
-export const deleteKbItem = (agentId: string, itemId: string) =>
-  request<{ ok: true }>(`${knowledge(agentId)}/items/${itemId}`, { method: 'DELETE' });
+export const updateKbNote = (
+  agentId: string,
+  noteId: string,
+  body: { path?: string; body?: string },
+) => request<KbNoteDetail>(`${knowledge(agentId)}/notes/${noteId}`, { method: 'PATCH', body });
+
+export const deleteKbNote = (agentId: string, noteId: string) =>
+  request<{ ok: true }>(`${knowledge(agentId)}/notes/${noteId}`, { method: 'DELETE' });
+
+/** The same ranker `listKbNotes` calls with a query, but sections rather than whole notes —
+ * what «Что найдёт агент» shows, because a note title is not what the agent quotes. */
+export const searchKb = (agentId: string, q: string, signal?: AbortSignal) =>
+  request<KbSection[]>(`${knowledge(agentId)}/search`, { query: { q }, signal });
 
 export const listKbSources = (agentId: string, signal?: AbortSignal) =>
   request<KbSource[]>(`${knowledge(agentId)}/sources`, { signal });
@@ -261,7 +269,7 @@ export const listKbSources = (agentId: string, signal?: AbortSignal) =>
 /** Owner only on the server: an import writes a batch nobody has read yet. */
 export const importKbText = (
   agentId: string,
-  body: { title: string; kind: KbItemKind; text: string },
+  body: { title: string; kind: KbNoteKind; text: string },
 ) => request<KbImport>(`${knowledge(agentId)}/import/text`, { method: 'POST', body });
 
 /** Owner only. The fetch happens inside the request, so it can take seconds. */

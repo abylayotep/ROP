@@ -1,4 +1,4 @@
-import { sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildServer } from '../src/api/server.js';
@@ -249,16 +249,21 @@ describe('importing a page', () => {
     expect(rows[0]?.body).toContain('1000 тенге');
   });
 
-  it('keeps a correction when the same address is pasted again', async () => {
+  it('keeps a correction when the same address is pasted again, and still writes the page fresh', async () => {
     const first = await importPage(PAGE);
     await edit(first.json().notes[0]!.id, '# Двери\n\nПравлено вручную.');
 
     const again = await importPage(PAGE.replace('По городу бесплатно.', 'По городу 1000 тенге.'));
 
+    // The edited note is kept; the page's fresh content is not withheld on that account — it
+    // lands beside it, at ` (2)`, rather than vanishing with no trace.
     expect(again.json().keptEdited).toBe(1);
     const rows = await db.select().from(kbNotes);
-    expect(rows).toHaveLength(1);
-    expect(rows[0]?.body).toContain('Правлено вручную.');
+    expect(rows).toHaveLength(2);
+    const kept = rows.find((row) => row.path === 'С сайта/Двери');
+    expect(kept?.body).toContain('Правлено вручную.');
+    const fresh = rows.find((row) => row.path === 'С сайта/Двери (2)');
+    expect(fresh?.body).toContain('1000 тенге');
   });
 
   it('reuses the failed row when the address finally answers', async () => {
@@ -355,13 +360,85 @@ describe('refreshing a page', () => {
     expect(kept.json().body).toContain('90 000 ₸.');
   });
 
+  it('writes the fresh page note beside an edited one, at " (2)"', async () => {
+    const first = await importPage('<h1>Двери</h1><p>80 000 ₸.</p>');
+    const noteId = first.json().notes[0]!.id;
+    await edit(noteId, '# Двери\n\nПравлено вручную.');
+
+    setFetcher(fakeFetcher({ [PAGE_URL]: '<h1>Двери</h1><p>99 000 ₸.</p>' }));
+    const again = await refresh();
+
+    // The edited note is kept, and its slot is not silently withheld: the page's own current
+    // content is always written, beside it, rather than dropped because the slot is taken.
+    expect(again.json().keptEdited).toBe(1);
+    const rows = await db.select().from(kbNotes);
+    expect(rows.map((row) => row.path).sort()).toEqual(['С сайта/Двери', 'С сайта/Двери (2)']);
+    const kept = rows.find((row) => row.path === 'С сайта/Двери');
+    expect(kept?.body).toContain('Правлено вручную.');
+    const fresh = rows.find((row) => row.path === 'С сайта/Двери (2)');
+    expect(fresh?.body).toContain('99 000 ₸.');
+  });
+
+  it('replaces the fresh note on a second refresh rather than piling up copies', async () => {
+    const first = await importPage('<h1>Двери</h1><p>80 000 ₸.</p>');
+    const noteId = first.json().notes[0]!.id;
+    await edit(noteId, '# Двери\n\nПравлено вручную.');
+
+    setFetcher(fakeFetcher({ [PAGE_URL]: '<h1>Двери</h1><p>99 000 ₸.</p>' }));
+    await refresh();
+    setFetcher(fakeFetcher({ [PAGE_URL]: '<h1>Двери</h1><p>101 000 ₸.</p>' }));
+    const again = await refresh();
+
+    expect(again.json().keptEdited).toBe(1);
+    // Still exactly two notes: the previous fresh note (unedited) went with the rest of
+    // `stale`, so this refresh does not leave a third, ` (3)`, copy behind.
+    const rows = await db.select().from(kbNotes);
+    expect(rows).toHaveLength(2);
+    expect(rows.map((row) => row.path).sort()).toEqual(['С сайта/Двери', 'С сайта/Двери (2)']);
+    const fresh = rows.find((row) => row.path === 'С сайта/Двери (2)');
+    expect(fresh?.body).toContain('101 000 ₸.');
+  });
+
+  it('drops the untouched notes of a legacy source and still writes the page fresh', async () => {
+    // The shape migration 0012 could leave behind: several old notes on one page source,
+    // and a person has edited only one of them.
+    const first = await importPage('<h1>Двери</h1><p>80 000 ₸.</p>');
+    const sourceId = first.json().source.id;
+    const noteId = first.json().notes[0]!.id;
+    await edit(noteId, '# Двери\n\nПравлено вручную.');
+    await db.insert(kbNotes).values([
+      { agentId, sourceId, path: 'С сайта/Второй', title: 'Второй', body: 'старое второе' },
+      { agentId, sourceId, path: 'С сайта/Третий', title: 'Третий', body: 'старое третье' },
+    ]);
+
+    setFetcher(fakeFetcher({ [PAGE_URL]: '<h1>Двери</h1><p>99 000 ₸.</p>' }));
+    const again = await reimportSource(sourceId);
+
+    expect(again.json().keptEdited).toBe(1);
+    const rows = await db.select().from(kbNotes).where(eq(kbNotes.sourceId, sourceId));
+    // The two untouched notes are gone; the edited one stays; the page's fresh content is
+    // present rather than lost with no trace.
+    expect(rows).toHaveLength(2);
+    expect(rows.some((row) => row.body.includes('Правлено вручную.'))).toBe(true);
+    expect(rows.some((row) => row.body.includes('99 000 ₸.'))).toBe(true);
+    expect(rows.some((row) => row.body.includes('старое'))).toBe(false);
+  });
+
   it('leaves the notes alone when the page fails to load', async () => {
     const first = await importPage('<h1>Двери</h1><p>80 000 ₸.</p>');
 
     server.fail(503);
     const again = await refresh();
 
+    // A refresh that did not happen must not answer 200: the owner's screen treats any
+    // non-throwing response as success, and `import/page` already throws 502 for the
+    // identical failure — the two routes have to agree.
+    expect(again.statusCode).toBe(502);
     expect(again.json().source.status).toBe('failed');
+    // The body still carries the full import shape (not `{message}`), so the screen can
+    // redraw the source row from this response without a second request — and the Russian
+    // sentence the owner is shown lives on it, not invented by the screen.
+    expect(again.json().source.error).toContain('Не удалось загрузить страницу');
     const still = await app.inject({
       method: 'GET',
       url: `${notes()}/${first.json().notes[0]!.id}`,

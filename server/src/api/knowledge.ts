@@ -22,7 +22,7 @@ import {
   type PageMarkdown,
 } from '../lib/knowledge/fetch-page.js';
 import { BODY_MAX } from '../lib/knowledge/note.js';
-import { deleteNote, saveNote } from '../lib/knowledge/notes.js';
+import { deleteNote, saveNote, type SaveNoteInput } from '../lib/knowledge/notes.js';
 import { kbChunkColumns, searchKnowledge, type KbRow } from '../lib/knowledge/search.js';
 // pleep's own limits, and they are the right shape: a fact, not an essay. They live beside
 // the splitter because that is the code that has to cut to fit them; a second copy here
@@ -540,6 +540,37 @@ export function registerKnowledgeRoutes(
     }
   }
 
+  /**
+   * `uniquePath` followed by the write it was computed for, with the one race that can still
+   * happen between them covered.
+   *
+   * The probe above answers correctly for everything writing inside this same transaction —
+   * that is what "inside the caller's own transaction" on `uniquePath` buys — but not for a
+   * second import racing it from a different transaction: both can probe the same free
+   * candidate before either commits, and one of the two inserts then hits the `kb_notes_agent_
+   * path_key` unique index. Rather than serializing every write behind a lock for a
+   * collision that needs two imports of the same title landing at the same instant, the write
+   * runs inside its own savepoint (`tx.transaction`, which `PostgresJsTransaction` turns into a
+   * real `SAVEPOINT`): a `23505` rolls back just that attempt, `uniquePath` is asked again
+   * against whatever just committed, and the next candidate is tried.
+   */
+  async function saveNoteAtUniquePath(
+    tx: Tx,
+    agentId: string,
+    folder: string,
+    title: string,
+    rest: Omit<SaveNoteInput, 'agentId' | 'path'>,
+  ): Promise<typeof kbNotes.$inferSelect> {
+    for (;;) {
+      const path = await uniquePath(tx, agentId, folder, title);
+      try {
+        return await tx.transaction((inner) => saveNote(inner as unknown as Db, { agentId, path, ...rest }));
+      } catch (error) {
+        if (!isDuplicate(error)) throw error;
+      }
+    }
+  }
+
   /** One pasted block, written as its own note under `Вставки/`, numbered clear of collisions. */
   async function insertPasteNotes(
     tx: Tx,
@@ -551,8 +582,7 @@ export function registerKnowledgeRoutes(
     const rows: (typeof kbNotes.$inferSelect)[] = [];
     for (const part of parts) {
       const body = kind === 'other' ? part.content : `---\nkind: ${kind}\n---\n\n${part.content}`;
-      const path = await uniquePath(tx, agentId, 'Вставки', part.title);
-      rows.push(await saveNote(tx as unknown as Db, { agentId, path, body, sourceId }));
+      rows.push(await saveNoteAtUniquePath(tx, agentId, 'Вставки', part.title, { body, sourceId }));
     }
     return rows;
   }
@@ -612,11 +642,15 @@ export function registerKnowledgeRoutes(
   /**
    * A refetched page written onto the source it belongs to.
    *
-   * A page is one note, so the rule collapses to one choice: **if a person edited that note it
-   * is left alone and counted; otherwise it is replaced whole with what the page says now.**
-   * There is no title to match a fresh part against a kept one by — the mistake the item-based
-   * predecessor of this function made, and the reason a page's sections used to drift apart
-   * from what the owner had corrected. One note, one fetch, one decision.
+   * A page's fresh content is always written, whatever else the source held: an edited note
+   * is a person's correction and is kept rather than overwritten, but that is not a reason to
+   * withhold the page's current content. A legacy source (migration 0012 gave every
+   * pre-existing page source one note per old record) can hold several of these; if even one
+   * of them was edited, refusing to write the fresh note anywhere would make the page's real
+   * content vanish with no trace the next time this source is read. There is no title to match
+   * a fresh part against a kept one by — the mistake the item-based predecessor of this
+   * function made — so every untouched (`edited = false`) note goes first, and the fresh note
+   * lands wherever `uniquePath` finds room, beside a kept one if it must.
    */
   async function applyReimport(
     agentId: string,
@@ -634,20 +668,17 @@ export function registerKnowledgeRoutes(
       // are derived from it, and only `deleteNote` knows to take them with it.
       for (const row of stale) await deleteNote(tx as unknown as Db, agentId, row.id);
 
-      // A fresh note is written only when nothing was kept: a page is one note, and a kept,
-      // edited copy of it already occupies that slot — writing a second one beside it would
-      // duplicate the page rather than update it.
-      const written =
-        kept.length === 0
-          ? [
-              await saveNote(tx as unknown as Db, {
-                agentId,
-                path: await uniquePath(tx, agentId, 'С сайта', page.title),
-                body: page.markdown,
-                sourceId: source.id,
-              }),
-            ]
-          : [];
+      // Written unconditionally, even beside a kept, edited note: a duplicate beside an
+      // edited note is the honest answer here, and a page silently withheld because its slot
+      // was taken is not. It does not accumulate across refreshes — the previous fresh note
+      // is unedited and was just deleted above, along with the rest of `stale`, so `uniquePath`
+      // finds the same ` (2)` free again rather than moving on to ` (3)`.
+      const written = [
+        await saveNoteAtUniquePath(tx, agentId, 'С сайта', page.title, {
+          body: page.markdown,
+          sourceId: source.id,
+        }),
+      ];
 
       const [updated] = await tx
         .update(kbSources)
@@ -815,9 +846,7 @@ export function registerKnowledgeRoutes(
           })
           .returning();
 
-        const note = await saveNote(tx as unknown as Db, {
-          agentId: req.agent!.id,
-          path: await uniquePath(tx, req.agent!.id, 'С сайта', page.title),
+        const note = await saveNoteAtUniquePath(tx, req.agent!.id, 'С сайта', page.title, {
           body: page.markdown,
           sourceId: created!.id,
         });
@@ -835,7 +864,7 @@ export function registerKnowledgeRoutes(
   app.post(
     '/api/agents/:agentId/knowledge/sources/:sourceId/reimport',
     { preHandler: [guard, ownerOnly] },
-    async (req): Promise<KbImport> => {
+    async (req, reply): Promise<KbImport> => {
       const { sourceId } = req.params as { sourceId: string };
       const source = await loadSource(req.agent!.id, sourceId);
       if (source.kind !== 'page' || !source.url) {
@@ -854,8 +883,15 @@ export function registerKnowledgeRoutes(
       } catch (error) {
         await markFailed(source.id, req.agent!.id, PAGE_REFUSED);
         app.log.warn({ url, detail: failureDetail(error) }, 'knowledge page reimport failed');
-        // Answered, not thrown: a first import has no source to show for a failure, but a
-        // refresh does, and its new `status` — read back here, not assumed — is the answer.
+        // Answered with the full body, not thrown: a first import has no source to show for a
+        // failure, but a refresh does, and its new `status` — read back here, not assumed — is
+        // the answer the owner's screen redraws from. But the status code still has to say
+        // this refresh did not work — `import/page` throws 502 for the identical failure, and
+        // the screen treats any non-throwing response as success, so a 200 here would tell the
+        // owner the page updated when it did not. `reply.code` rather than `ApiError`, whose
+        // global handler flattens the body to `{message}` and would lose the source and notes
+        // this response exists to carry.
+        reply.code(502);
         return failedReimport(req.agent!.id, source.id);
       }
 

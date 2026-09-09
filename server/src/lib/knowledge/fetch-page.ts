@@ -593,7 +593,7 @@ export function htmlToText(html: string): string {
     //    nothing, so the word before a stripped block and the word after it stay apart.
     .replace(STRIPPED_RE, '\n')
     .replace(UNCLOSED_RE, '\n')
-    // 2. Headings, to the markdown `splitByHeadings` reads.
+    // 2. Headings, to the markdown `fetchPage` below reads.
     .replace(
       /<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1\s*>/gi,
       (_found, level: string, inner: string) =>

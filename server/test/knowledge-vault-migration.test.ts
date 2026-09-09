@@ -1,9 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { ADMIN_URL, runMigration, tagsBefore, withDatabase } from './helpers/migration-db.js';
 import { parseNote } from '../src/lib/knowledge/note.js';
 
 /**
@@ -12,44 +10,15 @@ import { parseNote } from '../src/lib/knowledge/note.js';
  * runs exactly once against a customer's real data, so the thing worth testing is the move
  * itself, not a schema left behind by it.
  *
- * Migrations before 0012 are applied by hand — reading `drizzle/meta/_journal.json` for the
- * ordered tag list, reading each `.sql` file, and splitting on `--> statement-breakpoint` —
- * because that is exactly what `drizzle-orm`'s own migrator does (see
- * `node_modules/drizzle-orm/migrator.js`), and doing it by hand is what lets this test stop
- * short of 0012 so it can seed `kb_items` before that migration consumes it.
+ * Migrations before 0012 are applied by hand, via `helpers/migration-db.js` — reading
+ * `drizzle/meta/_journal.json` for the ordered tag list, reading each `.sql` file, and
+ * splitting on `--> statement-breakpoint` — because that is exactly what `drizzle-orm`'s own
+ * migrator does (see `node_modules/drizzle-orm/migrator.js`), and doing it by hand is what
+ * lets this test stop short of 0012 so it can seed `kb_items` before that migration consumes
+ * it.
  */
 
-const HERE = path.dirname(fileURLToPath(import.meta.url));
-const DRIZZLE_DIR = path.resolve(HERE, '../drizzle');
 const TARGET_TAG = '0012_married_mathemanic';
-
-const ADMIN_URL =
-  process.env.TEST_DATABASE_URL ?? 'postgres://rakurs:rakurs@localhost:55432/rakurs_test';
-
-type JournalEntry = { idx: number; tag: string };
-
-function tagsBefore(targetTag: string): string[] {
-  const journal = JSON.parse(
-    readFileSync(path.join(DRIZZLE_DIR, 'meta/_journal.json'), 'utf8'),
-  ) as { entries: JournalEntry[] };
-  const target = journal.entries.find((e) => e.tag === targetTag);
-  if (!target) throw new Error(`No journal entry tagged ${targetTag}`);
-  return journal.entries.filter((e) => e.idx < target.idx).map((e) => e.tag);
-}
-
-async function runMigration(sql: postgres.Sql, tag: string): Promise<void> {
-  const text = readFileSync(path.join(DRIZZLE_DIR, `${tag}.sql`), 'utf8');
-  for (const statement of text.split('--> statement-breakpoint')) {
-    if (statement.trim().length === 0) continue;
-    await sql.unsafe(statement);
-  }
-}
-
-function withDatabase(url: string, database: string): string {
-  const u = new URL(url);
-  u.pathname = `/${database}`;
-  return u.toString();
-}
 
 /** One `kb_items` row, seeded with an id we choose so the note it becomes is easy to find. */
 type SeedItem = {

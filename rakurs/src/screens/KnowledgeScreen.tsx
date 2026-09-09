@@ -66,18 +66,41 @@ export function KnowledgeScreen() {
 
   const [params, setParams] = useSearchParams();
   const selected = params.get('note');
-  const select = (noteId: string | null) =>
+
+  // Whether the one `NoteEditor` currently on screen has typed text it has not saved.
+  // `NoteEditor` is keyed by `selected`, so moving `selected` at all remounts it — this is
+  // the one flag standing between a click and a silently discarded draft.
+  const [editorDirty, setEditorDirty] = useState(false);
+
+  /** The actual navigation, with no question asked. For the paths that already answered
+   * one — a save, a confirmed delete, an explicit «Отмена» — asking again would be asking
+   * about a change that either no longer exists or was just discarded on purpose. */
+  const selectNow = (noteId: string | null) =>
     noteId === null ? setParams({}, { replace: true }) : setParams({ note: noteId }, { replace: true });
+
+  /**
+   * The one guard every note-to-note jump goes through: the tree, a backlink, an outgoing
+   * link, a search result, and «+ Новая заметка» all call this, never `selectNow` directly.
+   * A dirty editor gets a chance to say no before its draft is gone for good.
+   */
+  const select = (noteId: string | null) => {
+    if (editorDirty && !window.confirm('Уйти без сохранения? Несохранённые правки будут потеряны.')) return;
+    selectNow(noteId);
+  };
 
   /**
    * The tree's own source: the same ranker the agent uses when `search` is not empty, the
    * plain recent list otherwise. `GET /notes?q=` is what stage 5's agent calls, so this is
    * the owner's honest test of «would the agent find this note at all» — the same reason
    * the right pane's own search box exists.
+   *
+   * `kind` goes to the server too, not just `q`: both branches of that route narrow inside
+   * their own query, before the search or browse cap is applied, so «Товары» is twenty
+   * products, not what is left of twenty results after this screen threw the rest away.
    */
   const list = useApi<KbNote[]>(
-    (signal) => api.listKbNotes(agent.id, { q: search || undefined }, signal),
-    [agent.id, search],
+    (signal) => api.listKbNotes(agent.id, { q: search || undefined, kind: kind === 'all' ? undefined : kind }, signal),
+    [agent.id, search, kind],
   );
 
   /**
@@ -108,13 +131,7 @@ export function KnowledgeScreen() {
     vault.reload();
   }
 
-  // The kind filter is not sent to the server — `GET /notes` does not narrow by kind, only
-  // by `q` — so it is applied here, over whichever list `search` produced.
-  const filtered = useMemo(
-    () => (list.data ?? []).filter((item) => kind === 'all' || item.kind === kind),
-    [list.data, kind],
-  );
-  const tree = useMemo(() => buildTree(filtered), [filtered]);
+  const tree = useMemo(() => buildTree(list.data ?? []), [list.data]);
 
   return (
     <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
@@ -195,13 +212,17 @@ export function KnowledgeScreen() {
             agentId={agent.id}
             detail={null}
             titles={titles}
-            onCancel={() => select(null)}
+            // «Отмена» already means «throw this away» — asking again would be asking about
+            // a discard the owner just asked for.
+            onCancel={() => selectNow(null)}
             onSaved={(saved) => {
               refreshLists();
-              select(saved.id);
+              // The save just answered the question the guard exists to ask.
+              selectNow(saved.id);
             }}
-            onDeleted={() => select(null)}
+            onDeleted={() => selectNow(null)}
             onOpenNote={select}
+            onDirtyChange={setEditorDirty}
           />
         )}
 
@@ -222,9 +243,12 @@ export function KnowledgeScreen() {
                       }}
                       onDeleted={() => {
                         refreshLists();
-                        select(null);
+                        // The confirm inside `remove()` already asked; this is not a second
+                        // navigation the owner needs to approve again.
+                        selectNow(null);
                       }}
                       onOpenNote={select}
+                      onDirtyChange={setEditorDirty}
                     />
                   </div>
                   <div style={{ width: 300, flex: '0 0 300px' }}>

@@ -240,8 +240,11 @@ const knowledge = (agentId: string) => `/agents/${agentId}/knowledge`;
  * hits, in the ranker's own order, is not something the browser can reproduce from a plain
  * list of notes.
  */
-export const listKbNotes = (agentId: string, params: { q?: string } = {}, signal?: AbortSignal) =>
-  request<KbNote[]>(`${knowledge(agentId)}/notes`, { query: params, signal });
+export const listKbNotes = (
+  agentId: string,
+  params: { q?: string; kind?: KbNoteKind } = {},
+  signal?: AbortSignal,
+) => request<KbNote[]>(`${knowledge(agentId)}/notes`, { query: params, signal });
 
 export const getKbNote = (agentId: string, noteId: string, signal?: AbortSignal) =>
   request<KbNoteDetail>(`${knowledge(agentId)}/notes/${noteId}`, { signal });

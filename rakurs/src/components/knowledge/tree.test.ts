@@ -19,7 +19,11 @@ const note = (path: string): KbNote => ({
 
 describe('buildTree', () => {
   it('makes a folder out of a path segment', () => {
-    const tree = buildTree([note('Товары/Двери'), note('Товары/Окна'), note('Доставка')]);
+    // Deliberately out of the order the assertions expect, on both axes: `Доставка` is
+    // inserted before the `Товары` folder exists at all, and `Окна` before `Двери` within
+    // it. An implementation that never sorted anything would reproduce this exact input
+    // order back out — this fixture is the one that would catch that.
+    const tree = buildTree([note('Доставка'), note('Товары/Окна'), note('Товары/Двери')]);
     expect(tree.map((n) => n.name)).toEqual(['Товары', 'Доставка']);
     expect(tree[0]!.children.map((n) => n.name)).toEqual(['Двери', 'Окна']);
   });

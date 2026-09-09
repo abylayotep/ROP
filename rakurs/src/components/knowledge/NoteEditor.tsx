@@ -1,4 +1,4 @@
-import { useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import * as api from '@/api';
 import { kindLabel } from '@/components/knowledge/ImportPanel';
 import { renderMarkdown, type InlineNode, type MarkdownNode } from '@/components/knowledge/markdown';
@@ -81,7 +81,13 @@ function renderInline(node: InlineNode, key: number, onOpenNote: ((noteId: strin
       );
     case 'link': {
       const target = targets.get(node.target);
-      if (node.broken || !target) {
+      // `!target` alone, never `node.broken`: `node.broken` comes from the client's own
+      // title set, which is capped at `LIST_LIMIT` (see `KnowledgeScreen`'s `vault` fetch),
+      // while `target` comes from `detail.links`, which the server resolved over the whole
+      // vault with no cap. A link past the hundredth note is broken by the client's count and
+      // resolved by the server's — the server's resolution is authoritative, so the capped
+      // list must not get a vote here.
+      if (!target) {
         return (
           <span key={key} title="В базе нет заметки с таким названием" style={{ color: 'var(--danger)' }}>
             [[{node.label}]]
@@ -207,6 +213,7 @@ export function NoteEditor({
   onDeleted,
   onCancel,
   onOpenNote,
+  onDirtyChange,
 }: {
   agentId: string;
   /** Null starts a blank note under a path the owner has yet to type. */
@@ -218,6 +225,14 @@ export function NoteEditor({
   /** A blank note abandoned without saving. Not offered once a note exists to go back to. */
   onCancel?: () => void;
   onOpenNote: (noteId: string) => void;
+  /**
+   * Told every time `dirty` changes, so the one place that can actually change which note is
+   * open — `KnowledgeScreen`'s `select` — can ask before it does, instead of this pane's own
+   * unsaved textarea silently vanishing under a remount. This component is keyed by the
+   * selected note id, so switching notes does not update it — it replaces it, and whatever
+   * was typed here goes with the old instance.
+   */
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const toast = useToast();
   const isNew = detail === null;
@@ -231,6 +246,14 @@ export function NoteEditor({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const dirty = isNew ? path.trim() !== '' || body.trim() !== '' : path !== detail.path || body !== detail.body;
+
+  // Reported on every change, not read once by the guard: `select` needs the current value
+  // at the moment a click happens, and a plain prop passed once at mount would go stale the
+  // instant the owner typed a single character.
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dirty]);
 
   function updateSuggest(value: string, caret: number) {
     const uptoCaret = value.slice(0, caret);

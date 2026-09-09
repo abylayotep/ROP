@@ -92,7 +92,7 @@ function noteError(issue: { code: string; path: readonly PropertyKey[]; message:
   return new ApiError(400, 'Укажите название');
 }
 
-const queryParam = z.object({ q: z.string().optional() });
+const queryParam = z.object({ q: z.string().optional(), kind: z.enum(KINDS).optional() });
 
 const importPage = z.object({
   url: z.string().trim().min(1).max(2048),
@@ -330,13 +330,17 @@ export function registerKnowledgeRoutes(
     async (req): Promise<KbNote[]> => {
       const parsed = queryParam.safeParse(req.query);
       if (!parsed.success) throw new ApiError(400, 'Не удалось разобрать запрос');
-      const { q } = parsed.data;
+      const { q, kind } = parsed.data;
       const titles = await sourceTitles(req.agent!.id);
 
       // With a query the list IS the search: the owner's box and the agent must go through
-      // the same ranker, or the owner is testing something the agent never sees.
+      // the same ranker, or the owner is testing something the agent never sees. `kind`
+      // narrows inside that same ranker's own query (`SearchOptions.kind`) rather than over
+      // its answer: the ranker has already cut to `SEARCH_LIMIT` by the time this function
+      // sees anything, and trimming afterward could show the owner nineteen doors and no
+      // sign the twentieth, best-ranked hit was a delivery note the filter had to drop.
       if (q !== undefined && q.trim() !== '') {
-        const hits = await searchKnowledge(db, req.agent!.id, q, SEARCH_LIMIT);
+        const hits = await searchKnowledge(db, req.agent!.id, q, SEARCH_LIMIT, { kind });
 
         // The distinct notes of the hits, in the ranker's own order. Deduplicating with a
         // second, differently-ordered query — `SELECT DISTINCT noteId ... ORDER BY updatedAt`,
@@ -370,10 +374,13 @@ export function registerKnowledgeRoutes(
         });
       }
 
+      // Browsing narrows the same way: `kind` joins the `WHERE` beside the tenancy check, so
+      // a hundred notes of the sought kind are never crowded out of `LIST_LIMIT` by newer
+      // notes of every other kind that a post-hoc filter would have let occupy the cap first.
       const rows = await db
         .select()
         .from(kbNotes)
-        .where(eq(kbNotes.agentId, req.agent!.id))
+        .where(and(eq(kbNotes.agentId, req.agent!.id), kind === undefined ? undefined : eq(kbNotes.kind, kind)))
         .orderBy(desc(kbNotes.updatedAt))
         .limit(LIST_LIMIT);
       return rows.map((row) => toKbNote(row, titles.get(row.sourceId ?? '') ?? null));

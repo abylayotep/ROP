@@ -2,7 +2,8 @@ import { eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildServer } from '../src/api/server.js';
-import { kbChunks } from '../src/db/schema.js';
+import { kbChunks, kbNotes } from '../src/db/schema.js';
+import { saveNote } from '../src/lib/knowledge/notes.js';
 import { addMember, createAccountWithOwner } from '../src/lib/provision.js';
 import { withDb } from './helpers/db.js';
 import { testEnv } from './helpers/env.js';
@@ -121,6 +122,46 @@ describe('notes', () => {
 
     expect(res.json()[0]!.path).toBe('Новая');
     expect(res.json().length).toBeLessThanOrEqual(100);
+  });
+
+  it('narrows the search branch of the list to a kind inside the query, not after the limit', async () => {
+    // Twenty notes that outrank the one we actually want on the word alone, none of them a
+    // product. If `kind` trimmed the answer after `searchKnowledge` had already cut to
+    // `SEARCH_LIMIT`, these twenty would fill the cap by themselves and the product note
+    // would never make it into the response to be filtered out of.
+    for (let i = 0; i < 20; i++) {
+      await saveNote(db, { agentId, path: `Прочее/${i}`, body: `Доставка доставка доставка ${i}.` });
+    }
+    await saveNote(db, {
+      agentId,
+      path: 'Дверь входная',
+      body: '---\nkind: product\n---\nЦена включает доставку.',
+    });
+
+    const res = await app.inject({ method: 'GET', url: `${notes()}?q=доставка&kind=product`, cookies: jar });
+
+    expect(res.json().map((n: { path: string }) => n.path)).toEqual(['Дверь входная']);
+  });
+
+  it('narrows the browse branch of the list to a kind inside the query, not after the limit', async () => {
+    const target = (await add({ path: 'Дверь входная', body: '---\nkind: product\n---\nЦена.' })).json();
+
+    // A hundred notes strictly newer than the target, none of them a product: browsing
+    // without `kind` would already have pushed the target out of the newest hundred, so if
+    // `kind` were applied to that already-capped list instead of inside the `WHERE`, the
+    // target could not possibly come back.
+    await db.insert(kbNotes).values(
+      Array.from({ length: 100 }, (_, i) => ({
+        agentId,
+        path: `Прочее/${i}`,
+        title: `${i}`,
+        kind: 'other',
+      })),
+    );
+
+    const res = await app.inject({ method: 'GET', url: `${notes()}?kind=product`, cookies: jar });
+
+    expect(res.json().map((n: { path: string }) => n.path)).toEqual([target.path]);
   });
 
   it('answers backlinks and broken links on a note', async () => {

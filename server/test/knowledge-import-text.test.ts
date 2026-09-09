@@ -205,29 +205,40 @@ describe('importing pasted text', () => {
    * A regression guard for the shape, not the number: `saveNoteAtUniquePath` used to write
    * every note inside its own `SAVEPOINT`, so a bulk import paid one subtransaction per note.
    * Postgres caches only about 64 subtransaction ids per backend, and past that the cost of
-   * every later visibility check in the same transaction goes up — a 1 500-block paste (this
-   * size, 38 655 characters) measured at 16.1s under that shape on this test database, and a
-   * 5 400-block paste (198 688 characters, near the 200 000-character limit
-   * `docs/knowledge-base.md` advertises) at 233.7s, well past `deploy/nginx.conf`'s 120s
-   * `proxy_read_timeout` — a paste at the documented limit reliably timed out.
+   * every later visibility check in the same transaction goes up — not linearly, but with a
+   * blowup that accelerates the more of the transaction is still past the cliff: on this test
+   * database a 1 500-block paste measured 16.1s under that shape, a 2 000-block paste 22.9s,
+   * and a 5 400-block paste (198 688 characters, near the 200 000-character limit
+   * `docs/knowledge-base.md` advertises) 233.7s — well past `deploy/nginx.conf`'s 120s
+   * `proxy_read_timeout`, so a paste at the documented limit reliably timed out.
    *
-   * Writing straight to the transaction (see `saveNoteAtUniquePath`'s comment) measured 8.3s
-   * for this same size, and grows linearly rather than the old shape's super-linear blowup —
-   * 3 000 blocks went from 55.9s to 17.8s. 1 500 is large enough to be well past the 64-note
-   * cliff and small enough that this test costs single-digit seconds rather than the tens a
-   * size nearer the real limit would; 12s is comfortably above the measured 8.3s and
-   * comfortably under the old shape's 16.1s at the same size, so a regression here fails this
-   * test long before a customer would see a 504.
+   * A single wall-clock bound at a size just past the cliff turned out not to be a safe
+   * guard: a 1 500-block paste that took 8.3s in isolation took 13.2s under the load of the
+   * full suite, above the 12s bound this test used to assert, with nothing wrong in the code
+   * — a false failure on exactly the machine most likely to run this suite. Timing two sizes
+   * and comparing the ratio (which would cancel out shared contention, since both runs pay
+   * the same load) was tried first, but the super-linear blowup itself is too small to
+   * separate from that same noise until the *larger* of the two sizes is already deep in the
+   * tens of seconds — as expensive as, or more than, one absolute-bound test at a size large
+   * enough to be safe outright. So one size, chosen where the gap between the two shapes is
+   * wide enough to absorb load: at 2 000 blocks this shape (see `saveNoteAtUniquePath`'s
+   * comment) measured 11.3s, the old shape 22.9s — a 2x gap, not the old test's 1.27x one.
+   *
+   * The bound below (20s) sits with real margin on both sides of that gap: comfortably above
+   * this shape's 11.3s even inflated by the ~40% the full suite added to the old 1 500-block
+   * measurement (11.3s × 1.4 ≈ 15.8s), and comfortably under the old shape's 22.9s even if
+   * contention shaved some of that off. A regression here still fails this test long before a
+   * customer would see a 504, and it does so on a loaded machine as reliably as an idle one.
    */
   it('completes a bulk paste past the old savepoint-per-note cliff well inside a timeout', async () => {
-    const blocks = Array.from({ length: 1500 }, (_, i) => `Позиция ${i}\nЦена ${i} ₸.`);
+    const blocks = Array.from({ length: 2000 }, (_, i) => `Позиция ${i}\nЦена ${i} ₸.`);
 
     const startedAt = Date.now();
     const res = await paste(blocks.join('\n\n'));
     const elapsedMs = Date.now() - startedAt;
 
     expect(res.statusCode).toBe(200);
-    expect(res.json().notes).toHaveLength(1500);
-    expect(elapsedMs).toBeLessThan(12_000);
-  }, 30_000);
+    expect(res.json().notes).toHaveLength(2000);
+    expect(elapsedMs).toBeLessThan(20_000);
+  }, 60_000);
 });

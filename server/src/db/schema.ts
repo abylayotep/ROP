@@ -446,8 +446,8 @@ const tsvector = customType<{ data: string; notNull: true }>({
 /**
  * An import: a block of text someone pasted, or a page we fetched.
  *
- * It exists so that a reimport can replace what it made. An item written by hand has no
- * source, which is why `kb_items.source_id` is nullable.
+ * It exists so that a reimport can replace what it made. A note written by hand has no
+ * source, which is why `kb_notes.source_id` is nullable.
  */
 export const kbSources = pgTable(
   'kb_sources',
@@ -474,40 +474,78 @@ export const kbSources = pgTable(
 );
 
 /**
- * One retrievable answer.
- *
- * A hand-written fact and a chunk of an imported page are the same thing to the agent, so
- * they are the same row. Two tables would mean two search paths and two ways to be stale.
+ * One note: what a person writes and reads. `path` is its identity — «Товары/Двери входные» —
+ * and folders are the segments before the last slash rather than a table, exactly as a folder
+ * in a vault exists because a file is in it.
  */
-export const kbItems = pgTable(
-  'kb_items',
+export const kbNotes = pgTable(
+  'kb_notes',
   {
     id: uuid('id').primaryKey().defaultRandom(),
-    agentId: uuid('agent_id')
-      .notNull()
-      .references(() => agents.id, { onDelete: 'cascade' }),
-    // Set null, not cascade: deleting an import must not delete the corrections someone
-    // made to what it produced.
+    agentId: uuid('agent_id').notNull().references(() => agents.id, { onDelete: 'cascade' }),
+    // Set null, not cascade: deleting an import must not delete the notes it produced.
     sourceId: uuid('source_id').references(() => kbSources.id, { onDelete: 'set null' }),
-    // 'product' | 'qa' | 'procedure' | 'contact' | 'other'
-    kind: text('kind').notNull().default('other'),
+    path: text('path').notNull(),
+    // The last path segment, stored so search can weight it without parsing the path.
     title: text('title').notNull(),
-    content: text('content').notNull(),
-    // True once a person has changed it. A reimport replaces what it made, except these:
-    // a price the owner corrected by hand outranks the page it came from.
+    body: text('body').notNull().default(''),
+    // 'product' | 'qa' | 'procedure' | 'contact' | 'other', read out of the frontmatter.
+    kind: text('kind').notNull().default('other'),
+    tags: text('tags').array().notNull().default(sql`'{}'::text[]`),
+    // True once a person has changed it. A reimport replaces what it made, except these.
     edited: boolean('edited').notNull().default(false),
-    search: tsvector('search')
-      .notNull()
-      .generatedAlwaysAs(
-        sql`setweight(to_tsvector('russian', coalesce(title, '')), 'A') || setweight(to_tsvector('russian', coalesce(content, '')), 'B')`,
-      ),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [
-    index('kb_items_agent_kind_idx').on(t.agentId, t.kind),
-    index('kb_items_search_idx').using('gin', t.search),
-  ],
+  (t) => [unique('kb_notes_agent_path_key').on(t.agentId, t.path),
+          index('kb_notes_agent_updated_idx').on(t.agentId, t.updatedAt)],
+);
+
+/**
+ * One section of a note: the unit search ranks and the agent quotes.
+ *
+ * Derived and disposable. Every save deletes a note's rows here and writes them again, so
+ * nothing but `saveNote` may insert one and nothing may read a note's text out of one.
+ */
+export const kbChunks = pgTable(
+  'kb_chunks',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    agentId: uuid('agent_id').notNull().references(() => agents.id, { onDelete: 'cascade' }),
+    noteId: uuid('note_id').notNull().references(() => kbNotes.id, { onDelete: 'cascade' }),
+    ordinal: integer('ordinal').notNull(),
+    heading: text('heading').notNull().default(''),
+    // «Заметка › Раздел», or the note title for the lead section. Stored, not composed at
+    // read time: it is what the tsvector weights, and a composed value cannot be indexed.
+    title: text('title').notNull(),
+    content: text('content').notNull(),
+    kind: text('kind').notNull().default('other'),
+    search: tsvector('search').notNull().generatedAlwaysAs(
+      sql`setweight(to_tsvector('russian', coalesce(title, '')), 'A') || setweight(to_tsvector('russian', coalesce(content, '')), 'B')`,
+    ),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('kb_chunks_agent_kind_idx').on(t.agentId, t.kind),
+          index('kb_chunks_search_idx').using('gin', t.search),
+          index('kb_chunks_note_ordinal_idx').on(t.noteId, t.ordinal)],
+);
+
+/**
+ * One `[[link]]`. `toNoteId` is null while the target does not exist: a link written before
+ * its note is a broken link the vault shows as one, not a reason to refuse the text.
+ */
+export const kbLinks = pgTable(
+  'kb_links',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    agentId: uuid('agent_id').notNull().references(() => agents.id, { onDelete: 'cascade' }),
+    fromNoteId: uuid('from_note_id').notNull().references(() => kbNotes.id, { onDelete: 'cascade' }),
+    toNoteId: uuid('to_note_id').references(() => kbNotes.id, { onDelete: 'set null' }),
+    target: text('target').notNull(),
+  },
+  (t) => [index('kb_links_agent_target_idx').on(t.agentId, t.toNoteId),
+          index('kb_links_from_idx').on(t.fromNoteId)],
 );
 
 /**

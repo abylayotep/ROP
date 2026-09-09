@@ -180,18 +180,28 @@ describe('notes', () => {
   });
 
   it('renames a note through the route, re-pointing links that named it', async () => {
+    // The rename has to move the *title*, not just the folder: a link is matched by title
+    // (see `resolveLinks`), so a folder-only move leaves an already-correct link untouched
+    // and would pass this test even with `resolveLinks` deleted from `saveNote`. Writing
+    // «Двери»'s link against the title the target is about to take — not the one it has now
+    // — means the link starts broken (nothing is titled «Гарантии» yet) and only resolves
+    // once the rename below actually lands, so the assertion below is proof the rename made
+    // it resolve, not proof it was already resolved.
     const target = (await add({ path: 'Гарантия', body: 'Год.' })).json();
-    await add({ path: 'Двери', body: 'Смотри [[Гарантия]].' });
+    await add({ path: 'Двери', body: 'Смотри [[Гарантии]].' });
+
+    const before = await app.inject({ method: 'GET', url: `${notes()}/${target.id}`, cookies: jar });
+    expect(before.json().backlinks).toEqual([]);
 
     const res = await app.inject({
       method: 'PATCH',
       url: `${notes()}/${target.id}`,
       cookies: jar,
-      payload: { path: 'Сервис/Гарантия' },
+      payload: { path: 'Сервис/Гарантии' },
     });
 
     expect(res.statusCode).toBe(200);
-    expect(res.json().path).toBe('Сервис/Гарантия');
+    expect(res.json().path).toBe('Сервис/Гарантии');
     expect(res.json().edited).toBe(true);
 
     const from = await app.inject({ method: 'GET', url: `${notes()}/${target.id}`, cookies: jar });

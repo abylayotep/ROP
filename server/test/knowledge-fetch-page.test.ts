@@ -16,6 +16,7 @@ import {
   PAGE_REFUSED,
   PageError,
   createPageFetcher,
+  fetchPage,
   htmlToText,
 } from '../src/lib/knowledge/fetch-page.js';
 
@@ -52,6 +53,12 @@ afterEach(() => {
 });
 
 const refusal = (url: string) => fetcher.fetch(url).catch((error: unknown) => error);
+
+/** Serves `html` at a fixed address and returns it, for `fetchPage`'s own tests. */
+function url(html: string): string {
+  answering(() => page(html));
+  return 'https://safina.kz/';
+}
 
 describe('the address guard', () => {
   it('reads an ordinary page', async () => {
@@ -349,5 +356,28 @@ describe('htmlToText, on what a real page does wrong', () => {
     expect(text).not.toContain(' ');
     expect(text).toContain('Дверь');
     expect(text).toContain('50000');
+  });
+});
+
+describe('fetchPage', () => {
+  it('keeps the page headings as markdown headings', async () => {
+    const page = await fetchPage(url('<h1>Двери</h1><p>Металл.</p><h2>Доставка</h2><p>1500 ₸.</p>'));
+
+    expect(page.title).toBe('Двери');
+    expect(page.markdown).toBe('# Двери\n\nМеталл.\n\n## Доставка\n\n1500 ₸.');
+  });
+
+  it('falls back to the title tag and the address when the page has no heading', async () => {
+    const page = await fetchPage(url('<head><title>Сафина</title></head><p>Двери и окна.</p>'));
+
+    expect(page.title).toBe('Сафина — safina.kz');
+    expect(page.markdown).toBe('Двери и окна.');
+  });
+
+  it('goes through the same address guard as the raw fetcher', async () => {
+    const error = await fetchPage('http://127.0.0.1/admin').catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(PageError);
+    expect((error as PageError).message).toBe(PAGE_REFUSED);
   });
 });

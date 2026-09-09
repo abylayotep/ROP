@@ -2,7 +2,7 @@ import { sql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildServer } from '../src/api/server.js';
-import { kbItems, kbSources } from '../src/db/schema.js';
+import { kbNotes, kbSources } from '../src/db/schema.js';
 import { addMember, createAccountWithOwner } from '../src/lib/provision.js';
 import { withDb } from './helpers/db.js';
 import { testEnv } from './helpers/env.js';
@@ -62,6 +62,9 @@ afterEach(async () => {
   await app.close();
 });
 
+const notes = () => `/api/agents/${agentId}/knowledge/notes`;
+const search = () => `/api/agents/${agentId}/knowledge/search`;
+
 const importText = (payload: Record<string, unknown>) =>
   app.inject({
     method: 'POST',
@@ -70,38 +73,60 @@ const importText = (payload: Record<string, unknown>) =>
     payload,
   });
 
+/** A paste, under the one title these tests don't otherwise care about. */
+const paste = (text: string, extra: Record<string, unknown> = {}) =>
+  importText({ title: 'Прайс-лист', text, ...extra });
+
 describe('importing pasted text', () => {
-  it('creates a source and its items, and answers with both', async () => {
-    const res = await importText({
-      title: 'Прайс-лист',
+  it('makes a note per block under the paste folder', async () => {
+    const res = await paste('Двери\nМеталл.\n\nДоставка\n1500 ₸.');
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().notes.map((n: { path: string }) => n.path)).toEqual([
+      'Вставки/Двери',
+      'Вставки/Доставка',
+    ]);
+  });
+
+  it('numbers a second paste of the same title rather than refusing it', async () => {
+    await paste('Двери\nМеталл.');
+    const res = await paste('Двери\nДерево.');
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().notes[0]!.path).toBe('Вставки/Двери (2)');
+  });
+
+  it('creates a source and answers with it and its notes', async () => {
+    const res = await paste('Дверь входная\nОт 90 000 тенге.\n\nОкно\nОт 40 000 тенге.', {
       kind: 'product',
-      text: 'Дверь входная\nОт 90 000 тенге.\n\nОкно\nОт 40 000 тенге.',
     });
 
     expect(res.statusCode).toBe(200);
     expect(res.json().source.status).toBe('ready');
     expect(res.json().source.itemCount).toBe(2);
-    expect(res.json().items).toHaveLength(2);
-    expect(res.json().items[0].kind).toBe('product');
-    expect(res.json().items[0].sourceTitle).toBe('Прайс-лист');
+    expect(res.json().notes).toHaveLength(2);
+    expect(res.json().notes[0].kind).toBe('product');
+    expect(res.json().notes[0].sourceTitle).toBe('Прайс-лист');
+    expect(res.json().reimported).toBe(false);
+    expect(res.json().keptEdited).toBe(0);
   });
 
   it('defaults the kind to other', async () => {
-    const res = await importText({ title: 'Заметки', text: 'Работаем с 9 до 18.' });
+    const res = await paste('Работаем с 9 до 18.');
 
-    expect(res.json().items[0].kind).toBe('other');
+    expect(res.json().notes[0].kind).toBe('other');
   });
 
   it('refuses text that holds nothing', async () => {
-    const res = await importText({ title: 'Пусто', text: '   \n\n  ' });
+    const res = await paste('   \n\n  ');
 
     expect(res.statusCode).toBe(400);
     expect(await db.select().from(kbSources)).toHaveLength(0);
-    expect(await db.select().from(kbItems)).toHaveLength(0);
+    expect(await db.select().from(kbNotes)).toHaveLength(0);
   });
 
   it('refuses a paste larger than we will store', async () => {
-    const res = await importText({ title: 'Много', text: 'а'.repeat(200_001) });
+    const res = await paste('а'.repeat(200_001));
 
     expect(res.statusCode).toBe(400);
     expect(await db.select().from(kbSources)).toHaveLength(0);
@@ -114,90 +139,64 @@ describe('importing pasted text', () => {
       method: 'POST',
       url: `/api/agents/${agentId}/knowledge/import/text`,
       cookies: memberJar,
-      payload: { title: 'Прайс', text: 'Дверь\nЦена.' },
+      payload: { title: 'Прайс', text: 'Двери\nЦена.' },
     });
 
     expect(res.statusCode).toBe(403);
   });
 
-  it('imports a paste with more blocks than one statement can carry', async () => {
-    // Five bound parameters a row against the 65534-parameter cap is 13106 rows in one
-    // INSERT. This paste is well inside PASTE_MAX and past that cap, and used to answer 500.
-    const text = Array.from({ length: 14_000 }, (_, i) => `Т${i}`).join('\n\n');
-    expect(text.length).toBeLessThan(200_000);
-
-    const res = await importText({ title: 'Каталог', text });
-
-    expect(res.statusCode).toBe(200);
-    expect(res.json().source.itemCount).toBe(14_000);
-    expect(res.json().items).toHaveLength(14_000);
-    expect(await db.select({ id: kbItems.id }).from(kbItems)).toHaveLength(14_000);
-  });
-
-  it('answers without the generated search column', async () => {
-    const res = await importText({ title: 'Прайс', text: 'Дверь\nОт 90 000 тенге.' });
-
-    // The tsvector is machinery: large, derivable, and — if it ever leaves the database —
-    // on its way through this response into stage 5's prompt.
-    expect(res.json().items[0]).not.toHaveProperty('search');
-    expect(res.payload).not.toContain('search');
-  });
-
-it('writes no source when the items cannot be written', async () => {
-    // The failure has to come from the item insert itself, so it is induced rather than
-    // found: the paste that used to induce it — a NUL byte out of a PDF — is now stripped
-    // before it is split, which is the better fix and leaves nothing real to fail on. What
-    // the trigger raises does not matter. What matters is that the source row, which is
-    // written first, is not left behind claiming items that do not exist.
+  it('writes no source when a note cannot be written', async () => {
+    // The failure has to come from the note insert itself, so it is induced rather than
+    // found. What the trigger raises does not matter — what matters is that the source row,
+    // which is written first, is not left behind claiming a note that does not exist.
     await db.execute(sql`
-      create function kb_items_refuse() returns trigger language plpgsql as $$
+      create function kb_notes_refuse() returns trigger language plpgsql as $$
       begin raise exception 'induced failure'; end $$
     `);
     await db.execute(sql`
-      create trigger kb_items_refuse before insert on kb_items
-      for each row execute function kb_items_refuse()
+      create trigger kb_notes_refuse before insert on kb_notes
+      for each row execute function kb_notes_refuse()
     `);
 
     try {
-      const res = await importText({ title: 'Прайс', text: 'Дверь\nЦена 90 000.' });
+      const res = await paste('Дверь\nЦена 90 000.');
 
       expect(res.statusCode).toBe(500);
       expect(await db.select().from(kbSources)).toHaveLength(0);
-      expect(await db.select({ id: kbItems.id }).from(kbItems)).toHaveLength(0);
+      expect(await db.select({ id: kbNotes.id }).from(kbNotes)).toHaveLength(0);
     } finally {
-      await db.execute(sql`drop trigger kb_items_refuse on kb_items`);
-      await db.execute(sql`drop function kb_items_refuse()`);
+      await db.execute(sql`drop trigger kb_notes_refuse on kb_notes`);
+      await db.execute(sql`drop function kb_notes_refuse()`);
     }
   });
 
   it('imports a paste carrying the control characters a PDF leaves behind', async () => {
-    const res = await importText({
-      title: 'Прайс',
-      text: 'Дверь\u0000 входная\nОт 90 000\u0001 тенге.',
-    });
+    const res = await paste('Дверь\u0000 входная\nОт 90 000\u0001 тенге.');
 
     expect(res.statusCode).toBe(200);
-    expect(res.json().items[0].title).toBe('Дверь входная');
-    const [stored] = await db.select({ content: kbItems.content }).from(kbItems);
-    expect(stored!.content).toBe('От 90 000 тенге.');
+    expect(res.json().notes[0].path).toBe('Вставки/Дверь входная');
+
+    const opened = await app.inject({
+      method: 'GET',
+      url: `${notes()}/${res.json().notes[0].id}`,
+      cookies: jar,
+    });
+    expect(opened.json().body).toBe('От 90 000 тенге.');
   });
 
   it('refuses a paste that is nothing but control characters', async () => {
-    const res = await importText({ title: 'Мусор', text: '\u0000\u0001\u0000' });
+    const res = await paste('\u0000\u0001\u0000');
 
     expect(res.statusCode).toBe(400);
     expect(res.json().message).toBe('В тексте нечего сохранить');
     expect(await db.select().from(kbSources)).toHaveLength(0);
-    expect(await db.select({ id: kbItems.id }).from(kbItems)).toHaveLength(0);
+    expect(await db.select({ id: kbNotes.id }).from(kbNotes)).toHaveLength(0);
   });
 
-  it('makes the imported items searchable', async () => {
-    await importText({ title: 'Прайс', text: 'Дверь входная\nМеталлическая, Алматы.' });
+  it('makes the imported notes searchable', async () => {
+    await paste('Дверь входная\nМеталлическая, Алматы.');
 
-    const found = await app.inject({
-      url: `/api/agents/${agentId}/knowledge/items?q=металлическая`,
-      cookies: jar,
-    });
+    const found = await app.inject({ url: `${search()}?q=металлическая`, cookies: jar });
 
     expect(found.json()).toHaveLength(1);
   });

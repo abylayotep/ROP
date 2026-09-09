@@ -16,10 +16,10 @@ import { ApiError } from '../lib/errors.js';
 import {
   PAGE_REFUSED,
   PageError,
-  htmlToText,
+  fetchPage,
   pageTitle,
-  type FetchedPage,
   type PageFetcher,
+  type PageMarkdown,
 } from '../lib/knowledge/fetch-page.js';
 import { BODY_MAX } from '../lib/knowledge/note.js';
 import { deleteNote, saveNote } from '../lib/knowledge/notes.js';
@@ -27,7 +27,7 @@ import { kbChunkColumns, searchKnowledge, type KbRow } from '../lib/knowledge/se
 // pleep's own limits, and they are the right shape: a fact, not an essay. They live beside
 // the splitter because that is the code that has to cut to fit them; a second copy here
 // would be one edit away from letting the splitter produce what this route rejects.
-import { TITLE_MAX, splitBlocks, splitByHeadings, type SplitPart } from '../lib/knowledge/split.js';
+import { TITLE_MAX, splitBlocks, type SplitPart } from '../lib/knowledge/split.js';
 import { isUuid } from '../lib/uuid.js';
 import { requireAgent } from './require-agent.js';
 
@@ -516,18 +516,32 @@ export function registerKnowledgeRoutes(
   );
 
   /**
-   * One import's parts, each written as a flat note under the import's own title.
+   * A free path under `folder` for `title`, the way migration 0012 turned every `kb_items`
+   * row into a `kb_notes` one: try the plain name, then `" (2)"`, `" (3)"`, … until one is not
+   * already somebody's.
    *
-   * A stand-in for what Task 8 owns: turning a page or a paste into a vault's worth of
-   * folders is a design question — where a catalogue's sections become notes, what becomes a
-   * folder — and answering it here would be guessing at that task's shape rather than making
-   * this one compile. Until then every part becomes one note, named after itself, with the
-   * chosen `kind` carried as frontmatter so `saveNote` reads it back the same way a person's
-   * own note would. Two parts of one import that share a title collide on `(agent_id, path)`
-   * exactly as two hand-written notes would, and the caller sees the 409 that already exists
-   * for that — a real gap for a page whose headings repeat, and Task 8's to close.
+   * Probed one candidate at a time inside the caller's own transaction rather than computed
+   * up front, because a batch import writes its notes one by one in that same transaction: a
+   * second paste titled the same as an earlier note sees that note's path already taken —
+   * whether it was written earlier in this very call or committed by a previous one — and
+   * lands on the next free number instead of the 409 a plain insert would answer with.
    */
-  async function insertNotes(
+  async function uniquePath(tx: Tx, agentId: string, folder: string, title: string): Promise<string> {
+    // A slash in a title would open a folder nobody asked for; the migration met the same
+    // problem in `item.title` and answered it the same way.
+    const base = `${folder}/${title.replace(/\//g, '∕')}`;
+    for (let suffix = 1; ; suffix += 1) {
+      const candidate = suffix === 1 ? base : `${base} (${suffix})`;
+      const [existing] = await tx
+        .select({ id: kbNotes.id })
+        .from(kbNotes)
+        .where(and(eq(kbNotes.agentId, agentId), eq(kbNotes.path, candidate)));
+      if (!existing) return candidate;
+    }
+  }
+
+  /** One pasted block, written as its own note under `Вставки/`, numbered clear of collisions. */
+  async function insertPasteNotes(
     tx: Tx,
     agentId: string,
     sourceId: string,
@@ -537,40 +551,26 @@ export function registerKnowledgeRoutes(
     const rows: (typeof kbNotes.$inferSelect)[] = [];
     for (const part of parts) {
       const body = kind === 'other' ? part.content : `---\nkind: ${kind}\n---\n\n${part.content}`;
-      rows.push(await saveNote(tx as unknown as Db, { agentId, path: part.title, body, sourceId }));
+      const path = await uniquePath(tx, agentId, 'Вставки', part.title);
+      rows.push(await saveNote(tx as unknown as Db, { agentId, path, body, sourceId }));
     }
     return rows;
   }
 
-  /**
-   * Writes a finished import: the source, then its notes, in one transaction.
-   *
-   * Shared with the page import, which differs only in where the parts came from.
-   *
-   * The caller describes the source — what kind it is, what it is called, where it came
-   * from — and nothing else: the tenancy, the outcome and the count are this function's to
-   * write, and a caller that could pass its own `itemCount` could disagree with the notes it
-   * just handed us.
-   */
-  async function storeImport(
+  /** Writes a finished paste import: the source, then one note per block, in one transaction. */
+  async function storeTextImport(
     agentId: string,
-    source: Omit<typeof kbSources.$inferInsert, 'agentId' | 'status' | 'itemCount' | 'importedAt'>,
+    title: string,
     kind: (typeof KINDS)[number],
     parts: SplitPart[],
   ): Promise<KbImport> {
     return db.transaction(async (tx) => {
       const [created] = await tx
         .insert(kbSources)
-        .values({
-          ...source,
-          agentId,
-          status: 'ready',
-          itemCount: parts.length,
-          importedAt: new Date(),
-        })
+        .values({ kind: 'text', title, agentId, status: 'ready', itemCount: parts.length, importedAt: new Date() })
         .returning();
 
-      const rows = await insertNotes(tx, agentId, created!.id, kind, parts);
+      const rows = await insertPasteNotes(tx, agentId, created!.id, kind, parts);
 
       return {
         source: toKbSource(created!),
@@ -594,12 +594,7 @@ export function registerKnowledgeRoutes(
       // import happened and shows nothing for it.
       if (parts.length === 0) throw new ApiError(400, 'В тексте нечего сохранить');
 
-      return storeImport(
-        req.agent!.id,
-        { kind: 'text', title: parsed.data.title },
-        parsed.data.kind,
-        parts,
-      );
+      return storeTextImport(req.agent!.id, parsed.data.title, parsed.data.kind, parts);
     },
   );
 
@@ -617,41 +612,47 @@ export function registerKnowledgeRoutes(
   /**
    * A refetched page written onto the source it belongs to.
    *
-   * The rule is short on purpose: **every unedited note of this source goes, every part the
-   * page now yields is written, and what a person edited is left alone.** No part of the
-   * fresh page is ever dropped, and no title is ever compared with another.
-   *
-   * Matching fresh parts against the titles of the kept notes was an attempt to guess which
-   * fresh part «is» a kept one, and it guessed wrong in every way a real page moves — see the
-   * long version of this note in the item-based predecessor of this function. So it does not
-   * guess. An edited note and a fresh note may now say different things about the same
-   * subject, and `keptEdited` is how the owner is told to go and look.
+   * A page is one note, so the rule collapses to one choice: **if a person edited that note it
+   * is left alone and counted; otherwise it is replaced whole with what the page says now.**
+   * There is no title to match a fresh part against a kept one by — the mistake the item-based
+   * predecessor of this function made, and the reason a page's sections used to drift apart
+   * from what the owner had corrected. One note, one fetch, one decision.
    */
   async function applyReimport(
     agentId: string,
     source: typeof kbSources.$inferSelect,
-    /** The address the source is known by — `source.url`, which both callers have proven. */
-    url: string,
-    page: FetchedPage,
-    parts: SplitPart[],
+    page: PageMarkdown,
   ): Promise<KbImport> {
     return db.transaction(async (tx) => {
       const mine = and(eq(kbNotes.sourceId, source.id), eq(kbNotes.agentId, agentId));
 
-      // Read before the delete, and by `edited`: these rows are a person's work, not the
-      // page's, and this import has no claim on them.
+      // Read before the delete, and by `edited`: this row is a person's work, not the
+      // page's, and this import has no claim on it.
       const kept = await tx.select().from(kbNotes).where(and(mine, eq(kbNotes.edited, true)));
       const stale = await tx.select({ id: kbNotes.id }).from(kbNotes).where(and(mine, eq(kbNotes.edited, false)));
       // Through `deleteNote`, not a bulk delete: a note's chunks and the links it resolves
       // are derived from it, and only `deleteNote` knows to take them with it.
       for (const row of stale) await deleteNote(tx as unknown as Db, agentId, row.id);
 
-      const written = await insertNotes(tx, agentId, source.id, 'other', parts);
+      // A fresh note is written only when nothing was kept: a page is one note, and a kept,
+      // edited copy of it already occupies that slot — writing a second one beside it would
+      // duplicate the page rather than update it.
+      const written =
+        kept.length === 0
+          ? [
+              await saveNote(tx as unknown as Db, {
+                agentId,
+                path: await uniquePath(tx, agentId, 'С сайта', page.title),
+                body: page.markdown,
+                sourceId: source.id,
+              }),
+            ]
+          : [];
 
       const [updated] = await tx
         .update(kbSources)
         .set({
-          title: pageTitle(page.html, url),
+          title: page.title,
           // `url` is not written back. It is what this source is known by, and a reimport
           // that moved it to wherever the redirects ended would make the row unfindable by
           // the address the owner keeps typing — which is the whole bug this key exists for.
@@ -682,8 +683,30 @@ export function registerKnowledgeRoutes(
       .where(and(eq(kbSources.id, sourceId), eq(kbSources.agentId, agentId)));
   }
 
-  /** The page's text as parts — empty when there was nothing on it worth keeping. */
-  const partsOf = (page: FetchedPage): SplitPart[] => splitByHeadings(htmlToText(page.html));
+  /**
+   * What «Обновить» answers when the refetch itself did not work: the source, now saying so,
+   * beside the notes it already had — read back rather than assumed, because nothing on this
+   * path touched them.
+   *
+   * Unlike a first import, which has no source and nothing to show for a failed fetch, a
+   * refresh has one already, and its new `status` is itself the answer the owner is waiting
+   * on: reporting it here is what lets the screen redraw the source row without a second
+   * request, rather than a bare error the owner reads as a formality of the button they
+   * pressed on a source that keeps sitting in front of them.
+   */
+  async function failedReimport(agentId: string, sourceId: string): Promise<KbImport> {
+    const updated = await loadSource(agentId, sourceId);
+    const rows = await db
+      .select()
+      .from(kbNotes)
+      .where(and(eq(kbNotes.sourceId, sourceId), eq(kbNotes.agentId, agentId)));
+    return {
+      source: toKbSource(updated),
+      notes: rows.map((row) => toKbNote(row, updated.title)),
+      reimported: true,
+      keptEdited: rows.filter((row) => row.edited).length,
+    };
+  }
 
   /**
    * The one row this agent already has for a page address, whatever state it is in.
@@ -746,9 +769,9 @@ export function registerKnowledgeRoutes(
       // insert and the reimport — names this source the same way. See `pageKey`.
       const url = pageKey(targetUrl(parsed.data.url));
 
-      let page: FetchedPage;
+      let page: PageMarkdown;
       try {
-        page = await pageFetcher.fetch(url);
+        page = await fetchPage(url, pageFetcher);
       } catch (error) {
         // The attempt is kept. The owner pasted an address, waited, and got an error; a
         // sources list that then shows nothing at all leaves them unable to tell a refusal
@@ -764,27 +787,48 @@ export function registerKnowledgeRoutes(
       // two drifting apart from the next reimport onwards.
       const existing = await findPageSource(req.agent!.id, url);
 
-      const parts = partsOf(page);
       // Refused before anything is written: a source with no notes is a row that says an
       // import happened and shows nothing for it. More often than not this is a page whose
       // text arrives from JavaScript, and the honest answer is that we read it and there was
       // nothing there — which is the owner's to act on, so it says so.
       //
       // An address we already have is marked failed instead, exactly as «Обновить» does: its
-      // notes stay, and the row has to stop claiming a success that this attempt was not.
-      if (parts.length === 0) {
+      // note stays, and the row has to stop claiming a success that this attempt was not.
+      if (page.markdown.trim() === '') {
         if (existing) await markFailed(existing.id, req.agent!.id, NOTHING_TO_SAVE);
         throw new ApiError(400, NOTHING_TO_SAVE);
       }
 
-      if (existing) return applyReimport(req.agent!.id, existing, url, page, parts);
+      if (existing) return applyReimport(req.agent!.id, existing, page);
 
-      return storeImport(
-        req.agent!.id,
-        { kind: 'page', title: pageTitle(page.html, url), url },
-        'other',
-        parts,
-      );
+      return db.transaction(async (tx) => {
+        const [created] = await tx
+          .insert(kbSources)
+          .values({
+            kind: 'page',
+            title: page.title,
+            url,
+            agentId: req.agent!.id,
+            status: 'ready',
+            itemCount: 1,
+            importedAt: new Date(),
+          })
+          .returning();
+
+        const note = await saveNote(tx as unknown as Db, {
+          agentId: req.agent!.id,
+          path: await uniquePath(tx, req.agent!.id, 'С сайта', page.title),
+          body: page.markdown,
+          sourceId: created!.id,
+        });
+
+        return {
+          source: toKbSource(created!),
+          notes: [toKbNote(note, created!.title)],
+          reimported: false,
+          keptEdited: 0,
+        };
+      });
     },
   );
 
@@ -804,26 +848,27 @@ export function registerKnowledgeRoutes(
 
       // Fetched before anything is deleted, and outside the transaction: a site that is
       // down for an hour must not empty the knowledge base while it is.
-      let page: FetchedPage;
+      let page: PageMarkdown;
       try {
-        page = await pageFetcher.fetch(url);
+        page = await fetchPage(url, pageFetcher);
       } catch (error) {
         await markFailed(source.id, req.agent!.id, PAGE_REFUSED);
         app.log.warn({ url, detail: failureDetail(error) }, 'knowledge page reimport failed');
-        throw new ApiError(502, PAGE_REFUSED);
+        // Answered, not thrown: a first import has no source to show for a failure, but a
+        // refresh does, and its new `status` — read back here, not assumed — is the answer.
+        return failedReimport(req.agent!.id, source.id);
       }
 
-      const parts = partsOf(page);
-      // Marked failed before answering, exactly as a failed fetch is. The notes stay — they
-      // are still the best answer we have — but leaving the source `ready` with the
-      // `itemCount` of the previous import would have it claim a success that did not
-      // happen, and the owner would have no idea the page had stopped yielding anything.
-      if (parts.length === 0) {
+      // Marked failed before answering, exactly as a failed fetch is. The note stays — it is
+      // still the best answer we have — but leaving the source `ready` with the `itemCount`
+      // of the previous import would have it claim a success that did not happen, and the
+      // owner would have no idea the page had stopped yielding anything.
+      if (page.markdown.trim() === '') {
         await markFailed(source.id, req.agent!.id, NOTHING_TO_SAVE);
         throw new ApiError(400, NOTHING_TO_SAVE);
       }
 
-      return applyReimport(req.agent!.id, source, url, page, parts);
+      return applyReimport(req.agent!.id, source, page);
     },
   );
 

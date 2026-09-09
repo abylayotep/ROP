@@ -583,9 +583,9 @@ const oneLine = (html: string): string => html.replace(/<[^>]*>/g, ' ').replace(
  * do not want go before the tags we turn into layout, layout goes before the blanket removal
  * of what is left, and entities go last so that a decoded `&lt;` is never mistaken for a tag.
  *
- * Headings become `#` lines because that is what `splitByHeadings` reads: one heading is one
- * knowledge item, so the structure the author gave the page becomes the structure of what the
- * agent can quote.
+ * Headings become `#` lines because that markdown IS the note `fetchPage` below writes: the
+ * structure the author gave the page becomes the structure of the note the owner reads and the
+ * sections the agent quotes from it.
  */
 export function htmlToText(html: string): string {
   const text = html
@@ -644,4 +644,41 @@ export function pageTitle(html: string, finalUrl: string): string {
   const found = /<title\b[^>]*>([\s\S]*?)<\/title\s*>/i.exec(html);
   const named = found ? decodeEntities(oneLine(found[1]!)) : '';
   return named === '' ? where : `${named} — ${where}`;
+}
+
+/** A page, ready to become the one note it imports as. */
+export interface PageMarkdown {
+  title: string;
+  markdown: string;
+}
+
+/** The text of a page's own first heading, at any level — null when it has none. */
+function firstHeading(markdown: string): string | null {
+  const found = /^#{1,6}\s+(.*\S)\s*$/m.exec(markdown);
+  return found ? found[1]! : null;
+}
+
+/**
+ * Fetches a page and turns it into the one note it becomes.
+ *
+ * `htmlToText` already does the hard part — it turns the page's own headings into markdown
+ * `#` lines and leaves its paragraphs as the blocks between them — so there is nothing left to
+ * cut here: the whole document is the note's body, verbatim.
+ *
+ * The title is the page's own first heading, whatever level it is: that is the line the note
+ * opens with, so naming the note anything else would have its title disagree with its own
+ * first line. `pageTitle` — the `<title>` tag, or the host and path when there is none — is
+ * the fallback for the page that has no heading at all, which is also the only case it is
+ * still needed for; the host-plus-name shape it builds is for a page identified by where it
+ * lives, and a page that is about to be one note is better named by what that note says.
+ *
+ * Takes a `PageFetcher` rather than reaching for `createPageFetcher()` itself, so a route can
+ * hand it the same fake the rest of the import routes are tested against; the default is the
+ * real fetcher, which is what lets `knowledge-fetch-page.test.ts` drive this function alone
+ * and exercise the guards end to end, against a stubbed `fetch` rather than a fake `PageFetcher`.
+ */
+export async function fetchPage(url: string, fetcher: PageFetcher = createPageFetcher()): Promise<PageMarkdown> {
+  const { html, finalUrl } = await fetcher.fetch(url);
+  const markdown = htmlToText(html);
+  return { title: firstHeading(markdown) ?? pageTitle(html, finalUrl), markdown };
 }

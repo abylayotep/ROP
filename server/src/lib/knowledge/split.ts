@@ -121,38 +121,3 @@ export function splitBlocks(text: string): SplitPart[] {
       return toParts(first.trim(), body === '' ? first.trim() : body);
     });
 }
-
-/**
- * A page's text becomes items: a markdown heading starts one, the text under it is the body.
- *
- * A heading with nothing under it is dropped — that is a navigation label that survived the
- * strip, not a fact. A page with no headings is one item, because the alternative is
- * throwing away everything the owner asked us to read.
- */
-export function splitByHeadings(text: string): SplitPart[] {
-  const lines = normalise(text).split('\n');
-  const parts: SplitPart[] = [];
-
-  let title: string | null = null;
-  let buffer: string[] = [];
-
-  const flush = () => {
-    const content = buffer.join('\n').trim();
-    buffer = [];
-    if (content === '') return;
-    parts.push(...toParts(title ?? content.split('\n')[0]!.trim(), content));
-  };
-
-  for (const line of lines) {
-    const heading = /^#{1,6}\s+(.*\S)\s*$/.exec(line);
-    if (heading) {
-      flush();
-      title = heading[1]!;
-      continue;
-    }
-    buffer.push(line);
-  }
-  flush();
-
-  return parts;
-}

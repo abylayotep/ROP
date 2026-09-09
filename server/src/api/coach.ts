@@ -28,15 +28,17 @@
  * only ever answer one way, and store an owner line with no model line to answer it. Refused
  * outright, with the same 409 the settings route already uses for "no key, no turn".
  *
- * ## Why the in-flight cap is `SANDBOX_TURNS`, not a second number
+ * ## Why the in-flight cap is `SANDBOX_TURNS`, and the counter behind it shared
  *
  * A coaching turn holds a database connection for exactly the reason `api/ai.ts` names for
  * the sandbox: the model is thinking on the other end of it. When the model proposes a rule
  * it costs more than usual — `checkProposal` runs inside `runCoach` and reads `kb_chunks` and
  * `agent_rules` before it returns — but it is still one connection held for one call, the
- * same shape `SANDBOX_TURNS` was sized against. The two routes now share that one constant
- * and the comment behind it in `api/ai.ts`; each keeps its own in-flight counter, because the
- * sandbox and the coach are different queues drawing on the same pool, not one queue.
+ * same shape `SANDBOX_TURNS` was sized against. What the pool feels is how many connections
+ * are held at once, not which feature is holding them, so the counter behind the cap is one
+ * counter, not one per feature — `db/turn-cap.ts`'s `tryTakeTurnSlot`/`releaseTurnSlot`,
+ * shared with the sandbox. A busy sandbox now leaves the coach exactly as little room as it
+ * would leave a fourth sandbox call, and the other way round.
  *
  * ## Why a coach message may carry `aiReplyId`
  *
@@ -54,6 +56,7 @@ import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
 import { agentRules, aiReplies, coachMessages, conversations, kbNotes, messages } from '../db/schema.js';
+import { releaseTurnSlot, tryTakeTurnSlot } from '../db/turn-cap.js';
 import type { Env } from '../env.js';
 import {
   runCoach,
@@ -67,7 +70,6 @@ import type { ModelClient } from '../lib/ai/openrouter.js';
 import { ApiError } from '../lib/errors.js';
 import { credentialsKey } from '../lib/secret-box.js';
 import { isUuid } from '../lib/uuid.js';
-import { SANDBOX_TURNS } from './ai.js';
 import { requireAgent } from './require-agent.js';
 
 export interface CoachApiDeps {
@@ -87,10 +89,6 @@ const HISTORY_LIMIT = 100;
  * window for a live turn; carried over so the coach reads the same slice of the dialog the
  * agent itself would have. */
 const TRANSCRIPT_LIMIT = 20;
-
-/** How many coaching turns may be in flight across the whole process — see the file comment
- * for why this is `SANDBOX_TURNS` and not a second number. */
-let coachTurnsInFlight = 0;
 
 const postBody = z.object({
   text: z.string().trim().min(1).max(COACH_LIMIT),
@@ -225,12 +223,11 @@ export function registerCoachRoutes(
           : await ownConversation(db, agentId, parsed.data.conversationId);
 
       // Taken before the turn and given back in a `finally`, so a turn that raises does not
-      // leave the coach one slot poorer for the life of the process — see `sandboxTurnsInFlight`
-      // in `api/ai.ts`, which this mirrors.
-      if (coachTurnsInFlight >= SANDBOX_TURNS) {
+      // leave the shared cap one slot poorer for the life of the process. The slot is taken
+      // from the same counter the sandbox draws on — see `db/turn-cap.ts`.
+      if (!tryTakeTurnSlot()) {
         throw new ApiError(429, 'Коуч занят. Попробуйте через несколько секунд.');
       }
-      coachTurnsInFlight += 1;
 
       try {
         const [rules, notePaths, history, transcript, replyId] = await Promise.all([
@@ -280,7 +277,7 @@ export function registerCoachRoutes(
           warning: result.warning,
         };
       } finally {
-        coachTurnsInFlight -= 1;
+        releaseTurnSlot();
       }
     },
   );

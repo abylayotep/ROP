@@ -16,7 +16,7 @@ import { and, asc, desc, eq, gte, inArray, sql } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { POOL_MAX, type Db } from '../db/client.js';
+import type { Db } from '../db/client.js';
 import {
   agents,
   aiReplies,
@@ -28,6 +28,7 @@ import {
   stages,
   whatsappNumbers,
 } from '../db/schema.js';
+import { releaseTurnSlot, sandboxTurns, SANDBOX_TURNS, tryTakeTurnSlot } from '../db/turn-cap.js';
 import type { Env } from '../env.js';
 import { MODELS, type ModelClient } from '../lib/ai/openrouter.js';
 import { keyAad, runTurn, type TurnResult } from '../lib/ai/turn.js';
@@ -47,36 +48,11 @@ export interface AiDeps {
 /** What a customer may say to the sandbox. A WhatsApp message is far shorter than this. */
 const SANDBOX_LIMIT = 4_000;
 
-/**
- * Sandbox turns allowed to run at once, across the whole process.
- *
- * A sandbox turn holds a database connection for as long as the model thinks — up to the
- * client's sixty-second deadline — because the transaction it rolls back is what keeps an
- * invented customer out of somebody's inbox. Connections are `POOL_MAX` and shared with every
- * other route, so without a cap a handful of owners clicking «Проверить» empties the pool and
- * the webhook Meta is waiting on queues behind them for a minute.
- *
- * Three is the intent, and the pool is the ceiling: written against `POOL_MAX` so that
- * shrinking the pool cannot silently make this cap the larger of the two.
- *
- * Floored at one, because the ceiling can reach zero. A pool configured at two or less makes
- * `POOL_MAX - 2` zero or negative, and a cap of zero is not a small sandbox — it is a sandbox
- * that answers 429 to every owner, always, for a reason nothing on the screen explains.
- * Better one at a time on a pool that small than none at all.
- *
- * The rate limit does not do this job. Twenty a minute is above the pool size to begin with,
- * and a count per minute says nothing about how many are in flight at one instant.
- */
-export const sandboxTurns = (poolMax: number): number => Math.max(1, Math.min(3, poolMax - 2));
-
-export const SANDBOX_TURNS = sandboxTurns(POOL_MAX);
-
-/**
- * How many are in flight now. Module-level rather than per-server, because what it protects —
- * the connection pool — belongs to the process, and a second `buildServer` in one process
- * would share the pool without sharing a counter.
- */
-let sandboxTurnsInFlight = 0;
+// `SANDBOX_TURNS` and `sandboxTurns` now live in `db/turn-cap.ts`, shared with the coach —
+// re-exported here so nothing that already imports them from this file has to change. See
+// that file's comment for why the cap and the in-flight counter behind it are shared rather
+// than each feature keeping its own.
+export { SANDBOX_TURNS, sandboxTurns };
 
 const settings = z
   .object({
@@ -394,11 +370,11 @@ export function registerAiRoutes(
       }
 
       // Taken before the turn and given back in a `finally`, so a turn that raises does not
-      // leave the sandbox one slot poorer for the life of the process. See `SANDBOX_TURNS`.
-      if (sandboxTurnsInFlight >= SANDBOX_TURNS) {
+      // leave the shared cap one slot poorer for the life of the process. The slot is taken
+      // from the same counter the coach draws on — see `db/turn-cap.ts`.
+      if (!tryTakeTurnSlot()) {
         throw new ApiError(429, 'Песочница занята. Попробуйте через несколько секунд.');
       }
-      sandboxTurnsInFlight += 1;
 
       let result;
       try {
@@ -409,7 +385,7 @@ export function registerAiRoutes(
           text: parsed.data.text,
         });
       } finally {
-        sandboxTurnsInFlight -= 1;
+        releaseTurnSlot();
       }
 
       // Ids become names here rather than on the screen: the sections and the fields are

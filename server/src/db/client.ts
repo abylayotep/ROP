@@ -9,7 +9,9 @@ import * as schema from './schema.js';
  * a connection for as long as a model takes to think: the sandbox runs a turn inside a
  * transaction it rolls back. Anything that keeps a connection across a slow call has to stay
  * **well below** this number, or the pool empties and every other route — the webhook Meta is
- * waiting on included — queues behind it. `SANDBOX_TURNS` in `api/ai.ts` is that cap today.
+ * waiting on included — queues behind it. `turn-cap.ts`'s shared cap is that limit today,
+ * held in common by the sandbox and the coach alike — see that file for why it is one
+ * counter and not one per feature.
  */
 export const POOL_MAX = 10;
 

@@ -66,6 +66,11 @@ export function RuleList({
   // other's text with no prompt.
   const [slot, setSlot] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
+  // The edit form's own category pick — separate from `newCategory` below, which belongs
+  // to the create form. An edit starts from the rule's current category (`startEdit` sets
+  // it), and changing it is what lets «Изменить» move a rule between categories: the same
+  // move a drag can only do within one.
+  const [editCategory, setEditCategory] = useState<RuleCategory>('business');
   const [saving, setSaving] = useState(false);
 
   const [newCategory, setNewCategory] = useState<RuleCategory>('business');
@@ -76,7 +81,11 @@ export function RuleList({
   const creating = slot === NEW;
   const editingId = creating ? null : slot;
   const editingRule = editingId !== null ? rules.find((rule) => rule.id === editingId) ?? null : null;
-  const dirty = creating ? draft.trim() !== '' : editingRule !== null && draft !== editingRule.text;
+  // A changed category with untouched text is still unsaved work — «Сохранить» would move
+  // the rule, so leaving without it is exactly what the discard guard exists to catch.
+  const dirty = creating
+    ? draft.trim() !== ''
+    : editingRule !== null && (draft !== editingRule.text || editCategory !== editingRule.category);
 
   /** `false` means a dirty draft vetoed the switch and asked the owner first — the same
    * guard `KnowledgeScreen` runs before it lets a click discard an unsaved note. Covers both
@@ -95,6 +104,7 @@ export function RuleList({
     if (!confirmDiscard()) return;
     setSlot(rule.id);
     setDraft(rule.text);
+    setEditCategory(rule.category);
   }
 
   function closeSlot() {
@@ -106,7 +116,10 @@ export function RuleList({
     if (!editingRule || saving || draft.trim() === '') return;
     setSaving(true);
     try {
-      await api.updateRule(agentId, editingRule.id, { text: draft.trim() });
+      // `category` goes along even when it hasn't changed — the server no-ops a same-
+      // category PATCH (see `rules.ts`'s `movingCategory` check), so there's no need to
+      // special-case "did the owner actually touch the dropdown" here.
+      await api.updateRule(agentId, editingRule.id, { text: draft.trim(), category: editCategory });
       toast.ok('Правило сохранено');
       setSlot(null);
       await refresh();
@@ -269,12 +282,25 @@ export function RuleList({
 
                     <div style={{ flex: 1, minWidth: 0 }}>
                       {editingId === rule.id ? (
-                        <textarea
-                          style={{ ...control, minHeight: 52 }}
-                          value={draft}
-                          autoFocus
-                          onChange={(e) => setDraft(e.target.value)}
-                        />
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                          <select
+                            style={control}
+                            value={editCategory}
+                            onChange={(e) => setEditCategory(e.target.value as RuleCategory)}
+                          >
+                            {RULE_CATEGORIES.map((item) => (
+                              <option key={item.id} value={item.id}>
+                                {item.label}
+                              </option>
+                            ))}
+                          </select>
+                          <textarea
+                            style={{ ...control, minHeight: 52 }}
+                            value={draft}
+                            autoFocus
+                            onChange={(e) => setDraft(e.target.value)}
+                          />
+                        </div>
                       ) : (
                         <div
                           style={{

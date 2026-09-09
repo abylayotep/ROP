@@ -1,6 +1,7 @@
 import { useMemo, useState, type CSSProperties } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import * as api from '@/api';
+import { Graph } from '@/components/knowledge/Graph';
 import { ImportPanel } from '@/components/knowledge/ImportPanel';
 import { NoteEditor } from '@/components/knowledge/NoteEditor';
 import { buildTree, NoteTree } from '@/components/knowledge/NoteTree';
@@ -9,7 +10,7 @@ import { Card, Segmented, type SegmentItem } from '@/components/ui/primitives';
 import { Async, EmptyState, Skeleton } from '@/components/ui/states';
 import { useApi, useDebounced } from '@/hooks/useApi';
 import { useAgent } from '@/store/agent';
-import type { KbNote, KbNoteDetail, KbNoteKind } from '@/types';
+import type { KbGraph, KbNote, KbNoteDetail, KbNoteKind } from '@/types';
 
 /**
  * The vault: a folder tree, a markdown editor, and a panel of what points where.
@@ -43,6 +44,13 @@ const FILTERS: SegmentItem<Filter>[] = [
   { id: 'other', label: 'Другое' },
 ];
 
+type View = 'notes' | 'graph';
+
+const VIEWS: SegmentItem<View>[] = [
+  { id: 'notes', label: 'Заметки' },
+  { id: 'graph', label: 'Граф' },
+];
+
 const control: CSSProperties = {
   width: '100%',
   padding: '8px 10px',
@@ -64,6 +72,8 @@ export function KnowledgeScreen() {
   // Debounced so a word typed into the box is one search, not six.
   const search = useDebounced(query).trim();
 
+  const [view, setView] = useState<View>('notes');
+
   const [params, setParams] = useSearchParams();
   const selected = params.get('note');
 
@@ -71,6 +81,10 @@ export function KnowledgeScreen() {
   // `NoteEditor` is keyed by `selected`, so moving `selected` at all remounts it — this is
   // the one flag standing between a click and a silently discarded draft.
   const [editorDirty, setEditorDirty] = useState(false);
+
+  /** `false` means a dirty draft vetoed the navigation and asked the owner first. */
+  const confirmDiscard = () =>
+    !editorDirty || window.confirm('Уйти без сохранения? Несохранённые правки будут потеряны.');
 
   /** The actual navigation, with no question asked. For the paths that already answered
    * one — a save, a confirmed delete, an explicit «Отмена» — asking again would be asking
@@ -84,8 +98,19 @@ export function KnowledgeScreen() {
    * A dirty editor gets a chance to say no before its draft is gone for good.
    */
   const select = (noteId: string | null) => {
-    if (editorDirty && !window.confirm('Уйти без сохранения? Несохранённые правки будут потеряны.')) return;
+    if (!confirmDiscard()) return;
     selectNow(noteId);
+  };
+
+  /**
+   * The graph tab's own node click. It goes through the exact same veto as `select` — a
+   * click on a node is still a selection change, and the graph does not get to skip the
+   * question just because it arrived from a canvas instead of the tree.
+   */
+  const openFromGraph = (noteId: string) => {
+    if (!confirmDiscard()) return;
+    selectNow(noteId);
+    setView('notes');
   };
 
   /**
@@ -123,6 +148,17 @@ export function KnowledgeScreen() {
     (signal) =>
       selected && selected !== NEW ? api.getKbNote(agent.id, selected, signal) : Promise.resolve(null),
     [agent.id, selected],
+  );
+
+  /**
+   * The graph tab's own data, fetched only while that tab is open — same trick as `detail`
+   * above with `NEW`: the fetcher answers `null` for the tab nobody is looking at, so
+   * flipping to «Заметки» and back does not leave a stale request in flight, and flipping
+   * to «Граф» always sees whatever the vault looks like right now.
+   */
+  const graph = useApi<KbGraph | null>(
+    (signal) => (view === 'graph' ? api.getKbGraph(agent.id, signal) : Promise.resolve(null)),
+    [agent.id, view],
   );
 
   /** A note was created, saved under a new path, or deleted — both lists may have moved. */
@@ -200,65 +236,86 @@ export function KnowledgeScreen() {
       </div>
 
       <div style={{ flex: 1, minWidth: 0 }}>
-        {selected === null && (
+        <div style={{ marginBottom: 14 }}>
+          <Segmented items={VIEWS} value={view} onChange={setView} size="sm" />
+        </div>
+
+        {/*
+         * Hidden with `display`, never unmounted: the graph tab and the note tab share this
+         * column, and switching tabs must not throw away an editor draft the way removing
+         * `NoteEditor` from the tree would. The dirty guard already covers every path that
+         * actually changes `selected` — a tab flip on its own does not, so it needs none of
+         * its own.
+         */}
+        <div style={{ display: view === 'notes' ? 'block' : 'none' }}>
+          {selected === null && (
+            <Card>
+              <EmptyState>Выберите заметку слева или создайте новую.</EmptyState>
+            </Card>
+          )}
+
+          {selected === NEW && (
+            <NoteEditor
+              key={NEW}
+              agentId={agent.id}
+              detail={null}
+              titles={titles}
+              // «Отмена» already means «throw this away» — asking again would be asking about
+              // a discard the owner just asked for.
+              onCancel={() => selectNow(null)}
+              onSaved={(saved) => {
+                refreshLists();
+                // The save just answered the question the guard exists to ask.
+                selectNow(saved.id);
+              }}
+              onDeleted={() => selectNow(null)}
+              onOpenNote={select}
+              onDirtyChange={setEditorDirty}
+            />
+          )}
+
+          {selected !== null && selected !== NEW && (
+            <Async state={detail} skeleton={<Skeleton height={420} />}>
+              {(loaded) =>
+                loaded && (
+                  <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <NoteEditor
+                        key={selected}
+                        agentId={agent.id}
+                        detail={loaded}
+                        titles={titles}
+                        onSaved={() => {
+                          refreshLists();
+                          detail.reload();
+                        }}
+                        onDeleted={() => {
+                          refreshLists();
+                          // The confirm inside `remove()` already asked; this is not a second
+                          // navigation the owner needs to approve again.
+                          selectNow(null);
+                        }}
+                        onOpenNote={select}
+                        onDirtyChange={setEditorDirty}
+                      />
+                    </div>
+                    <div style={{ width: 300, flex: '0 0 300px' }}>
+                      <NotePanel key={selected} agentId={agent.id} detail={loaded} onOpenNote={select} />
+                    </div>
+                  </div>
+                )
+              }
+            </Async>
+          )}
+        </div>
+
+        <div style={{ display: view === 'graph' ? 'block' : 'none' }}>
           <Card>
-            <EmptyState>Выберите заметку слева или создайте новую.</EmptyState>
+            <Async state={graph} skeleton={<Skeleton height={560} />}>
+              {(loaded) => loaded && <Graph graph={loaded} onOpenNote={openFromGraph} />}
+            </Async>
           </Card>
-        )}
-
-        {selected === NEW && (
-          <NoteEditor
-            key={NEW}
-            agentId={agent.id}
-            detail={null}
-            titles={titles}
-            // «Отмена» already means «throw this away» — asking again would be asking about
-            // a discard the owner just asked for.
-            onCancel={() => selectNow(null)}
-            onSaved={(saved) => {
-              refreshLists();
-              // The save just answered the question the guard exists to ask.
-              selectNow(saved.id);
-            }}
-            onDeleted={() => selectNow(null)}
-            onOpenNote={select}
-            onDirtyChange={setEditorDirty}
-          />
-        )}
-
-        {selected !== null && selected !== NEW && (
-          <Async state={detail} skeleton={<Skeleton height={420} />}>
-            {(loaded) =>
-              loaded && (
-                <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <NoteEditor
-                      key={selected}
-                      agentId={agent.id}
-                      detail={loaded}
-                      titles={titles}
-                      onSaved={() => {
-                        refreshLists();
-                        detail.reload();
-                      }}
-                      onDeleted={() => {
-                        refreshLists();
-                        // The confirm inside `remove()` already asked; this is not a second
-                        // navigation the owner needs to approve again.
-                        selectNow(null);
-                      }}
-                      onOpenNote={select}
-                      onDirtyChange={setEditorDirty}
-                    />
-                  </div>
-                  <div style={{ width: 300, flex: '0 0 300px' }}>
-                    <NotePanel key={selected} agentId={agent.id} detail={loaded} onOpenNote={select} />
-                  </div>
-                </div>
-              )
-            }
-          </Async>
-        )}
+        </div>
       </div>
     </div>
   );

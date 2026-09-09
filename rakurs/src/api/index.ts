@@ -11,6 +11,7 @@ import type {
   ConversationSummary,
   ConversationThread,
   Customer,
+  KbGraph,
   KbImport,
   KbNote,
   KbNoteDetail,
@@ -265,6 +266,10 @@ export const deleteKbNote = (agentId: string, noteId: string) =>
  * what «Что найдёт агент» shows, because a note title is not what the agent quotes. */
 export const searchKb = (agentId: string, q: string, signal?: AbortSignal) =>
   request<KbSection[]>(`${knowledge(agentId)}/search`, { query: { q }, signal });
+
+/** The graph tab's own fetch: every note as a node, every resolved `[[link]]` as an edge. */
+export const getKbGraph = (agentId: string, signal?: AbortSignal) =>
+  request<KbGraph>(`${knowledge(agentId)}/graph`, { signal });
 
 export const listKbSources = (agentId: string, signal?: AbortSignal) =>
   request<KbSource[]>(`${knowledge(agentId)}/sources`, { signal });

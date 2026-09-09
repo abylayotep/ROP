@@ -1,4 +1,5 @@
 import { useState, type CSSProperties, type FormEvent, type ReactNode } from 'react';
+import { Link } from 'react-router-dom';
 import * as api from '@/api';
 import { Card, CardHead, Segmented, Toggle } from '@/components/ui/primitives';
 import { Async, EmptyState, Skeleton } from '@/components/ui/states';
@@ -9,13 +10,13 @@ import { useAgent } from '@/store/agent';
 import type { AiModel, AiSettings, AiTurn, AiUsage, AiUsagePeriod } from '@/types';
 
 /**
- * Что агент говорит клиентам, чем он это говорит и что бы он ответил.
+ * Модель, которой отвечает агент, чем это оплачивается и что бы он ответил.
  *
- * The one thing this screen exists to make plain: the instructions change how the agent
- * TALKS, never what it KNOWS. Facts come from the knowledge base and from nowhere else — an
- * owner who writes «доставка 2000 тенге» here and expects the agent to say it will find the
- * agent handing the thread to a person instead. It is written above the box, not in a
- * tooltip, because it is the misunderstanding that costs the most.
+ * The agent's character — what it says and how — moved to «Обучение»: a set of rules the
+ * owner writes or approves in a coaching chat, not a paragraph on this screen. What stays
+ * here is the machinery underneath it: the model, the key that pays for it, and a sandbox
+ * to try a real turn. Facts still come from the knowledge base and from nowhere else — a
+ * rule that promises something the base does not know sends the agent to a person instead.
  */
 
 const control: CSSProperties = {
@@ -39,10 +40,7 @@ const hint: CSSProperties = {
   lineHeight: 1.45,
 };
 
-/** Mirrors `INSTRUCTIONS_LIMIT` in `server/src/api/ai.ts`: longer is refused with a 400. */
-const INSTRUCTIONS_LIMIT = 20_000;
-
-/** Mirrors `SANDBOX_LIMIT` there. A WhatsApp message is far shorter than this. */
+/** Mirrors `SANDBOX_LIMIT` in `server/src/api/ai.ts`. A WhatsApp message is far shorter than this. */
 const SANDBOX_LIMIT = 4_000;
 
 /** Where an owner gets the key the agent spends. */
@@ -109,8 +107,8 @@ export function AgentScreen() {
     <Async state={query} skeleton={<Skeleton height={320} />}>
       {(loaded) => (
         <AgentSettings
-          // Keyed on the agent, so a form cannot show one agent's instructions and save
-          // them onto another when the URL moves under a provider that stays alive.
+          // Keyed on the agent, so a form cannot show one agent's settings and save them
+          // onto another when the URL moves under a provider that stays alive.
           key={agent.id}
           agentId={agent.id}
           owner={owner}
@@ -122,15 +120,15 @@ export function AgentScreen() {
 }
 
 // Module scope, not nested inside AgentScreen: a component declared inside another's body
-// gets a new identity every render, so React remounts it — wiping the instructions being
-// typed and the sandbox answer on screen.
+// gets a new identity every render, so React remounts it — wiping the model form being
+// edited and the sandbox answer on screen.
 
 /**
  * Настройки агента, каким их вернул сервер.
  *
  * Ответ сервера — единственный источник правды: каждая мутация отвечает всей строкой, и
  * состояние заменяется ею целиком. Собранная руками строка врала бы о том, что сохранилось:
- * температура округляется до двух знаков, а инструкции сервер обрезает по краям.
+ * температура округляется до двух знаков.
  */
 function AgentSettings({
   agentId,
@@ -151,12 +149,7 @@ function AgentSettings({
         settings={settings}
         onSaved={setSettings}
       />
-      <InstructionsCard
-        agentId={agentId}
-        owner={owner}
-        settings={settings}
-        onSaved={setSettings}
-      />
+      <RulesPointerCard agentId={agentId} />
       <ModelCard
         agentId={agentId}
         owner={owner}
@@ -171,7 +164,7 @@ function AgentSettings({
       {!owner && (
         <Card>
           <div style={{ fontSize: 12.5, color: 'var(--text-dim)' }}>
-            Инструкции, модель и ключ меняет владелец компании. Выключить агента в отдельном
+            Правила, модель и ключ меняет владелец компании. Выключить агента в отдельном
             диалоге может любой сотрудник — тумблер стоит в карточке диалога.
           </div>
         </Card>
@@ -183,10 +176,9 @@ function AgentSettings({
 /**
  * «Агент отвечает клиентам».
  *
- * Включение запрещено без ключа и без инструкций, и запрещено здесь, а не только на
- * сервере: агент, включённый с пустыми инструкциями, отвечает клиентам тем, что придёт
- * модели в голову, — и сервер такое пропускает, потому что пустые инструкции не ошибка, а
- * состояние. Ключа же нет — и агент молча пропускает каждое сообщение.
+ * Включение запрещено без ключа, и запрещено здесь, а не только на сервере: агент без
+ * ключа молча пропускает каждое сообщение, и владелец должен узнать об этом до того, как
+ * включит тумблер, а не после первого потерянного клиента.
  */
 function EnableCard({
   agentId,
@@ -202,13 +194,9 @@ function EnableCard({
   const toast = useToast();
   const [saving, setSaving] = useState(false);
 
-  // What is missing, named. «Нельзя включить» without «чего не хватает» sends the owner
-  // hunting through four cards.
-  const missing = !settings.keySet
-    ? 'Сначала добавьте ключ OpenRouter — ниже на этом экране.'
-    : settings.instructions.trim() === ''
-      ? 'Сначала напишите инструкции — без них агент говорит клиентам что угодно.'
-      : null;
+  // What is missing, named — the same gate `PATCH /ai` runs server-side (see api/ai.ts):
+  // an agent left on with no key skips every message in silence.
+  const missing = !settings.keySet ? 'Сначала добавьте ключ OpenRouter — ниже на этом экране.' : null;
 
   const blocked = !settings.aiEnabled && missing !== null;
 
@@ -262,100 +250,22 @@ function EnableCard({
 }
 
 /**
- * Инструкции — характер агента, а не его знания.
+ * Где теперь живёт характер агента.
  *
- * Сохраняются явной кнопкой: это текст, который агент говорит клиентам от имени бизнеса, и
- * автосохранение на каждой букве отправило бы клиентам половину недописанной мысли.
+ * The free-text instructions field is gone — a rule is switchable and orderable on its own,
+ * a paragraph is not. This card is the one line that sends an owner looking for it to where
+ * it actually is now.
  */
-function InstructionsCard({
-  agentId,
-  owner,
-  settings,
-  onSaved,
-}: {
-  agentId: string;
-  owner: boolean;
-  settings: AiSettings;
-  onSaved: (settings: AiSettings) => void;
-}) {
-  const toast = useToast();
-  const [draft, setDraft] = useState(settings.instructions);
-  const [saving, setSaving] = useState(false);
-
-  const dirty = draft !== settings.instructions;
-  const tooLong = draft.length > INSTRUCTIONS_LIMIT;
-
-  async function save(event: FormEvent) {
-    event.preventDefault();
-    if (tooLong) return;
-
-    setSaving(true);
-    try {
-      const saved = await api.updateAiSettings(agentId, { instructions: draft });
-      onSaved(saved);
-      // Re-seeded from what the server stored, not from what was typed: otherwise the form
-      // stays dirty forever over a difference nobody can see.
-      setDraft(saved.instructions);
-      toast.ok('Инструкции сохранены');
-    } catch (error) {
-      // Написанное остаётся в поле: перенабирать инструкции после неудачного сохранения —
-      // последнее, чего хочется.
-      toast.fail(error);
-    } finally {
-      setSaving(false);
-    }
-  }
-
+function RulesPointerCard({ agentId }: { agentId: string }) {
   return (
     <Card>
-      <form onSubmit={save}>
-        <CardHead title="Инструкции" gap={10} />
-
-        {/* The whole point of the screen, said before the box rather than after it. */}
-        <div
-          className="sunken-box"
-          style={{ padding: '10px 12px', fontSize: 12, lineHeight: 1.5, color: 'var(--text-3)' }}
-        >
-          Инструкции задают, <b>как</b> агент говорит: что вы продаёте, как обращаетесь к
-          клиенту, чего никогда не обещаете. Фактами они не становятся. Цены, сроки, наличие
-          и адреса агент берёт только из базы знаний — чего там нет, того он не скажет и
-          передаст диалог человеку. Написать здесь «доставка два дня» недостаточно: это нужно
-          в базе знаний.
-        </div>
-
-        <textarea
-          style={{
-            ...control,
-            marginTop: 12,
-            minHeight: 260,
-            lineHeight: 1.5,
-            resize: 'vertical',
-          }}
-          value={draft}
-          disabled={!owner}
-          placeholder={
-            'Например: мы продаём мебель на заказ. Отвечаем коротко и по делу, на «вы». ' +
-            'Всегда спрашиваем город и срок. Никогда не обещаем скидку и не называем сроки ' +
-            'доставки, которых нет в базе знаний.'
-          }
-          onChange={(e) => setDraft(e.target.value)}
-        />
-
-        {owner && (
-          <>
-            <div style={{ ...hint, color: tooLong ? 'var(--danger)' : undefined }}>
-              {tooLong
-                ? `Слишком длинно: ${draft.length} из ${INSTRUCTIONS_LIMIT} символов.`
-                : 'Меняются в любой момент — агент подхватит их со следующего сообщения.'}
-            </div>
-            <div style={{ marginTop: 10 }}>
-              <button type="submit" className="btn" disabled={!dirty || saving || tooLong}>
-                {saving ? 'Сохраняем…' : 'Сохранить инструкции'}
-              </button>
-            </div>
-          </>
-        )}
-      </form>
+      <div style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--text-3)' }}>
+        Характер агента задаётся правилами в разделе «
+        <Link to={`/a/${agentId}/coach`} style={{ color: 'var(--accent)' }}>
+          Обучение
+        </Link>
+        ».
+      </div>
     </Card>
   );
 }
@@ -840,7 +750,7 @@ function SandboxCard({ agentId, settings }: { agentId: string; settings: AiSetti
 
         <div style={{ ...hint, marginTop: 0 }}>
           Напишите то, что написал бы клиент. Агент отработает по-настоящему — с вашими
-          инструкциями и вашей базой знаний, — но клиенту ничего не уйдёт, лид не изменится и
+          правилами и вашей базой знаний, — но клиенту ничего не уйдёт, лид не изменится и
           в переписке ничего не останется. Ход оплачивается с вашего счёта в OpenRouter.
         </div>
 

@@ -88,8 +88,10 @@ export function layout(graph: KbGraph, steps: number): Map<string, Point> {
         const b = positions.get(ids[j])!;
         const dx = a.x - b.x;
         const dy = a.y - b.y;
-        // Two notes hashed to (almost) the same point get pushed apart along an arbitrary
-        // fixed direction rather than dividing by zero.
+        // Clamped so two notes whose seeded positions coincide exactly cannot divide by
+        // zero. That does not push them apart: `ux`/`uy` below are both zero in that case,
+        // so the pair displaces each other by nothing and stays coincident. Harmless, and
+        // only possible when two note ids hash to the same 32-bit value.
         const dist = Math.max(Math.hypot(dx, dy), 0.01);
         const force = (k * k) / dist;
         const ux = dx / dist;

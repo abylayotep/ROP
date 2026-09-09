@@ -1,13 +1,12 @@
 import {
   useEffect,
-  useMemo,
   useRef,
   useState,
   type PointerEvent as ReactPointerEvent,
   type WheelEvent as ReactWheelEvent,
 } from 'react';
 import { layout, type Point } from './layout.js';
-import { EmptyState } from '@/components/ui/states';
+import { EmptyState, Skeleton } from '@/components/ui/states';
 import { useAppState } from '@/store/app-state';
 import type { KbGraph } from '@/types';
 
@@ -75,7 +74,33 @@ export function Graph({
   // Fewer steps for a big vault: the simulation is O(notes^2) per step, and a tab switch
   // should not stall the UI thread waiting on the server's 500-note cap to settle.
   const steps = Math.max(60, Math.min(300, Math.round(30_000 / Math.max(graph.notes.length, 1))));
-  const positions = useMemo(() => layout(graph, steps), [graph, steps]);
+
+  // `layout` itself stays a pure, synchronous function — that purity is what makes it
+  // unit-testable, and slicing it across frames would trade that away for a saving nobody
+  // needs at the 500-note cap. What moves is *when* it runs: at that cap it costs on the
+  // order of 200ms, and running it inside render (e.g. via `useMemo`) would compute it
+  // before React ever commits and paints the loading skeleton below — the owner would see
+  // the tab freeze, then the picture appear. An effect runs after that paint, so the
+  // skeleton is what freezes the thread this time, not a blank tab.
+  const [positions, setPositions] = useState<Map<string, Point> | null>(null);
+
+  useEffect(() => {
+    // A stale computation must never win a race against a newer one, and a graph that
+    // changed underneath a finished layout must not leave the old picture on screen: reset
+    // to "computing" the moment `graph`/`steps` change, and let `cancelled` stop a
+    // still-running previous computation from overwriting the newer one's result.
+    let cancelled = false;
+    setPositions(null);
+    const frame = requestAnimationFrame(() => {
+      if (cancelled) return;
+      const result = layout(graph, steps);
+      if (!cancelled) setPositions(result);
+    });
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(frame);
+    };
+  }, [graph, steps]);
 
   // Size the canvas in device pixels for crisp lines on a hi-DPI screen, and re-measure
   // whenever the container's own box changes — including the very first layout pass.
@@ -103,6 +128,8 @@ export function Graph({
   // suits neither.
   useEffect(() => {
     if (size.width === 0 || size.height === 0) return;
+    // Still computing (or about to start over for a newer graph) — nothing to fit yet.
+    if (!positions) return;
     if (fittedRef.current === positions) return;
     fittedRef.current = positions;
     if (positions.size === 0) return;
@@ -140,6 +167,9 @@ export function Graph({
 
     ctx.setTransform(size.dpr, 0, 0, size.dpr, 0, 0);
     ctx.clearRect(0, 0, size.width, size.height);
+    // Still computing (or starting over for a newer graph): leave the canvas blank under
+    // the loading skeleton rather than drawing the previous graph's stale positions.
+    if (!positions) return;
 
     const styles = getComputedStyle(document.documentElement);
     const lineColor = styles.getPropertyValue('--line-strong').trim() || '#888';
@@ -300,6 +330,13 @@ export function Graph({
           }}
           style={{ width: '100%', height: '100%', display: 'block', cursor: 'grab', touchAction: 'none' }}
         />
+        {/* Canvas stays mounted underneath — its own sizing effect must not lose its ref —
+            but blank, while this covers it: the owner sees the wait, not a frozen tab. */}
+        {!positions && (
+          <div style={{ position: 'absolute', inset: 0, padding: 12 }}>
+            <Skeleton height="100%" radius={8} />
+          </div>
+        )}
       </div>
     </div>
   );

@@ -1,4 +1,4 @@
-import { asc, eq } from 'drizzle-orm';
+import { asc, eq, sql } from 'drizzle-orm';
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { Db } from '../src/db/client.js';
 import { accounts, agents, kbChunks, kbLinks, kbNotes } from '../src/db/schema.js';
@@ -60,6 +60,65 @@ describe('saveNote', () => {
     });
     expect((await chunks(note.id)).map((c) => c.title))
       .toEqual(['Прайс › Цены (1)', 'Прайс › Цены (2)']);
+  });
+
+  it('numbers pieces distinctly when the un-numbered title already fills the column', async () => {
+    // The heading alone pushes the un-numbered "Прайс › <heading>" past TITLE_MAX, so a
+    // truncate-then-append would cut the " (1)"/" (2)" suffix away entirely and leave both
+    // pieces under the same clamped title. Clamp-then-append must keep them distinct.
+    const heading = 'Ц'.repeat(250);
+    const note = await saveNote(db, {
+      agentId, path: 'Прайс', body: `## ${heading}\n${'а'.repeat(5000)}\n\n${'б'.repeat(5000)}`,
+    });
+    const titles = (await chunks(note.id)).map((c) => c.title);
+    expect(titles).toHaveLength(2);
+    expect(titles[0]).not.toBe(titles[1]);
+    expect(titles[0]!.endsWith(' (1)')).toBe(true);
+    expect(titles[1]!.endsWith(' (2)')).toBe(true);
+    for (const title of titles) expect(title.length).toBeLessThanOrEqual(200);
+  });
+
+  it('numbers two distinct sections that happen to share a heading, like pieces of one section', async () => {
+    // Accepted, not a bug: two unrelated sections with the same heading text are
+    // indistinguishable from two pieces of one over-long section once split, and giving them
+    // identical titles would be worse than numbering them as if they were pieces.
+    const note = await saveNote(db, {
+      agentId, path: 'Прайс', body: '## Доставка\n1500 ₸.\n\n## Доставка\n3000 ₸.',
+    });
+    expect((await chunks(note.id)).map((c) => c.title))
+      .toEqual(['Прайс › Доставка (1)', 'Прайс › Доставка (2)']);
+  });
+
+  it('breaks a link when its target is renamed away from the linked title', async () => {
+    // No FK fires here: the target note keeps its id and just stops matching the link's
+    // text, so only the un-pointing UPDATE in resolveLinks can break this link.
+    const target = await saveNote(db, { agentId, path: 'Гарантия', body: 'Год.' });
+    const from = await saveNote(db, { agentId, path: 'Двери', body: '[[Гарантия]]' });
+    let [link] = await db.select().from(kbLinks).where(eq(kbLinks.fromNoteId, from.id));
+    expect(link!.toNoteId).toBe(target.id);
+
+    await saveNote(db, { agentId, noteId: target.id, path: 'Что-то другое', body: 'Год.' });
+    [link] = await db.select().from(kbLinks).where(eq(kbLinks.fromNoteId, from.id));
+    expect(link!.toNoteId).toBeNull();
+  });
+
+  it('resolves an ambiguous title to the oldest note, and keeps it there on re-save', async () => {
+    const first = await saveNote(db, { agentId, path: 'Товары/Доставка', body: 'А.' });
+    const second = await saveNote(db, { agentId, path: 'Услуги/Доставка', body: 'Б.' });
+    // Force `second` to be the older row regardless of how fast the two inserts above ran,
+    // so this tests the tiebreak rule itself rather than real-world insert timing.
+    await db.execute(
+      sql`update kb_notes set created_at = created_at - interval '1 minute' where id = ${second.id}`,
+    );
+
+    const from = await saveNote(db, { agentId, path: 'Двери', body: '[[Доставка]]' });
+    let [link] = await db.select().from(kbLinks).where(eq(kbLinks.fromNoteId, from.id));
+    expect(link!.toNoteId).toBe(second.id);
+    expect(link!.toNoteId).not.toBe(first.id);
+
+    await saveNote(db, { agentId, noteId: from.id, path: 'Двери', body: '[[Доставка]]' });
+    [link] = await db.select().from(kbLinks).where(eq(kbLinks.fromNoteId, from.id));
+    expect(link!.toNoteId).toBe(second.id);
   });
 
   it('resolves a link when its target already exists', async () => {

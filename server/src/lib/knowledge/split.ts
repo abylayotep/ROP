@@ -15,8 +15,11 @@ export interface SplitPart {
  * surrogate — which is not valid UTF-8, so it arrives as `�` if it arrives at all. The
  * budget is still counted in UTF-16 units, because that is what the column and the route's
  * `max()` both measure.
+ *
+ * Exported for `notes.ts`'s `chunkTitle`, which needs the same clamp-then-append order: pass
+ * `TITLE_MAX - suffix.length` as `max` so a later-appended `" (n)"` never gets truncated away.
  */
-function clampTitle(line: string, max: number = TITLE_MAX): string {
+export function clampTitle(line: string, max: number = TITLE_MAX): string {
   if (line.length <= max) return line;
 
   let kept = '';

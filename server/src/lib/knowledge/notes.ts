@@ -3,7 +3,7 @@ import type { Db } from '../../db/client.js';
 import { kbChunks, kbLinks, kbNotes } from '../../db/schema.js';
 import { parseLinks } from './links.js';
 import { parseNote } from './note.js';
-import { TITLE_MAX } from './split.js';
+import { clampTitle, TITLE_MAX } from './split.js';
 
 export interface SaveNoteInput {
   agentId: string;
@@ -14,11 +14,19 @@ export interface SaveNoteInput {
   edited?: boolean;
 }
 
-/** «Заметка › Раздел», numbered when one section became several pieces. */
+/**
+ * «Заметка › Раздел», numbered when one section became several pieces.
+ *
+ * Clamped before the `" (n)"` suffix is appended, not after: shares `split.ts`'s `clampTitle`
+ * so the two splitters cut the same way. Clamping the numbered string as a whole would let an
+ * over-long base eat the suffix in the cut, and every piece of a long section would then come
+ * back under the same truncated title — the opposite of what the number is for.
+ */
 export function chunkTitle(noteTitle: string, heading: string, index: number, total: number): string {
   const base = heading === '' ? noteTitle : `${noteTitle} › ${heading}`;
-  const numbered = total > 1 ? `${base} (${index + 1})` : base;
-  return numbered.length <= TITLE_MAX ? numbered : `${numbered.slice(0, TITLE_MAX - 1)}…`;
+  if (total <= 1) return clampTitle(base);
+  const suffix = ` (${index + 1})`;
+  return `${clampTitle(base, TITLE_MAX - suffix.length)}${suffix}`;
 }
 
 /** The last path segment. Folders are everything before it and are not stored anywhere. */
@@ -31,15 +39,29 @@ const titleOf = (path: string): string => path.split('/').pop()!.trim();
  * Whole-agent rather than per-note: a note created, renamed or deleted changes the meaning of
  * links written in notes we are not touching, and resolving only the note in hand is what
  * would leave a link broken until somebody happened to re-save the note holding it.
+ *
+ * Titles are not unique — the unique index is on `(agent_id, path)`, so `Товары/Доставка` and
+ * `Услуги/Доставка` can both carry the title «Доставка». An `UPDATE … FROM` joined straight
+ * against `kb_notes` would then match a link against both rows, and which one it keeps is
+ * whatever the planner happens to pick — a link could point at one note today and the other
+ * tomorrow with no change anyone made. The `DISTINCT ON` subquery below picks exactly one row
+ * per lowercased title, oldest `created_at` first and `id` as a tiebreaker for notes created in
+ * the same instant: the oldest note is the one whose title existed first and is least likely to
+ * be the one somebody is about to rename away, and «oldest wins» is an answer the writer of the
+ * ambiguous link can see and explain, unlike an answer that depends on query planning.
  */
 async function resolveLinks(tx: Db, agentId: string): Promise<void> {
   await tx.execute(sql`
     UPDATE kb_links l
     SET to_note_id = n.id
-    FROM kb_notes n
+    FROM (
+      SELECT DISTINCT ON (lower(title)) id, lower(title) AS title
+      FROM kb_notes
+      WHERE agent_id = ${agentId}
+      ORDER BY lower(title), created_at ASC, id ASC
+    ) n
     WHERE l.agent_id = ${agentId}
-      AND n.agent_id = ${agentId}
-      AND lower(n.title) = lower(l.target)
+      AND n.title = lower(l.target)
       AND l.to_note_id IS DISTINCT FROM n.id`);
   await tx.execute(sql`
     UPDATE kb_links l
@@ -57,6 +79,11 @@ async function resolveLinks(tx: Db, agentId: string): Promise<void> {
  * The chunks are deleted and written again rather than diffed: a diff would have to decide
  * which old section a new one «is», and that guess is exactly what the page importer learned
  * not to make.
+ *
+ * «One transaction» is a promise this function only keeps if its caller does: `tx` must
+ * already be inside `db.transaction(...)`, because `saveNote` itself never opens one. Pass the
+ * plain `db` handle instead and a crash between the chunk rewrite and the link rewrite leaves
+ * the note updated with its old chunks or a half-written link set, none of it rolled back.
  */
 export async function saveNote(tx: Db, input: SaveNoteInput): Promise<typeof kbNotes.$inferSelect> {
   const parsed = parseNote(input.body);

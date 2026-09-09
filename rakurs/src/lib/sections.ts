@@ -11,6 +11,12 @@ export interface SectionDef {
   label: string;
   /** What is missing and when it arrives. Empty once the section is real. */
   pending: string;
+  /**
+   * Hidden from anyone but the account's owner. `Sidebar` reads this to leave the item out
+   * of the menu entirely, rather than showing a link into a screen whose every route —
+   * the reads included — answers a non-owner with a 403.
+   */
+  ownerOnly?: boolean;
 }
 
 export const SECTIONS: SectionDef[] = [
@@ -22,6 +28,7 @@ export const SECTIONS: SectionDef[] = [
   },
   { path: 'customers', label: 'Клиенты', pending: '' },
   { path: 'knowledge', label: 'База знаний', pending: '' },
+  { path: 'coach', label: 'Обучение', pending: '', ownerOnly: true },
   { path: 'agent', label: 'Агент', pending: '' },
   {
     path: 'integrations',

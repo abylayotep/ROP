@@ -5,6 +5,7 @@ import { AgentScreen } from '@/screens/AgentScreen';
 import { AgentSettingsScreen } from '@/screens/AgentSettingsScreen';
 import { AgentsScreen } from '@/screens/AgentsScreen';
 import { BoardScreen } from '@/screens/BoardScreen';
+import { CoachScreen } from '@/screens/CoachScreen';
 import { CustomersScreen } from '@/screens/CustomersScreen';
 import { DialogsScreen } from '@/screens/DialogsScreen';
 import { IntegrationsScreen } from '@/screens/IntegrationsScreen';
@@ -62,6 +63,8 @@ function AuthGate() {
                 <CustomersScreen />
               ) : section.path === 'knowledge' ? (
                 <KnowledgeScreen />
+              ) : section.path === 'coach' ? (
+                <CoachScreen />
               ) : section.path === 'agent' ? (
                 <AgentScreen />
               ) : section.path === 'stats' ? (

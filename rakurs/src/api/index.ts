@@ -1,5 +1,6 @@
 import type {
   Agent,
+  AgentRule,
   AiModel,
   AiSettings,
   AiTurn,
@@ -8,6 +9,8 @@ import type {
   Board,
   CapiEvent,
   CapiSettings,
+  CoachMessage,
+  CoachProposal,
   ConversationSummary,
   ConversationThread,
   Customer,
@@ -24,6 +27,7 @@ import type {
   Member,
   Message,
   Period,
+  RuleCategory,
   Stage,
   StatsCurrent,
   StatsPeriodReport,
@@ -311,7 +315,6 @@ export const updateAiSettings = (
     aiEnabled?: boolean;
     model?: string;
     temperature?: number;
-    instructions?: string;
     replyLanguage?: string;
     openrouterKey?: string | null;
   },
@@ -444,3 +447,62 @@ export const getStatsPeriod = (agentId: string, period: Period, signal?: AbortSi
     query: { period },
     signal,
   });
+
+// ── Правила агента ───────────────────────────────────────────────────────────
+
+/**
+ * In the order the model reads them — categories in the prompt's own sequence, then
+ * position inside each. Owner only on the server; every route below is.
+ */
+export const listRules = (agentId: string, signal?: AbortSignal) =>
+  request<AgentRule[]>(`/agents/${agentId}/rules`, { signal });
+
+/** A new rule joins the end of its category. */
+export const createRule = (
+  agentId: string,
+  body: { category: RuleCategory; text: string; warning?: string | null },
+) => request<AgentRule>(`/agents/${agentId}/rules`, { method: 'POST', body });
+
+export const updateRule = (
+  agentId: string,
+  ruleId: string,
+  body: { category?: RuleCategory; text?: string; enabled?: boolean; position?: number },
+) => request<AgentRule>(`/agents/${agentId}/rules/${ruleId}`, { method: 'PATCH', body });
+
+export const deleteRule = (agentId: string, ruleId: string) =>
+  request<{ ok: true }>(`/agents/${agentId}/rules/${ruleId}`, { method: 'DELETE' });
+
+// ── Коуч ──────────────────────────────────────────────────────────────────────
+
+export const listCoachMessages = (agentId: string, signal?: AbortSignal) =>
+  request<CoachMessage[]>(`/agents/${agentId}/coach/messages`, { signal });
+
+/**
+ * What a coaching turn answers: the model's own line, a possible proposal, and a warning
+ * when the fact check turned a priced rule into a note.
+ *
+ * Not `CoachMessage` — the owner's line this same call writes is not handed back (the
+ * screen already knows what it sent), and the model's row keeps its text under `message`,
+ * not `text`, exactly as `server/src/api/coach.ts`'s `POST` route answers it.
+ */
+export interface CoachReply {
+  id: string;
+  message: string;
+  proposal: CoachProposal | null;
+  warning: string | null;
+}
+
+/**
+ * One turn of the coaching chat. Costs money — an OpenRouter call runs on the other end —
+ * and can hold a turn slot as long as a sandbox call, hence the same long deadline.
+ */
+export const sendCoachMessage = (agentId: string, body: { text: string; conversationId?: string }) =>
+  request<CoachReply>(`/agents/${agentId}/coach/messages`, {
+    method: 'POST',
+    body,
+    timeoutMs: LONG_TIMEOUT_MS,
+  });
+
+/** The one answer that costs nothing: turning down a proposal writes no rule and no note. */
+export const rejectCoachMessage = (agentId: string, messageId: string) =>
+  request<CoachMessage>(`/agents/${agentId}/coach/messages/${messageId}/reject`, { method: 'POST' });

@@ -38,7 +38,14 @@ const control: CSSProperties = {
   outline: 'none',
 };
 
-const DISCARD_PROMPT = 'Уйти без сохранения? Несохранённые правки правила будут потеряны.';
+const DISCARD_PROMPT = 'Уйти без сохранения? Несохранённый текст правила будет потерян.';
+
+/** Not a real rule id — every rule id is a uuid the server minted, and this string never
+ * collides with one. Marks the inline slot as "a blank rule, not yet saved". Mirrors
+ * `KnowledgeScreen`'s own `NEW` sentinel, for the same reason: a create draft and an edit
+ * draft are the same kind of unsaved text, so they share one slot and one dirty guard
+ * instead of two states that can't see each other. */
+const NEW = 'new';
 
 export function RuleList({
   agentId,
@@ -51,23 +58,30 @@ export function RuleList({
 }) {
   const toast = useToast();
 
-  // Which rule's text is open in the inline editor, and what has been typed into it.
-  const [editingId, setEditingId] = useState<string | null>(null);
+  // The one inline slot open at a time: a rule id being edited, `NEW` for the create form,
+  // or `null` when nothing is open. Folding "which rule" and "am I creating" into one piece
+  // of state is what lets a single guard see every draft — two independent booleans (one for
+  // the inline editor, one for the create form) would each answer "is *my* draft dirty" and
+  // never "is there a draft at all", so switching from one to the other would discard the
+  // other's text with no prompt.
+  const [slot, setSlot] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
   const [saving, setSaving] = useState(false);
 
-  const [creating, setCreating] = useState(false);
   const [newCategory, setNewCategory] = useState<RuleCategory>('business');
-  const [newText, setNewText] = useState('');
   const [addingRule, setAddingRule] = useState(false);
 
   const [dragId, setDragId] = useState<string | null>(null);
 
-  const editingRule = rules.find((rule) => rule.id === editingId) ?? null;
-  const dirty = editingRule !== null && draft !== editingRule.text;
+  const creating = slot === NEW;
+  const editingId = creating ? null : slot;
+  const editingRule = editingId !== null ? rules.find((rule) => rule.id === editingId) ?? null : null;
+  const dirty = creating ? draft.trim() !== '' : editingRule !== null && draft !== editingRule.text;
 
   /** `false` means a dirty draft vetoed the switch and asked the owner first — the same
-   * guard `KnowledgeScreen` runs before it lets a click discard an unsaved note. */
+   * guard `KnowledgeScreen` runs before it lets a click discard an unsaved note. Covers both
+   * directions: leaving an in-progress create for an edit, and leaving an in-progress edit
+   * for the create form, since both drafts now live in the one `slot`/`draft` pair above. */
   function confirmDiscard(): boolean {
     return !dirty || window.confirm(DISCARD_PROMPT);
   }
@@ -77,16 +91,15 @@ export function RuleList({
   }
 
   function startEdit(rule: AgentRule) {
-    if (editingId === rule.id) return;
+    if (slot === rule.id) return;
     if (!confirmDiscard()) return;
-    setCreating(false);
-    setEditingId(rule.id);
+    setSlot(rule.id);
     setDraft(rule.text);
   }
 
-  function cancelEdit() {
+  function closeSlot() {
     // An explicit «Отмена» already answers the question the guard exists to ask.
-    setEditingId(null);
+    setSlot(null);
   }
 
   async function saveEdit() {
@@ -95,7 +108,7 @@ export function RuleList({
     try {
       await api.updateRule(agentId, editingRule.id, { text: draft.trim() });
       toast.ok('Правило сохранено');
-      setEditingId(null);
+      setSlot(null);
       await refresh();
     } catch (error) {
       toast.fail(error);
@@ -118,7 +131,7 @@ export function RuleList({
     try {
       await api.deleteRule(agentId, rule.id);
       toast.ok('Правило удалено');
-      if (editingId === rule.id) setEditingId(null);
+      if (slot === rule.id) setSlot(null);
       await refresh();
     } catch (error) {
       toast.fail(error);
@@ -126,21 +139,21 @@ export function RuleList({
   }
 
   function openCreate() {
+    if (creating) return;
     if (!confirmDiscard()) return;
-    setEditingId(null);
-    setNewText('');
-    setCreating(true);
+    setDraft('');
+    setNewCategory('business');
+    setSlot(NEW);
   }
 
   async function submitCreate(event: FormEvent) {
     event.preventDefault();
-    if (addingRule || newText.trim() === '') return;
+    if (addingRule || draft.trim() === '') return;
     setAddingRule(true);
     try {
-      await api.createRule(agentId, { category: newCategory, text: newText.trim() });
+      await api.createRule(agentId, { category: newCategory, text: draft.trim() });
       toast.ok('Правило добавлено');
-      setCreating(false);
-      setNewText('');
+      setSlot(null);
       await refresh();
     } catch (error) {
       toast.fail(error);
@@ -196,16 +209,16 @@ export function RuleList({
           </select>
           <textarea
             style={{ ...control, minHeight: 60 }}
-            value={newText}
+            value={draft}
             placeholder="Например: всегда спрашиваем город доставки."
             autoFocus
-            onChange={(e) => setNewText(e.target.value)}
+            onChange={(e) => setDraft(e.target.value)}
           />
           <div style={{ display: 'flex', gap: 8 }}>
-            <button type="submit" className="btn-sm" disabled={addingRule || newText.trim() === ''}>
+            <button type="submit" className="btn-sm" disabled={addingRule || draft.trim() === ''}>
               {addingRule ? 'Сохраняем…' : 'Сохранить'}
             </button>
-            <button type="button" className="btn-link" style={{ fontSize: 11.5 }} onClick={() => setCreating(false)}>
+            <button type="button" className="btn-link" style={{ fontSize: 11.5 }} onClick={closeSlot}>
               Отмена
             </button>
           </div>
@@ -292,7 +305,7 @@ export function RuleList({
                           >
                             {saving ? '…' : 'Сохранить'}
                           </button>
-                          <button type="button" className="btn-link" style={{ fontSize: 11.5 }} onClick={cancelEdit}>
+                          <button type="button" className="btn-link" style={{ fontSize: 11.5 }} onClick={closeSlot}>
                             Отмена
                           </button>
                         </>

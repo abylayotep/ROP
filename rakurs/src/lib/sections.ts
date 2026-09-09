@@ -1,5 +1,5 @@
 /**
- * The cabinet's eight sections, in menu order.
+ * The cabinet's nine sections, in menu order.
  *
  * One list feeds the routes, the sidebar and the header title, so a section cannot exist
  * in the menu without a route or gain a second name in the header.

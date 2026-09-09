@@ -24,4 +24,15 @@ describe('describeProposal', () => {
     expect(describeProposal({ kind: 'note', path: 'Доставка', body: '1500 ₸.' }, rules).title)
       .toBe('Новая заметка «Доставка»');
   });
+
+  it('degrades to an unnamed rule_edit when the ruleId is not in the list', () => {
+    const result = describeProposal({ kind: 'rule_edit', ruleId: 'gone', text: 'Только на «вы».' }, rules);
+    expect(result.title).toBe('Правка правила');
+    expect(result.body).toBe('Только на «вы».');
+  });
+
+  it('names a note_edit without a path, since this function is never handed notes', () => {
+    expect(describeProposal({ kind: 'note_edit', noteId: 'n1', body: 'Доставка бесплатна от 10000 ₸.' }, rules))
+      .toEqual({ title: 'Правка заметки', body: 'Доставка бесплатна от 10000 ₸.' });
+  });
 });

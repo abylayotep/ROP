@@ -1,6 +1,6 @@
 /**
  * The coaching chat: what the model reads when an owner is teaching the agent, and the one
- * call that turns what they said into a proposal.
+ * call that turns what they said into a checked proposal.
  *
  * `RuleCategory` and `CoachProposal` were placed here by an earlier task, before this module
  * had anything to import — see the file's own history. Task 4 adds the rest: a Russian system
@@ -9,6 +9,18 @@
  * `runCoach`, which loads the one thing that *is* worth a `Db` call — the agent's model,
  * temperature and sealed OpenRouter key, precisely as `turn.ts` does — and then calls the
  * model the same way `runTurn` does: build the messages, call, parse, retry once, stop.
+ *
+ * ## Why `runCoach` calls `checkProposal` itself
+ *
+ * `checkProposal` (`fact-check.ts`) is what keeps a coach from writing a fact straight into a
+ * rule — see that file's own comment for why that hole matters. Nothing currently writes a
+ * rule from a proposal without going through it, but that is a property of today's callers,
+ * not of the type this function returns: a bare `CoachProposal` carries no mark of whether it
+ * has been checked, so a later caller that reaches for `runCoach` and forgets the import gets
+ * a proposal that looks exactly like a checked one and is not. A promise this product means to
+ * keep in code, not in a prompt, cannot depend on every future caller remembering a second
+ * call. So `runCoach` runs the check itself, before it ever returns, and `warning` travels
+ * alongside the (possibly rewritten) proposal so the owner can see why a rule became a note.
  *
  * ## Why `buildCoachMessages` does not gather its own rows
  *
@@ -32,6 +44,7 @@ import { eq } from 'drizzle-orm';
 import { z } from 'zod';
 import type { Db } from '../../db/client.js';
 import { agents } from '../../db/schema.js';
+import { checkProposal } from './fact-check.js';
 import { decryptSecret } from '../secret-box.js';
 import type { ChatMessage, ModelClient } from './openrouter.js';
 import { mintGuard } from './prompt.js';
@@ -91,10 +104,13 @@ const noteEditProposal = z.object({
 /**
  * The model's whole answer: what it says to the owner, and what it proposes changing.
  *
- * `proposal` is nullable rather than optional-and-nullable: a model that has nothing to
- * propose is expected to say so with `null`, the same leniency `handoff` takes in
- * `prompt.ts`'s `REPLY_SCHEMA` — an omitted key and an explicit `null` mean the same thing to
- * an owner reading the chat, so both are accepted.
+ * `proposal` is `.nullable().default(null)`, the same leniency `handoff` takes in
+ * `prompt.ts`'s `REPLY_SCHEMA`: an omitted key and an explicit `null` mean the same thing to an
+ * owner reading the chat — "nothing to propose" — so a model that writes either one keeps its
+ * good `message`. `.nullable()` alone would only accept the explicit `null`; a model that
+ * instead leaves the key out the way it leaves any other "nothing here" key out would fail the
+ * schema, burn the one retry this file allows, and — on a second omission — hand the owner an
+ * apology in place of the message the model actually wrote.
  */
 export const COACH_SCHEMA = z.object({
   message: z.string(),
@@ -103,7 +119,7 @@ export const COACH_SCHEMA = z.object({
     ruleEditProposal,
     noteProposal,
     noteEditProposal,
-  ]).nullable(),
+  ]).nullable().default(null),
 });
 
 export type CoachReply = z.infer<typeof COACH_SCHEMA>;
@@ -171,23 +187,30 @@ const AUTHOR_LABELS: Record<string, string> = {
  */
 const TRANSCRIPT_TAG = /<\s*\/?\s*переписка[^>]*>/gi;
 
-/** The headings this prompt uses. A transcript line may not open with one of them. */
+/** The headings this prompt uses. Nothing borrowed — a transcript line, a rule's text, a note
+ * path — may open a line with one of them. */
 const SECTION_NAMES = ['ПЕРЕПИСКА', 'ПРАВИЛА АГЕНТА', 'ЗАМЕТКИ', 'РАЗНИЦА', 'ФОРМАТ ОТВЕТА'];
 
 /**
- * One transcript line, made safe to place inside the guarded block.
+ * Removes anything in `text` that could pass for one of this prompt's own structural
+ * elements: a line that is only rule characters, because that is the separator between this
+ * prompt's own sections; a line opening with one of this prompt's own headings, because
+ * `ПЕРЕПИСКА` or `ФОРМАТ ОТВЕТА` at the front of a line renders as a second one of our sections
+ * positioned after the real one; and our own transcript tag, so nothing borrowed can forge the
+ * close of a fence it did not open. Newlines collapse to a space rather than being kept, so a
+ * multi-line value cannot open a fresh line that starts one of the above from a position this
+ * function did not check.
  *
- * The same shape of cleaning `prompt.ts`'s `quoted` does to a knowledge record: a line that
- * is only rule characters is dropped, because that is the separator between this prompt's own
- * sections; a line opening with one of this prompt's own headings is dropped, because a
- * customer typing `ПЕРЕПИСКА` or `ФОРМАТ ОТВЕТА` at the front of a line is trying to render a
- * second one of our sections after the real one; and our own tag is stripped so a transcript
- * line cannot forge the close of the fence it sits inside. Newlines collapse to a space rather
- * than being kept, so a multi-line message cannot open a fresh line that starts one of the
- * above from a position this function did not check.
+ * The same shape of cleaning `prompt.ts`'s `quoted` does to a knowledge record — and used for
+ * everything here that a customer or an imported page could have written before it reaches
+ * the model: a transcript line, a rule's text, a note path, and the company name. A note path
+ * is exactly as untrusted as a knowledge record — `docs/ai-agent.md` and this file's own
+ * `notesSection` say the vault holds a path for every page an import wrote, and that path's
+ * first segment is the page's own first heading — so a hostile page can plant a line here as
+ * readily as inside a record `prompt.ts` already fences.
  */
-function guardedLine(text: string): string {
-  const cleaned = text
+function stripStructure(text: string): string {
+  return text
     .split('\n')
     .filter((line) => {
       const trimmed = line.trim();
@@ -199,12 +222,21 @@ function guardedLine(text: string): string {
     .replace(TRANSCRIPT_TAG, '')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+/**
+ * One transcript line, made safe to place inside the guarded block — `stripStructure`, plus a
+ * placeholder for the line that cleans away to nothing, since a blank line inside the fence
+ * would otherwise read as a gap in the dialog rather than as a message with nothing left of it.
+ */
+function guardedLine(text: string): string {
+  const cleaned = stripStructure(text);
   return cleaned === '' ? '[пусто]' : cleaned;
 }
 
 /** Who the coach is talking to, and about what. */
 function roleSection(company: string): string {
-  const name = company.replace(/\s+/g, ' ').trim().slice(0, 60) || 'без названия';
+  const name = stripStructure(company).slice(0, 60) || 'без названия';
   return (
     `Ты помогаешь владельцу компании «${name}» настраивать продающего агента, который ` +
     'переписывается с клиентами в WhatsApp. Ты обсуждаешь с владельцем в чате, как агент ' +
@@ -217,7 +249,7 @@ function rulesSection(rules: readonly CoachRule[]): string {
   if (rules.length === 0) {
     return 'ПРАВИЛА АГЕНТА. Сейчас у агента нет ни одного правила.';
   }
-  const lines = rules.map((rule) => `- [${rule.id}] (${rule.category}) ${rule.text}`);
+  const lines = rules.map((rule) => `- [${rule.id}] (${rule.category}) ${stripStructure(rule.text)}`);
   return ['ПРАВИЛА АГЕНТА. Вот все правила агента сейчас, с их id:', ...lines].join('\n');
 }
 
@@ -226,9 +258,10 @@ function notesSection(notePaths: readonly string[]): string {
   if (notePaths.length === 0) {
     return 'ЗАМЕТКИ. В базе знаний агента сейчас нет ни одной заметки.';
   }
-  return ['ЗАМЕТКИ. Вот все заметки базы знаний сейчас, по путям:', ...notePaths.map((p) => `- ${p}`)].join(
-    '\n',
-  );
+  return [
+    'ЗАМЕТКИ. Вот все заметки базы знаний сейчас, по путям:',
+    ...notePaths.map((p) => `- ${stripStructure(p)}`),
+  ].join('\n');
 }
 
 /**
@@ -367,30 +400,37 @@ function read(text: string): Read {
 }
 
 /**
- * Turns what the owner said into a reply and, maybe, a proposal.
+ * Turns what the owner said into a reply and, maybe, a checked proposal.
  *
  * Loads the agent's model, temperature and sealed OpenRouter key from `db` — the one row
  * this call genuinely needs, exactly what `runTurn` reads before its own first call — and
- * otherwise touches nothing else in the database: `input.context` is already the whole world
- * `buildCoachMessages` reads, assembled by the caller from whichever tables it already had
- * open for the coaching screen.
+ * otherwise touches nothing else in the database on the way to a model call: `input.context`
+ * is already the whole world `buildCoachMessages` reads, assembled by the caller from
+ * whichever tables it already had open for the coaching screen. `db` is read a second time
+ * only if the model actually returns a proposal, to run it through `checkProposal` — see the
+ * file comment for why that call happens here and not in whoever calls `runCoach`.
  *
  * Retries once on a reply that fails `COACH_SCHEMA`, the same one-retry-then-stop rule
  * `runTurn` follows, and for the same reason: a `ModelError` (a rejected key, a rate limit)
  * will not come out differently a second time, so only a parse failure is retried.
  *
- * A second failure does not throw. The coaching chat is a conversation, not a customer's
- * reply the number guard has to protect — there is nothing here for a bad answer to leak —
- * so the owner is shown an apology instead of the screen breaking.
+ * A second failure does not throw, and neither does a missing agent or a missing key: the
+ * coaching chat is a conversation, not a customer's reply the number guard has to protect —
+ * there is nothing here for a bad answer to leak — so the owner is shown a readable sentence
+ * instead of the screen breaking. The two sentences below are `runTurn`'s own, unchanged: a
+ * caller wiring this into a route reads the same «Агент не найден.» / «Ключ OpenRouter не
+ * задан.» it already knows how to show, rather than a second message meaning the same thing.
  */
 export async function runCoach(
   db: Db,
   deps: CoachDeps,
   input: CoachInput,
-): Promise<{ text: string; proposal: CoachProposal | null; cost: string }> {
+): Promise<{ text: string; proposal: CoachProposal | null; warning: string | null; cost: string }> {
   const [agent] = await db.select().from(agents).where(eq(agents.id, input.agentId));
-  if (!agent) throw new Error('Agent not found.');
-  if (agent.openrouterKey === null) throw new Error('OpenRouter key not set for this agent.');
+  if (!agent) return { text: 'Агент не найден.', proposal: null, warning: null, cost: '0' };
+  if (agent.openrouterKey === null) {
+    return { text: 'Ключ OpenRouter не задан.', proposal: null, warning: null, cost: '0' };
+  }
 
   const key = decryptSecret(agent.openrouterKey, deps.key, keyAad(input.agentId));
   const prompt = buildCoachMessages(input.context);
@@ -420,9 +460,15 @@ export async function runCoach(
     return {
       text: 'Не удалось разобрать ответ модели. Попробуйте переформулировать сообщение.',
       proposal: null,
+      warning: null,
       cost,
     };
   }
 
-  return { text: result.message, proposal: result.proposal, cost };
+  if (result.proposal === null) {
+    return { text: result.message, proposal: null, warning: null, cost };
+  }
+
+  const checked = await checkProposal(db, input.agentId, result.proposal);
+  return { text: result.message, proposal: checked.proposal, warning: checked.warning, cost };
 }

@@ -151,4 +151,32 @@ describe('checkProposal', () => {
     expect(checked.proposal).toEqual({ kind: 'rule_edit', ruleId, enabled: false });
     expect(checked.warning).toBeNull();
   });
+
+  it('maps a slash in the rule text so it cannot open a folder, the way api/knowledge.ts does', async () => {
+    const checked = await checkProposal(db, agentId, {
+      kind: 'rule',
+      category: 'business',
+      text: 'Цена 1500/2000 ₸.',
+    });
+    expect(checked.proposal.kind).toBe('note');
+    // «/» becomes «∕» — the note lands beside Прочее, not inside a "1500" folder it never asked
+    // for and a "2000" note under it.
+    expect((checked.proposal as { path: string }).path).toBe('Прочее/Цена 1500∕2000 ₸.');
+  });
+
+  it('never leaves a trailing slash when the 80-character cut would otherwise land on one', async () => {
+    // Built so the raw text's 80th character (index 79) is a real slash — the exact case
+    // where truncating before mapping would cut the slash's mapped replacement in half and
+    // hand `notePath` a path ending in «/», which its own validation refuses at approval time.
+    const prefix = 'Число 1500 ';
+    const text = `${prefix}${'x'.repeat(79 - prefix.length)}/дальше не влезает в восемьдесят`;
+    expect(text[79]).toBe('/');
+
+    const checked = await checkProposal(db, agentId, { kind: 'rule', category: 'business', text });
+
+    expect(checked.proposal.kind).toBe('note');
+    const path = (checked.proposal as { path: string }).path;
+    expect(path.endsWith('/')).toBe(false);
+    expect(path.slice('Прочее/'.length)).not.toContain('/');
+  });
 });

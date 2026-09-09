@@ -50,11 +50,14 @@ async function knownSources(db: Db, agentId: string): Promise<string[]> {
   return [...chunks.map((row) => row.content), ...rules.map((row) => row.text)];
 }
 
-/** How much of a rule's first line becomes the note's name. */
+/** How much of a rule's first line becomes the note's name. Applied after the slash mapping
+ * below, not before: mapping first means a cut can never land on a slash and leave a
+ * trailing one, which `notePath`'s own validation in `api/knowledge.ts` refuses. */
 const PATH_TITLE_LIMIT = 80;
 
 /**
- * A path under `Прочее/` that no note of this agent already holds.
+ * A path under `Прочее/` that no note of this agent already holds, at the moment this check
+ * runs.
  *
  * The brief's own suggestion — `Прочее/<first line>` — collides the moment two proposals
  * share an opening line, or the owner has already written a note there by hand. Neither
@@ -62,7 +65,13 @@ const PATH_TITLE_LIMIT = 80;
  * converts more than once. Silently overwriting whatever already lives at that path would
  * lose a note nobody asked to lose, and letting the collision reach `saveNote`'s own unique
  * index would fail the whole approval instead of the one thing that needed rewriting — so the
- * free path is found here, before either can happen.
+ * free path is found here, checked against every note that exists right now.
+ *
+ * That narrows the window a collision can happen in; it does not close it. A checked proposal
+ * is not an applied one — nothing here writes `kb_notes` — so two proposals built from the
+ * same opening line before either is approved both see the same path free, and both are handed
+ * back the identical candidate. Closing that the rest of the way is the approval path's job
+ * (`saveNote`'s own unique index refuses the second write), not this probe's.
  */
 async function freeNotePath(db: Db, agentId: string, base: string): Promise<string> {
   const rows = await db.select({ path: kbNotes.path }).from(kbNotes).where(eq(kbNotes.agentId, agentId));
@@ -102,7 +111,12 @@ export async function checkProposal(
   const invented = unsourcedNumber(text, sources);
   if (invented === null) return { proposal, warning: null };
 
-  const firstLine = (text.split('\n')[0] ?? '').trim().slice(0, PATH_TITLE_LIMIT) || text.slice(0, PATH_TITLE_LIMIT);
+  const firstLineRaw = (text.split('\n')[0] ?? '').trim() || text.trim();
+  // A slash in the rule's own text would open a folder nobody asked for — `api/knowledge.ts`
+  // meets the same problem mapping a page's title into a path and answers it the same way.
+  // Mapped before the length cut below, not after: mapping first means the cut can never land
+  // on a slash and leave a trailing one, which `notePath`'s own validation would then refuse.
+  const firstLine = firstLineRaw.replace(/\//g, '∕').slice(0, PATH_TITLE_LIMIT);
   const path = await freeNotePath(db, agentId, `Прочее/${firstLine}`);
 
   return {

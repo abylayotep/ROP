@@ -17,6 +17,9 @@ import {
 // Type-only, so this stays a leaf module at runtime. `capi_events.payload` holds the exact
 // bytes sent to Meta, and the brand is what stops anything but `serialiseEvent` filling it.
 import type { CapiEventBody } from '../lib/capi/events.js';
+// Type-only, so this stays a leaf module at runtime. `coach_messages.proposal` holds what the
+// coach suggested, and the brand is what stops anything but a real proposal filling it.
+import type { CoachProposal } from '../lib/ai/coach.js';
 
 /**
  * Tenancy plus authentication, plus WhatsApp: connected numbers, contacts,
@@ -105,10 +108,8 @@ export const agents = pgTable(
     // numeric, not real: a temperature read back as a string cannot drift through a float,
     // and it is written into a request body as text anyway.
     temperature: numeric('temperature', { precision: 3, scale: 2 }).notNull().default('0.30'),
-    // What the owner wrote about how their business sells. The whole of the agent's character.
-    instructions: text('instructions').notNull().default(''),
     // 'auto' answers in the language the customer wrote in. Anything else is a language name
-    // the instructions will carry verbatim.
+    // the prompt carries verbatim.
     replyLanguage: text('reply_language').notNull().default('auto'),
     // Encrypted with the credentials key, the same way a WhatsApp token is. Never selected
     // into an API response.
@@ -699,4 +700,62 @@ export const capiEvents = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index('capi_events_status_created_idx').on(t.status, t.createdAt)],
+);
+
+/**
+ * One rule the agent follows: how to speak, what to ask, what never to do, what we are.
+ *
+ * A row rather than a paragraph in a text field, because a rule has to be switchable and
+ * orderable on its own — an owner testing whether a sentence caused a bad answer turns that
+ * sentence off, and a wall of text has no off switch.
+ */
+export const agentRules = pgTable(
+  'agent_rules',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    agentId: uuid('agent_id').notNull().references(() => agents.id, { onDelete: 'cascade' }),
+    // 'business' | 'tone' | 'order' | 'forbid'. Four, because the prompt groups by them and a
+    // free-form label would drift into forty groups nobody reads.
+    category: text('category').notNull(),
+    text: text('text').notNull(),
+    enabled: boolean('enabled').notNull().default(true),
+    // 'manual' | 'coach' — what the owner wrote against what they approved.
+    origin: text('origin').notNull().default('manual'),
+    // Order inside a category. The prompt follows it, so a reordered list reorders the rules
+    // the model reads.
+    position: integer('position').notNull().default(0),
+    // Set when the owner insisted on a rule the fact check wanted to be a note. Shown beside
+    // the rule, because a number in instructions is a number no record backs.
+    warning: text('warning'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('agent_rules_agent_category_idx').on(t.agentId, t.category, t.position)],
+);
+
+/**
+ * One turn of the coaching conversation.
+ *
+ * `proposal` is what the model suggests and nothing more: this table is the only thing the
+ * coach routes write, and a proposal reaches the store only through a draft.
+ */
+export const coachMessages = pgTable(
+  'coach_messages',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    agentId: uuid('agent_id').notNull().references(() => agents.id, { onDelete: 'cascade' }),
+    // 'owner' | 'model'
+    role: text('role').notNull(),
+    text: text('text').notNull(),
+    // A `CoachProposal`, or null on the owner's own lines and on a plain reply.
+    proposal: jsonb('proposal').$type<CoachProposal>(),
+    // 'pending' | 'drafted' | 'rejected'
+    status: text('status').notNull().default('pending'),
+    // The dialog this coaching started from, and the turn inside it, so the model reads what
+    // the agent actually answered rather than what the owner remembers of it.
+    conversationId: uuid('conversation_id').references(() => conversations.id, { onDelete: 'set null' }),
+    aiReplyId: uuid('ai_reply_id').references(() => aiReplies.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('coach_messages_agent_created_idx').on(t.agentId, t.createdAt)],
 );

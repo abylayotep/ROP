@@ -91,6 +91,11 @@ describe('migration 0012: kb_items becomes kb_notes/kb_chunks', () => {
   const contactId = randomUUID();
   const crossAgentDoorId = randomUUID();
 
+  // Every id's seeded `kb_items.content`, kept alongside the seed calls below so the chunk
+  // test can assert against the record's own original text rather than the note's body —
+  // which, for a non-`other` kind, now carries a frontmatter block the chunk must not.
+  const contentById = new Map<string, string>();
+
   beforeAll(async () => {
     adminSql = postgres(ADMIN_URL, { max: 1 });
     await adminSql.unsafe(`CREATE DATABASE "${dbName}"`);
@@ -124,14 +129,17 @@ describe('migration 0012: kb_items becomes kb_notes/kb_chunks', () => {
       id: doorId[0]!, agentId: agentA, kind: 'product', title: 'Дверь',
       content: 'Дверь первая.', createdAt: at(0),
     });
+    contentById.set(doorId[0]!, 'Дверь первая.');
     await seedItem(scratchSql, {
       id: doorId[1]!, agentId: agentA, kind: 'product', title: 'Дверь',
       content: 'Дверь вторая.', createdAt: at(1),
     });
+    contentById.set(doorId[1]!, 'Дверь вторая.');
     await seedItem(scratchSql, {
       id: doorId[2]!, agentId: agentA, kind: 'product', title: 'Дверь',
       content: 'Дверь третья.', createdAt: at(2),
     });
+    contentById.set(doorId[2]!, 'Дверь третья.');
 
     // The case that breaks the old row_number()-per-title scheme: a record whose title
     // already ends in " (2)", alongside a duplicate pair of its base title. The naive
@@ -140,32 +148,38 @@ describe('migration 0012: kb_items becomes kb_notes/kb_chunks', () => {
       id: tableLiteralId, agentId: agentA, kind: 'product', title: 'Стол (2)',
       content: 'Стол особый.', createdAt: at(3),
     });
+    contentById.set(tableLiteralId, 'Стол особый.');
     await seedItem(scratchSql, {
       id: tableDupId[0]!, agentId: agentA, kind: 'product', title: 'Стол',
       content: 'Стол первый.', createdAt: at(4),
     });
+    contentById.set(tableDupId[0]!, 'Стол первый.');
     await seedItem(scratchSql, {
       id: tableDupId[1]!, agentId: agentA, kind: 'product', title: 'Стол',
       content: 'Стол второй.', createdAt: at(5),
     });
+    contentById.set(tableDupId[1]!, 'Стол второй.');
 
     // A literal "/" in the title must not be read as a folder separator.
     await seedItem(scratchSql, {
       id: slashId, agentId: agentA, kind: 'qa', title: 'Доставка/Самовывоз',
       content: 'Забрать можно самому.', createdAt: at(6),
     });
+    contentById.set(slashId, 'Забрать можно самому.');
 
     // A non-product kind, edited, with a source — to prove kind/edited/source_id survive.
     await seedItem(scratchSql, {
       id: contactId, agentId: agentA, kind: 'contact', title: 'Офис', sourceId,
       content: 'Алматы, Абая 10.', edited: true, createdAt: at(7),
     });
+    contentById.set(contactId, 'Алматы, Абая 10.');
 
     // The same title under a different agent must not be numbered against agent A's.
     await seedItem(scratchSql, {
       id: crossAgentDoorId, agentId: agentB, kind: 'product', title: 'Дверь',
       content: 'Дверь в агенте Б.', createdAt: at(8),
     });
+    contentById.set(crossAgentDoorId, 'Дверь в агенте Б.');
 
     await runMigration(scratchSql, TARGET_TAG);
   });
@@ -273,7 +287,15 @@ describe('migration 0012: kb_items becomes kb_notes/kb_chunks', () => {
     expect(parseNote(contact!.body).sections).toEqual([{ heading: '', content: 'Алматы, Абая 10.' }]);
   });
 
-  it('writes exactly one chunk per note, carrying the note`s body', async () => {
+  /**
+   * A chunk's `content` is exactly what `turn.ts` quotes to a customer and what the search
+   * tsvector indexes — so it has to be the record's own text, never the frontmatter block the
+   * note's `body` now carries for a non-`other` kind. Building the chunk from `n.body` after
+   * the loop (rather than from `item.content` inside it) would hand the agent that block
+   * verbatim on every migrated `product`/`qa`/`procedure`/`contact` note — proven here by
+   * comparing the chunk against the record's original seeded content, not the note's body.
+   */
+  it('builds each chunk from the record`s own text, not the note`s frontmatter-carrying body', async () => {
     const allIds = [
       ...doorId, tableLiteralId, ...tableDupId, slashId, contactId, crossAgentDoorId,
     ];
@@ -289,9 +311,19 @@ describe('migration 0012: kb_items becomes kb_notes/kb_chunks', () => {
         { content: string; title: string }[]
       >`SELECT content, title FROM kb_chunks WHERE note_id = ${id}`;
       expect(chunks).toHaveLength(1);
-      expect(chunks[0]!.content).toBe(note!.body);
+      expect(chunks[0]!.content).toBe(contentById.get(id));
       expect(chunks[0]!.title).toBe(note!.title);
     }
+
+    // The sharpest case: a `contact` note's body carries the frontmatter block, but its
+    // chunk must not — that block is not part of what the agent quotes.
+    const contact = await noteFor(contactId);
+    const [contactChunk] = await scratchSql<
+      { content: string }[]
+    >`SELECT content FROM kb_chunks WHERE note_id = ${contactId}`;
+    expect(contact!.body.startsWith('---\n')).toBe(true);
+    expect(contactChunk!.content.startsWith('---')).toBe(false);
+    expect(contactChunk!.content).toBe('Алматы, Абая 10.');
   });
 
   it('drops kb_items', async () => {

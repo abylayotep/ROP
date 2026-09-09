@@ -109,11 +109,18 @@ BEGIN
       item.id, item.agent_id, item.source_id, candidate_path, note_title, note_body,
       item.kind, item.edited, item.created_at, item.updated_at
     );
+
+    -- Built from `item.content`, not `note_body`: a chunk's `content` is exactly what
+    -- `turn.ts` quotes to a customer and what the search tsvector indexes, so the
+    -- frontmatter block above -- however necessary in the note's own body -- must never
+    -- appear inside it. `saveNote` keeps this same split: it builds chunks from
+    -- `parseNote(body).sections`, which is the body with its frontmatter already stripped.
+    INSERT INTO kb_chunks (agent_id, note_id, ordinal, heading, title, content, kind, created_at, updated_at)
+    VALUES (
+      item.agent_id, item.id, 0, '', note_title, item.content, item.kind,
+      item.created_at, item.updated_at
+    );
   END LOOP;
 END $$;
---> statement-breakpoint
-INSERT INTO kb_chunks (agent_id, note_id, ordinal, heading, title, content, kind, created_at, updated_at)
-SELECT n.agent_id, n.id, 0, '', n.title, n.body, n.kind, n.created_at, n.updated_at
-FROM kb_notes n;
 --> statement-breakpoint
 DROP TABLE "kb_items" CASCADE;

@@ -279,4 +279,47 @@ describe('rules', () => {
       }
     }
   });
+
+  // The hole `FOR UPDATE` can't close: it locks *existing* rows, and a category that has
+  // never held a rule for this agent has no row to lock. Two concurrent first-ever `POST`s
+  // into such a category both count zero (nothing to block on) and both insert at position 0.
+  //
+  // Every category of every agent is in this state until its first rule lands, so this isn't
+  // an exotic corner — it's the first two rules an owner ever types. A fresh agent per trial
+  // guarantees the category is genuinely empty (never touched by this agent before), which a
+  // shared agent across trials could not: 20 trials, each asserting the pair of rules lands
+  // at exactly positions 0 and 1 with no duplicate.
+  it('keeps positions dense and unique for two concurrent first-ever creates in an empty category', async () => {
+    const TRIALS = 20;
+    for (let trial = 0; trial < TRIALS; trial++) {
+      const created = await app.inject({
+        method: 'POST',
+        url: `/api/accounts/${accountId}/agents`,
+        cookies: jar,
+        payload: { name: `Trial ${trial}` },
+      });
+      const freshAgentId = created.json().id;
+      const freshRules = `/api/agents/${freshAgentId}/rules`;
+
+      const [resA, resB] = await Promise.all([
+        app.inject({
+          method: 'POST',
+          url: freshRules,
+          cookies: jar,
+          payload: { category: 'business', text: `A${trial}` },
+        }),
+        app.inject({
+          method: 'POST',
+          url: freshRules,
+          cookies: jar,
+          payload: { category: 'business', text: `B${trial}` },
+        }),
+      ]);
+      expect(resA.statusCode).toBe(200);
+      expect(resB.statusCode).toBe(200);
+
+      const positions = [resA.json().position, resB.json().position].sort((a: number, b: number) => a - b);
+      expect(positions).toEqual([0, 1]);
+    }
+  });
 });

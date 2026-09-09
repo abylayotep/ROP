@@ -1,5 +1,6 @@
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
+import { clampTitle } from './split.js';
 
 /**
  * The one outbound HTTP request this product makes on somebody else's behalf.
@@ -672,6 +673,13 @@ function firstHeading(markdown: string): string | null {
  * still needed for; the host-plus-name shape it builds is for a page identified by where it
  * lives, and a page that is about to be one note is better named by what that note says.
  *
+ * Clamped through `clampTitle`, the same as a paste's title: `С сайта/<title>` becomes a
+ * path, and a path lives under a unique btree index whose entries top out around 2704 bytes.
+ * A first heading is whatever text the page's author put there, unbounded — a page whose
+ * `<h1>` runs past roughly 900 Cyrillic characters would otherwise raise Postgres's `54000`
+ * (index row too large), which `isDuplicate` does not match, so the owner would get a bare
+ * 500 for a page that is otherwise perfectly readable.
+ *
  * Takes a `PageFetcher` rather than reaching for `createPageFetcher()` itself, so a route can
  * hand it the same fake the rest of the import routes are tested against; the default is the
  * real fetcher, which is what lets `knowledge-fetch-page.test.ts` drive this function alone
@@ -680,5 +688,5 @@ function firstHeading(markdown: string): string | null {
 export async function fetchPage(url: string, fetcher: PageFetcher = createPageFetcher()): Promise<PageMarkdown> {
   const { html, finalUrl } = await fetcher.fetch(url);
   const markdown = htmlToText(html);
-  return { title: firstHeading(markdown) ?? pageTitle(html, finalUrl), markdown };
+  return { title: clampTitle(firstHeading(markdown) ?? pageTitle(html, finalUrl)), markdown };
 }

@@ -251,7 +251,11 @@ Expected: FAIL — unresolved import.
 export function parseLinks(body: string): string[] {
   const withoutFences = body.replace(/```[\s\S]*?(```|$)/g, '');
   const found = new Map<string, string>();
-  for (const match of withoutFences.matchAll(/\[\[([^\]|]+)(?:\|[^\]]*)?\]\]/g)) {
+  // `[` and `\n` are excluded from the target alongside `]` and `|`. Obsidian permits
+  // neither in a link target, and excluding `[` is what stops a body of `[[` repeated to
+  // the 200 000-character cap from backtracking quadratically — measured at 24 seconds
+  // on the event loop before the class was tightened.
+  for (const match of withoutFences.matchAll(/\[\[([^\]|[\n]+)(?:\|[^\]]*)?\]\]/g)) {
     const target = match[1]!.trim();
     if (target === '') continue;
     const key = target.toLocaleLowerCase('ru');

@@ -201,13 +201,12 @@ const SECTION_NAMES = ['ПЕРЕПИСКА', 'ПРАВИЛА АГЕНТА', 'З�
  * multi-line value cannot open a fresh line that starts one of the above from a position this
  * function did not check.
  *
- * The same shape of cleaning `prompt.ts`'s `quoted` does to a knowledge record — and used for
- * everything here that a customer or an imported page could have written before it reaches
- * the model: a transcript line, a rule's text, a note path, and the company name. A note path
- * is exactly as untrusted as a knowledge record — `docs/ai-agent.md` and this file's own
- * `notesSection` say the vault holds a path for every page an import wrote, and that path's
- * first segment is the page's own first heading — so a hostile page can plant a line here as
- * readily as inside a record `prompt.ts` already fences.
+ * The same shape of cleaning `prompt.ts`'s `quoted` does to a knowledge record, and used only
+ * for a transcript line: the transcript is many bare lines in a row, so dropping the one that
+ * tries to open a second section still leaves the rest of the dialog intact. `stripForgery`
+ * below is the sibling for a rule's text, a note path, and the company name — values that are
+ * never rendered as a bare line of their own, so the heading filter here would only ever erase
+ * them, never protect anything.
  */
 function stripStructure(text: string): string {
   return text
@@ -234,9 +233,35 @@ function guardedLine(text: string): string {
   return cleaned === '' ? '[пусто]' : cleaned;
 }
 
+/**
+ * Neutralises a single-value field — a rule's text, a note path, the company name — against
+ * the two things a customer or an imported page could plant inside one: our own transcript
+ * tag, and a newline that would let the value open a line of its own further down the prompt.
+ * Newlines collapse to a space *before* the tag is stripped, the same order `stripStructure`
+ * keeps, so a tag an attacker split across a line break cannot reassemble after the split is
+ * undone the wrong way round.
+ *
+ * Deliberately does **not** drop a line that opens with one of this prompt's own headings —
+ * that filter belongs to `stripStructure` alone. A rule is rendered as the whole value of a
+ * list item (`- [id] (category) <text>`), a note path as the whole value of a list item
+ * (`- <path>`), and the company name inside a fixed sentence (`roleSection`): none of the
+ * three is ever one of several bare lines the way a transcript line is, so none of them can
+ * *forge* a heading — the line always starts with our own `- ` or our own sentence, never with
+ * the value itself. Applying the heading filter here would not close a hole; it would erase an
+ * owner's rule the moment it happened to open with an ordinary word like «Заметки» or
+ * «Разница» — exactly the regression this function replaces.
+ */
+function stripForgery(text: string): string {
+  return text
+    .replace(/\n/g, ' ')
+    .replace(TRANSCRIPT_TAG, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 /** Who the coach is talking to, and about what. */
 function roleSection(company: string): string {
-  const name = stripStructure(company).slice(0, 60) || 'без названия';
+  const name = stripForgery(company).slice(0, 60) || 'без названия';
   return (
     `Ты помогаешь владельцу компании «${name}» настраивать продающего агента, который ` +
     'переписывается с клиентами в WhatsApp. Ты обсуждаешь с владельцем в чате, как агент ' +
@@ -249,7 +274,7 @@ function rulesSection(rules: readonly CoachRule[]): string {
   if (rules.length === 0) {
     return 'ПРАВИЛА АГЕНТА. Сейчас у агента нет ни одного правила.';
   }
-  const lines = rules.map((rule) => `- [${rule.id}] (${rule.category}) ${stripStructure(rule.text)}`);
+  const lines = rules.map((rule) => `- [${rule.id}] (${rule.category}) ${stripForgery(rule.text)}`);
   return ['ПРАВИЛА АГЕНТА. Вот все правила агента сейчас, с их id:', ...lines].join('\n');
 }
 
@@ -260,7 +285,7 @@ function notesSection(notePaths: readonly string[]): string {
   }
   return [
     'ЗАМЕТКИ. Вот все заметки базы знаний сейчас, по путям:',
-    ...notePaths.map((p) => `- ${stripStructure(p)}`),
+    ...notePaths.map((p) => `- ${stripForgery(p)}`),
   ].join('\n');
 }
 

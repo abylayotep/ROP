@@ -21,4 +21,21 @@ describe('parseLinks', () => {
   it('ignores an empty or whitespace target', () => {
     expect(parseLinks('[[]] [[   ]]')).toEqual([]);
   });
+
+  it('does not catastrophically backtrack on a body of unclosed brackets at the note-size cap', () => {
+    const body = '[['.repeat(100000);
+    const start = performance.now();
+    const result = parseLinks(body);
+    const elapsed = performance.now() - start;
+    expect(result).toEqual([]);
+    expect(elapsed).toBeLessThan(1000);
+  });
+
+  it('does not let a target span a newline', () => {
+    expect(parseLinks('[[unclosed start\nmore text later]] end')).toEqual([]);
+  });
+
+  it('ignores a link after an unclosed fenced block', () => {
+    expect(parseLinks('```\nno closing fence\n[[Доставка]]')).toEqual([]);
+  });
 });

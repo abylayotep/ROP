@@ -8,7 +8,7 @@
 export function parseLinks(body: string): string[] {
   const withoutFences = body.replace(/```[\s\S]*?(```|$)/g, '');
   const found = new Map<string, string>();
-  for (const match of withoutFences.matchAll(/\[\[([^\]|]+)(?:\|[^\]]*)?\]\]/g)) {
+  for (const match of withoutFences.matchAll(/\[\[([^\]|[\n]+)(?:\|[^\]]*)?\]\]/g)) {
     const target = match[1]!.trim();
     if (target === '') continue;
     const key = target.toLocaleLowerCase('ru');

@@ -347,6 +347,50 @@ export interface AiModel {
   description: string;
 }
 
+/* ── Правила и коуч ──────────────────────────────────────────────────────────
+ * The agent's character used to be one paragraph in `instructions`. It is now a set of
+ * rules the owner writes or approves in a coaching chat — this section names both. */
+
+export type RuleCategory = 'business' | 'tone' | 'order' | 'forbid';
+
+/** One rule the agent follows. The four categories are how the prompt groups them. */
+export interface AgentRule {
+  id: string;
+  category: RuleCategory;
+  text: string;
+  enabled: boolean;
+  /** 'manual' is what the owner typed, 'coach' is what they approved in the chat. */
+  origin: 'manual' | 'coach';
+  position: number;
+  /**
+   * Set when the owner kept a rule the fact check wanted to be a note. Shown beside the rule,
+   * because a number in instructions is a number no record backs.
+   */
+  warning: string | null;
+  updatedAt: string;
+}
+
+/** What the coach suggests. It writes nothing: a proposal becomes a draft or it is rejected. */
+export type CoachProposal =
+  | { kind: 'rule'; category: RuleCategory; text: string }
+  | { kind: 'rule_edit'; ruleId: string; text?: string; enabled?: boolean }
+  | { kind: 'note'; path: string; body: string }
+  | { kind: 'note_edit'; noteId: string; body: string };
+
+export interface CoachMessage {
+  id: string;
+  role: 'owner' | 'model';
+  text: string;
+  proposal: CoachProposal | null;
+  /** Why the fact check moved a rule into a note, when it did. */
+  warning: string | null;
+  status: 'pending' | 'drafted' | 'rejected';
+  /** Set once the proposal became a draft. The drafts plan fills this in. */
+  draftId: string | null;
+  conversationId: string | null;
+  createdAt: string;
+}
+
 /** A knowledge record an answer was built from, named so the screen can show which. */
 export interface AiTurnItem {
   id: string;

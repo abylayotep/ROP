@@ -24,6 +24,7 @@ import { requireSession } from './require-session.js';
 import { registerRuleRoutes } from './rules.js';
 import { registerStageRoutes } from './stages.js';
 import { registerStatsRoutes } from './stats.js';
+import { registerTestCaseRoutes } from './test-cases.js';
 import { registerWhatsappNumberRoutes } from './whatsapp-numbers.js';
 import { registerWhatsappWebhook } from './whatsapp-webhook.js';
 
@@ -112,6 +113,9 @@ export function buildServer(env: Env, db: Db, deps: ServerDeps = {}): FastifyIns
     // Drafts, their cases and their runs — including `POST …/coach/messages/:id/draft`,
     // which turns a checked proposal into the one thing the coach itself never writes.
     registerDraftRoutes(app, db, env, guard, { model, graph });
+    // The conversations a draft is proven against — kept by hand, pulled from a real dialog,
+    // or suggested by the model. Registered beside the drafts it serves.
+    registerTestCaseRoutes(app, db, env, guard, { model });
     // The same client the drain sends with, so a save is verified against the Meta a
     // report will actually reach.
     registerCapiRoutes(app, db, env, guard, capi);

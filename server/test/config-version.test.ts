@@ -42,6 +42,8 @@ const rules = () => `/api/agents/${agentId}/rules`;
 const sources = () => `/api/agents/${agentId}/knowledge/sources`;
 const aiSettings = () => `/api/agents/${agentId}/ai`;
 const agent = () => `/api/agents/${agentId}`;
+const stages = () => `/api/agents/${agentId}/stages`;
+const leadFields = () => `/api/agents/${agentId}/lead-fields`;
 
 beforeEach(async () => {
   db = await withDb();
@@ -342,5 +344,94 @@ describe('config version', () => {
     });
     expect(res.statusCode).toBe(200);
     expect(await version()).toBe(before);
+  });
+
+  // `stagesSection` (`lib/ai/prompt.ts`) writes every stage's name and description into the
+  // system prompt — the same failure Task 5 fixed for the agent's own name and timezone, this
+  // time for the eight writing routes in `api/stages.ts`. Each checked one at a time so a
+  // bump wired into only one route can't hide behind the others passing.
+  it('moves when a stage is created, edited, reordered or deleted', async () => {
+    const before = await version();
+
+    const created = await app.inject({
+      method: 'POST',
+      url: stages(),
+      cookies: jar,
+      payload: { name: 'Новая стадия', color: '#4b8ef0', kind: 'active' },
+    });
+    expect(created.statusCode).toBe(200);
+    const stage = created.json();
+    expect(await version()).toBe(before + 1);
+
+    const patched = await app.inject({
+      method: 'PATCH',
+      url: `${stages()}/${stage.id}`,
+      cookies: jar,
+      payload: { description: 'Ждём ответа клиента.' },
+    });
+    expect(patched.statusCode).toBe(200);
+    expect(await version()).toBe(before + 2);
+
+    const all = (await app.inject({ method: 'GET', url: stages(), cookies: jar })).json() as { id: string }[];
+    const reordered = await app.inject({
+      method: 'POST',
+      url: `${stages()}/order`,
+      cookies: jar,
+      payload: { ids: [...all].reverse().map((s) => s.id) },
+    });
+    expect(reordered.statusCode).toBe(200);
+    expect(await version()).toBe(before + 3);
+
+    const deleted = await app.inject({ method: 'DELETE', url: `${stages()}/${stage.id}`, cookies: jar });
+    expect(deleted.statusCode).toBe(200);
+    expect(await version()).toBe(before + 4);
+  });
+
+  // `fieldsSection` writes every field's name and hint into the prompt the same way
+  // `stagesSection` writes a stage — the four lead-field routes get the same treatment.
+  it('moves when a lead field is created, edited, reordered or deleted', async () => {
+    const before = await version();
+
+    const created = await app.inject({
+      method: 'POST',
+      url: leadFields(),
+      cookies: jar,
+      payload: { name: 'Город', kind: 'text', hint: 'В каком городе клиент.' },
+    });
+    expect(created.statusCode).toBe(200);
+    const field = created.json();
+    expect(await version()).toBe(before + 1);
+
+    const patched = await app.inject({
+      method: 'PATCH',
+      url: `${leadFields()}/${field.id}`,
+      cookies: jar,
+      payload: { hint: 'Город доставки.' },
+    });
+    expect(patched.statusCode).toBe(200);
+    expect(await version()).toBe(before + 2);
+
+    const second = (
+      await app.inject({
+        method: 'POST',
+        url: leadFields(),
+        cookies: jar,
+        payload: { name: 'Срок', kind: 'text', hint: 'Когда нужно.' },
+      })
+    ).json();
+    expect(await version()).toBe(before + 3);
+
+    const reordered = await app.inject({
+      method: 'POST',
+      url: `${leadFields()}/order`,
+      cookies: jar,
+      payload: { ids: [second.id, field.id] },
+    });
+    expect(reordered.statusCode).toBe(200);
+    expect(await version()).toBe(before + 4);
+
+    const deleted = await app.inject({ method: 'DELETE', url: `${leadFields()}/${field.id}`, cookies: jar });
+    expect(deleted.statusCode).toBe(200);
+    expect(await version()).toBe(before + 5);
   });
 });

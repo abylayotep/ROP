@@ -4,6 +4,7 @@ import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
 import { agents, conversations, leadFields, stages } from '../db/schema.js';
+import { bumpConfigVersion } from '../lib/drafts/version.js';
 import { ApiError } from '../lib/errors.js';
 import type { Executor } from '../lib/funnel.js';
 import { isUuid } from '../lib/uuid.js';
@@ -177,6 +178,10 @@ export function registerStageRoutes(
             position: (existing.at(-1)?.position ?? -1) + 1,
           })
           .returning();
+        // A stage's name and description ride straight into the system prompt
+        // (`stagesSection`) — a new one changes what the agent reads before every answer, the
+        // same standing a rule or a note already has.
+        await bumpConfigVersion(tx as unknown as Db, req.agent!.id);
         return created!;
       });
       return toStage(row);
@@ -220,6 +225,9 @@ export function registerStageRoutes(
           .set({ ...parsed.data, autoMessage: template(parsed.data.autoMessage) })
           .where(eq(stages.id, current.id))
           .returning();
+        // Same reason the create route bumps: a stage's name, description or kind sits in the
+        // prompt the agent reads before every answer (`stagesSection`).
+        await bumpConfigVersion(tx as unknown as Db, req.agent!.id);
         return updated!;
       });
       return toStage(row);
@@ -257,6 +265,9 @@ export function registerStageRoutes(
         }
 
         await tx.delete(stages).where(eq(stages.id, current.id));
+        // A deleted stage stops reading into the prompt at all — as real a change to what the
+        // agent sees as any edit above.
+        await bumpConfigVersion(tx as unknown as Db, req.agent!.id);
       });
       return { ok: true };
     },
@@ -287,6 +298,9 @@ export function registerStageRoutes(
             .set({ position })
             .where(and(eq(stages.id, id), eq(stages.agentId, req.agent!.id)));
         }
+        // Order is part of what `stagesSection` writes into the prompt too, not only which
+        // stages exist — a reorder is a change the agent reads exactly like a rename.
+        await bumpConfigVersion(tx as unknown as Db, req.agent!.id);
       });
       return (await listStages(req.agent!.id)).map(toStage);
     },
@@ -319,15 +333,21 @@ export function registerStageRoutes(
         throw new ApiError(409, 'Поле с таким названием уже есть');
       }
 
-      const [row] = await db
-        .insert(leadFields)
-        .values({
-          agentId: req.agent!.id,
-          ...parsed.data,
-          position: (existing.at(-1)?.position ?? -1) + 1,
-        })
-        .returning();
-      return toField(row!);
+      const row = await db.transaction(async (tx) => {
+        const [created] = await tx
+          .insert(leadFields)
+          .values({
+            agentId: req.agent!.id,
+            ...parsed.data,
+            position: (existing.at(-1)?.position ?? -1) + 1,
+          })
+          .returning();
+        // A field's name and hint ride into the system prompt (`fieldsSection`) exactly the
+        // way a stage's do — a new field changes what the agent asks about.
+        await bumpConfigVersion(tx as unknown as Db, req.agent!.id);
+        return created!;
+      });
+      return toField(row);
     },
   );
 
@@ -355,12 +375,16 @@ export function registerStageRoutes(
         }
       }
 
-      const [row] = await db
-        .update(leadFields)
-        .set(parsed.data)
-        .where(eq(leadFields.id, current.id))
-        .returning();
-      return toField(row!);
+      const row = await db.transaction(async (tx) => {
+        const [updated] = await tx
+          .update(leadFields)
+          .set(parsed.data)
+          .where(eq(leadFields.id, current.id))
+          .returning();
+        await bumpConfigVersion(tx as unknown as Db, req.agent!.id);
+        return updated!;
+      });
+      return toField(row);
     },
   );
 
@@ -371,13 +395,17 @@ export function registerStageRoutes(
       const { fieldId } = req.params as { fieldId: string };
       if (!isUuid(fieldId)) throw new ApiError(404, 'Поле не найдено');
 
-      // The values cascade with the field. Said here because it is not obvious from the
-      // call site: removing a field removes what every lead answered for it.
-      const deleted = await db
-        .delete(leadFields)
-        .where(and(eq(leadFields.id, fieldId), eq(leadFields.agentId, req.agent!.id)))
-        .returning({ id: leadFields.id });
-      if (deleted.length === 0) throw new ApiError(404, 'Поле не найдено');
+      await db.transaction(async (tx) => {
+        // The values cascade with the field. Said here because it is not obvious from the
+        // call site: removing a field removes what every lead answered for it.
+        const deleted = await tx
+          .delete(leadFields)
+          .where(and(eq(leadFields.id, fieldId), eq(leadFields.agentId, req.agent!.id)))
+          .returning({ id: leadFields.id });
+        if (deleted.length === 0) throw new ApiError(404, 'Поле не найдено');
+        // A deleted field stops reading into the prompt at all.
+        await bumpConfigVersion(tx as unknown as Db, req.agent!.id);
+      });
       return { ok: true };
     },
   );
@@ -410,6 +438,8 @@ export function registerStageRoutes(
             .set({ position })
             .where(and(eq(leadFields.id, id), eq(leadFields.agentId, req.agent!.id)));
         }
+        // `fieldsSection` writes the fields into the prompt in this same order.
+        await bumpConfigVersion(tx as unknown as Db, req.agent!.id);
       });
       return (await listFields(req.agent!.id)).map(toField);
     },

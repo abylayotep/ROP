@@ -4,7 +4,17 @@ import type { FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildServer } from '../src/api/server.js';
 import type { Db } from '../src/db/client.js';
-import { agents, contacts, conversations, kbDrafts, messages, testCases, whatsappNumbers } from '../src/db/schema.js';
+import {
+  agents,
+  contacts,
+  conversations,
+  kbDrafts,
+  messages,
+  testCases,
+  testResults,
+  testRuns,
+  whatsappNumbers,
+} from '../src/db/schema.js';
 import type { CompletionInput, ModelClient } from '../src/lib/ai/openrouter.js';
 import { keyAad } from '../src/lib/ai/turn.js';
 import type { DraftOp } from '../src/lib/drafts/ops.js';
@@ -213,6 +223,83 @@ describe('keeping cases by hand', () => {
 
     expect(res.statusCode).toBe(200);
     expect(await db.select().from(testCases)).toHaveLength(0);
+  });
+
+  // `baselineResults` (`lib/drafts/baseline.ts`) keys «было» on the case, the agent's
+  // `config_version` and its model — nothing about a case's own `updated_at`. Left alone, a
+  // changed question would still pair against the old question's «было»: a run would compare
+  // an answer to a *different* question and pay a model to write a verdict about the mismatch.
+  // Chosen fix: delete the case's own baseline rows the moment `messages` changes, so the next
+  // run pays for a fresh one instead of reusing a stale one — see `api/test-cases.ts`'s own
+  // comment on the PATCH route for why this, rather than teaching `baselineResults` to read
+  // `updated_at`.
+  it('drops a case\'s own baseline results when its messages change', async () => {
+    const kase = (await post({ title: 'Про доставку', messages: ['сколько стоит доставка?'] })).json();
+
+    const [baselineRun] = await db
+      .insert(testRuns)
+      .values({ agentId, draftId: null, configVersion: 1, model: 'x', status: 'done' })
+      .returning();
+    await db.insert(testResults).values({ runId: baselineRun!.id, caseId: kase.id, outcome: 'sent' });
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `${cases()}/${kase.id}`,
+      cookies: jar,
+      payload: { messages: ['а в область доставите?'] },
+    });
+    expect(res.statusCode).toBe(200);
+
+    const remaining = await db.select().from(testResults).where(eq(testResults.caseId, kase.id));
+    expect(remaining).toHaveLength(0);
+  });
+
+  it('leaves a case\'s baseline alone when only its title or expectation changes', async () => {
+    const kase = (await post({ title: 'Про доставку', messages: ['сколько стоит доставка?'] })).json();
+
+    const [baselineRun] = await db
+      .insert(testRuns)
+      .values({ agentId, draftId: null, configVersion: 1, model: 'x', status: 'done' })
+      .returning();
+    await db.insert(testResults).values({ runId: baselineRun!.id, caseId: kase.id, outcome: 'sent' });
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `${cases()}/${kase.id}`,
+      cookies: jar,
+      payload: { title: 'Доставка (новое название)' },
+    });
+    expect(res.statusCode).toBe(200);
+
+    const remaining = await db.select().from(testResults).where(eq(testResults.caseId, kase.id));
+    expect(remaining).toHaveLength(1);
+  });
+
+  // A draft's own «стало» rows are never anyone's baseline (`baselineResults` only ever reads
+  // `draft_id is null`), so a messages edit must leave them alone even for the very case whose
+  // real baseline it just cleared.
+  it("does not touch a draft run's own results when messages change", async () => {
+    const kase = (await post({ title: 'Про доставку', messages: ['сколько стоит доставка?'] })).json();
+    const [draft] = await db
+      .insert(kbDrafts)
+      .values({ agentId, title: 'Черновик', origin: 'manual', status: 'open', ops: [], base: {} })
+      .returning();
+    const [draftRun] = await db
+      .insert(testRuns)
+      .values({ agentId, draftId: draft!.id, configVersion: 1, model: 'x', status: 'done' })
+      .returning();
+    await db.insert(testResults).values({ runId: draftRun!.id, caseId: kase.id, outcome: 'sent' });
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `${cases()}/${kase.id}`,
+      cookies: jar,
+      payload: { messages: ['а в область доставите?'] },
+    });
+    expect(res.statusCode).toBe(200);
+
+    const remaining = await db.select().from(testResults).where(eq(testResults.caseId, kase.id));
+    expect(remaining).toHaveLength(1);
   });
 
   it('refuses a member on every write route, and on the read', async () => {

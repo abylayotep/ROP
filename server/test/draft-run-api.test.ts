@@ -953,4 +953,38 @@ describe('recovering from a restart', () => {
     expect(row!.status).toBe('done');
     expect(row!.cost).toBe('0.00010000');
   });
+
+  // The one thing this sweep used to get wrong: it marked *every* `running` row `failed`,
+  // including a baseline run (`draft_id is null`) that had already written real, paid-for
+  // results before the process died — exactly the loss `runReplay`'s own catch closed for the
+  // request that is still alive (see the file comment on what `failed` means for a baseline
+  // run). A restart must not bury those too.
+  it('rescues an orphaned baseline run that already wrote a result, marking it `done`', async () => {
+    const kase = await addCase('сколько стоит доставка');
+    const [orphanBaseline] = await db
+      .insert(testRuns)
+      .values({ agentId, draftId: null, configVersion: 1, model: 'x', status: 'running' })
+      .returning();
+    await db.insert(testResults).values({ runId: orphanBaseline!.id, caseId: kase.id, outcome: 'sent' });
+
+    await reconcileOrphanedRuns(db);
+
+    const [row] = await db.select().from(testRuns).where(eq(testRuns.id, orphanBaseline!.id));
+    expect(row!.status).toBe('done');
+    expect(row!.finishedAt).not.toBeNull();
+  });
+
+  // The rescue is for rows that actually paid for something — a baseline run that died before
+  // writing a single result never proved anything and is still `failed`, same as before.
+  it('still fails an orphaned baseline run that never wrote a single result', async () => {
+    const [orphanBaseline] = await db
+      .insert(testRuns)
+      .values({ agentId, draftId: null, configVersion: 1, model: 'x', status: 'running' })
+      .returning();
+
+    await reconcileOrphanedRuns(db);
+
+    const [row] = await db.select().from(testRuns).where(eq(testRuns.id, orphanBaseline!.id));
+    expect(row!.status).toBe('failed');
+  });
 });

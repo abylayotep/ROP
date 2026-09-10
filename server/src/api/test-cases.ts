@@ -24,11 +24,11 @@
  * a disabled case out before it ever costs anything. Nothing here deletes one for being
  * disabled — that would throw away the very baseline a re-enabled case would want back.
  */
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
-import { conversations, kbDrafts, messages, testCases } from '../db/schema.js';
+import { conversations, kbDrafts, messages, testCases, testResults, testRuns } from '../db/schema.js';
 import { releaseTurnSlot, tryTakeTurnSlot } from '../db/turn-cap.js';
 import type { Env } from '../env.js';
 import type { ModelClient } from '../lib/ai/openrouter.js';
@@ -150,19 +150,52 @@ export function registerTestCaseRoutes(
       if (!parsed.success) throw new ApiError(400, 'Не удалось разобрать случай');
       const { title, messages: msgs, expectation, enabled } = parsed.data;
 
-      const [row] = await db
-        .update(testCases)
-        .set({
-          ...(title === undefined ? {} : { title }),
-          ...(msgs === undefined ? {} : { messages: msgs }),
-          ...(expectation === undefined ? {} : { expectation }),
-          ...(enabled === undefined ? {} : { enabled }),
-          updatedAt: sql`now()`,
-        })
-        .where(and(eq(testCases.id, caseId), eq(testCases.agentId, agentId)))
-        .returning();
+      const row = await db.transaction(async (tx) => {
+        const [updated] = await tx
+          .update(testCases)
+          .set({
+            ...(title === undefined ? {} : { title }),
+            ...(msgs === undefined ? {} : { messages: msgs }),
+            ...(expectation === undefined ? {} : { expectation }),
+            ...(enabled === undefined ? {} : { enabled }),
+            updatedAt: sql`now()`,
+          })
+          .where(and(eq(testCases.id, caseId), eq(testCases.agentId, agentId)))
+          .returning();
 
-      return toCase(row!);
+        // `baselineResults` (`lib/drafts/baseline.ts`) keys «было» on the case, the agent's
+        // `config_version` and its model — it knows nothing about `test_cases.updated_at`, so
+        // a changed question would otherwise still pair against the *old* question's «было»:
+        // a run would compare the new answer against an answer to something nobody is asking
+        // any more, and pay a model to write a verdict about the mismatch. Deleting this
+        // case's own baseline rows here — the ones written by a run with no draft at all
+        // (`draft_id is null`) — is what makes the next run pay for a fresh one instead of
+        // reusing a stale one; a draft's own «стало» rows need no such cleanup, since they are
+        // never reused as anyone's baseline to begin with.
+        if (msgs !== undefined) {
+          const baselineRuns = await tx
+            .select({ id: testRuns.id })
+            .from(testRuns)
+            .where(and(eq(testRuns.agentId, agentId), isNull(testRuns.draftId)));
+          if (baselineRuns.length > 0) {
+            await tx
+              .delete(testResults)
+              .where(
+                and(
+                  eq(testResults.caseId, caseId),
+                  inArray(
+                    testResults.runId,
+                    baselineRuns.map((run) => run.id),
+                  ),
+                ),
+              );
+          }
+        }
+
+        return updated!;
+      });
+
+      return toCase(row);
     },
   );
 

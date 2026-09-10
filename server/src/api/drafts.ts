@@ -486,10 +486,43 @@ function missingRowMessage(error: MissingDraftRowError, base: DraftBase): string
  * instead (see its own comment).
  */
 export async function reconcileOrphanedRuns(db: Db): Promise<void> {
-  await db
-    .update(testRuns)
-    .set({ status: 'failed', finishedAt: sql`now()` })
+  const running = await db
+    .select({ id: testRuns.id, draftId: testRuns.draftId })
+    .from(testRuns)
     .where(eq(testRuns.status, 'running'));
+  if (running.length === 0) return;
+
+  // A baseline run (`draft_id is null`) that already wrote at least one result is the same
+  // case `runReplay`'s own catch already covers for the request that is still alive — up to
+  // nineteen already-paid-for rows must not become permanently unreachable just because the
+  // *process* died rather than the request merely throwing. Everything else still `running` —
+  // every draft-side run, and a baseline that never wrote a single row — never proved
+  // anything and is marked `failed`, same as before this fix.
+  const baselineIds = running.filter((row) => row.draftId === null).map((row) => row.id);
+  const rescuable = new Set<string>();
+  if (baselineIds.length > 0) {
+    const withResults = await db
+      .selectDistinct({ runId: testResults.runId })
+      .from(testResults)
+      .where(inArray(testResults.runId, baselineIds));
+    for (const row of withResults) rescuable.add(row.runId);
+  }
+
+  const doneIds = [...rescuable];
+  if (doneIds.length > 0) {
+    await db
+      .update(testRuns)
+      .set({ status: 'done', finishedAt: sql`now()` })
+      .where(inArray(testRuns.id, doneIds));
+  }
+
+  const failedIds = running.map((row) => row.id).filter((id) => !rescuable.has(id));
+  if (failedIds.length > 0) {
+    await db
+      .update(testRuns)
+      .set({ status: 'failed', finishedAt: sql`now()` })
+      .where(inArray(testRuns.id, failedIds));
+  }
 }
 
 export function registerDraftRoutes(
@@ -863,9 +896,21 @@ export function registerDraftRoutes(
             draftRun: draftRun!,
             baselineRun,
             annotateDeps,
-          }).finally(() => {
-            runningDrafts.delete(draft.id);
-          });
+          })
+            // `runReplay` already catches everything it can throw and marks both rows itself —
+            // this is a backstop for the one thing it cannot guard against: that very `catch`
+            // block failing (the `db.update` calls inside it losing the connection, say). With
+            // no `.catch` here that failure would leave `runReplay`'s own promise rejected, and
+            // an unhandled rejection kills the process on Node's default — taking down every
+            // other run and request with it over one row that was only ever going to stay
+            // `'running'` a little longer. `index.ts` and `whatsapp-webhook.ts` guard their own
+            // detached work the same way.
+            .catch((error) => {
+              app.log.error({ error, runId: draftRun!.id }, 'draft run: replay failed to record its own failure');
+            })
+            .finally(() => {
+              runningDrafts.delete(draft.id);
+            });
         });
 
         return {

@@ -224,6 +224,7 @@
  * in `db/schema.ts` for where it is set. Refused with a Russian 409 the moment the row moved
  * after that instant, before the draft is ever written.
  */
+import type { TestRun } from '@rakurs/contract';
 import { and, asc, desc, eq, gte, inArray, isNull, sql } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
@@ -796,7 +797,7 @@ export function registerDraftRoutes(
   app.get(
     '/api/agents/:agentId/drafts/:draftId/runs/:runId',
     { preHandler: [guard, ownerOnly] },
-    async (req) => {
+    async (req): Promise<TestRun> => {
       const agentId = req.agent!.id;
       const { draftId, runId } = req.params as { draftId: string; runId: string };
       // 404s the draft first — the same reason `loadDraft` is used everywhere else — and then
@@ -848,7 +849,7 @@ export function registerDraftRoutes(
         .orderBy(asc(testRuns.startedAt))
         .limit(1);
 
-      const results: { caseId: string; before: CaseSideOut | null; after: CaseSideOut }[] = rows.map((row) => {
+      const results = rows.map((row) => {
         const baseline = baselines.get(row.caseId);
         // `'paid'` exactly when this case's «было» lives in the baseline run paired with `run`
         // itself — the row this run's own POST is what wrote — and `'reused'` when it instead
@@ -859,7 +860,14 @@ export function registerDraftRoutes(
         return {
           caseId: row.caseId,
           before: baseline ? { ...sideFromRow(baseline), origin: beforeOrigin } : null,
-          after: { ...sideFromRow(row), origin: 'paid' },
+          after: { ...sideFromRow(row), origin: 'paid' as const },
+          // Written only onto the draft's own «стало» row (`resultRow`, above) — `row` here
+          // is exactly that row, never the baseline's, so reading it straight off is safe. A
+          // reload used to drop both columns entirely: `sideFromRow` never carried them, even
+          // though `annotate` had already written them, so a screen polling this route could
+          // never show the hint it asked the model for in the first place.
+          verdict: row.verdict as 'better' | 'worse' | 'same' | null,
+          verdictReason: row.verdictReason,
         };
       });
 

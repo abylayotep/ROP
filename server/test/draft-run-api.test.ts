@@ -801,6 +801,31 @@ describe('reading drafts and runs back', () => {
     expect(res.json().results[0]!.after).not.toBeNull();
   });
 
+  // `annotate` writes `verdict`/`verdictReason` onto the draft's own `test_results` row (see
+  // `runReplay`), but the GET used to build its response through `sideFromRow`, which never
+  // carried either column back out — a screen polling this route could never show the hint it
+  // asked the model for. `model.replyAlways` here answers the annotation call too, with JSON
+  // that does not match `VERDICT_SCHEMA`, so `annotate` itself returns null and the columns
+  // stay null in the database — this test is about the two keys reaching the response at all,
+  // not about a real verdict, which is `draft-annotate.test.ts`'s own job.
+  it("carries the annotation's verdict columns back on GET, not just into the database", async () => {
+    const draft = await openDraft();
+    const kase = await addCase('сколько стоит доставка');
+    model.replyAlways({ text: 'Уточню у коллеги.' });
+
+    const posted = await run(draft.id, [kase.id]);
+    await waitForRun(posted.json().id);
+
+    const res = await app.inject({
+      method: 'GET',
+      cookies: jar,
+      url: `${drafts()}/${draft.id}/runs/${posted.json().id}`,
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().results[0]).toHaveProperty('verdict');
+    expect(res.json().results[0]).toHaveProperty('verdictReason');
+  });
+
   // The cost used to come back half-reported on GET (`draftCost: run.cost` and no
   // `baselineCost`) and `before.origin` was hardcoded `'reused'` regardless of which run had
   // actually paid for it — a side the POST that made it called `'paid'` came back `'reused'`

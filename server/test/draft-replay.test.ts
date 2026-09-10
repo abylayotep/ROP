@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { asc, eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, it } from 'vitest';
-import type { AiDeps } from '../src/api/ai.js';
 import type { Db } from '../src/db/client.js';
+import { releaseTurnSlot, tryTakeTurnSlot } from '../src/db/turn-cap.js';
 import {
   accounts,
   agentRules,
@@ -15,7 +15,7 @@ import {
   messages,
   whatsappNumbers,
 } from '../src/db/schema.js';
-import { replayCase } from '../src/lib/drafts/replay.js';
+import { replayCase, type AiDeps, type ReplayInput, type ReplayResult } from '../src/lib/drafts/replay.js';
 import type { ChatMessage, CompletionInput, ModelClient } from '../src/lib/ai/openrouter.js';
 import { encryptSecret } from '../src/lib/secret-box.js';
 import { withDb } from './helpers/db.js';
@@ -172,11 +172,28 @@ beforeEach(async () => {
   deps = { model, graph: fakeGraph() };
 });
 
+/**
+ * `replayCase` asserts a turn-cap slot is already held — see `turnSlotHeld` in
+ * `db/turn-cap.ts` — because every real caller (the sandbox route today, Task 6's run route
+ * tomorrow) takes one before calling it and gives it back in a `finally`. Every test in this
+ * file goes through this helper rather than calling `replayCase` directly, so the suite
+ * exercises the same contract a real caller has to honour — except the one test that calls
+ * `replayCase` on its own, on purpose, to prove a caller that skips this gets caught.
+ */
+async function runCase(input: ReplayInput): Promise<ReplayResult> {
+  if (!tryTakeTurnSlot()) throw new Error('test: no turn-cap slot available');
+  try {
+    return await replayCase(db, deps, input);
+  } finally {
+    releaseTurnSlot();
+  }
+}
+
 describe('replaying a case', () => {
   it('answers from the draft rather than from the store', async () => {
     model.reply({ text: 'Доставка 1600 ₸.' });
 
-    const result = await replayCase(db, deps, {
+    const result = await runCase({
       agentId,
       numberId,
       key,
@@ -191,7 +208,7 @@ describe('replaying a case', () => {
   it('leaves the store exactly as it found it', async () => {
     const before = await snapshot(db, agentId);
 
-    await replayCase(db, deps, {
+    await runCase({
       agentId,
       numberId,
       key,
@@ -202,11 +219,11 @@ describe('replaying a case', () => {
     expect(await snapshot(db, agentId)).toEqual(before);
   });
 
-  it('carries the conversation forward across messages', async () => {
+  it('carries the conversation forward across messages, sums every turn\'s cost, and marks the carried reply as the agent\'s own', async () => {
     model.reply({ text: 'Какие двери нужны?' });
     model.reply({ text: 'Входные — от 80 000 ₸.' });
 
-    await replayCase(db, deps, {
+    const result = await runCase({
       agentId,
       numberId,
       key,
@@ -214,14 +231,27 @@ describe('replaying a case', () => {
       ops: [],
     });
 
-    const second = model.callsAt(1)!.messages.map((m) => m.content).join('\n');
-    expect(second).toContain('Какие двери нужны?');
+    const secondCallMessages = model.callsAt(1)!.messages;
+    const carried = secondCallMessages.find((m) => m.content.includes('Какие двери нужны?'));
+    expect(carried).toBeDefined();
+    // Not `author: 'client'`: the carried-forward message is the agent's own first reply, and
+    // a model reading it as the customer's own words would retrieve against them instead of
+    // answering them. `buildMessages` (`prompt.ts`) turns that author into role `assistant`,
+    // never `user` — pinned here so a wrong author on the insert (`replayCase`'s own) fails
+    // this test even though the joined-content check above would not have noticed.
+    expect(carried?.role).toBe('assistant');
+
+    // Every model call the case made, added together — see `meteredModel`'s own comment. The
+    // scripted model returns a fixed '0.00010000' per call, so two turns is a known total; a
+    // regressed accumulator that kept only the last turn's cost would report '0.00010000'
+    // instead and this would catch it, which nothing before this test did.
+    expect(result.cost).toBe('0.00020000');
   });
 
   it('reports the sections the reply was built from', async () => {
     model.reply({ text: 'Доставка 1600 ₸.' });
 
-    const result = await replayCase(db, deps, {
+    const result = await runCase({
       agentId,
       numberId,
       key,
@@ -235,7 +265,7 @@ describe('replaying a case', () => {
   it('reports a handoff and its reason instead of a reply', async () => {
     model.reply({ text: 'Скидка 90%.' });
 
-    const result = await replayCase(db, deps, {
+    const result = await runCase({
       agentId,
       numberId,
       key,
@@ -246,5 +276,41 @@ describe('replaying a case', () => {
     expect(result.handoff).toBe(true);
     expect(result.handoffReason).toContain('90');
     expect(result.reply).toBeNull();
+  });
+
+  it('stops the case at a handoff and never asks the model about the next message', async () => {
+    // The first turn hands off outright (the model asks for one), the second is scripted to
+    // answer normally — and must never be reached.
+    model.reply({ text: 'Уточню у коллеги.', handoff: { reason: 'просит скидку 90%' } });
+    model.reply({ text: 'Это не должно быть отправлено.' });
+
+    const result = await runCase({
+      agentId,
+      numberId,
+      key,
+      messages: ['дадите скидку 90%?', 'а если попросить по-другому?'],
+      ops: [],
+    });
+
+    expect(result.outcome).toBe('handoff');
+    expect(result.handoff).toBe(true);
+    expect(result.handoffReason).toContain('90%');
+    // One call, not two: the second message in the case was never answered.
+    expect(model.calls).toHaveLength(1);
+  });
+
+  it('refuses to run without a turn-cap slot already held', async () => {
+    // No `tryTakeTurnSlot()` here, on purpose — `runCase` above takes one for every other
+    // test; this one calls `replayCase` directly to prove a caller that forgot is caught here
+    // rather than under load in production. See `turnSlotHeld` in `db/turn-cap.ts`.
+    await expect(
+      replayCase(db, deps, {
+        agentId,
+        numberId,
+        key,
+        messages: ['здравствуйте'],
+        ops: [],
+      }),
+    ).rejects.toThrow(/turn-cap slot/);
   });
 });

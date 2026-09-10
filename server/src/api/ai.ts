@@ -27,21 +27,19 @@ import {
 } from '../db/schema.js';
 import { releaseTurnSlot, sandboxTurns, SANDBOX_TURNS, tryTakeTurnSlot } from '../db/turn-cap.js';
 import type { Env } from '../env.js';
-import { MODELS, type ModelClient } from '../lib/ai/openrouter.js';
+import { MODELS } from '../lib/ai/openrouter.js';
 import { keyAad } from '../lib/ai/turn.js';
-import { replayCase } from '../lib/drafts/replay.js';
+import { replayCase, type AiDeps } from '../lib/drafts/replay.js';
 import { ApiError } from '../lib/errors.js';
 import { periodQuery, periodSince } from '../lib/period.js';
 import { credentialsKey, encryptSecret } from '../lib/secret-box.js';
 import { isUuid } from '../lib/uuid.js';
-import type { GraphClient } from '../lib/whatsapp/graph.js';
 import { requireAgent } from './require-agent.js';
 
-export interface AiDeps {
-  model: ModelClient;
-  /** The sandbox runs the same turn a customer would get, and a turn takes a Graph client. */
-  graph: GraphClient;
-}
+// `AiDeps` now lives in `lib/drafts/replay.ts`, beside `replayCase` — the function that
+// actually spends it — and re-exported here so nothing that already imports it from this file
+// has to change.
+export type { AiDeps };
 
 /** What a customer may say to the sandbox. A WhatsApp message is far shorter than this. */
 const SANDBOX_LIMIT = 4_000;

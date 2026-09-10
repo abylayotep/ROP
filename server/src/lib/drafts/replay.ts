@@ -14,12 +14,28 @@
  * customer's second message always is.
  */
 import { randomUUID } from 'node:crypto';
-import type { AiDeps } from '../../api/ai.js';
 import type { Db } from '../../db/client.js';
 import { contacts, conversations, messages } from '../../db/schema.js';
+import { turnSlotHeld } from '../../db/turn-cap.js';
 import type { ModelClient } from '../ai/openrouter.js';
 import { addCost, runTurn, type TurnOutcome, type TurnResult } from '../ai/turn.js';
+import type { GraphClient } from '../whatsapp/graph.js';
 import { applyOps, type DraftOp } from './ops.js';
+
+/**
+ * What a case needs beyond the store it runs against: the model to call, and the Graph client
+ * a turn still reads from even in a dry run — to check a number is enabled and a token still
+ * opens, never to send (see `runTurn`'s own comment on `readySend`).
+ *
+ * Lived in `api/ai.ts` until now, the one caller before this file existed. `replayCase` is the
+ * thing that actually spends both fields, so it is the thing this type sits beside — `api/ai.ts`
+ * imports it from here rather than the other way around, the same `lib` → `api` direction every
+ * other dependency in this module already runs.
+ */
+export interface AiDeps {
+  model: ModelClient;
+  graph: GraphClient;
+}
 
 export interface ReplayInput {
   agentId: string;
@@ -88,14 +104,17 @@ export interface ReplayResult {
  * Carries the last turn's own `TurnResult` rather than an already-built `ReplayResult`, and
  * the summed cost beside it — the one field that is not simply the last turn's, kept apart so
  * nothing here has to re-derive it from a result it has already thrown away the pieces of.
+ *
+ * Named `ReplayDone`, not `SandboxDone`: this file is no longer the sandbox's own private
+ * mechanism, and the name should say what actually finished.
  */
-class SandboxDone extends Error {
+class ReplayDone extends Error {
   constructor(
     readonly turn: TurnResult,
     readonly cost: string,
   ) {
     super('replay finished');
-    this.name = 'SandboxDone';
+    this.name = 'ReplayDone';
   }
 }
 
@@ -129,7 +148,7 @@ function meteredModel(model: ModelClient): { model: ModelClient; total: () => st
   };
 }
 
-const toResult = (done: SandboxDone): ReplayResult => ({
+const toResult = (done: ReplayDone): ReplayResult => ({
   reply: done.turn.reply,
   usedChunkIds: done.turn.usedItemIds,
   stageId: done.turn.stageId,
@@ -166,6 +185,15 @@ const toResult = (done: SandboxDone): ReplayResult => ({
  * have changed has to already be sitting there before the first message is answered — inside
  * the same transaction that is about to disappear.
  *
+ * A `rule_create` op holds an advisory lock on its category for the rest of the transaction —
+ * see `lockCategories` — which here means for the rest of the case, across every message and
+ * every model call it makes. Nothing here works around that, and nothing should: `applyOps`
+ * has to run before the turns (see above), and the lock it takes has to outlive the write it
+ * guards for the same reason any transaction-scoped lock does. It is worth saying plainly
+ * because a coaching draft is exactly the kind that carries `rule_create` (`agent-coaching.md`),
+ * so this is not a cold path — a concurrent edit to that category blocks for as long as the
+ * slowest model call in the case takes.
+ *
  * Each message is inserted as an inbound one and answered with `runTurn(..., { dryRun: true })`
  * before the next is. A dry run never writes the reply it produces — `deliver` in `turn.ts`,
  * the one place that write happens, is never reached in a dry run — so this is where the
@@ -173,6 +201,27 @@ const toResult = (done: SandboxDone): ReplayResult => ({
  * as though the first question had never been asked is exactly what a second `runTurn` call
  * would do without this: the reply is inserted as an outbound message before the loop moves
  * on, the same author and kind a real one would carry.
+ *
+ * A handoff ends the case. `failed` and `skipped` loop on to the next message — a real thread
+ * gets another chance to answer on its customer's next message, and a case should show the
+ * same recovery a real conversation gets. A handoff is different: `runTurn` skips its own
+ * `!dryRun && !conversation.aiEnabled` refusal for exactly this reason (see that file's header
+ * comment), so nothing here stops a second dry-run turn from answering right past a handoff a
+ * real turn would have ended the thread on — reporting whatever the *last* message did, not
+ * the handoff a real customer would never have gotten a reply to. So the loop breaks the
+ * instant a turn hands off, and the case's result is that turn's own.
+ *
+ * The two inserted messages inside one message's turn — inbound, then its own reply — get
+ * timestamps from one monotonically increasing counter for the whole case, not `new Date()`
+ * called twice. Every insert lands in the same transaction, and Postgres's `now()` — what
+ * `transaction_timestamp()` and so `created_at`'s own `defaultNow()` reads — is fixed for the
+ * whole transaction, so `created_at` cannot break a tie between two rows inserted here even
+ * though `runTurn`'s history query orders by it second. `sentAt` is set in application code
+ * and does vary row to row, but only at millisecond resolution — and a case can insert several
+ * rows inside one millisecond, so two adjacent messages can tie there too. A real message never
+ * has either problem: it lands in its own transaction, with its own `now()`, seconds or minutes
+ * apart from its neighbours. Only a replayed case's messages are dense enough, in one
+ * transaction, to need a tie-break that cannot fail.
  *
  * The turn is handed the transaction, which is the same query interface under a type Drizzle
  * keeps separate from `Db` — hence the casts. Nothing `runTurn` reaches for in a dry run lives
@@ -188,9 +237,18 @@ const toResult = (done: SandboxDone): ReplayResult => ({
  * this function, once per turn rather than once per call, would not even track the truth: the
  * transaction holds its connection for the whole case regardless of how the counter is poked,
  * so a per-turn slot would let the bookkeeping claim a connection was freed between messages
- * that the pool never actually gave back.
+ * that the pool never actually gave back. What this function *does* do is assert, at its own
+ * top, that some caller somewhere already took the slot it is about to hold for the case's
+ * whole duration — see `turnSlotHeld`. That is not a substitute for a caller taking its own
+ * slot; it is a caller that forgot failing loudly in a test rather than emptying the pool
+ * silently in production.
  */
 export async function replayCase(db: Db, deps: AiDeps, input: ReplayInput): Promise<ReplayResult> {
+  if (!turnSlotHeld()) {
+    throw new Error(
+      'replayCase: called with no turn-cap slot held — see tryTakeTurnSlot in db/turn-cap.ts',
+    );
+  }
   if (input.messages.length === 0) {
     throw new Error('replayCase: a case needs at least one message');
   }
@@ -224,6 +282,13 @@ export async function replayCase(db: Db, deps: AiDeps, input: ReplayInput): Prom
         })
         .returning();
 
+      // One base instant plus a strictly increasing tick, rather than `new Date()` at each
+      // insert — see this function's own comment on why a case's own messages need a tie-break
+      // that milliseconds alone cannot give them.
+      const base = now.getTime();
+      let tick = 0;
+      const nextSentAt = (): Date => new Date(base + tick++);
+
       let turn: TurnResult | null = null;
       // Every call the case makes, across every message and every retry within one — see
       // `meteredModel`'s own comment for why this is read off the model rather than off
@@ -237,7 +302,7 @@ export async function replayCase(db: Db, deps: AiDeps, input: ReplayInput): Prom
           author: 'client',
           kind: 'text',
           body: text,
-          sentAt: new Date(),
+          sentAt: nextSentAt(),
         });
 
         turn = await runTurn(
@@ -246,9 +311,13 @@ export async function replayCase(db: Db, deps: AiDeps, input: ReplayInput): Prom
           { agentId: input.agentId, conversationId: conversation!.id, dryRun: true },
         );
 
+        // A handoff ends the case here — see this function's own comment. Nothing after this
+        // message is answered, and the case's result is this turn's.
+        if (turn.outcome === 'handoff') break;
+
         // See this function's own comment: a dry run never writes this itself, and the next
         // iteration's history has to hold it. Nothing to insert when the turn produced no
-        // reply — a handoff or an empty answer leaves nothing for the next message to read.
+        // reply — an empty answer leaves nothing for the next message to read.
         if (turn.reply !== null) {
           await tx.insert(messages).values({
             conversationId: conversation!.id,
@@ -256,15 +325,15 @@ export async function replayCase(db: Db, deps: AiDeps, input: ReplayInput): Prom
             author: 'ai',
             kind: 'text',
             body: turn.reply,
-            sentAt: new Date(),
+            sentAt: nextSentAt(),
           });
         }
       }
 
-      throw new SandboxDone(turn!, metered.total());
+      throw new ReplayDone(turn!, metered.total());
     });
   } catch (error) {
-    if (error instanceof SandboxDone) return toResult(error);
+    if (error instanceof ReplayDone) return toResult(error);
     throw error;
   }
   // The callback above always throws, which the compiler has no way of knowing.

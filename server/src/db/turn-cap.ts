@@ -58,3 +58,23 @@ export function tryTakeTurnSlot(): boolean {
 export function releaseTurnSlot(): void {
   turnsInFlight -= 1;
 }
+
+/**
+ * Whether at least one slot is held anywhere in the process right now.
+ *
+ * Not "did *this* caller take one" — the counter above has no notion of who holds what, only
+ * how many. That is enough for what this answers: a function that must never run without a
+ * slot already held (`replayCase`, which holds a database connection across a model call the
+ * same way every other caller of this module does) can assert this at its own top and catch
+ * a caller that forgot `tryTakeTurnSlot` in the first test that exercises it, instead of
+ * finding out under load that the pool has no cap protecting it there at all.
+ *
+ * A concurrent, unrelated slot would make this pass even for a caller that itself forgot —
+ * that gap is real, but closing it needs a token handed back from `tryTakeTurnSlot` and
+ * threaded through every caller, which is a bigger change than an assertion meant to catch a
+ * caller that forgot is worth. Every test that exercises `replayCase` today runs alone against
+ * this counter, so the gap does not hide anything in practice.
+ */
+export function turnSlotHeld(): boolean {
+  return turnsInFlight >= 1;
+}

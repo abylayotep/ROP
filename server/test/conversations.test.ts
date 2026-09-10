@@ -7,6 +7,7 @@ import { buildServer } from '../src/api/server.js';
 import {
   accountMembers,
   agents,
+  aiReplies,
   contacts,
   conversations,
   messages,
@@ -203,6 +204,31 @@ describe('reading conversations', () => {
       'первое',
       'второе',
     ]);
+  });
+
+  it('names the ai_replies row a message came from, and leaves the rest of the thread without one', async () => {
+    const clientMessage = await seedMessage({ author: 'client', direction: 'in', body: 'дадите скидку?' });
+    const aiMessage = await seedMessage({
+      author: 'ai',
+      direction: 'out',
+      body: 'Доставка 1500 ₸.',
+      sentAt: new Date(clientMessage.sentAt.getTime() + 1000),
+    });
+    const [reply] = await db
+      .insert(aiReplies)
+      .values({
+        agentId,
+        conversationId,
+        messageId: aiMessage.id,
+        model: 'test-model',
+        outcome: 'sent',
+      })
+      .returning();
+
+    const found = (await thread()).json().messages;
+
+    expect(found.find((m: { id: string }) => m.id === clientMessage.id)!.aiReplyId).toBeNull();
+    expect(found.find((m: { id: string }) => m.id === aiMessage.id)!.aiReplyId).toBe(reply!.id);
   });
 
   it('never puts a path on our disk in the answer', async () => {

@@ -49,6 +49,7 @@ import {
   type AgentReply,
   type TurnContext,
 } from './prompt.js';
+import { assembleRules, loadRules } from './rules.js';
 
 export interface TurnDeps {
   model: ModelClient;
@@ -351,8 +352,11 @@ function retryMessage(kind: string): ChatMessage {
  * A retry is two calls and one bill. Scaled to integers rather than added as floats: the
  * numbers are eight decimal places wide and a float sum of two of them prints as
  * `0.00019999999999999998`, which the column rounds and an owner reads as a typo.
+ *
+ * Exported so `coach.ts`'s own retry totals the same two bills the same way, rather than a
+ * second adder that rounds a different way on the same numbers.
  */
-function addCost(a: string, b: string): string {
+export function addCost(a: string, b: string): string {
   const scaled = (value: string): number => {
     const parsed = Number(value);
     return Number.isFinite(parsed) ? Math.round(parsed * 1e8) : 0;
@@ -535,11 +539,16 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
   // the customer wants to know right now.
   const hits = await searchKnowledge(db, agent.id, last.body ?? '', KNOWLEDGE_LIMIT);
 
+  // `agents.instructions` is gone; this is the same string, assembled from the owner's rules.
+  // Read once and used twice below — in the prompt, and again as one of the number guard's
+  // three sources — so the two can never see a different owner's text.
+  const instructions = assembleRules(await loadRules(db, agent.id));
+
   const context: TurnContext = {
     agent: {
       name: agent.name,
       timezone: agent.timezone,
-      instructions: agent.instructions,
+      instructions,
       replyLanguage: agent.replyLanguage,
     },
     stages: stageRows.map((stage) => ({
@@ -554,10 +563,10 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
       hint: field.hint,
     })),
     knowledge: hits.map((hit) => ({
-      id: hit.item.id,
-      kind: hit.item.kind,
-      title: hit.item.title,
-      content: hit.item.content,
+      id: hit.chunk.id,
+      kind: hit.chunk.kind,
+      title: hit.chunk.title,
+      content: hit.chunk.content,
     })),
     history: history.map((message) => ({
       author: message.author,
@@ -678,7 +687,7 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
       .filter((item) => cited.has(item.id))
       .flatMap((item) => [item.title, item.content]),
     last.body ?? '',
-    agent.instructions,
+    instructions,
   ];
   const invented = unsourcedNumber(reply.reply, sources);
   const unsourced = invented !== null;

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import * as api from '@/api';
 import { LeadPanel } from '@/components/lead/LeadPanel';
 import { Card } from '@/components/ui/primitives';
@@ -7,7 +7,7 @@ import { Async, EmptyState, Skeleton } from '@/components/ui/states';
 import { useToast } from '@/components/ui/Toast';
 import { useApi } from '@/hooks/useApi';
 import { useAgent } from '@/store/agent';
-import type { ConversationSummary, ConversationThread, Message } from '@/types';
+import type { ConversationSummary, ConversationThread, Message, Role } from '@/types';
 
 const time = (iso: string) =>
   new Date(iso).toLocaleString('ru-RU', {
@@ -25,6 +25,30 @@ const bubble = (mine: boolean): CSSProperties => ({
   background: mine ? 'rgba(13,150,104,0.14)' : 'var(--sunken)',
   border: '1px solid var(--line-soft)',
 });
+
+/**
+ * Whether «Так нельзя» belongs on this message: only the agent's own answer, and only for
+ * the owner. «Обучение» refuses everyone else on the server (see `CoachScreen`'s own
+ * comment), so a member offered this button would only ever land on a screen that tells
+ * them so — worse than a button that is not there at all.
+ */
+export function canCoachFrom(message: Message, role: Role): boolean {
+  return role === 'owner' && message.direction === 'out' && message.author === 'ai';
+}
+
+/**
+ * Where «Так нельзя» sends the owner: «Обучение», with this dialog's id in the query string
+ * so the coach can load its transcript, and — when the clicked message carries one — the
+ * exact `ai_replies` id it came from, so the coach names *that* turn instead of falling back
+ * to the conversation's latest reply (which need not be the one the owner is complaining
+ * about at all). Both are ids, never the message itself — the fence
+ * `server/src/lib/ai/coach.ts` builds around a transcript is not something a link built here
+ * may hand a way around.
+ */
+export function coachLink(conversationId: string, aiReplyId?: string | null): string {
+  const reply = aiReplyId ? `&reply=${aiReplyId}` : '';
+  return `../coach?conversation=${conversationId}${reply}`;
+}
 
 export function DialogsScreen() {
   const { agent } = useAgent();
@@ -205,7 +229,12 @@ function Thread({
             }}
           >
             {data.messages.map((message) => (
-              <Bubble key={message.id} agentId={agentId} message={message} />
+              <Bubble
+                key={message.id}
+                agentId={agentId}
+                conversationId={conversationId}
+                message={message}
+              />
             ))}
             <div ref={bottom} />
           </div>
@@ -245,8 +274,18 @@ function Thread({
   );
 }
 
-function Bubble({ agentId, message }: { agentId: string; message: Message }) {
+function Bubble({
+  agentId,
+  conversationId,
+  message,
+}: {
+  agentId: string;
+  conversationId: string;
+  message: Message;
+}) {
   const mine = message.direction === 'out';
+  const { role } = useAgent();
+  const navigate = useNavigate();
 
   return (
     <div style={bubble(mine)}>
@@ -268,10 +307,30 @@ function Bubble({ agentId, message }: { agentId: string; message: Message }) {
           Сообщение типа «{message.kind}» — показать его пока нечем.
         </div>
       )}
-      <div style={{ fontSize: 10.5, color: 'var(--text-dim)', marginTop: 4 }}>
-        {time(message.sentAt)}
-        {mine ? ` · ${message.author === 'ai' ? 'ИИ' : 'оператор'}` : ''}
-        {message.status ? ` · ${message.status}` : ''}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
+        <div style={{ fontSize: 10.5, color: 'var(--text-dim)' }}>
+          {time(message.sentAt)}
+          {mine ? ` · ${message.author === 'ai' ? 'ИИ' : 'оператор'}` : ''}
+          {message.status ? ` · ${message.status}` : ''}
+        </div>
+        {canCoachFrom(message, role) && (
+          <button
+            type="button"
+            onClick={() => navigate(coachLink(conversationId, message.aiReplyId))}
+            style={{
+              marginLeft: 'auto',
+              fontSize: 10.5,
+              color: 'var(--danger)',
+              background: 'none',
+              border: 0,
+              padding: 0,
+              cursor: 'pointer',
+              textDecoration: 'underline',
+            }}
+          >
+            Так нельзя
+          </button>
+        )}
       </div>
     </div>
   );

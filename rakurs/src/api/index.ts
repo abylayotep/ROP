@@ -1,5 +1,6 @@
 import type {
   Agent,
+  AgentRule,
   AiModel,
   AiSettings,
   AiTurn,
@@ -8,12 +9,17 @@ import type {
   Board,
   CapiEvent,
   CapiSettings,
+  CoachMessage,
+  CoachProposal,
   ConversationSummary,
   ConversationThread,
   Customer,
+  KbGraph,
   KbImport,
-  KbItem,
-  KbItemKind,
+  KbNote,
+  KbNoteDetail,
+  KbNoteKind,
+  KbSection,
   KbSource,
   Lead,
   LeadField,
@@ -21,6 +27,7 @@ import type {
   Member,
   Message,
   Period,
+  RuleCategory,
   Stage,
   StatsCurrent,
   StatsPeriodReport,
@@ -233,27 +240,40 @@ const knowledge = (agentId: string) => `/agents/${agentId}/knowledge`;
 
 /**
  * With a query it is a search, without one a list. One route for both is deliberate: the
- * owner has to test exactly the search stage 5's agent uses.
+ * owner has to test exactly the search stage 5's agent uses, and the tree pane's own search
+ * box calls this rather than filtering a cached list — the distinct notes of the ranker's
+ * hits, in the ranker's own order, is not something the browser can reproduce from a plain
+ * list of notes.
  */
-export const listKbItems = (
+export const listKbNotes = (
   agentId: string,
-  params: { kind?: KbItemKind; q?: string },
+  params: { q?: string; kind?: KbNoteKind } = {},
   signal?: AbortSignal,
-) => request<KbItem[]>(`${knowledge(agentId)}/items`, { query: params, signal });
+) => request<KbNote[]>(`${knowledge(agentId)}/notes`, { query: params, signal });
 
-export const createKbItem = (
+export const getKbNote = (agentId: string, noteId: string, signal?: AbortSignal) =>
+  request<KbNoteDetail>(`${knowledge(agentId)}/notes/${noteId}`, { signal });
+
+export const createKbNote = (agentId: string, body: { path: string; body: string }) =>
+  request<KbNoteDetail>(`${knowledge(agentId)}/notes`, { method: 'POST', body });
+
+export const updateKbNote = (
   agentId: string,
-  body: { kind: KbItemKind; title: string; content: string },
-) => request<KbItem>(`${knowledge(agentId)}/items`, { method: 'POST', body });
+  noteId: string,
+  body: { path?: string; body?: string },
+) => request<KbNoteDetail>(`${knowledge(agentId)}/notes/${noteId}`, { method: 'PATCH', body });
 
-export const updateKbItem = (
-  agentId: string,
-  itemId: string,
-  body: { kind?: KbItemKind; title?: string; content?: string },
-) => request<KbItem>(`${knowledge(agentId)}/items/${itemId}`, { method: 'PATCH', body });
+export const deleteKbNote = (agentId: string, noteId: string) =>
+  request<{ ok: true }>(`${knowledge(agentId)}/notes/${noteId}`, { method: 'DELETE' });
 
-export const deleteKbItem = (agentId: string, itemId: string) =>
-  request<{ ok: true }>(`${knowledge(agentId)}/items/${itemId}`, { method: 'DELETE' });
+/** The same ranker `listKbNotes` calls with a query, but sections rather than whole notes —
+ * what «Что найдёт агент» shows, because a note title is not what the agent quotes. */
+export const searchKb = (agentId: string, q: string, signal?: AbortSignal) =>
+  request<KbSection[]>(`${knowledge(agentId)}/search`, { query: { q }, signal });
+
+/** The graph tab's own fetch: every note as a node, every resolved `[[link]]` as an edge. */
+export const getKbGraph = (agentId: string, signal?: AbortSignal) =>
+  request<KbGraph>(`${knowledge(agentId)}/graph`, { signal });
 
 export const listKbSources = (agentId: string, signal?: AbortSignal) =>
   request<KbSource[]>(`${knowledge(agentId)}/sources`, { signal });
@@ -261,7 +281,7 @@ export const listKbSources = (agentId: string, signal?: AbortSignal) =>
 /** Owner only on the server: an import writes a batch nobody has read yet. */
 export const importKbText = (
   agentId: string,
-  body: { title: string; kind: KbItemKind; text: string },
+  body: { title: string; kind: KbNoteKind; text: string },
 ) => request<KbImport>(`${knowledge(agentId)}/import/text`, { method: 'POST', body });
 
 /** Owner only. The fetch happens inside the request, so it can take seconds. */
@@ -295,7 +315,6 @@ export const updateAiSettings = (
     aiEnabled?: boolean;
     model?: string;
     temperature?: number;
-    instructions?: string;
     replyLanguage?: string;
     openrouterKey?: string | null;
   },
@@ -428,3 +447,63 @@ export const getStatsPeriod = (agentId: string, period: Period, signal?: AbortSi
     query: { period },
     signal,
   });
+
+// ── Правила агента ───────────────────────────────────────────────────────────
+
+/**
+ * In the order the model reads them — categories in the prompt's own sequence, then
+ * position inside each. Owner only on the server; every route below is.
+ */
+export const listRules = (agentId: string, signal?: AbortSignal) =>
+  request<AgentRule[]>(`/agents/${agentId}/rules`, { signal });
+
+/** A new rule joins the end of its category. */
+export const createRule = (agentId: string, body: { category: RuleCategory; text: string }) =>
+  request<AgentRule>(`/agents/${agentId}/rules`, { method: 'POST', body });
+
+export const updateRule = (
+  agentId: string,
+  ruleId: string,
+  body: { category?: RuleCategory; text?: string; enabled?: boolean; position?: number },
+) => request<AgentRule>(`/agents/${agentId}/rules/${ruleId}`, { method: 'PATCH', body });
+
+export const deleteRule = (agentId: string, ruleId: string) =>
+  request<{ ok: true }>(`/agents/${agentId}/rules/${ruleId}`, { method: 'DELETE' });
+
+// ── Коуч ──────────────────────────────────────────────────────────────────────
+
+export const listCoachMessages = (agentId: string, signal?: AbortSignal) =>
+  request<CoachMessage[]>(`/agents/${agentId}/coach/messages`, { signal });
+
+/**
+ * What a coaching turn answers: the model's own line, a possible proposal, and a warning
+ * when the fact check turned a priced rule into a note.
+ *
+ * Not `CoachMessage` — the owner's line this same call writes is not handed back (the
+ * screen already knows what it sent), and the model's row keeps its text under `message`,
+ * not `text`, exactly as `server/src/api/coach.ts`'s `POST` route answers it.
+ */
+export interface CoachReply {
+  id: string;
+  message: string;
+  proposal: CoachProposal | null;
+  warning: string | null;
+}
+
+/**
+ * One turn of the coaching chat. Costs money — an OpenRouter call runs on the other end —
+ * and can hold a turn slot as long as a sandbox call, hence the same long deadline.
+ */
+export const sendCoachMessage = (
+  agentId: string,
+  body: { text: string; conversationId?: string; aiReplyId?: string },
+) =>
+  request<CoachReply>(`/agents/${agentId}/coach/messages`, {
+    method: 'POST',
+    body,
+    timeoutMs: LONG_TIMEOUT_MS,
+  });
+
+/** The one answer that costs nothing: turning down a proposal writes no rule and no note. */
+export const rejectCoachMessage = (agentId: string, messageId: string) =>
+  request<CoachMessage>(`/agents/${agentId}/coach/messages/${messageId}/reject`, { method: 'POST' });

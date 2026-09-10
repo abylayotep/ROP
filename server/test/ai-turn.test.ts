@@ -2,11 +2,12 @@ import { randomUUID } from 'node:crypto';
 import { and, asc, eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
+  agentRules,
   agents,
   aiReplies,
   contacts,
   conversations,
-  kbItems,
+  kbChunks,
   leadFields,
   leadValues,
   messages,
@@ -16,6 +17,7 @@ import {
 } from '../src/db/schema.js';
 import type { Db } from '../src/db/client.js';
 import { seedFunnel } from '../src/lib/funnel.js';
+import { deleteNote, saveNote } from '../src/lib/knowledge/notes.js';
 import { createAccountWithOwner } from '../src/lib/provision.js';
 import { encryptSecret } from '../src/lib/secret-box.js';
 import {
@@ -51,6 +53,7 @@ let conversationId: string;
 let cityFieldId: string;
 let budgetFieldId: string;
 let itemId: string;
+let noteId: string;
 
 /** The five keys a model is asked for, with only the ones a test cares about overridden. */
 function answer(over: Record<string, unknown> = {}): string {
@@ -161,9 +164,14 @@ beforeEach(async () => {
     accountId,
     name: 'Сафина',
     aiEnabled: true,
-    instructions: 'Продавай двери. Будь краток.',
     openrouterKey: encryptSecret(OPENROUTER_KEY, key, agentId),
   });
+  // Replaces the old `instructions: 'Продавай двери. Будь краток.'` column value: one rule
+  // per sentence, which is what the owner would actually have typed as two rules.
+  await db.insert(agentRules).values([
+    { agentId, category: 'business', text: 'Продавай двери.', position: 0 },
+    { agentId, category: 'tone', text: 'Будь краток.', position: 0 },
+  ]);
   await seedFunnel(db, agentId);
 
   const fields = await db
@@ -176,16 +184,16 @@ beforeEach(async () => {
   cityFieldId = fields[0]!.id;
   budgetFieldId = fields[1]!.id;
 
-  const [item] = await db
-    .insert(kbItems)
-    .values({
-      agentId,
-      kind: 'product',
-      title: 'Доставка',
-      content: 'Доставка по Алматы — 1500 ₸, от 20 000 ₸ бесплатно.',
-      })
-    .returning();
-  itemId = item!.id;
+  // One note, one lead section with no heading: the chunk it produces carries the note's own
+  // title, so the fixture reads exactly as the flat `kbItems` row it replaces did.
+  const note = await saveNote(db, {
+    agentId,
+    path: 'Доставка',
+    body: '---\nkind: product\n---\nДоставка по Алматы — 1500 ₸, от 20 000 ₸ бесплатно.',
+  });
+  noteId = note.id;
+  const [chunk] = await db.select().from(kbChunks).where(eq(kbChunks.noteId, note.id));
+  itemId = chunk!.id;
 
   const [number] = await db
     .insert(whatsappNumbers)
@@ -423,6 +431,27 @@ describe('a turn that answers', () => {
     expect(result.usedItemIds).toEqual([itemId]);
     const [log] = await replyLog();
     expect(log?.usedItemIds).toEqual([itemId]);
+  });
+
+  it('records the sections an answer was built from', async () => {
+    // A section is a chunk of its own note, so the id a reply cites is `kb_chunks.id` — not
+    // an id invented for the occasion, and not the note's own id, which no reply ever names.
+    const note = await saveNote(db, {
+      agentId,
+      path: 'Доставка/Астана',
+      body: '## По городу\nДоставка по Астане — 2500 ₸.',
+    });
+    const [chunk] = await db.select().from(kbChunks).where(eq(kbChunks.noteId, note.id));
+    const model = fakeModel(
+      answer({ reply: 'Доставка по Астане — 2500 ₸.', usedItemIds: [chunk!.id] }),
+    );
+
+    const result = await turn(model);
+
+    expect(result.outcome).toBe('sent');
+    expect(result.usedItemIds).toEqual([chunk!.id]);
+    const [log] = await replyLog();
+    expect(log?.usedItemIds).toEqual([chunk!.id]);
   });
 });
 
@@ -728,7 +757,9 @@ describe('handing off', () => {
   });
 
   it('hands off with no price in the reply when the knowledge base found nothing', async () => {
-    await db.delete(kbItems).where(eq(kbItems.agentId, agentId));
+    // Only `saveNote`/`deleteNote` may touch `kb_chunks`, so an empty knowledge base is a
+    // deleted note rather than a row deleted out from under it.
+    await deleteNote(db, agentId, noteId);
     const model = fakeModel(
       answer({
         reply: 'Уточню у коллеги и вернусь с ответом.',
@@ -1157,10 +1188,12 @@ describe('a number nothing the agent read contains', () => {
     // Rule 9 tells the agent it may and should repeat the owner's words, and the guide's own
     // example instructions say «Работаем с 2015 года». A greeting written from the guide must
     // not hand the conversation to a human.
-    await db
-      .update(agents)
-      .set({ instructions: 'Мы ставим двери в Алматы. Работаем с 2015 года.' })
-      .where(eq(agents.id, agentId));
+    await db.insert(agentRules).values({
+      agentId,
+      category: 'business',
+      text: 'Мы ставим двери в Алматы. Работаем с 2015 года.',
+      position: 1,
+    });
     const model = fakeModel(
       answer({ reply: 'Здравствуйте! Мы работаем с 2015 года. Какие двери нужны?' }),
     );

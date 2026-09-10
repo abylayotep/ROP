@@ -17,6 +17,9 @@ import {
 // Type-only, so this stays a leaf module at runtime. `capi_events.payload` holds the exact
 // bytes sent to Meta, and the brand is what stops anything but `serialiseEvent` filling it.
 import type { CapiEventBody } from '../lib/capi/events.js';
+// Type-only, so this stays a leaf module at runtime. `coach_messages.proposal` holds what the
+// coach suggested, and the brand is what stops anything but a real proposal filling it.
+import type { CoachProposal } from '../lib/ai/coach.js';
 
 /**
  * Tenancy plus authentication, plus WhatsApp: connected numbers, contacts,
@@ -105,10 +108,8 @@ export const agents = pgTable(
     // numeric, not real: a temperature read back as a string cannot drift through a float,
     // and it is written into a request body as text anyway.
     temperature: numeric('temperature', { precision: 3, scale: 2 }).notNull().default('0.30'),
-    // What the owner wrote about how their business sells. The whole of the agent's character.
-    instructions: text('instructions').notNull().default(''),
     // 'auto' answers in the language the customer wrote in. Anything else is a language name
-    // the instructions will carry verbatim.
+    // the prompt carries verbatim.
     replyLanguage: text('reply_language').notNull().default('auto'),
     // Encrypted with the credentials key, the same way a WhatsApp token is. Never selected
     // into an API response.
@@ -446,8 +447,8 @@ const tsvector = customType<{ data: string; notNull: true }>({
 /**
  * An import: a block of text someone pasted, or a page we fetched.
  *
- * It exists so that a reimport can replace what it made. An item written by hand has no
- * source, which is why `kb_items.source_id` is nullable.
+ * It exists so that a reimport can replace what it made. A note written by hand has no
+ * source, which is why `kb_notes.source_id` is nullable.
  */
 export const kbSources = pgTable(
   'kb_sources',
@@ -474,40 +475,78 @@ export const kbSources = pgTable(
 );
 
 /**
- * One retrievable answer.
- *
- * A hand-written fact and a chunk of an imported page are the same thing to the agent, so
- * they are the same row. Two tables would mean two search paths and two ways to be stale.
+ * One note: what a person writes and reads. `path` is its identity — «Товары/Двери входные» —
+ * and folders are the segments before the last slash rather than a table, exactly as a folder
+ * in a vault exists because a file is in it.
  */
-export const kbItems = pgTable(
-  'kb_items',
+export const kbNotes = pgTable(
+  'kb_notes',
   {
     id: uuid('id').primaryKey().defaultRandom(),
-    agentId: uuid('agent_id')
-      .notNull()
-      .references(() => agents.id, { onDelete: 'cascade' }),
-    // Set null, not cascade: deleting an import must not delete the corrections someone
-    // made to what it produced.
+    agentId: uuid('agent_id').notNull().references(() => agents.id, { onDelete: 'cascade' }),
+    // Set null, not cascade: deleting an import must not delete the notes it produced.
     sourceId: uuid('source_id').references(() => kbSources.id, { onDelete: 'set null' }),
-    // 'product' | 'qa' | 'procedure' | 'contact' | 'other'
-    kind: text('kind').notNull().default('other'),
+    path: text('path').notNull(),
+    // The last path segment, stored so search can weight it without parsing the path.
     title: text('title').notNull(),
-    content: text('content').notNull(),
-    // True once a person has changed it. A reimport replaces what it made, except these:
-    // a price the owner corrected by hand outranks the page it came from.
+    body: text('body').notNull().default(''),
+    // 'product' | 'qa' | 'procedure' | 'contact' | 'other', read out of the frontmatter.
+    kind: text('kind').notNull().default('other'),
+    tags: text('tags').array().notNull().default(sql`'{}'::text[]`),
+    // True once a person has changed it. A reimport replaces what it made, except these.
     edited: boolean('edited').notNull().default(false),
-    search: tsvector('search')
-      .notNull()
-      .generatedAlwaysAs(
-        sql`setweight(to_tsvector('russian', coalesce(title, '')), 'A') || setweight(to_tsvector('russian', coalesce(content, '')), 'B')`,
-      ),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [
-    index('kb_items_agent_kind_idx').on(t.agentId, t.kind),
-    index('kb_items_search_idx').using('gin', t.search),
-  ],
+  (t) => [unique('kb_notes_agent_path_key').on(t.agentId, t.path),
+          index('kb_notes_agent_updated_idx').on(t.agentId, t.updatedAt)],
+);
+
+/**
+ * One section of a note: the unit search ranks and the agent quotes.
+ *
+ * Derived and disposable. Every save deletes a note's rows here and writes them again, so
+ * nothing but `saveNote` may insert one and nothing may read a note's text out of one.
+ */
+export const kbChunks = pgTable(
+  'kb_chunks',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    agentId: uuid('agent_id').notNull().references(() => agents.id, { onDelete: 'cascade' }),
+    noteId: uuid('note_id').notNull().references(() => kbNotes.id, { onDelete: 'cascade' }),
+    ordinal: integer('ordinal').notNull(),
+    heading: text('heading').notNull().default(''),
+    // «Заметка › Раздел», or the note title for the lead section. Stored, not composed at
+    // read time: it is what the tsvector weights, and a composed value cannot be indexed.
+    title: text('title').notNull(),
+    content: text('content').notNull(),
+    kind: text('kind').notNull().default('other'),
+    search: tsvector('search').notNull().generatedAlwaysAs(
+      sql`setweight(to_tsvector('russian', coalesce(title, '')), 'A') || setweight(to_tsvector('russian', coalesce(content, '')), 'B')`,
+    ),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('kb_chunks_agent_kind_idx').on(t.agentId, t.kind),
+          index('kb_chunks_search_idx').using('gin', t.search),
+          index('kb_chunks_note_ordinal_idx').on(t.noteId, t.ordinal)],
+);
+
+/**
+ * One `[[link]]`. `toNoteId` is null while the target does not exist: a link written before
+ * its note is a broken link the vault shows as one, not a reason to refuse the text.
+ */
+export const kbLinks = pgTable(
+  'kb_links',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    agentId: uuid('agent_id').notNull().references(() => agents.id, { onDelete: 'cascade' }),
+    fromNoteId: uuid('from_note_id').notNull().references(() => kbNotes.id, { onDelete: 'cascade' }),
+    toNoteId: uuid('to_note_id').references(() => kbNotes.id, { onDelete: 'set null' }),
+    target: text('target').notNull(),
+  },
+  (t) => [index('kb_links_agent_target_idx').on(t.agentId, t.toNoteId),
+          index('kb_links_from_idx').on(t.fromNoteId)],
 );
 
 /**
@@ -541,11 +580,14 @@ export const aiReplies = pgTable(
     outcome: text('outcome').notNull(),
     // Why it ended that way, when it was not 'sent'. Never carries a key.
     detail: text('detail'),
-    // The knowledge records the reply was built from, so a wrong answer leads to the record
-    // that produced it.
+    // The knowledge chunks — sections of a note, since the vault replaced flat records — the
+    // reply was built from, so a wrong answer leads to the section that produced it.
+    // The column keeps the name `used_item_ids` rather than being renamed to match: it reads
+    // fine either way ("the knowledge items a reply used"), and a rename would buy nothing
+    // behavioural while touching every reader of this table, statistics included.
     // Typed at the column rather than cast at every read: the only thing that ever goes in
-    // here is a list of knowledge item ids, and an `unknown` would make each caller assert
-    // that separately.
+    // here is a list of chunk ids, and an `unknown` would make each caller assert that
+    // separately.
     usedItemIds: jsonb('used_item_ids').$type<string[]>().notNull().default([]),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -658,4 +700,74 @@ export const capiEvents = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index('capi_events_status_created_idx').on(t.status, t.createdAt)],
+);
+
+/**
+ * One rule the agent follows: how to speak, what to ask, what never to do, what we are.
+ *
+ * A row rather than a paragraph in a text field, because a rule has to be switchable and
+ * orderable on its own — an owner testing whether a sentence caused a bad answer turns that
+ * sentence off, and a wall of text has no off switch.
+ */
+export const agentRules = pgTable(
+  'agent_rules',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    agentId: uuid('agent_id').notNull().references(() => agents.id, { onDelete: 'cascade' }),
+    // 'business' | 'tone' | 'order' | 'forbid'. Four, because the prompt groups by them and a
+    // free-form label would drift into forty groups nobody reads.
+    category: text('category').notNull(),
+    text: text('text').notNull(),
+    enabled: boolean('enabled').notNull().default(true),
+    // 'manual' | 'coach' — what the owner wrote against what they approved.
+    origin: text('origin').notNull().default('manual'),
+    // Order inside a category. The prompt follows it, so a reordered list reorders the rules
+    // the model reads.
+    position: integer('position').notNull().default(0),
+    // Meant to be set when the owner insists on a rule the fact check wanted to be a note —
+    // shown beside the rule, because a number in instructions is a number no record backs.
+    // No writer exists yet: `POST /rules` (api/rules.ts) does not accept this field, and the
+    // spec's «Всё равно правилом» escape hatch was never built (the fact check discards a
+    // rule's category the moment it rewrites the proposal into a note, so there is nothing
+    // for that button to keep). A later plan that actually builds the escape hatch is what
+    // gives this column its writer; the column stays so that plan does not also need a
+    // migration.
+    warning: text('warning'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('agent_rules_agent_category_idx').on(t.agentId, t.category, t.position)],
+);
+
+/**
+ * One turn of the coaching conversation.
+ *
+ * `proposal` is what the model suggests and nothing more: this table is the only thing the
+ * coach routes write, and a proposal reaches the store only through a draft.
+ */
+export const coachMessages = pgTable(
+  'coach_messages',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    agentId: uuid('agent_id').notNull().references(() => agents.id, { onDelete: 'cascade' }),
+    // 'owner' | 'model'
+    role: text('role').notNull(),
+    text: text('text').notNull(),
+    // A `CoachProposal`, or null on the owner's own lines and on a plain reply.
+    proposal: jsonb('proposal').$type<CoachProposal>(),
+    // Why the fact check rewrote a rule proposal into a note, when it did. Null on the
+    // owner's own lines, on a plain reply, and on a proposal the check left alone. Stored
+    // rather than returned only on the POST response: a reload of the coaching chat has to
+    // show the same explanation the owner saw the moment the card appeared, not lose it the
+    // instant they leave the screen.
+    warning: text('warning'),
+    // 'pending' | 'drafted' | 'rejected'
+    status: text('status').notNull().default('pending'),
+    // The dialog this coaching started from, and the turn inside it, so the model reads what
+    // the agent actually answered rather than what the owner remembers of it.
+    conversationId: uuid('conversation_id').references(() => conversations.id, { onDelete: 'set null' }),
+    aiReplyId: uuid('ai_reply_id').references(() => aiReplies.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('coach_messages_agent_created_idx').on(t.agentId, t.createdAt)],
 );

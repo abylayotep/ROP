@@ -106,7 +106,6 @@ beforeEach(async () => {
     accountId,
     name: 'Сафина',
     aiEnabled: true,
-    instructions: 'Продавай двери. Будь краток.',
     openrouterKey: encryptSecret(OPENROUTER_KEY, key, agentId),
   });
   await seedFunnel(db, agentId);

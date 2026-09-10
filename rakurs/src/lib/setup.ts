@@ -120,11 +120,11 @@ export function funnelStatus(facts: Pick<SetupFacts, 'stages' | 'leadFields'>): 
 
 /** База знаний: агенту нечем отвечать, пока в ней пусто. */
 export function knowledgeStatus(items: number): SetupStatus {
-  if (items === 0) return { state: 'todo', note: 'Ни одной записи' };
+  if (items === 0) return { state: 'todo', note: 'Ни одной заметки' };
   if (items < 5) {
-    return { state: 'partial', note: `Записей ${items} — на большинство вопросов ответить нечем` };
+    return { state: 'partial', note: `Заметок ${items} — на большинство вопросов ответить нечем` };
   }
-  return { state: 'done', note: `Записей ${items}` };
+  return { state: 'done', note: `Заметок ${items}` };
 }
 
 /**

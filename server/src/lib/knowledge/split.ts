@@ -15,8 +15,11 @@ export interface SplitPart {
  * surrogate — which is not valid UTF-8, so it arrives as `�` if it arrives at all. The
  * budget is still counted in UTF-16 units, because that is what the column and the route's
  * `max()` both measure.
+ *
+ * Exported for `notes.ts`'s `chunkTitle`, which needs the same clamp-then-append order: pass
+ * `TITLE_MAX - suffix.length` as `max` so a later-appended `" (n)"` never gets truncated away.
  */
-function clampTitle(line: string, max: number = TITLE_MAX): string {
+export function clampTitle(line: string, max: number = TITLE_MAX): string {
   if (line.length <= max) return line;
 
   let kept = '';
@@ -49,8 +52,13 @@ function cutAt(window: string): number {
   return candidates.find((at) => at > CONTENT_MAX / 2) ?? CONTENT_MAX;
 }
 
-/** Cuts a body too long for its column into pieces, each one cut where it costs least. */
-function cut(content: string): string[] {
+/**
+ * Cuts a body too long for its column into pieces, each one cut where it costs least.
+ *
+ * Shared with the note splitter (`note.ts`): a note section is cut on the same rule as a
+ * record's content, so a price list reads the same whether it lives in a note or a record.
+ */
+export function splitLongText(content: string): string[] {
   if (content.length <= CONTENT_MAX) return [content];
 
   const pieces: string[] = [];
@@ -66,7 +74,7 @@ function cut(content: string): string[] {
 
 /** One part per piece, numbered when there is more than one so a hit still reads sensibly. */
 function toParts(title: string, content: string): SplitPart[] {
-  const pieces = cut(content);
+  const pieces = splitLongText(content);
   if (pieces.length === 1) return [{ title: clampTitle(title), content: pieces[0]! }];
   return pieces.map((piece, index) => {
     // The number is appended after the clamp, not clamped with it: a title that already
@@ -112,39 +120,4 @@ export function splitBlocks(text: string): SplitPart[] {
       // fact, and refusing it would make an owner pad their text to satisfy us.
       return toParts(first.trim(), body === '' ? first.trim() : body);
     });
-}
-
-/**
- * A page's text becomes items: a markdown heading starts one, the text under it is the body.
- *
- * A heading with nothing under it is dropped — that is a navigation label that survived the
- * strip, not a fact. A page with no headings is one item, because the alternative is
- * throwing away everything the owner asked us to read.
- */
-export function splitByHeadings(text: string): SplitPart[] {
-  const lines = normalise(text).split('\n');
-  const parts: SplitPart[] = [];
-
-  let title: string | null = null;
-  let buffer: string[] = [];
-
-  const flush = () => {
-    const content = buffer.join('\n').trim();
-    buffer = [];
-    if (content === '') return;
-    parts.push(...toParts(title ?? content.split('\n')[0]!.trim(), content));
-  };
-
-  for (const line of lines) {
-    const heading = /^#{1,6}\s+(.*\S)\s*$/.exec(line);
-    if (heading) {
-      flush();
-      title = heading[1]!;
-      continue;
-    }
-    buffer.push(line);
-  }
-  flush();
-
-  return parts;
 }

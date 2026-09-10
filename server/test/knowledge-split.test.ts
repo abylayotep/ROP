@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { splitBlocks, splitByHeadings } from '../src/lib/knowledge/split.js';
+import { splitBlocks } from '../src/lib/knowledge/split.js';
 
 describe('splitBlocks', () => {
   it('splits on a blank line and takes the first line as the title', () => {
@@ -97,60 +97,5 @@ describe('splitBlocks', () => {
     expect(parts.every((part) => part.title.length <= 200)).toBe(true);
     expect(parts[1]!.title.endsWith('(2)')).toBe(true);
     expect(new Set(parts.map((part) => part.title)).size).toBe(parts.length);
-  });
-});
-
-describe('splitByHeadings', () => {
-  it('makes an item per heading', () => {
-    const parts = splitByHeadings([
-      '# Сафина',
-      'Двери и окна в Алматы.',
-      '## Доставка',
-      'По городу бесплатно.',
-      '## Гарантия',
-      'Двенадцать месяцев.',
-    ].join('\n'));
-
-    expect(parts.map((part) => part.title)).toEqual(['Сафина', 'Доставка', 'Гарантия']);
-    expect(parts[1]!.content).toBe('По городу бесплатно.');
-  });
-
-  it('makes one item out of a page with no headings', () => {
-    const parts = splitByHeadings('Просто текст.\nЕщё строка.');
-
-    expect(parts).toHaveLength(1);
-    expect(parts[0]!.content).toContain('Просто текст.');
-  });
-
-  it('drops a heading with nothing under it', () => {
-    // A navigation label that survived the strip is a heading with no text. It is not a fact.
-    const parts = splitByHeadings('# Меню\n## Контакты\nАлматы, Абая 1.');
-
-    expect(parts.map((part) => part.title)).toEqual(['Контакты']);
-  });
-
-  it('returns nothing for empty text', () => {
-    expect(splitByHeadings('   ')).toEqual([]);
-  });
-
-  it('drops control characters before it splits', () => {
-    // Task 4 feeds this a fetched page, which carries the same artefacts a paste does.
-    expect(splitByHeadings('# Контакты\u0000\nАлматы\u0001, Абая 1.')).toEqual([
-      { title: 'Контакты', content: 'Алматы, Абая 1.' },
-    ]);
-  });
-
-  it('prefers a paragraph break to a line break when cutting a long section', () => {
-    // A blank line separates blocks before `splitBlocks` ever cuts, so a section under a
-    // heading is the only body that reaches the cutter with a paragraph break inside it.
-    // Both breaks are in the window and past the halfway mark; the paragraph break is the
-    // cheaper cut, so it wins even though the line break is later.
-    const parts = splitByHeadings(
-      `# Прайс\n${'а'.repeat(5000)}\n\nВторой абзац.\n${'б'.repeat(4000)}`,
-    );
-
-    expect(parts).toHaveLength(2);
-    expect(parts[0]!.content).toBe('а'.repeat(5000));
-    expect(parts[1]!.content.startsWith('Второй абзац.')).toBe(true);
   });
 });

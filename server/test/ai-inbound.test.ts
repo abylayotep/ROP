@@ -17,11 +17,12 @@ import { SANDBOX_TURNS, sandboxTurns } from '../src/api/ai.js';
 import { buildServer } from '../src/api/server.js';
 import type { Db } from '../src/db/client.js';
 import {
+  agentRules,
   agents,
   aiReplies,
   contacts,
   conversations,
-  kbItems,
+  kbChunks,
   leadFields,
   leadValues,
   messages,
@@ -33,6 +34,7 @@ import {
 import { ModelError, type Completion, type ModelClient } from '../src/lib/ai/openrouter.js';
 import { keyAad } from '../src/lib/ai/turn.js';
 import { seedFunnel } from '../src/lib/funnel.js';
+import { saveNote } from '../src/lib/knowledge/notes.js';
 import { addMember, createAccountWithOwner } from '../src/lib/provision.js';
 import { decryptSecret, encryptSecret } from '../src/lib/secret-box.js';
 import { processPendingEvents, type InboundDeps } from '../src/lib/whatsapp/inbound.js';
@@ -257,9 +259,14 @@ beforeEach(async () => {
     accountId,
     name: 'Сафина',
     aiEnabled: true,
-    instructions: 'Продавай двери. Будь краток.',
     openrouterKey: encryptSecret(OPENROUTER_KEY, key, keyAad(agentId)),
   });
+  // Replaces the old `instructions: 'Продавай двери. Будь краток.'` column value: one rule
+  // per sentence, which is what the owner would actually have typed as two rules.
+  await db.insert(agentRules).values([
+    { agentId, category: 'business', text: 'Продавай двери.', position: 0 },
+    { agentId, category: 'tone', text: 'Будь краток.', position: 0 },
+  ]);
   await seedFunnel(db, agentId);
 
   const [field] = await db
@@ -268,16 +275,15 @@ beforeEach(async () => {
     .returning();
   cityFieldId = field!.id;
 
-  const [item] = await db
-    .insert(kbItems)
-    .values({
-      agentId,
-      kind: 'product',
-      title: 'Доставка',
-      content: 'Доставка по Алматы — 1500 ₸, от 20 000 ₸ бесплатно.',
-    })
-    .returning();
-  itemId = item!.id;
+  // One note, one lead section with no heading: the chunk it produces carries the note's own
+  // title, so the fixture reads exactly as the flat `kbItems` row it replaces did.
+  const note = await saveNote(db, {
+    agentId,
+    path: 'Доставка',
+    body: '---\nkind: product\n---\nДоставка по Алматы — 1500 ₸, от 20 000 ₸ бесплатно.',
+  });
+  const [chunk] = await db.select().from(kbChunks).where(eq(kbChunks.noteId, note.id));
+  itemId = chunk!.id;
 
   await db.insert(whatsappNumbers).values({
     agentId,
@@ -521,7 +527,6 @@ describe('the settings routes', () => {
       aiEnabled: true,
       model: 'openai/gpt-4o-mini',
       temperature: 0.3,
-      instructions: 'Продавай двери. Будь краток.',
       replyLanguage: 'auto',
       keySet: true,
     });
@@ -535,7 +540,7 @@ describe('the settings routes', () => {
     const read = await app.inject({ method: 'GET', url: settingsUrl(), cookies: asMember });
     expect(read.statusCode).toBe(200);
 
-    expect((await patchSettings({ instructions: 'Иначе' }, asMember)).statusCode).toBe(403);
+    expect((await patchSettings({ aiEnabled: false }, asMember)).statusCode).toBe(403);
   });
 
   it('stores the key sealed against the agent and answers without it', async () => {

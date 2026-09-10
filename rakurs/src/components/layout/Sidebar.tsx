@@ -3,7 +3,8 @@ import { SECTIONS } from '@/lib/sections';
 import { useAgent } from '@/store/agent';
 
 export function Sidebar() {
-  const { agent } = useAgent();
+  const { agent, role } = useAgent();
+  const items = SECTIONS.filter((section) => !section.ownerOnly || role === 'owner');
 
   return (
     <aside
@@ -57,7 +58,7 @@ export function Sidebar() {
       </div>
 
       <nav style={{ display: 'flex', flexDirection: 'column', gap: 2, padding: '0 10px' }}>
-        {SECTIONS.map((section) => (
+        {items.map((section) => (
           <NavLink
             key={section.path}
             to={section.path}

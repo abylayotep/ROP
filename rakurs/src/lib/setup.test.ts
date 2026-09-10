@@ -34,7 +34,6 @@ const ai = (over: Partial<AiSettings> = {}): AiSettings => ({
   aiEnabled: false,
   model: 'openai/gpt-4o-mini',
   temperature: 0.3,
-  instructions: '',
   replyLanguage: 'auto',
   keySet: false,
   ...over,
@@ -94,7 +93,7 @@ describe('funnelStatus и knowledgeStatus', () => {
     expect(funnelStatus({ stages: 0, leadFields: 4 }).state).toBe('todo');
   });
 
-  it('не выдаёт одну запись в базе знаний за наполненную базу', () => {
+  it('не выдаёт одну заметку в базе знаний за наполненную базу', () => {
     expect(knowledgeStatus(0).state).toBe('todo');
     expect(knowledgeStatus(3).state).toBe('partial');
     expect(knowledgeStatus(12).state).toBe('done');

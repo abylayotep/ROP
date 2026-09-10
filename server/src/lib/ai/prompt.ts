@@ -190,8 +190,12 @@ const OUR_TAGS = /<\s*\/?\s*(запись|инструкции)[^>]*>/gi;
  * Four bytes rather than sixteen: this has to be guessed inside one prompt by someone who
  * never sees the result, not survive cryptanalysis, and eight characters repeated on every
  * record is already paid for in tokens.
+ *
+ * Exported so `coach.ts` mints the same shape of token for the transcript it fences, rather
+ * than inventing a second guard scheme that a reviewer has to convince themselves is just as
+ * safe as this one.
  */
-function mintGuard(): string {
+export function mintGuard(): string {
   return randomBytes(4).toString('hex');
 }
 
@@ -356,7 +360,17 @@ function rulesSection(agent: PromptAgent, guard: string): string {
   ].join('\n');
 }
 
-/** The owner's own words, fenced like everything else that is quoted, and followed as rules. */
+/**
+ * The owner's own words, fenced like everything else that is quoted, and followed as rules.
+ *
+ * `agent.instructions` no longer comes from a free-text column: `turn.ts` assembles it from
+ * the owner's `agent_rules` rows (`assembleRules` in `rules.ts`) before this function ever
+ * sees it. Nothing here changes for that — the type stays `string`, and this section still
+ * quotes it exactly the same way. That is deliberate: the number guard in `turn.ts` checks a
+ * price against «the instructions» as one of its three sources, and it has to go on reading
+ * exactly the string the model was shown. Widening this seam to a list of rules would give
+ * the guard a second shape to agree with the prompt on, and the two would eventually drift.
+ */
 function instructionsSection(agent: PromptAgent, guard: string): string {
   const instructions = quoted(agent.instructions);
   if (instructions === '') {

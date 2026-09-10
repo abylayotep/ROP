@@ -47,7 +47,7 @@ export function SetupScreen() {
           api.listConversations(agent.id, signal),
           api.listStages(agent.id, signal),
           api.listLeadFields(agent.id, signal),
-          api.listKbItems(agent.id, {}, signal),
+          api.listKbNotes(agent.id, {}, signal),
           api.getAiSettings(agent.id, signal),
           api.getCapiSettings(agent.id, signal),
         ]);
@@ -118,7 +118,7 @@ const STEPS: StepDef[] = [
   {
     id: 'agent',
     title: 'Проверить и включить ИИ-агента',
-    why: 'Ключ, инструкции, песочница — и только потом ответы живым клиентам.',
+    why: 'Ключ, правила характера в «Обучении», песочница — и только потом ответы живым клиентам.',
     section: { to: '../agent', label: 'Агент' },
   },
   {

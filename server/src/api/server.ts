@@ -14,11 +14,13 @@ import { registerAiRoutes } from './ai.js';
 import { registerAuthRoutes } from './auth.js';
 import { registerBoardRoutes } from './board.js';
 import { registerCapiRoutes } from './capi.js';
+import { registerCoachRoutes } from './coach.js';
 import { registerConversationRoutes } from './conversations.js';
 import { registerKnowledgeRoutes } from './knowledge.js';
 import { registerLeadRoutes } from './leads.js';
 import { registerOrderRoutes } from './orders.js';
 import { requireSession } from './require-session.js';
+import { registerRuleRoutes } from './rules.js';
 import { registerStageRoutes } from './stages.js';
 import { registerStatsRoutes } from './stats.js';
 import { registerWhatsappNumberRoutes } from './whatsapp-numbers.js';
@@ -101,7 +103,11 @@ export function buildServer(env: Env, db: Db, deps: ServerDeps = {}): FastifyIns
     registerBoardRoutes(app, db, guard);
     registerStatsRoutes(app, db, guard);
     registerKnowledgeRoutes(app, db, guard, pageFetcher);
+    registerRuleRoutes(app, db, guard);
     registerAiRoutes(app, db, env, guard, { model, graph });
+    // The coach writes only `coach_messages` — see the file's own comment for why a
+    // proposal never reaches `agent_rules` or `kb_notes` from here.
+    registerCoachRoutes(app, db, env, guard, { model });
     // The same client the drain sends with, so a save is verified against the Meta a
     // report will actually reach.
     registerCapiRoutes(app, db, env, guard, capi);

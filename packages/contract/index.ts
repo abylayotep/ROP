@@ -69,6 +69,12 @@ export interface Message {
   /** Outbound only: sent, delivered, read, failed. */
   status: string | null;
   sentAt: string;
+  /** The `ai_replies` row this message was the agent's output of. Null for an inbound
+   * customer message and for an operator's own line — neither is a reply `coach.ts`'s
+   * `ownReply` would ever resolve — and null for an AI message from before this column
+   * existed. Carried so «Так нельзя» can name the exact turn a wrong answer came from,
+   * rather than the coach guessing the conversation's latest reply. */
+  aiReplyId: string | null;
 }
 
 export interface ConversationSummary {
@@ -229,21 +235,55 @@ export interface Customer {
 }
 
 /* ── База знаний ────────────────────────────────────────────────────────────
- * What the agent answers from. One row is one retrievable answer. */
+ * What the agent answers from: a vault of notes, the sections they split into,
+ * and the links between them. */
 
-export type KbItemKind = 'product' | 'qa' | 'procedure' | 'contact' | 'other';
+export type KbNoteKind = 'product' | 'qa' | 'procedure' | 'contact' | 'other';
 
-export interface KbItem {
+/** A note as a list or a tree shows it: enough to draw a row, not the body. */
+export interface KbNote {
   id: string;
-  kind: KbItemKind;
+  /** «Товары/Двери входные». Folders are the segments before the last slash. */
+  path: string;
   title: string;
-  content: string;
-  /** True once a person has changed it. A reimport keeps these and replaces the rest. */
+  kind: KbNoteKind;
+  tags: string[];
   edited: boolean;
   sourceId: string | null;
-  /** The import this came from, for the screen. Null for a hand-written item. */
   sourceTitle: string | null;
   updatedAt: string;
+}
+
+/** One section of a note: what search ranks and what the agent quotes. */
+export interface KbSection {
+  id: string;
+  noteId: string;
+  /** «Доставка › По городу», so an answer says where in the note to look. */
+  title: string;
+  heading: string;
+  content: string;
+}
+
+export interface KbLinkRef {
+  noteId: string | null;
+  title: string;
+}
+
+/** A note opened: its text, its sections, and what points at it. */
+export interface KbNoteDetail extends KbNote {
+  body: string;
+  sections: KbSection[];
+  /** Notes that link here. */
+  backlinks: KbLinkRef[];
+  /** What this note links to. `noteId` null is a link whose target does not exist. */
+  links: KbLinkRef[];
+}
+
+/** The graph tab. Capped at 500 notes; `truncated` says the cap was hit. */
+export interface KbGraph {
+  notes: { id: string; title: string; path: string }[];
+  links: { from: string; to: string }[];
+  truncated: boolean;
 }
 
 export type KbSourceKind = 'text' | 'page';
@@ -269,18 +309,18 @@ export interface KbSource {
 /** What an import produced, answered by the import routes so the owner sees it at once. */
 export interface KbImport {
   source: KbSource;
-  items: KbItem[];
+  notes: KbNote[];
   /**
    * True when this went onto a source that already existed — «Обновить», or a page address
    * this agent had already imported. The screen words those two outcomes apart: a first
-   * import created its items, an update answers with everything the source holds now.
+   * import created its notes, an update answers with everything the source holds now.
    */
   reimported: boolean;
   /**
-   * How many of `items` a person had edited, which an update keeps untouched.
+   * How many of `notes` a person had edited, which an update keeps untouched.
    *
-   * Answered rather than inferred from `items`, because the screen must say it in words: a
-   * kept item and a fresh one from the same page can now contradict each other, and the only
+   * Answered rather than inferred from `notes`, because the screen must say it in words: a
+   * kept note and a fresh one from the same page can now contradict each other, and the only
    * honest thing to do is name how many records the owner should go and check.
    */
   keptEdited: number;
@@ -300,8 +340,6 @@ export interface AiSettings {
    * nothing is lost by passing it through a float the way an order's sum would be.
    */
   temperature: number;
-  /** What the owner wrote about how their business sells. The agent's whole character. */
-  instructions: string;
   /** 'auto' answers in the customer's own language; anything else names one. */
   replyLanguage: string;
   /** Whether a key is stored. The key itself never leaves the server. */
@@ -313,6 +351,53 @@ export interface AiModel {
   id: string;
   label: string;
   description: string;
+}
+
+/* ── Правила и коуч ──────────────────────────────────────────────────────────
+ * The agent's character used to be one paragraph in `instructions`. It is now a set of
+ * rules the owner writes or approves in a coaching chat — this section names both. */
+
+export type RuleCategory = 'business' | 'tone' | 'order' | 'forbid';
+
+/** One rule the agent follows. The four categories are how the prompt groups them. */
+export interface AgentRule {
+  id: string;
+  category: RuleCategory;
+  text: string;
+  enabled: boolean;
+  /** 'manual' is what the owner typed, 'coach' is what they approved in the chat. */
+  origin: 'manual' | 'coach';
+  position: number;
+  /**
+   * Meant to be set when the owner keeps a rule the fact check wanted to be a note — shown
+   * beside the rule, because a number in instructions is a number no record backs. No writer
+   * exists yet: `POST /rules` does not accept it, and the «Всё равно правилом» escape hatch
+   * this field was meant to back was never built. Kept so the plan that does build it does not
+   * also need to add the field.
+   */
+  warning: string | null;
+  updatedAt: string;
+}
+
+/** What the coach suggests. It writes nothing: a proposal becomes a draft or it is rejected. */
+export type CoachProposal =
+  | { kind: 'rule'; category: RuleCategory; text: string }
+  | { kind: 'rule_edit'; ruleId: string; text?: string; enabled?: boolean }
+  | { kind: 'note'; path: string; body: string }
+  | { kind: 'note_edit'; noteId: string; body: string };
+
+export interface CoachMessage {
+  id: string;
+  role: 'owner' | 'model';
+  text: string;
+  proposal: CoachProposal | null;
+  /** Why the fact check moved a rule into a note, when it did. */
+  warning: string | null;
+  status: 'pending' | 'drafted' | 'rejected';
+  /** Set once the proposal became a draft. The drafts plan fills this in. */
+  draftId: string | null;
+  conversationId: string | null;
+  createdAt: string;
 }
 
 /** A knowledge record an answer was built from, named so the screen can show which. */
@@ -342,7 +427,7 @@ export interface AiTurn {
   /**
    * Why the turn would leave the conversation to a person, or null when it would not. The
    * reason and not a flag: «передал человеку» with no «почему» is the one answer an owner
-   * tuning instructions cannot act on.
+   * writing rules cannot act on.
    */
   handoff: string | null;
   /** 'sent' | 'unrecorded' | 'applied' | 'handoff' | 'failed' | 'skipped'. */

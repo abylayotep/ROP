@@ -16,18 +16,19 @@ import { and, asc, desc, eq, gte, inArray, sql } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { POOL_MAX, type Db } from '../db/client.js';
+import type { Db } from '../db/client.js';
 import {
   agents,
   aiReplies,
   contacts,
   conversations,
-  kbItems,
+  kbChunks,
   leadFields,
   messages,
   stages,
   whatsappNumbers,
 } from '../db/schema.js';
+import { releaseTurnSlot, sandboxTurns, SANDBOX_TURNS, tryTakeTurnSlot } from '../db/turn-cap.js';
 import type { Env } from '../env.js';
 import { MODELS, type ModelClient } from '../lib/ai/openrouter.js';
 import { keyAad, runTurn, type TurnResult } from '../lib/ai/turn.js';
@@ -44,49 +45,20 @@ export interface AiDeps {
   graph: GraphClient;
 }
 
-/** Long enough for a real sales brief, short enough that a paste cannot fill a column. */
-const INSTRUCTIONS_LIMIT = 20_000;
-
 /** What a customer may say to the sandbox. A WhatsApp message is far shorter than this. */
 const SANDBOX_LIMIT = 4_000;
 
-/**
- * Sandbox turns allowed to run at once, across the whole process.
- *
- * A sandbox turn holds a database connection for as long as the model thinks — up to the
- * client's sixty-second deadline — because the transaction it rolls back is what keeps an
- * invented customer out of somebody's inbox. Connections are `POOL_MAX` and shared with every
- * other route, so without a cap a handful of owners clicking «Проверить» empties the pool and
- * the webhook Meta is waiting on queues behind them for a minute.
- *
- * Three is the intent, and the pool is the ceiling: written against `POOL_MAX` so that
- * shrinking the pool cannot silently make this cap the larger of the two.
- *
- * Floored at one, because the ceiling can reach zero. A pool configured at two or less makes
- * `POOL_MAX - 2` zero or negative, and a cap of zero is not a small sandbox — it is a sandbox
- * that answers 429 to every owner, always, for a reason nothing on the screen explains.
- * Better one at a time on a pool that small than none at all.
- *
- * The rate limit does not do this job. Twenty a minute is above the pool size to begin with,
- * and a count per minute says nothing about how many are in flight at one instant.
- */
-export const sandboxTurns = (poolMax: number): number => Math.max(1, Math.min(3, poolMax - 2));
-
-export const SANDBOX_TURNS = sandboxTurns(POOL_MAX);
-
-/**
- * How many are in flight now. Module-level rather than per-server, because what it protects —
- * the connection pool — belongs to the process, and a second `buildServer` in one process
- * would share the pool without sharing a counter.
- */
-let sandboxTurnsInFlight = 0;
+// `SANDBOX_TURNS` and `sandboxTurns` now live in `db/turn-cap.ts`, shared with the coach —
+// re-exported here so nothing that already imports them from this file has to change. See
+// that file's comment for why the cap and the in-flight counter behind it are shared rather
+// than each feature keeping its own.
+export { SANDBOX_TURNS, sandboxTurns };
 
 const settings = z
   .object({
     aiEnabled: z.boolean().optional(),
     model: z.string().trim().optional(),
     temperature: z.number().min(0).max(2).optional(),
-    instructions: z.string().max(INSTRUCTIONS_LIMIT).optional(),
     replyLanguage: z.string().trim().min(1).max(40).optional(),
     // Optional and nullable are different things here: absent leaves the stored key alone,
     // and an explicit null clears it.
@@ -148,7 +120,6 @@ const toApi = (row: typeof agents.$inferSelect): AiSettings => ({
   aiEnabled: row.aiEnabled,
   model: row.model,
   temperature: Number(row.temperature),
-  instructions: row.instructions,
   replyLanguage: row.replyLanguage,
   keySet: row.openrouterKey !== null,
 });
@@ -260,14 +231,14 @@ export function registerAiRoutes(
 
   app.patch(
     '/api/agents/:agentId/ai',
-    // Owner only: the instructions are what the agent says to customers in the business's
-    // name, and the key is what the business pays with.
+    // Owner only: the agent's character now lives in `agent_rules`, behind its own routes,
+    // but the model, the temperature and the key are still set here — and the key is what
+    // the business pays with.
     { preHandler: [guard, ownerOnly] },
     async (req): Promise<AiSettings> => {
       const parsed = settings.safeParse(req.body);
       if (!parsed.success) throw new ApiError(400, 'Не удалось разобрать настройки агента');
-      const { aiEnabled, model, temperature, instructions, replyLanguage, openrouterKey } =
-        parsed.data;
+      const { aiEnabled, model, temperature, replyLanguage, openrouterKey } = parsed.data;
 
       // A list, not free text: an id OpenRouter does not know would be learned about from a
       // customer's silence.
@@ -280,7 +251,6 @@ export function registerAiRoutes(
       if (model !== undefined) changes.model = model;
       // The column is numeric(3,2) and hands back a string; two decimals is all it keeps.
       if (temperature !== undefined) changes.temperature = temperature.toFixed(2);
-      if (instructions !== undefined) changes.instructions = instructions;
       if (replyLanguage !== undefined) changes.replyLanguage = replyLanguage;
       if (openrouterKey !== undefined) {
         changes.openrouterKey =
@@ -400,11 +370,11 @@ export function registerAiRoutes(
       }
 
       // Taken before the turn and given back in a `finally`, so a turn that raises does not
-      // leave the sandbox one slot poorer for the life of the process. See `SANDBOX_TURNS`.
-      if (sandboxTurnsInFlight >= SANDBOX_TURNS) {
+      // leave the shared cap one slot poorer for the life of the process. The slot is taken
+      // from the same counter the coach draws on — see `db/turn-cap.ts`.
+      if (!tryTakeTurnSlot()) {
         throw new ApiError(429, 'Песочница занята. Попробуйте через несколько секунд.');
       }
-      sandboxTurnsInFlight += 1;
 
       let result;
       try {
@@ -415,19 +385,19 @@ export function registerAiRoutes(
           text: parsed.data.text,
         });
       } finally {
-        sandboxTurnsInFlight -= 1;
+        releaseTurnSlot();
       }
 
-      // Ids become names here rather than on the screen: the records and the fields are the
-      // owner's own, and «Прайс на 2026» is what tells them whether the answer used the
-      // right one.
+      // Ids become names here rather than on the screen: the sections and the fields are
+      // the owner's own, and «Прайс на 2026 › Двери» is what tells them whether the answer
+      // used the right one.
       const itemRows =
         result.usedItemIds.length === 0
           ? []
           : await db
-              .select({ id: kbItems.id, title: kbItems.title })
-              .from(kbItems)
-              .where(inArray(kbItems.id, result.usedItemIds));
+              .select({ id: kbChunks.id, title: kbChunks.title })
+              .from(kbChunks)
+              .where(inArray(kbChunks.id, result.usedItemIds));
       const fieldIds = Object.keys(result.fields);
       const fieldRows =
         fieldIds.length === 0

@@ -5,8 +5,9 @@
  * fact out of a rule proposal; both run inside `runCoach` itself. This file is the seam that
  * turns an HTTP request into the `CoachContext` those two need, and the one table this whole
  * feature is allowed to write on the way there: a `coach_messages` row per turn, never
- * `agent_rules`, never `kb_notes` — a proposal only ever reaches those tables through a draft,
- * which belongs to a later plan (`POST …/messages/:id/draft`, not written here).
+ * `agent_rules`, never `kb_notes` — a proposal only ever reaches those tables through a draft.
+ * `POST …/messages/:id/draft`, the route that turns one into a draft, is registered by
+ * `api/drafts.ts` instead — see this file's trailing comment.
  *
  * ## Why the route queries `agent_rules` itself rather than calling `loadRules`
  *
@@ -129,10 +130,10 @@ const toMessage = (row: typeof coachMessages.$inferSelect) => ({
   proposal: row.proposal ?? null,
   warning: row.warning,
   status: row.status as 'pending' | 'drafted' | 'rejected',
-  // `coach_messages` has no `draft_id` column yet — the drafts plan (`…/messages/:id/draft`)
-  // is what adds both the column and its one writer. Until then every row answers the
-  // contract's `draftId: null` honestly: no proposal here has ever become a draft.
-  draftId: null,
+  // `POST …/messages/:id/draft` (`api/drafts.ts`) is the one writer of this column — set in
+  // the same transaction as the draft it makes, so a row reading `status: 'drafted'` always
+  // carries the id of the draft it became.
+  draftId: row.draftId,
   conversationId: row.conversationId,
   createdAt: row.createdAt.toISOString(),
 });
@@ -322,13 +323,20 @@ export function registerCoachRoutes(
           conversationId === null ? Promise.resolve(null) : transcriptFor(db, conversationId),
         ]);
 
-        await db.insert(coachMessages).values({
-          agentId,
-          role: 'owner',
-          text: parsed.data.text,
-          conversationId,
-          aiReplyId: replyId,
-        });
+        // Returns its own `createdAt` — Postgres's clock, stamped right after the store above
+        // was read — so the model row below can carry it as `contextAt`: the instant the
+        // proposal it is about to write was actually written against, not the instant the
+        // model happens to finish answering. See `coach_messages.contextAt`'s own comment.
+        const [ownerRow] = await db
+          .insert(coachMessages)
+          .values({
+            agentId,
+            role: 'owner',
+            text: parsed.data.text,
+            conversationId,
+            aiReplyId: replyId,
+          })
+          .returning({ createdAt: coachMessages.createdAt });
 
         const context: CoachContext = {
           company: req.agent!.name,
@@ -353,6 +361,7 @@ export function registerCoachRoutes(
             warning: result.warning,
             conversationId,
             aiReplyId: replyId,
+            contextAt: ownerRow!.createdAt,
           })
           .returning();
 
@@ -387,7 +396,9 @@ export function registerCoachRoutes(
     },
   );
 
-  // POST /api/agents/:agentId/coach/messages/:id/draft belongs to a later plan: it is what
-  // turns a checked proposal into an `agent_rules` or `kb_notes` row. Not written here — see
-  // the file comment.
+  // POST /api/agents/:agentId/coach/messages/:id/draft is what turns a checked proposal into
+  // a draft — registered by `api/drafts.ts`, not here: turning a proposal into a `DraftOp` is
+  // that file's whole job, the same mapping a manually-built draft goes through. A proposal
+  // still never reaches `agent_rules` or `kb_notes` directly from this route — only through
+  // the draft it becomes, and later, an apply this plan does not yet write.
 }

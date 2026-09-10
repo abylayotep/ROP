@@ -4,6 +4,7 @@ import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
 import { agents } from '../db/schema.js';
+import { bumpConfigVersion } from '../lib/drafts/version.js';
 import { ApiError } from '../lib/errors.js';
 import { seedFunnel } from '../lib/funnel.js';
 import { requireAccount } from './require-account.js';
@@ -90,12 +91,24 @@ export function registerAgentRoutes(
       // nothing is not an error — answer with the row as it stands.
       if (Object.keys(parsed.data).length === 0) return toApi(req.agent!);
 
-      const [row] = await db
-        .update(agents)
-        .set(parsed.data)
-        .where(eq(agents.id, req.agent!.id))
-        .returning();
-      return toApi(row!);
+      // `name` and `timezone` are quoted verbatim into `roleSection` (`prompt.ts`) — «Ты —
+      // продавец-консультант компании «{name}»» and «Часовой пояс компании: {timezone}» —
+      // so either one changes what the agent would say for the same input and has to bump
+      // `configVersion` the same way a knowledge note or a rule does. `description` never
+      // reaches the prompt (`PromptAgent` has no field for it), so it deliberately does not
+      // bump. Bumped inside the same transaction as the write it describes, as `knowledge.ts`
+      // and `rules.ts` do.
+      const bumps = parsed.data.name !== undefined || parsed.data.timezone !== undefined;
+      const row = await db.transaction(async (tx) => {
+        const [updated] = await tx
+          .update(agents)
+          .set(parsed.data)
+          .where(eq(agents.id, req.agent!.id))
+          .returning();
+        if (bumps) await bumpConfigVersion(tx as unknown as Db, req.agent!.id);
+        return updated!;
+      });
+      return toApi(row);
     },
   );
 }

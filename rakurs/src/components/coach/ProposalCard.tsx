@@ -1,4 +1,5 @@
 import { useMemo, useState, type CSSProperties } from 'react';
+import { useNavigate } from 'react-router-dom';
 import * as api from '@/api';
 import { useToast } from '@/components/ui/Toast';
 import { ruleCategoryPhrase } from '@/lib/rule-categories';
@@ -7,12 +8,10 @@ import type { AgentRule, CoachMessage, CoachProposal } from '@/types';
 /**
  * What a coaching turn proposed, and the two answers an owner may give it today.
  *
- * The coach writes nothing on its own — `server/src/api/coach.ts`'s own file comment is
- * explicit that a proposal reaches `agent_rules` or `kb_notes` only through a draft, and
- * `POST …/messages/:id/draft` is a later plan. So «В черновик» is drawn and wired to that
- * route's shape already, but disabled: the button exists so the coaching flow reads as
- * finished rather than half-built, and its `title` says exactly what is missing and when it
- * arrives. «Отклонить» needs nothing new — it is live today.
+ * `POST …/messages/:id/draft` (`server/src/api/coach.ts` and `server/src/api/drafts.ts`) is
+ * what turns a proposal into a draft, and «В черновик» calls it and sends the owner straight
+ * to `DraftScreen` to read «было — стало» and decide. «Отклонить» needs nothing beyond it —
+ * it was live before this and stays exactly as it was.
  */
 
 const control: CSSProperties = {
@@ -28,8 +27,6 @@ const control: CSSProperties = {
   outline: 'none',
   resize: 'vertical',
 };
-
-const DRAFT_TITLE = 'Черновики появятся на следующем шаге';
 
 /**
  * The one-liner a card shows above its text, and the text itself.
@@ -81,11 +78,13 @@ export function ProposalCard({
   onRejected: (updated: CoachMessage) => void;
 }) {
   const toast = useToast();
+  const navigate = useNavigate();
   const proposal = message.proposal!;
   const described = useMemo(() => describeProposal(proposal, rules), [proposal, rules]);
 
   const [text, setText] = useState(described.body);
   const [rejecting, setRejecting] = useState(false);
+  const [drafting, setDrafting] = useState(false);
 
   const decided = message.status !== 'pending';
 
@@ -98,6 +97,26 @@ export function ProposalCard({
       toast.fail(error);
     } finally {
       setRejecting(false);
+    }
+  }
+
+  /**
+   * `text` in the box above is not sent — the coach's proposal writes exactly the note or
+   * rule text it already produced, and this route (`server/src/api/drafts.ts`'s own file
+   * comment, "Mapping a `CoachProposal` onto a `DraftOp`") maps that proposal one to one, with
+   * no room for the owner's own edit of the field to ride along. Polishing the wording before
+   * it becomes a real rule or note stays what «+ Добавить правило» and the note editor are
+   * for, same as it always was — the box here is a preview, not a draft of its own.
+   */
+  async function toDraft() {
+    if (drafting || decided) return;
+    setDrafting(true);
+    try {
+      const draft = await api.draftCoachMessage(agentId, message.id);
+      navigate(`../drafts/${draft.id}`);
+    } catch (error) {
+      toast.fail(error);
+      setDrafting(false);
     }
   }
 
@@ -120,14 +139,21 @@ export function ProposalCard({
       />
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <button type="button" className="btn-sm" disabled title={DRAFT_TITLE}>
-          В черновик
+        <button type="button" className="btn-sm" disabled={drafting || decided} onClick={() => void toDraft()}>
+          {drafting ? 'Открываем…' : 'В черновик'}
         </button>
         <button type="button" className="btn-sm" disabled={rejecting || decided} onClick={reject}>
           {message.status === 'rejected' ? 'Отклонено' : rejecting ? 'Отклоняем…' : 'Отклонить'}
         </button>
-        {message.status === 'drafted' && (
-          <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>В черновиках</span>
+        {message.status === 'drafted' && message.draftId && (
+          <button
+            type="button"
+            className="btn-link"
+            style={{ fontSize: 11, color: 'var(--text-dim)' }}
+            onClick={() => navigate(`../drafts/${message.draftId}`)}
+          >
+            В черновиках →
+          </button>
         )}
       </div>
     </div>

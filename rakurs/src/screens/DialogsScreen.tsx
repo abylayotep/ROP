@@ -286,6 +286,29 @@ function Bubble({
   const mine = message.direction === 'out';
   const { role } = useAgent();
   const navigate = useNavigate();
+  const toast = useToast();
+  const [addingCase, setAddingCase] = useState(false);
+
+  /**
+   * Copies the conversation's customer side into a saved test case — the same route
+   * `test-cases.ts`'s own file comment describes, and the same owner-only standing «Так
+   * нельзя» already has. Placed on the same message rather than once per conversation: the
+   * two buttons answer the same question — «this dialog is worth learning from» — one by
+   * teaching the agent directly, the other by keeping the dialog as a check a future draft
+   * has to pass.
+   */
+  async function addCase() {
+    if (addingCase) return;
+    setAddingCase(true);
+    try {
+      await api.createCaseFromDialog(agentId, conversationId);
+      toast.ok('Диалог сохранён как проверка');
+    } catch (error) {
+      toast.fail(error);
+    } finally {
+      setAddingCase(false);
+    }
+  }
 
   return (
     <div style={bubble(mine)}>
@@ -314,22 +337,40 @@ function Bubble({
           {message.status ? ` · ${message.status}` : ''}
         </div>
         {canCoachFrom(message, role) && (
-          <button
-            type="button"
-            onClick={() => navigate(coachLink(conversationId, message.aiReplyId))}
-            style={{
-              marginLeft: 'auto',
-              fontSize: 10.5,
-              color: 'var(--danger)',
-              background: 'none',
-              border: 0,
-              padding: 0,
-              cursor: 'pointer',
-              textDecoration: 'underline',
-            }}
-          >
-            Так нельзя
-          </button>
+          <>
+            <button
+              type="button"
+              onClick={() => navigate(coachLink(conversationId, message.aiReplyId))}
+              style={{
+                marginLeft: 'auto',
+                fontSize: 10.5,
+                color: 'var(--danger)',
+                background: 'none',
+                border: 0,
+                padding: 0,
+                cursor: 'pointer',
+                textDecoration: 'underline',
+              }}
+            >
+              Так нельзя
+            </button>
+            <button
+              type="button"
+              disabled={addingCase}
+              onClick={() => void addCase()}
+              style={{
+                fontSize: 10.5,
+                color: 'var(--text-dim)',
+                background: 'none',
+                border: 0,
+                padding: 0,
+                cursor: 'pointer',
+                textDecoration: 'underline',
+              }}
+            >
+              {addingCase ? 'Добавляем…' : 'В проверки'}
+            </button>
+          </>
         )}
       </div>
     </div>

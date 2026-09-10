@@ -1,0 +1,1242 @@
+/**
+ * Drafts, the cases they are proven against, and the runs that prove them.
+ *
+ * A draft is a promise: what was tested is what would land. Nothing here ever writes
+ * `agent_rules` or `kb_notes` for real — every draft op a run applies is applied inside
+ * `replayCase`'s own transaction, which is always rolled back. The one write this file makes
+ * to the live store is bookkeeping: `kb_drafts`, `test_runs`, `test_results`, and the
+ * `coach_messages` row a proposal came from.
+ *
+ * `POST …/coach/messages/:id/draft` is the route `api/coach.ts` left for later — see that
+ * file's trailing comment. It lives here, not there, because turning a proposal into a draft
+ * is this file's whole job: the four `CoachProposal` kinds each become exactly one `DraftOp`,
+ * the same op a manually-built draft or a future generation feature would carry.
+ *
+ * ## «Было» and «стало», and what each costs
+ *
+ * «Стало» — the draft's own ops applied — is paid for every case, every run: that half of the
+ * table is the whole point of asking. «Было» is the agent as it stands today, and it is
+ * reusable: `baselineResults` (`lib/drafts/baseline.ts`) finds the newest `done` run with no
+ * draft at the same `config_version` and model, and a case with one costs nothing here. A case
+ * without one is run once, empty ops, in the same pass — and that result is written into its
+ * own `test_runs` row (`draft_id` null) so the *next* draft's run finds it and pays nothing
+ * either. Getting this backwards either wastes the owner's balance re-running an unchanged
+ * agent, or — worse — skips a needed baseline call and compares the new draft against a stale
+ * «было» from a different config version, which is not what the run claims to show.
+ *
+ * A disabled case stays named in a request's `caseIds` but is never run — a stale list from a
+ * tab left open must not go on paying for a case the owner has since switched off. `enabled` is
+ * read alongside each case row and filtered before anything is spent, not merely before it is
+ * shown.
+ *
+ * ## The run is asynchronous
+ *
+ * `POST …/drafts/:draftId/runs` answers the instant a run is admitted — before a single case
+ * has been replayed, not once every case has a result. `deploy/nginx.conf` gives every request
+ * 120 seconds before it gives up on it (`proxy_read_timeout`), and twenty cases at up to two
+ * sides each, up to two model attempts a call, each attempt bounded at the model's own sixty
+ * seconds, blows past that in the ordinary case, not only a pathological one — the owner would
+ * watch their own request die with a 504 while the run it started keeps spending their balance
+ * behind a response that never arrives, never even learning the run's own id to look it up by.
+ * `test_runs.status` already had `'running'` as a value before this fix; that value only means
+ * something if the request that inserted the row can answer before the row leaves it.
+ *
+ * So the route still does exactly the validating, refusing and bookkeeping it always did — same
+ * order, same refusals, same two rows inserted — and then, instead of awaiting the replay loop
+ * before answering, hands that loop to `setImmediate` and answers right away with the run's id
+ * and `status: 'running'`. `GET …/runs/:runId` (below) is how the rest is read: it answers with
+ * whatever `test_results` rows exist yet, so a client polling it watches the table fill, the
+ * same way `api/whatsapp-webhook.ts` already answers Meta before draining the CAPI queue behind
+ * the response — see that file's own comment for the pattern this follows.
+ *
+ * Three things change shape once nothing is waiting on the HTTP response any more:
+ *
+ * - **The `runningDrafts` lock** (below) used to be released in a `finally` wrapped around the
+ *   whole handler. It still is, but "the whole handler" now means the detached replay too — the
+ *   lock is only ever dropped once that finishes, in *its own* `finally`, not when the response
+ *   goes out. A second run of the same draft is refused with 409 for exactly as long as the
+ *   first one is actually still working, not merely for as long as its request took.
+ * - **A slot wait can no longer afford to give up quickly.** `takeTurnSlotWaiting` used to
+ *   default to one model timeout on the premise that whoever held a slot could only run that
+ *   long — false even before this change (see `db/turn-cap.ts`'s own comment) and pointless to
+ *   keep bounded now that giving up doesn't spare an HTTP client from waiting: the detached
+ *   replay calls it with no bound at all, so it simply waits for as long as the run itself is
+ *   still alive.
+ * - **An error has nowhere left to answer to.** A `MissingDraftRowError` (see "A deleted note
+ *   or rule" below) used to become a synchronous Russian 409, the response itself. It cannot any
+ *   more — the response already went out — so every error the loop throws, this one included,
+ *   is caught in one place: the run's own `test_runs` rows are marked the way they always were
+ *   on failure (see "Answering as the table fills" below), and the error is logged
+ *   (`app.log.error`) rather than thrown further, the same shape `whatsapp-webhook.ts` already
+ *   uses for its own detached work. The owner's signal is the run's `status`, not a message
+ *   naming what went wrong — `test_runs` has no column for that, and adding one to recover
+ *   detail this feature has never promised felt like more schema than any of this asked for;
+ *   the exact reason is one `app.log.error` line away for whoever is debugging it.
+ *
+ * ## A restart, and the `running` row it leaves behind
+ *
+ * A run's own loop lives only in the memory of the process replaying it — nothing about it is
+ * written anywhere durable enough for a different process, or this one restarted, to pick back
+ * up. If the process dies mid-run, its `test_runs` row is left reading `'running'` forever, and
+ * the in-memory `runningDrafts` lock that would have refused a second run of the same draft is
+ * gone the moment the process is: nothing left standing says the row is a lie.
+ * `reconcileOrphanedRuns` below sweeps every row still `'running'` to `'failed'` — called once
+ * from `index.ts`, before `app.listen()`, early enough that nothing legitimately `running` can
+ * exist yet to be caught by mistake (see that function's own comment for why it lives there and
+ * not on a Fastify hook every test's own `buildServer` would trip too). Nothing already paid for is
+ * lost by marking it so: `baselineResults` only ever reuses a run with `status = 'done'`, so a
+ * `running` row was never going to be reused either way, and the owner's screen gets an honest
+ * `'failed'` instead of a progress bar that was never going to move again.
+ *
+ * ## Refusing a run before it costs anything
+ *
+ * Three refusals happen before a single row is written or a single call is made, because a run
+ * is expensive (up to forty model calls, minutes of wall clock) and shows no progress while it
+ * runs — precisely the shape of request a double click repeats:
+ *
+ * - **A draft with a run already in flight** answers 409. `runningDrafts` below is a plain
+ *   in-process `Set`, not the turn-cap counter — this is a business rule about which *draft* is
+ *   being tested, not about how many database connections a slow model call is holding, and the
+ *   two must not be confused: a fourth run of a *different* draft is refused by the turn-cap
+ *   (429, below); a second run of the *same* draft is refused by this Set regardless of whether
+ *   any turn-cap slot is free. Checked and set synchronously, with no `await` between the check
+ *   and the add, so two concurrent requests for the same draft cannot both pass it — Node's
+ *   single-threaded event loop makes that atomic without anything fancier.
+ * - **More than twenty cases, or none at all.** An empty `caseIds` used to insert a `done` run
+ *   at the agent's current `config_version` — literally satisfying the apply gate the spec
+ *   describes without a single case ever having been checked. There is no such thing as a run
+ *   that proves nothing, so it is refused rather than accepted as a no-op.
+ * - **Every slot already taken.** See "The turn-cap slot" below.
+ *
+ * ## The turn-cap slot
+ *
+ * `replayCase` asserts a slot is already held (`turnSlotHeld`, `db/turn-cap.ts`) and refuses
+ * otherwise — Task 4's ruling. This route still takes one slot per `replayCase` call, not once
+ * for the whole run — a run of twenty cases, each up to two calls, never holds more than one
+ * slot at a time this way, so three runs, of any size, can proceed together under the same
+ * process-wide cap the sandbox and the coach already share. What changed is what happens when
+ * none is free, and it now depends on whether the run has started spending yet:
+ *
+ * - **At the door**, before either `test_runs` row is written, `turnSlotAvailable` — a peek at
+ *   the same counter, not a reservation — decides whether to admit the run at all. Refused here
+ *   costs the owner nothing: no row, no call. It can race (two runs might both see a slot free
+ *   a moment before both actually need one) and that is fine — see that function's own comment.
+ * - **From the first case on**, once the run is admitted and its rows exist, every
+ *   `replayCase` call goes through `takeTurnSlotWaiting` instead: it waits for a slot rather
+ *   than throwing the instant none is free, and — called with no bound, now that the replay
+ *   loop runs detached from any HTTP response — waits for as long as the run itself is alive.
+ *   A fourth run used to be able to pass at case one, spend real money through case *k*, and
+ *   then be refused outright at case *k+1* for a reason that has nothing to do with what it had
+ *   already paid for — once admitted, a run finishes rather than being cut off partway through.
+ *   `takeTurnSlotWaiting`'s own comment says why a bound never described this caller honestly.
+ *
+ * A case that throws cannot leak the slot: the `try`/`finally` around each `replayCase` call is
+ * unconditional, the same shape `api/ai.ts`'s sandbox and `api/coach.ts`'s coach already use
+ * around their own one call.
+ *
+ * ## Answering as the table fills
+ *
+ * Twenty cases at up to two calls each is a request that can run long — there is no attempt
+ * here to make it short, and (see "The run is asynchronous" above) no reason left to: the owner
+ * gets the run's id back immediately and watches «было»/«стало» fill in over `GET …/runs/:runId`
+ * as `test_results` gains a row per case, rather than one round trip that answers only once
+ * everything is done.
+ *
+ * `test_runs.status` means three different things depending on which run and which column you
+ * are looking at, and all three are spelled `'failed'`:
+ *
+ * 1. **A draft-side run**, marked `failed` when the request itself could not finish — the pool
+ *    stayed empty past the wait bound, or something below `replayCase` broke outright. Its rows
+ *    are never reused as a baseline regardless of status (`baselineResults` only ever reads a
+ *    run with `draft_id is null`), so this is purely informational: the run did not complete.
+ * 2. **A baseline-side run**, marked `failed` only when it produced *zero* usable rows. One or
+ *    more, and it is `done` even though the request that made it may have thrown partway
+ *    through — see the next paragraph. A baseline run's status describes whether its rows may
+ *    be reused, not whether the request that created it finished; those used to be the same
+ *    question and are not any more.
+ * 3. **`test_results.outcome`** — a different column, on a per-*case* row, and an entirely
+ *    ordinary event: `runTurn` already turns a bad key, a timeout, or a malformed reply into
+ *    `outcome: 'failed'` on the result it returns rather than throwing (see `replay.ts`'s own
+ *    comment on `meteredModel`), so "the model failed once" is one ordinary row in `results`,
+ *    not an exception, and the other cases around it are not wasted for it.
+ *
+ * On (1)/(2): a baseline run that produced at least one result before the run it belonged to
+ * threw is marked `done`, not `failed` — up to nineteen already-paid-for baseline rows used to
+ * become permanently unreachable (and re-paid for by the next run) over one broken case, purely
+ * because the whole request wrapping them didn't finish cleanly. The draft-side run's own
+ * status keeps the older, stricter meaning, because nothing ever reuses it either way.
+ *
+ * A run refused before it is admitted (the case count, an empty list, a missing number, the
+ * turn-cap door) never gets a `test_runs` row at all — see "Refusing a run before it costs
+ * anything" above.
+ *
+ * ## A deleted note or rule, named by a draft
+ *
+ * `applyOps` (`lib/drafts/ops.ts`) throws `MissingDraftRowError` when an update op names a row
+ * that is gone — deleted between the draft being made and the run that replays it. Ops apply
+ * before the first model call in every case (see `replayCase`), so no model call is ever spent
+ * chasing a draft that could never have applied; the draft's own `base` (`baseOf`, captured
+ * when the draft was made) still holds the display name of the missing row, the same photograph
+ * `staleOps` reads for the same reason, and `missingRowMessage` below turns the two into a
+ * Russian sentence. What happens to that sentence is the general answer "The run is
+ * asynchronous" above already gives for any error the loop throws: it is logged, and the run's
+ * own `test_runs` row is marked `failed` — it is no longer, itself, a 409 the caller reads,
+ * because by the time this can be discovered the response admitting the run has already gone
+ * out.
+ *
+ * ## Mapping a `CoachProposal` onto a `DraftOp`
+ *
+ * `toDraftOp` below is the whole mapping, and it is one-to-one: `rule` → `rule_create`,
+ * `rule_edit` → `rule_update`, `note` → `note_create`, `note_edit` → `note_update`, each
+ * carrying exactly the fields the other side already has a name for. The proposal kind with no
+ * op is not a fourth kind at all — it is `proposal: null`, a coach message that answered in
+ * words alone, and `POST …/coach/messages/:id/draft` refuses one with 400 before it ever
+ * reaches `toDraftOp`.
+ *
+ * ## `baseOf`, before the draft row exists — and the edit it can still miss
+ *
+ * `baseOf` (`lib/drafts/ops.ts`) is read right before the `kb_drafts` insert, from a plain
+ * `db` read rather than from inside the same transaction as that insert — the same looseness
+ * `ops.ts`'s own comment on `baseOf` explicitly allows ("the parameter is named `db` only to
+ * say what the common case is, not to forbid the other one"). A concurrent edit landing in the
+ * gap between the read and the insert is the same shape of race `staleOps`'s own comment
+ * already accepts for a neighbouring reorder: `config_version` is the catch-all standing
+ * behind it, because the apply route (a later task) refuses any draft not run at the agent's
+ * *current* version, and a run against a stale `base` would already have compared against the
+ * wrong floor before apply is ever reached. Ordering it this way rather than after the insert
+ * also gives the title something to read: an update op names no row of its own (`note_update`
+ * carries no path — see `ops.ts`), so `titleFor` below reads the display name `baseOf` just
+ * captured rather than inventing a second query for it.
+ *
+ * That catch-all does not reach one particular gap, though: a coach proposal is written against
+ * whatever the note or rule said the moment the coach answered, not the moment the draft is
+ * made — an owner can read the coach's suggestion, edit the row themselves in the meantime, and
+ * only then click «В черновик». `config_version` cannot catch this, because the edit happens
+ * *before* the draft (and so before its own version check) exists at all — the gate never sees
+ * anything stale to refuse. `POST …/coach/messages/:id/draft` closes it directly: it compares
+ * the row's current `updatedAt` (already sitting in `base`, the same read `baseOf` always does)
+ * against `coach_messages.contextAt` — the instant the *store* was read to write this proposal,
+ * not `createdAt`, the instant the model's reply was inserted once it finally answered (up to
+ * two attempts, minutes later). An edit landing in that gap — after the context was read, before
+ * the model was done thinking — moved the row after the instant the proposal was actually
+ * written against, even though it lands before `createdAt` is ever stamped; comparing against
+ * `createdAt` would have missed exactly that edit. See `coach_messages.contextAt`'s own comment
+ * in `db/schema.ts` for where it is set. Refused with a Russian 409 the moment the row moved
+ * after that instant, before the draft is ever written.
+ */
+import type { TestRun } from '@rakurs/contract';
+import { and, asc, desc, eq, gte, inArray, isNull, sql } from 'drizzle-orm';
+import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
+import { z } from 'zod';
+import type { Db } from '../db/client.js';
+import {
+  agents,
+  coachMessages,
+  kbDrafts,
+  testCases,
+  testResults,
+  testRuns,
+  whatsappNumbers,
+} from '../db/schema.js';
+import { releaseTurnSlot, takeTurnSlotWaiting, turnSlotAvailable } from '../db/turn-cap.js';
+import type { Env } from '../env.js';
+import type { CoachProposal } from '../lib/ai/coach.js';
+import { addCost, keyAad } from '../lib/ai/turn.js';
+import { annotate, type AnnotateDeps } from '../lib/drafts/annotate.js';
+import { isDraftApplicable } from '../lib/drafts/applicable.js';
+import { baselineResults } from '../lib/drafts/baseline.js';
+import { applyOps, baseOf, MissingDraftRowError, staleOps, type DraftBase, type DraftOp } from '../lib/drafts/ops.js';
+import { replayCase, type AiDeps, type ReplayResult } from '../lib/drafts/replay.js';
+import { bumpConfigVersion } from '../lib/drafts/version.js';
+import { ApiError, isDuplicate } from '../lib/errors.js';
+import { clampTitle } from '../lib/knowledge/split.js';
+import { credentialsKey, decryptSecret } from '../lib/secret-box.js';
+import { isUuid } from '../lib/uuid.js';
+import { requireAgent } from './require-agent.js';
+
+/** Matches the sandbox and the coach — see `db/turn-cap.ts`. A run of any size never holds
+ * more than one slot at once (see the file comment), so this is not itself the cap on how many
+ * cases a run may hold in flight; it is the cap the design settles on for a run request at all. */
+const MAX_CASES = 20;
+
+/** A rule or a note's body can run long; a draft's own title is read in a list, not a page. */
+const TITLE_MAX = 80;
+
+const RULE_CATEGORIES = ['business', 'tone', 'order', 'forbid'] as const;
+
+/**
+ * Which drafts have a run in flight right now, in this process.
+ *
+ * A plain module-level `Set`, the same shape `db/turn-cap.ts`'s own counter takes and for the
+ * same reason: there is exactly one process in production, so this needs no more than that to
+ * be correct, and a second `registerDraftRoutes` call sharing it (as every test file's rebuilt
+ * `app` does across that file's own tests) is the same "belongs to the process, not to one
+ * server instance" reasoning `turnsInFlight` already rests on. An entry is added synchronously
+ * by the request that admits a run and removed once that run's own detached replay finishes —
+ * not once the request that started it answers, which happens first — so nothing here outlives
+ * the *run*, even though it outlives the request that opened it. See the run route below.
+ */
+const runningDrafts = new Set<string>();
+
+const draftOpSchema = z.discriminatedUnion('op', [
+  z.object({ op: z.literal('note_create'), path: z.string().trim().min(1), body: z.string() }),
+  z.object({ op: z.literal('note_update'), noteId: z.string().trim().min(1), body: z.string() }),
+  z.object({
+    op: z.literal('rule_create'),
+    category: z.enum(RULE_CATEGORIES),
+    text: z.string().trim().min(1),
+    warning: z.string().nullable().optional(),
+  }),
+  z.object({
+    op: z.literal('rule_update'),
+    ruleId: z.string().trim().min(1),
+    text: z.string().trim().min(1).optional(),
+    enabled: z.boolean().optional(),
+  }),
+]);
+
+const createDraftBody = z.object({
+  title: z.string().trim().min(1).max(200),
+  ops: z.array(draftOpSchema).min(1),
+});
+
+const runBody = z.object({
+  caseIds: z.array(z.string().trim().min(1)),
+});
+
+/** The one-to-one mapping this file's header comment describes. A proposal is checked by the
+ * coach before it is ever stored (`lib/ai/coach.ts`), so every field a `DraftOp` wants is
+ * already sitting on the proposal — nothing here re-validates shape, only renames it. */
+function toDraftOp(proposal: CoachProposal): DraftOp {
+  switch (proposal.kind) {
+    case 'rule':
+      return { op: 'rule_create', category: proposal.category, text: proposal.text };
+    case 'rule_edit':
+      return { op: 'rule_update', ruleId: proposal.ruleId, text: proposal.text, enabled: proposal.enabled };
+    case 'note':
+      return { op: 'note_create', path: proposal.path, body: proposal.body };
+    case 'note_edit':
+      return { op: 'note_update', noteId: proposal.noteId, body: proposal.body };
+    default: {
+      const exhaustive: never = proposal;
+      throw new Error(`unknown coach proposal: ${JSON.stringify(exhaustive)}`);
+    }
+  }
+}
+
+/** What a draft's list entry is named, for a screen that shows many at once. A create op
+ * names its own row (`path`, `text`); an update op names none — `note_update` in particular
+ * carries no path of its own (see `ops.ts`) — so it falls back to the display name `baseOf`
+ * already captured for the row it edits. */
+function titleFor(op: DraftOp, base: DraftBase): string {
+  switch (op.op) {
+    case 'note_create':
+      return clampTitle(op.path, TITLE_MAX);
+    case 'note_update':
+      return clampTitle(base.noteNames?.[op.noteId] ?? 'Заметка', TITLE_MAX);
+    case 'rule_create':
+      return clampTitle(op.text, TITLE_MAX);
+    case 'rule_update':
+      return clampTitle(op.text ?? base.ruleNames?.[op.ruleId] ?? 'Правило', TITLE_MAX);
+    default: {
+      const exhaustive: never = op;
+      throw new Error(`unknown draft op: ${JSON.stringify(exhaustive)}`);
+    }
+  }
+}
+
+const toDraft = (row: typeof kbDrafts.$inferSelect) => ({
+  id: row.id,
+  title: row.title,
+  origin: row.origin as 'coach' | 'manual',
+  status: row.status as 'open' | 'applied' | 'discarded',
+  ops: row.ops,
+  base: row.base,
+  createdAt: row.createdAt.toISOString(),
+  appliedAt: row.appliedAt === null ? null : row.appliedAt.toISOString(),
+});
+
+/**
+ * The baseline run a given draft run's own POST paired with, if it needed one — found without
+ * a column linking the two, because the POST that makes a draft run inserts the two back to
+ * back, in the same request, with nothing awaited in between: any baseline run at the same
+ * `agentId`/`configVersion`/`model` that started at or after `run` did is the one that POST
+ * created for it. `baselineResults` can answer a case from an *older* baseline too (one that
+ * already existed and was simply reused) — those necessarily started before `run` did, since
+ * the POST read them before `run`'s own row was even inserted — so the `>=` here is what tells
+ * "paid by this run" apart from "reused from an earlier one". This can misattribute a case to
+ * a different, unrelated run that happens to start immediately after `run` and share its
+ * agent/version/model while `run` itself needed no fresh baseline at all — accepted as the
+ * rare edge a heuristic without a new column has to leave, not a case this feature promises to
+ * get right.
+ *
+ * Shared between `GET .../runs/:runId` (the route this heuristic was written for) and
+ * `GET .../drafts/:draftId`'s own run list, so a run's reported `baselineCost` means the same
+ * thing regardless of which route asked.
+ */
+async function pairedBaselineRun(
+  db: Db,
+  run: typeof testRuns.$inferSelect,
+): Promise<typeof testRuns.$inferSelect | null> {
+  const [row] = await db
+    .select()
+    .from(testRuns)
+    .where(
+      and(
+        eq(testRuns.agentId, run.agentId),
+        isNull(testRuns.draftId),
+        eq(testRuns.configVersion, run.configVersion),
+        eq(testRuns.model, run.model),
+        gte(testRuns.startedAt, run.startedAt),
+      ),
+    )
+    .orderBy(asc(testRuns.startedAt))
+    .limit(1);
+  return row ?? null;
+}
+
+/** The seven `test_results` columns a replay actually fills — never `fields` or `detail`,
+ * which `ReplayResult` also carries but which have no column of their own (see that type's
+ * comment). Shared by a freshly-run side and one read back out of a reused baseline row, so
+ * the response pairs «было» and «стало» in one shape regardless of which of the two paid. */
+interface CaseSide {
+  reply: string | null;
+  usedChunkIds: string[];
+  stageId: string | null;
+  handoff: boolean;
+  handoffReason: string | null;
+  outcome: string;
+  cost: string;
+}
+
+/** A `CaseSide` plus who paid for it, this time — never a stored column, only ever attached at
+ * the moment a response is built. `'paid'` on «стало» always: the draft side is never reused.
+ * On «было» it is `'paid'` exactly when *this* call is what wrote the row (nothing cached
+ * existed yet) and `'reused'` when an existing baseline answered it instead — so a client can
+ * tell a fresh baseline from a cached one instead of guessing from the cost totals alone. */
+interface CaseSideOut extends CaseSide {
+  origin: 'paid' | 'reused';
+}
+
+const sideFromReplay = (result: ReplayResult): CaseSide => ({
+  reply: result.reply,
+  usedChunkIds: result.usedChunkIds,
+  stageId: result.stageId,
+  handoff: result.handoff,
+  handoffReason: result.handoffReason,
+  outcome: result.outcome,
+  cost: result.cost,
+});
+
+const sideFromRow = (row: typeof testResults.$inferSelect): CaseSide => ({
+  reply: row.reply,
+  usedChunkIds: row.usedChunkIds,
+  stageId: row.stageId,
+  handoff: row.handoff,
+  handoffReason: row.handoffReason,
+  outcome: row.outcome,
+  cost: row.cost,
+});
+
+/** `verdict`/`verdictReason` are extra, optional columns rather than part of `CaseSide`:
+ * only the draft's own «стало» row ever carries them — see `runReplay`'s own comment on why
+ * the baseline side is never annotated. */
+const resultRow = (
+  runId: string,
+  caseId: string,
+  side: CaseSide,
+  verdict: { verdict: string; reason: string } | null = null,
+) => ({
+  runId,
+  caseId,
+  reply: side.reply,
+  usedChunkIds: side.usedChunkIds,
+  stageId: side.stageId,
+  handoff: side.handoff,
+  handoffReason: side.handoffReason,
+  outcome: side.outcome,
+  cost: side.cost,
+  verdict: verdict?.verdict ?? null,
+  verdictReason: verdict?.reason ?? null,
+});
+
+/** The Russian 409 for a draft op naming a note or rule that is gone — see the file comment's
+ * "A deleted note or rule, named by a draft". `draft.base`'s own `noteNames`/`ruleNames` still
+ * holds the last name this row had, the same photograph `staleOps` reads for the same reason;
+ * a row this draft never actually touched (so `base` never photographed it) falls back to a
+ * generic label rather than an empty one. */
+function missingRowMessage(error: MissingDraftRowError, base: DraftBase): string {
+  const name = error.kind === 'note' ? base.noteNames?.[error.id] : base.ruleNames?.[error.id];
+  const label = error.kind === 'note' ? 'Заметка' : 'Правило';
+  return `${name ? `«${name}»` : label} была удалена с тех пор, как сделан черновик — обновите его и повторите`;
+}
+
+/** The Russian 409 for a `note_create` op landing on a path another note already took —
+ * `applyOps` (`ops.ts`) writes through `saveNote`, which raises a raw Postgres unique
+ * violation rather than a typed error, so this is not a `MissingDraftRowError` and is caught
+ * separately, wherever that one is: a run's own catch (below) and the apply route both need
+ * it, for the same reason neither can rely on `staleOps` to see a *new* path collide with a
+ * row the draft never touched and so never photographed. */
+const DUPLICATE_NOTE_PATH_MESSAGE =
+  'Черновик создаёт заметку с путём, который уже занят другой заметкой — переименуйте или удалите её и повторите';
+
+/**
+ * Marks every run this process finds still `running` at boot as `failed` — see the file
+ * comment's "A restart, and the `running` row it leaves behind".
+ *
+ * Deliberately **not** wired to a Fastify `onReady` hook inside `registerDraftRoutes`: a test
+ * builds a server the same way production does, but many of them (`health.test.ts`,
+ * `not-found.test.ts`) do it against a `db` that never actually connects — `createDb` is lazy,
+ * and those tests' whole point is answering without touching Postgres. A hook that ran on
+ * every `app.ready()` would query on their behalf too, and fail them for a reason that has
+ * nothing to do with what they test. `index.ts` calls this once, explicitly, before
+ * `app.listen()` — the one place `buildServer` is not also stood up by a test — the same
+ * reasoning that keeps the CAPI drain's own timer out of `buildServer` and in that file
+ * instead (see its own comment).
+ */
+export async function reconcileOrphanedRuns(db: Db): Promise<void> {
+  const running = await db
+    .select({ id: testRuns.id, draftId: testRuns.draftId })
+    .from(testRuns)
+    .where(eq(testRuns.status, 'running'));
+  if (running.length === 0) return;
+
+  // A baseline run (`draft_id is null`) that already wrote at least one result is the same
+  // case `runReplay`'s own catch already covers for the request that is still alive — up to
+  // nineteen already-paid-for rows must not become permanently unreachable just because the
+  // *process* died rather than the request merely throwing. Everything else still `running` —
+  // every draft-side run, and a baseline that never wrote a single row — never proved
+  // anything and is marked `failed`, same as before this fix.
+  const baselineIds = running.filter((row) => row.draftId === null).map((row) => row.id);
+  const rescuable = new Set<string>();
+  if (baselineIds.length > 0) {
+    const withResults = await db
+      .selectDistinct({ runId: testResults.runId })
+      .from(testResults)
+      .where(inArray(testResults.runId, baselineIds));
+    for (const row of withResults) rescuable.add(row.runId);
+  }
+
+  const doneIds = [...rescuable];
+  if (doneIds.length > 0) {
+    await db
+      .update(testRuns)
+      .set({ status: 'done', finishedAt: sql`now()` })
+      .where(inArray(testRuns.id, doneIds));
+  }
+
+  const failedIds = running.map((row) => row.id).filter((id) => !rescuable.has(id));
+  if (failedIds.length > 0) {
+    await db
+      .update(testRuns)
+      .set({ status: 'failed', finishedAt: sql`now()` })
+      .where(inArray(testRuns.id, failedIds));
+  }
+}
+
+export function registerDraftRoutes(
+  app: FastifyInstance,
+  db: Db,
+  env: Env,
+  guard: preHandlerHookHandler,
+  deps: AiDeps,
+): void {
+  // Every route below is owner-only: a draft is a proposed change to the agent's character,
+  // and running one spends the owner's own OpenRouter balance.
+  const ownerOnly = requireAgent(db, { role: 'owner' });
+  const key = credentialsKey(env);
+
+  /** One agent's draft, or 404 — never another agent's, and never a bare 500 on a malformed id. */
+  async function loadDraft(agentId: string, draftId: string): Promise<typeof kbDrafts.$inferSelect> {
+    if (!isUuid(draftId)) throw new ApiError(404, 'Черновик не найден');
+    const [row] = await db
+      .select()
+      .from(kbDrafts)
+      .where(and(eq(kbDrafts.id, draftId), eq(kbDrafts.agentId, agentId)));
+    if (!row) throw new ApiError(404, 'Черновик не найден');
+    return row;
+  }
+
+  /** A real number to invent the case's fake conversation on, preferring an enabled one — the
+   * same choice `POST …/ai/sandbox` makes and the same reason: a run that invented a number
+   * would test an agent that could never actually answer. */
+  async function ownNumber(agentId: string): Promise<string> {
+    const [number] = await db
+      .select({ id: whatsappNumbers.id })
+      .from(whatsappNumbers)
+      .where(eq(whatsappNumbers.agentId, agentId))
+      .orderBy(desc(whatsappNumbers.enabled), asc(whatsappNumbers.createdAt))
+      .limit(1);
+    if (!number) {
+      throw new ApiError(409, 'Сначала подключите номер WhatsApp — агенту некуда отвечать');
+    }
+    return number.id;
+  }
+
+  app.post(
+    '/api/agents/:agentId/drafts',
+    { preHandler: [guard, ownerOnly] },
+    async (req) => {
+      const agentId = req.agent!.id;
+      const parsed = createDraftBody.safeParse(req.body);
+      if (!parsed.success) throw new ApiError(400, 'Не удалось разобрать черновик');
+
+      const base = await baseOf(db, agentId, parsed.data.ops);
+      const [row] = await db
+        .insert(kbDrafts)
+        .values({
+          agentId,
+          title: parsed.data.title,
+          origin: 'manual',
+          status: 'open',
+          ops: parsed.data.ops,
+          base,
+          createdBy: req.user!.id,
+        })
+        .returning();
+
+      return toDraft(row!);
+    },
+  );
+
+  /** Every open draft of this agent, newest first — the way back in for an owner who left
+   * `DraftScreen` before deciding. `ProposalCard`'s own «В черновик» already lands on one
+   * directly, but nothing before this route named where to find one again after leaving —
+   * shown in «Обучение», next to the coaching chat that made most drafts in the first place. */
+  app.get(
+    '/api/agents/:agentId/drafts',
+    { preHandler: [guard, ownerOnly] },
+    async (req) => {
+      const rows = await db
+        .select()
+        .from(kbDrafts)
+        .where(and(eq(kbDrafts.agentId, req.agent!.id), eq(kbDrafts.status, 'open')))
+        .orderBy(desc(kbDrafts.createdAt));
+      return rows.map(toDraft);
+    },
+  );
+
+  app.get(
+    '/api/agents/:agentId/drafts/:draftId',
+    { preHandler: [guard, ownerOnly] },
+    async (req) => {
+      const agentId = req.agent!.id;
+      const { draftId } = req.params as { draftId: string };
+      const row = await loadDraft(agentId, draftId);
+
+      // What a reload used to have no way to know — see the file comment's opening section on
+      // why this exists at all. Newest first, so a screen can show the most recent run without
+      // sorting it itself.
+      const runRows = await db
+        .select()
+        .from(testRuns)
+        .where(and(eq(testRuns.agentId, agentId), eq(testRuns.draftId, row.id)))
+        .orderBy(desc(testRuns.startedAt));
+
+      const runs = await Promise.all(
+        runRows.map(async (run) => {
+          const baseline = await pairedBaselineRun(db, run);
+          return {
+            id: run.id,
+            status: run.status as 'running' | 'done' | 'failed',
+            configVersion: run.configVersion,
+            draftCost: run.cost,
+            baselineCost: baseline?.cost ?? '0',
+            startedAt: run.startedAt.toISOString(),
+            finishedAt: run.finishedAt === null ? null : run.finishedAt.toISOString(),
+          };
+        }),
+      );
+
+      // The exact predicate the apply route itself checks — see `isDraftApplicable`'s own
+      // comment for why this is one shared function rather than a second copy of the query.
+      const applicable = await isDraftApplicable(db, row.id, req.agent!.configVersion);
+
+      return { ...toDraft(row), runs, applicable };
+    },
+  );
+
+  /**
+   * Everything a run does after `POST …/drafts/:draftId/runs` has already answered — see the
+   * file comment's "The run is asynchronous". Runs detached, behind the response, the same
+   * loop this route used to await before replying: «стало» always paid, «было» read back or
+   * paid once, one `test_results` row per side per case, `test_runs` marked `done` or `failed`
+   * on the way out. The one thing that changes is where an error that escapes the loop goes:
+   * nowhere a caller can read any more, only into a log and the run's own `status`.
+   */
+  async function runReplay(input: {
+    agentId: string;
+    numberId: string;
+    draft: typeof kbDrafts.$inferSelect;
+    casesById: Map<string, { id: string; messages: string[]; enabled: boolean; expectation: string | null }>;
+    runIds: string[];
+    existingBaselines: Map<string, typeof testResults.$inferSelect>;
+    draftRun: typeof testRuns.$inferSelect;
+    baselineRun: typeof testRuns.$inferSelect | null;
+    // Ready to call the moment a case needs it — decrypted once, up front, rather than once a
+    // case, twenty queries a run has no reason to make. Null exactly when the agent has no
+    // OpenRouter key at all, the same case a plain turn already answers 'skipped' for; no
+    // point building a call that can only fail the same way twenty times over.
+    annotateDeps: AnnotateDeps | null;
+  }): Promise<void> {
+    const { agentId, numberId, draft, casesById, runIds, existingBaselines, draftRun, baselineRun, annotateDeps } = input;
+
+    /** Takes a slot for exactly one `replayCase` call and gives it back immediately after —
+     * see the file comment for why per-call, not per-case or per-run. Waits with no bound:
+     * nothing is waiting on this returning quickly any more — see `db/turn-cap.ts`'s own
+     * comment on why a bound never described this caller honestly in the first place. */
+    async function replayOneSide(ops: DraftOp[], messages: string[]): Promise<ReplayResult> {
+      const acquired = await takeTurnSlotWaiting();
+      if (!acquired) {
+        // Unreachable with the unbounded wait above — `takeTurnSlotWaiting`'s return type is a
+        // `boolean`, not a proof, so this stays as a defensive fallback rather than an
+        // assertion. Kept in English, not the Russian a caller used to read: nothing reaches
+        // this any more except `runReplay`'s own `catch` below, on its way into a log.
+        throw new Error('turn-cap: gave up waiting for a slot other runs are holding');
+      }
+      try {
+        return await replayCase(db, deps, { agentId, numberId, key, messages, ops });
+      } finally {
+        releaseTurnSlot();
+      }
+    }
+
+    let draftCost = '0';
+    let baselineCost = '0';
+    // How many baseline rows this run itself wrote — not merely attempted. Decides the
+    // baseline run's own final status on the way out; see the file comment on `failed`.
+    let baselineWritten = 0;
+
+    try {
+      for (const caseId of runIds) {
+        const kase = casesById.get(caseId)!;
+
+        // «Стало» — always paid, every case, every run.
+        const after = await replayOneSide(draft.ops, kase.messages);
+        draftCost = addCost(draftCost, after.cost);
+
+        // «Было» — read back when a baseline already exists at this version and model, paid
+        // for and stored as one only when it does not. Read (or paid) before the annotation
+        // call below, which needs both replies to compare.
+        let beforeReply: string | null;
+        if (existingBaselines.has(caseId)) {
+          beforeReply = existingBaselines.get(caseId)!.reply;
+        } else {
+          const baseline = await replayOneSide([], kase.messages);
+          baselineCost = addCost(baselineCost, baseline.cost);
+          await db.insert(testResults).values(resultRow(baselineRun!.id, caseId, sideFromReplay(baseline)));
+          baselineWritten += 1;
+          beforeReply = baseline.reply;
+        }
+
+        // The annotation — one model call, advice in a column, never a gate. Only the draft's
+        // own «стало» row carries a verdict: the baseline row is what «было» *is*, not a
+        // comparison of anything, so there is nothing for it to be annotated against. A call
+        // that never got an answer at all (`annotate` never throws — see its own file comment)
+        // returns `null` and costs nothing; a call that answered but did not parse still cost
+        // real money, and `annotate` carries that cost back rather than losing it — added here
+        // regardless of whether there is a verdict worth writing to `verdict`/`verdictReason`.
+        const annotation = annotateDeps
+          ? await annotate(annotateDeps, {
+              expectation: kase.expectation,
+              question: kase.messages[kase.messages.length - 1] ?? '',
+              before: beforeReply,
+              after: after.reply,
+            })
+          : null;
+        if (annotation) draftCost = addCost(draftCost, annotation.cost);
+        const verdict =
+          annotation && annotation.verdict !== null ? { verdict: annotation.verdict, reason: annotation.reason! } : null;
+
+        await db.insert(testResults).values(resultRow(draftRun.id, caseId, sideFromReplay(after), verdict));
+      }
+
+      await db
+        .update(testRuns)
+        .set({ status: 'done', cost: draftCost, finishedAt: sql`now()` })
+        .where(eq(testRuns.id, draftRun.id));
+      if (baselineRun) {
+        await db
+          .update(testRuns)
+          .set({ status: 'done', cost: baselineCost, finishedAt: sql`now()` })
+          .where(eq(testRuns.id, baselineRun.id));
+      }
+    } catch (error) {
+      // The run could not finish — something below `replayCase` broke outright, or (see "A
+      // deleted note or rule" above) a draft op named a row that is gone. Whatever
+      // `test_results` rows already landed stay; the run itself is marked so nothing later
+      // mistakes it for a complete answer, and the error goes to the log — see the file
+      // comment's "An error has nowhere left to answer to".
+      await db
+        .update(testRuns)
+        .set({ status: 'failed', cost: draftCost, finishedAt: sql`now()` })
+        .where(eq(testRuns.id, draftRun.id));
+      if (baselineRun) {
+        // `done` the moment at least one result landed — see the file comment on what `failed`
+        // means for a baseline run versus a draft-side one.
+        await db
+          .update(testRuns)
+          .set({ status: baselineWritten > 0 ? 'done' : 'failed', cost: baselineCost, finishedAt: sql`now()` })
+          .where(eq(testRuns.id, baselineRun.id));
+      }
+      const detail = error instanceof MissingDraftRowError
+        ? missingRowMessage(error, draft.base)
+        : isDuplicate(error)
+          ? DUPLICATE_NOTE_PATH_MESSAGE
+          : undefined;
+      app.log.error({ error, runId: draftRun.id, detail }, 'draft run: replay failed');
+    }
+  }
+
+  app.post(
+    '/api/agents/:agentId/drafts/:draftId/runs',
+    {
+      preHandler: [guard, ownerOnly],
+      // The same 20-a-minute bound the sandbox and the coach give a route that spends real
+      // money — the in-flight cap below is what stops one run from emptying the pool, this is
+      // what stops a script from starting run after run after each finishes.
+      config: { rateLimit: { max: 20, timeWindow: '1 minute' } },
+    },
+    async (req): Promise<TestRun> => {
+      const agentId = req.agent!.id;
+      const { draftId } = req.params as { draftId: string };
+      const draft = await loadDraft(agentId, draftId);
+
+      // A run is expensive and shows no progress — precisely the shape of request a double
+      // click repeats. Refused before the body is even parsed, so a second click never spends
+      // what the first click is already spending. See the file comment's "Refusing a run
+      // before it costs anything". Not released until the run itself is over, not merely once
+      // this request answers — see "The run is asynchronous" above.
+      if (runningDrafts.has(draft.id)) {
+        throw new ApiError(409, 'Этот черновик уже проверяется — дождитесь окончания прогона');
+      }
+      runningDrafts.add(draft.id);
+
+      // Released here only on an early throw below, before the run is ever admitted; once
+      // admitted, the detached replay's own `finally` takes over instead — see below.
+      let admitted = false;
+      try {
+        const parsed = runBody.safeParse(req.body);
+        if (!parsed.success) throw new ApiError(400, 'Не удалось разобрать список случаев');
+        // Deduplicated before the count is checked against the limit or a row is written: a
+        // repeated id is one case to run, not two, and left alone it would trip `test_results`'
+        // own `(run_id, case_id)` uniqueness on the second write and fail the whole run for a
+        // client mistake this route can just as easily not make in the first place.
+        const caseIds = [...new Set(parsed.data.caseIds)];
+
+        if (caseIds.length === 0) {
+          throw new ApiError(400, 'Нужен хотя бы один случай для прогона');
+        }
+        if (caseIds.length > MAX_CASES) {
+          throw new ApiError(400, 'За один прогон можно проверить не больше двадцати случаев');
+        }
+        // A malformed id is exactly as absent as one that does not exist — comparing it against
+        // a uuid column would make Postgres raise instead of this route answering 404 (`uuid.ts`).
+        if (caseIds.some((id) => !isUuid(id))) throw new ApiError(404, 'Случай не найден');
+
+        const caseRows = await db
+          .select({
+            id: testCases.id,
+            messages: testCases.messages,
+            enabled: testCases.enabled,
+            expectation: testCases.expectation,
+          })
+          .from(testCases)
+          .where(and(eq(testCases.agentId, agentId), inArray(testCases.id, caseIds)));
+        const casesById = new Map(caseRows.map((row) => [row.id, row]));
+        if (casesById.size !== caseIds.length) throw new ApiError(404, 'Случай не найден');
+
+        // A disabled case stays named in the request but is not run — see the file comment.
+        const runIds = caseIds.filter((id) => casesById.get(id)!.enabled);
+        if (runIds.length === 0) {
+          throw new ApiError(400, 'Все выбранные случаи отключены — включите хотя бы один');
+        }
+
+        // Resolved before any bookkeeping row is written: a run refused for want of a number
+        // should leave no trace of a run that never started.
+        const numberId = await ownNumber(agentId);
+
+        const configVersion = req.agent!.configVersion;
+        const model = req.agent!.model;
+        const existingBaselines = await baselineResults(db, agentId, runIds, configVersion, model);
+        const needsBaseline = runIds.filter((id) => !existingBaselines.has(id));
+
+        // Decrypted once, here, rather than once a case inside `runReplay` — the agent row is
+        // already in hand from `requireAgent`, so this is one decryption, not a query at all.
+        // Null exactly when the agent has no OpenRouter key: a run can still be admitted and
+        // its cases still replayed (each side call answers 'skipped' on its own, the same as
+        // it always has), but there is no key to spend on a hint nobody could act on either.
+        const annotateDeps: AnnotateDeps | null =
+          req.agent!.openrouterKey === null
+            ? null
+            : {
+                model: deps.model,
+                key: decryptSecret(req.agent!.openrouterKey, key, keyAad(agentId)),
+                modelId: model,
+                temperature: req.agent!.temperature,
+              };
+
+        // The run-level admission check — see the file comment's "The turn-cap slot". A peek,
+        // not a reservation: the real, per-call reservation happens inside `runReplay`, once
+        // the run is admitted and committed to finishing.
+        if (!turnSlotAvailable()) {
+          throw new ApiError(429, 'Прогоны заняты. Попробуйте через несколько секунд.');
+        }
+
+        const [draftRun] = await db
+          .insert(testRuns)
+          .values({ agentId, draftId: draft.id, configVersion, model, status: 'running' })
+          .returning();
+        const [baselineRun] =
+          needsBaseline.length === 0
+            ? [null]
+            : await db
+                .insert(testRuns)
+                .values({ agentId, draftId: null, configVersion, model, status: 'running' })
+                .returning();
+
+        admitted = true;
+
+        // Everything from here runs behind the response already on its way out — see the file
+        // comment's "The run is asynchronous". `setImmediate` rather than a bare `void`: the
+        // same way `whatsapp-webhook.ts` queues its own post-response work, so this handler's
+        // own `return` stays the last thing it does, before Node hands the response to the
+        // socket.
+        setImmediate(() => {
+          void runReplay({
+            agentId,
+            numberId,
+            draft,
+            casesById,
+            runIds,
+            existingBaselines,
+            draftRun: draftRun!,
+            baselineRun,
+            annotateDeps,
+          })
+            // `runReplay` already catches everything it can throw and marks both rows itself —
+            // this is a backstop for the one thing it cannot guard against: that very `catch`
+            // block failing (the `db.update` calls inside it losing the connection, say). With
+            // no `.catch` here that failure would leave `runReplay`'s own promise rejected, and
+            // an unhandled rejection kills the process on Node's default — taking down every
+            // other run and request with it over one row that was only ever going to stay
+            // `'running'` a little longer. `index.ts` and `whatsapp-webhook.ts` guard their own
+            // detached work the same way.
+            .catch((error) => {
+              app.log.error({ error, runId: draftRun!.id }, 'draft run: replay failed to record its own failure');
+            })
+            .finally(() => {
+              runningDrafts.delete(draft.id);
+            });
+        });
+
+        return {
+          id: draftRun!.id,
+          draftId: draft.id,
+          configVersion: draftRun!.configVersion,
+          model: draftRun!.model,
+          status: 'running' as const,
+          draftCost: '0',
+          baselineCost: '0',
+          // `RunTable.tsx` reads `run.results.length` unguarded while a run is `'running'` —
+          // this is what `POST` answers with the instant it admits one, before a single case
+          // has a result, and the contract's own `TestRun.results` is not optional. Answering
+          // without it let TypeScript's unchecked `request<TestRun>` cast hide a `TypeError` on
+          // the very first render after the click; see `packages/contract/index.ts`. The
+          // `Promise<TestRun>` return type just above this route is what makes the compiler
+          // actually hold this object to that shape rather than trusting the client's cast.
+          results: [],
+          startedAt: draftRun!.startedAt.toISOString(),
+          finishedAt: null,
+        };
+      } finally {
+        if (!admitted) runningDrafts.delete(draft.id);
+      }
+    },
+  );
+
+  app.get(
+    '/api/agents/:agentId/drafts/:draftId/runs/:runId',
+    { preHandler: [guard, ownerOnly] },
+    async (req): Promise<TestRun> => {
+      const agentId = req.agent!.id;
+      const { draftId, runId } = req.params as { draftId: string; runId: string };
+      // 404s the draft first — the same reason `loadDraft` is used everywhere else — and then
+      // pins the run to *this* draft, not merely to this agent: a baseline run's `draft_id` is
+      // null and belongs to no draft at all, so nesting the URL under one and not checking it
+      // would let a run answer for a draft it was never scored against.
+      const draft = await loadDraft(agentId, draftId);
+      if (!isUuid(runId)) throw new ApiError(404, 'Прогон не найден');
+
+      const [run] = await db
+        .select()
+        .from(testRuns)
+        .where(and(eq(testRuns.id, runId), eq(testRuns.agentId, agentId), eq(testRuns.draftId, draft.id)));
+      if (!run) throw new ApiError(404, 'Прогон не найден');
+
+      const rows = await db.select().from(testResults).where(eq(testResults.runId, runId));
+      // Paired the same way the POST that made this run did — a reload must not show «стало»
+      // with nothing beside it. `baselineResults` always answers with the *newest* done
+      // baseline at this run's own `configVersion`/`model`, which is exactly what «было» meant
+      // at the time this run was scored (and, if a later run has since refreshed it, the
+      // freshest known answer at that same version — still the right thing to show).
+      const caseIds = rows.map((row) => row.caseId);
+      const baselines = await baselineResults(db, agentId, caseIds, run.configVersion, run.model);
+
+      // The baseline run *this* draft run's own POST paired with, if it needed one — see
+      // `pairedBaselineRun`'s own comment for the heuristic and what it can misattribute.
+      const pairedBaseline = await pairedBaselineRun(db, run);
+
+      const results = rows.map((row) => {
+        const baseline = baselines.get(row.caseId);
+        // `'paid'` exactly when this case's «было» lives in the baseline run paired with `run`
+        // itself — the row this run's own POST is what wrote — and `'reused'` when it instead
+        // answers from an older run's own already-`done` row. Both are reads, as every `GET`
+        // is; the label describes which run originally spent the money, not whether this
+        // particular request did.
+        const beforeOrigin: 'paid' | 'reused' = pairedBaseline && baseline?.runId === pairedBaseline.id ? 'paid' : 'reused';
+        return {
+          caseId: row.caseId,
+          before: baseline ? { ...sideFromRow(baseline), origin: beforeOrigin } : null,
+          after: { ...sideFromRow(row), origin: 'paid' as const },
+          // Written only onto the draft's own «стало» row (`resultRow`, above) — `row` here
+          // is exactly that row, never the baseline's, so reading it straight off is safe. A
+          // reload used to drop both columns entirely: `sideFromRow` never carried them, even
+          // though `annotate` had already written them, so a screen polling this route could
+          // never show the hint it asked the model for in the first place.
+          verdict: row.verdict as 'better' | 'worse' | 'same' | null,
+          verdictReason: row.verdictReason,
+        };
+      });
+
+      return {
+        id: run.id,
+        draftId: run.draftId,
+        configVersion: run.configVersion,
+        model: run.model,
+        status: run.status as 'running' | 'done' | 'failed',
+        draftCost: run.cost,
+        baselineCost: pairedBaseline?.cost ?? '0',
+        startedAt: run.startedAt.toISOString(),
+        finishedAt: run.finishedAt === null ? null : run.finishedAt.toISOString(),
+        results,
+      };
+    },
+  );
+
+  /**
+   * Applying a draft: the moment the promise it made — what was tested is what lands — is
+   * either kept or refused. Refused for one of four reasons, checked in this order and each
+   * inside the same transaction as the write it guards, because a stale check would be exactly
+   * the promise this route exists to keep:
+   *
+   * 1. The draft is not `open` — already applied, already discarded, or (once concurrent
+   *    requests are considered) applied by the request that beat this one to the row lock
+   *    below.
+   * 2. No run of this draft ever finished `done`, at any version. "Finished" excludes a run
+   *    still `'running'` — it has not settled on an answer yet — and excludes one
+   *    `reconcileOrphanedRuns` marked `'failed'` after a restart orphaned it (see
+   *    `api/drafts.ts`'s own file comment on that sweep): neither ever proved anything. A
+   *    draft with no `done` run at all has never been checked, full stop, which is a different
+   *    fact than "checked, but against an older store" — see (4) — and calls for the same next
+   *    step either way (run it) named more plainly.
+   * 3. `staleOps` names a note or a rule the draft touches that moved since the draft's own
+   *    `base` was taken. Checked *before* (4) on purpose, even though every write that moves a
+   *    note or a rule also bumps the version — so a row this step names would fail (4) too:
+   *    `staleOps` is what turns "the store moved" into "here is what moved", which is what an
+   *    owner actually needs to hear, and showing the version's generic sentence first when this
+   *    step could have named the exact row would be worse for no reason but check order.
+   * 4. The run found in (2) finished at some `config_version` other than the agent's *current*
+   *    one. The catch-all standing behind (3), not a duplicate of it: a version bumps on *any*
+   *    change that could change an answer, including one `staleOps` has no way to see at all —
+   *    a neighbouring rule reorder, say (see that function's own comment on what it cannot see)
+   *    — so this still refuses a draft (3) let through clean.
+   *
+   * A red verdict from Task 7's annotator blocks none of this — `test_results.verdict` is read
+   * nowhere below. The button that applies a draft is under a human hand; the model's opinion
+   * is a column beside it, not a fifth gate.
+   *
+   * Bumping the version here is not merely correct but the whole point: every baseline this
+   * bump invalidates (`baselineResults` only ever reuses a run whose `config_version` still
+   * matches the agent's current one) is a baseline that measured the agent *before* this
+   * draft's ops landed — reusing one after would silently compare a future run against an
+   * answer the agent can no longer give. Nothing in this route tries to carry one forward, and
+   * nothing should: nightly disqualifying every open baseline is what makes the next run's
+   * «было» trustworthy again, and it costs nothing until then, since a run only pays for a
+   * baseline it actually needs (see the file's opening comment).
+   */
+  app.post(
+    '/api/agents/:agentId/drafts/:draftId/apply',
+    { preHandler: [guard, ownerOnly] },
+    async (req) => {
+      const agentId = req.agent!.id;
+      const { draftId } = req.params as { draftId: string };
+      // Fast 404 before opening a transaction, the same shape `rules.ts`'s own PATCH route
+      // uses for the same reason — everything this read could tell us is re-read, under lock,
+      // inside the transaction below; this is only here so a stranger's id or a foreign
+      // agent's draft answers 404 without ever opening one.
+      await loadDraft(agentId, draftId);
+
+      const applied = await db.transaction(async (tx) => {
+        // Locks this one row for the rest of the transaction — a second `apply` racing the
+        // first waits here rather than both reading `status: 'open'` and both proceeding. A
+        // single-row lock by primary key, not the category-wide lock `lockCategories` uses:
+        // that one exists because a *range* of rows (a whole category's positions) has to stay
+        // consistent across the lock; this is one row, so the ordinary tool is the right one.
+        const [draft] = await tx
+          .select()
+          .from(kbDrafts)
+          .where(and(eq(kbDrafts.id, draftId), eq(kbDrafts.agentId, agentId)))
+          .for('update');
+        if (!draft) throw new ApiError(404, 'Черновик не найден');
+        if (draft.status !== 'open') {
+          throw new ApiError(409, 'Черновик уже применён или отклонён');
+        }
+
+        const [agent] = await tx
+          .select({ configVersion: agents.configVersion })
+          .from(agents)
+          .where(eq(agents.id, agentId));
+        if (!agent) throw new ApiError(404, 'Агент не найден');
+
+        // Was this draft ever tested at all — any `done` run, at any version? See the file
+        // comment above for why `'running'` and a restart-orphaned `'failed'` both fail this
+        // the same way a draft nobody ever ran does. Asked before the version-specific
+        // question below (`isDraftApplicable`), because "never tested" and "tested, but
+        // against an older store" are different facts and call for different sentences.
+        const [everRun] = await tx
+          .select({ id: testRuns.id })
+          .from(testRuns)
+          .where(and(eq(testRuns.draftId, draft.id), eq(testRuns.status, 'done')))
+          .limit(1);
+        if (!everRun) {
+          throw new ApiError(409, 'Черновик не прогнан — сначала проверьте его');
+        }
+
+        // Checked *before* the version comparison below, even though a row this names has
+        // already bumped the version too (every write that moves a note or a rule bumps it —
+        // `version.ts`) and so would also fail that check. `staleOps` is what turns "the store
+        // moved" into "here is what moved", which is what the owner actually needs to hear;
+        // falling through to the version check first would show the generic sentence even when
+        // this file can name the exact row, for no reason but the order two checks happen to
+        // run in.
+        const stale = await staleOps(tx as unknown as Db, agentId, draft.ops, draft.base);
+        if (stale.length > 0) {
+          const names = stale.map((name) => `«${name}»`).join(', ');
+          throw new ApiError(409, `Изменилось с тех пор, как черновик проверен: ${names} — прогоните черновик заново`);
+        }
+
+        // The catch-all standing behind `staleOps` — see that function's own comment on what
+        // it cannot see (a neighbouring reorder, say): anything that bumped the version without
+        // moving a row this draft names still fails here, with the one message left that fits.
+        // `isDraftApplicable` is the exact same call `GET .../drafts/:draftId` makes to report
+        // `applicable` — see that function's own comment for why it is shared rather than
+        // copied.
+        if (!(await isDraftApplicable(tx as unknown as Db, draft.id, agent.configVersion))) {
+          throw new ApiError(409, 'База изменилась после проверки — прогоните черновик заново');
+        }
+
+        // `staleOps` and `isDraftApplicable` above only see a row this draft's own `note_update`
+        // or `rule_update` names moving out from under it — neither has anything to check a
+        // `note_create` op against, because it names no existing row at all. So a `note_create`
+        // landing on a path some *other* note has since taken (a real, unrelated note, or an
+        // earlier draft's own apply) reaches `saveNote` clean and raises a raw Postgres unique
+        // violation instead — caught here and turned into the same Russian 409 shape every
+        // other refusal in this route already is, rather than an uncaught throw answering 500.
+        try {
+          await applyOps(tx as unknown as Db, agentId, draft.ops);
+        } catch (error) {
+          if (isDuplicate(error)) throw new ApiError(409, DUPLICATE_NOTE_PATH_MESSAGE);
+          throw error;
+        }
+        await bumpConfigVersion(tx as unknown as Db, agentId);
+
+        const [row] = await tx
+          .update(kbDrafts)
+          .set({ status: 'applied', appliedAt: sql`now()` })
+          .where(eq(kbDrafts.id, draft.id))
+          .returning();
+        return row!;
+      });
+
+      return toDraft(applied);
+    },
+  );
+
+  /** Throwing a draft away. No ops are ever applied for real — see the file comment — so
+   * there is nothing here to undo; the only write is the draft's own status. */
+  app.post(
+    '/api/agents/:agentId/drafts/:draftId/discard',
+    { preHandler: [guard, ownerOnly] },
+    async (req) => {
+      const agentId = req.agent!.id;
+      const { draftId } = req.params as { draftId: string };
+      const draft = await loadDraft(agentId, draftId);
+      if (draft.status !== 'open') {
+        throw new ApiError(409, 'Черновик уже применён или отклонён');
+      }
+
+      const [row] = await db
+        .update(kbDrafts)
+        .set({ status: 'discarded' })
+        .where(eq(kbDrafts.id, draft.id))
+        .returning();
+
+      return toDraft(row!);
+    },
+  );
+
+  app.post(
+    '/api/agents/:agentId/coach/messages/:id/draft',
+    { preHandler: [guard, ownerOnly] },
+    async (req) => {
+      const agentId = req.agent!.id;
+      const { id } = req.params as { id: string };
+      if (!isUuid(id)) throw new ApiError(404, 'Сообщение не найдено');
+
+      const [message] = await db
+        .select()
+        .from(coachMessages)
+        .where(and(eq(coachMessages.id, id), eq(coachMessages.agentId, agentId)));
+      if (!message) throw new ApiError(404, 'Сообщение не найдено');
+      if (message.proposal === null) throw new ApiError(400, 'В этом сообщении нет предложения');
+      if (message.status !== 'pending') throw new ApiError(409, 'Предложение уже обработано');
+
+      const op = toDraftOp(message.proposal);
+      const base = await baseOf(db, agentId, [op]);
+
+      // The row the proposal touches, if it edits one, may have moved since the coach wrote
+      // the proposal against it — see the file comment's closing section. Only an update op
+      // has anything to compare: a create op names no existing row.
+      const touchedAt =
+        op.op === 'note_update' ? base.notes?.[op.noteId] : op.op === 'rule_update' ? base.rules?.[op.ruleId] : undefined;
+      // `contextAt` — the instant the store was read to write this proposal — not `createdAt`,
+      // the instant the model's reply was inserted once it finally answered, up to two attempts
+      // later. A row edited while the coach was still thinking moved after the context it was
+      // actually written against was read, even though the edit lands before `createdAt` is
+      // ever stamped; falling back to `createdAt` here is only for a row from before this
+      // column existed. See `coach_messages.contextAt`'s own comment in `db/schema.ts`.
+      const proposedAt = message.contextAt ?? message.createdAt;
+      if (touchedAt !== undefined && new Date(touchedAt) > proposedAt) {
+        const label = op.op === 'note_update' ? 'Заметка изменилась' : 'Правило изменилось';
+        throw new ApiError(409, `${label} с тех пор, как это предложил коуч — задайте вопрос коучу заново`);
+      }
+
+      const title = titleFor(op, base);
+
+      const draft = await db.transaction(async (tx) => {
+        const [row] = await tx
+          .insert(kbDrafts)
+          .values({ agentId, title, origin: 'coach', status: 'open', ops: [op], base, createdBy: req.user!.id })
+          .returning();
+        await tx
+          .update(coachMessages)
+          .set({ status: 'drafted', draftId: row!.id })
+          .where(eq(coachMessages.id, id));
+        return row!;
+      });
+
+      return toDraft(draft);
+    },
+  );
+}

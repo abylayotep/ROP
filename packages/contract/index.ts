@@ -760,3 +760,126 @@ export interface StatsPeriodReport {
   money: StatsMoney | null;
   currency: string;
 }
+
+/* ── Черновики и прогоны ────────────────────────────────────────────────────
+ * A proposed change to the agent — a draft — proven against a case set before it lands. A
+ * draft's own run is asynchronous: `POST .../drafts/:draftId/runs` answers with `status:
+ * 'running'` before a single case has been replayed, and a screen polls `GET .../runs/:runId`
+ * to watch `results` gain a row per case. */
+
+/** One write a draft would make, applied for real only once the draft is applied. */
+export type DraftOp =
+  | { op: 'note_create'; path: string; body: string }
+  | { op: 'note_update'; noteId: string; body: string }
+  | { op: 'rule_create'; category: RuleCategory; text: string; warning?: string | null }
+  | { op: 'rule_update'; ruleId: string; text?: string; enabled?: boolean };
+
+/** A change waiting to be proven. It is applied only after a run at the current version. */
+export interface KbDraft {
+  id: string;
+  title: string;
+  origin: 'coach' | 'manual';
+  status: 'open' | 'applied' | 'discarded';
+  ops: DraftOp[];
+  createdAt: string;
+  appliedAt: string | null;
+}
+
+/** One run in a draft's own history, as `GET .../drafts/:draftId` lists it — enough for a
+ * screen to say «прогнан тогда-то» without guessing, and to reopen the full `TestRun` (with
+ * its per-case results) through `GET .../runs/:runId` by `id`. Newest first. */
+export interface DraftRunSummary {
+  id: string;
+  status: 'running' | 'done' | 'failed';
+  configVersion: number;
+  draftCost: string;
+  baselineCost: string;
+  startedAt: string;
+  finishedAt: string | null;
+}
+
+/**
+ * `GET .../drafts/:draftId`'s own answer — `KbDraft` plus what a reload needs and cannot
+ * otherwise know: the draft's run history, and whether it is provably safe to apply *right
+ * now*. `applicable` is exactly the predicate the apply route itself checks (a `done` run at
+ * the agent's current `config_version`), computed by the one function both share — so a
+ * screen's «Применить» can never disagree with what the apply route would actually do.
+ */
+export interface KbDraftDetail extends KbDraft {
+  runs: DraftRunSummary[];
+  applicable: boolean;
+}
+
+export interface TestCase {
+  id: string;
+  title: string;
+  /** The customer's side only. The agent's replies are what is being tested. */
+  messages: string[];
+  expectation: string | null;
+  origin: 'manual' | 'dialog' | 'generated';
+  conversationId: string | null;
+  enabled: boolean;
+  updatedAt: string;
+}
+
+/**
+ * One case the model suggested for a draft, from `POST .../drafts/:draftId/suggest-cases`.
+ *
+ * Nothing here is saved — the route that returns it writes no `test_cases` row. A set that
+ * grows by itself is a set nobody trusts, so this is only ever what the owner is offered to
+ * post back through `POST .../test-cases`, one at a time or not at all.
+ */
+export interface SuggestedCase {
+  title: string;
+  messages: string[];
+}
+
+/** One side of a comparison — «было» or «стало» — as a run reports it. */
+export interface TestCaseSide {
+  reply: string | null;
+  usedChunkIds: string[];
+  stageId: string | null;
+  handoff: boolean;
+  handoffReason: string | null;
+  /** The `TurnOutcome` the replay ended in. */
+  outcome: string;
+  /** In US dollars, as OpenRouter reported it. */
+  cost: string;
+  /** Whether *this* run is what paid for this side, or an existing baseline answered it — see
+   * `TestRun.baselineCost`'s own comment. */
+  origin: 'paid' | 'reused';
+}
+
+/** One row of the «было — стало» table. `before` is null when the case is new to the set —
+ * no baseline has ever answered it. */
+export interface TestComparison {
+  caseId: string;
+  before: TestCaseSide | null;
+  after: TestCaseSide;
+  /** The model's hint. It gates nothing — the owner presses the button. */
+  verdict: 'better' | 'worse' | 'same' | null;
+  verdictReason: string | null;
+}
+
+/**
+ * One pass over a set of cases. `draftId` null is a baseline run: the agent as the store
+ * stands, replayed with no draft ops at all.
+ *
+ * `status` is `'running'` from the instant the run is admitted, before any case has a result —
+ * a screen polls `GET .../runs/:runId` and watches `results` fill until it leaves `'running'`.
+ */
+export interface TestRun {
+  id: string;
+  draftId: string | null;
+  configVersion: number;
+  model: string;
+  status: 'running' | 'done' | 'failed';
+  /** «Стало» — the draft's own ops applied. Paid for every case, every run, in US dollars. */
+  draftCost: string;
+  /** «Было». Zero when every case reused an existing baseline rather than paying for a fresh
+   * one — see each row's own `before.origin` for which case paid and which was reused. */
+  baselineCost: string;
+  results: TestComparison[];
+  startedAt: string;
+  finishedAt: string | null;
+}

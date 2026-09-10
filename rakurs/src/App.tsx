@@ -8,6 +8,7 @@ import { BoardScreen } from '@/screens/BoardScreen';
 import { CoachScreen } from '@/screens/CoachScreen';
 import { CustomersScreen } from '@/screens/CustomersScreen';
 import { DialogsScreen } from '@/screens/DialogsScreen';
+import { DraftScreen } from '@/screens/DraftScreen';
 import { IntegrationsScreen } from '@/screens/IntegrationsScreen';
 import { KnowledgeScreen } from '@/screens/KnowledgeScreen';
 import { LoginScreen } from '@/screens/LoginScreen';
@@ -47,6 +48,9 @@ function AuthGate() {
         }
       >
         <Route index element={<Navigate to="orders" replace />} />
+        {/* Not a section: reached only from `ProposalCard`'s «В черновик» or a draft link,
+            never from the sidebar — `Sidebar` reads `SECTIONS`, and this route is not one. */}
+        <Route path="drafts/:draftId" element={<DraftScreen />} />
         {SECTIONS.map((section) => (
           <Route
             key={section.path}

@@ -18,6 +18,8 @@ import type {
   KbImport,
   KbNote,
   KbNoteDetail,
+  KbDraft,
+  KbDraftDetail,
   KbNoteKind,
   KbSection,
   KbSource,
@@ -31,6 +33,9 @@ import type {
   Stage,
   StatsCurrent,
   StatsPeriodReport,
+  SuggestedCase,
+  TestCase,
+  TestRun,
   WebhookSetup,
   WhatsappNumber,
 } from '@/types';
@@ -507,3 +512,75 @@ export const sendCoachMessage = (
 /** The one answer that costs nothing: turning down a proposal writes no rule and no note. */
 export const rejectCoachMessage = (agentId: string, messageId: string) =>
   request<CoachMessage>(`/agents/${agentId}/coach/messages/${messageId}/reject`, { method: 'POST' });
+
+/** Where a coaching proposal becomes a draft — the route `ProposalCard`'s own comment names
+ * as the one thing standing between «В черновик» and a live button. */
+export const draftCoachMessage = (agentId: string, messageId: string) =>
+  request<KbDraft>(`/agents/${agentId}/coach/messages/${messageId}/draft`, { method: 'POST' });
+
+// ── Черновики и прогоны ──────────────────────────────────────────────────────
+
+/** Every open draft of this agent, newest first — the way back in for an owner who left
+ * `DraftScreen` before deciding. Shown in «Обучение», beside the coaching chat that made most
+ * drafts in the first place. */
+export const listOpenDrafts = (agentId: string, signal?: AbortSignal) =>
+  request<KbDraft[]>(`/agents/${agentId}/drafts`, { signal });
+
+export const getDraft = (agentId: string, draftId: string, signal?: AbortSignal) =>
+  request<KbDraftDetail>(`/agents/${agentId}/drafts/${draftId}`, { signal });
+
+/**
+ * Starts a run and returns the instant it is admitted — `status: 'running'`, before a single
+ * case has been replayed. `GET .../runs/:runId` below is how the rest is read: poll it and
+ * watch `results` gain a row per case, exactly as `server/src/api/drafts.ts`'s own file
+ * comment describes.
+ */
+export const runDraft = (agentId: string, draftId: string, caseIds: string[]) =>
+  request<TestRun>(`/agents/${agentId}/drafts/${draftId}/runs`, { method: 'POST', body: { caseIds } });
+
+export const getDraftRun = (agentId: string, draftId: string, runId: string, signal?: AbortSignal) =>
+  request<TestRun>(`/agents/${agentId}/drafts/${draftId}/runs/${runId}`, { signal });
+
+/** Refused for one of four reasons — see `api/drafts.ts`'s own file comment on the apply
+ * route — and the refusal is a Russian sentence in `ApiError.body.message`, exactly what
+ * `humanError` already surfaces: no client-side prediction of which of the four applies. */
+export const applyDraft = (agentId: string, draftId: string) =>
+  request<KbDraft>(`/agents/${agentId}/drafts/${draftId}/apply`, { method: 'POST' });
+
+/** No op is ever applied for real before this, so there is nothing to undo — only the
+ * draft's own status changes. */
+export const discardDraft = (agentId: string, draftId: string) =>
+  request<KbDraft>(`/agents/${agentId}/drafts/${draftId}/discard`, { method: 'POST' });
+
+// ── Проверки ──────────────────────────────────────────────────────────────────
+
+export const listTestCases = (agentId: string, signal?: AbortSignal) =>
+  request<TestCase[]>(`/agents/${agentId}/test-cases`, { signal });
+
+export const createTestCase = (
+  agentId: string,
+  body: { title: string; messages: string[]; expectation?: string | null },
+) => request<TestCase>(`/agents/${agentId}/test-cases`, { method: 'POST', body });
+
+export const updateTestCase = (
+  agentId: string,
+  caseId: string,
+  body: { title?: string; messages?: string[]; expectation?: string | null; enabled?: boolean },
+) => request<TestCase>(`/agents/${agentId}/test-cases/${caseId}`, { method: 'PATCH', body });
+
+export const deleteTestCase = (agentId: string, caseId: string) =>
+  request<{ ok: true }>(`/agents/${agentId}/test-cases/${caseId}`, { method: 'DELETE' });
+
+/** Copies a real dialog's customer side into a new, saved case — see `test-cases.ts`'s own
+ * comment on why only the inbound messages are kept. */
+export const createCaseFromDialog = (agentId: string, conversationId: string) =>
+  request<TestCase>(`/agents/${agentId}/test-cases/from-dialog`, { method: 'POST', body: { conversationId } });
+
+/** Suggestions only — nothing here is saved. A screen offers them as unticked rows the owner
+ * may post back through `createTestCase`, one at a time or not at all. Given the same long
+ * deadline as the coach and the sandbox: a real model call runs on the other end. */
+export const suggestCases = (agentId: string, draftId: string) =>
+  request<{ cases: SuggestedCase[] }>(`/agents/${agentId}/drafts/${draftId}/suggest-cases`, {
+    method: 'POST',
+    timeoutMs: LONG_TIMEOUT_MS,
+  });

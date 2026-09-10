@@ -58,3 +58,70 @@ export function tryTakeTurnSlot(): boolean {
 export function releaseTurnSlot(): void {
   turnsInFlight -= 1;
 }
+
+/**
+ * Whether at least one slot is held anywhere in the process right now.
+ *
+ * Not "did *this* caller take one" — the counter above has no notion of who holds what, only
+ * how many. That is enough for what this answers: a function that must never run without a
+ * slot already held (`replayCase`, which holds a database connection across a model call the
+ * same way every other caller of this module does) can assert this at its own top and catch
+ * a caller that forgot `tryTakeTurnSlot` in the first test that exercises it, instead of
+ * finding out under load that the pool has no cap protecting it there at all.
+ *
+ * A concurrent, unrelated slot would make this pass even for a caller that itself forgot —
+ * that gap is real, but closing it needs a token handed back from `tryTakeTurnSlot` and
+ * threaded through every caller, which is a bigger change than an assertion meant to catch a
+ * caller that forgot is worth. Every test that exercises `replayCase` today runs alone against
+ * this counter, so the gap does not hide anything in practice.
+ */
+export function turnSlotHeld(): boolean {
+  return turnsInFlight >= 1;
+}
+
+/**
+ * Whether a slot is free right now — a peek, not a reservation.
+ *
+ * `api/drafts.ts`'s run route uses this once, at the door, before it writes a single row: if
+ * the pool already reads full, refusing there costs the owner nothing. It is deliberately not
+ * a reservation — nothing here is held between this call and the real, per-call
+ * `tryTakeTurnSlot`/`takeTurnSlotWaiting` below, so two callers can both see a slot free and
+ * both proceed. That race is fine for what this answers: an admission heuristic that only ever
+ * needs to catch the common case (the pool is visibly saturated *before* a run even starts),
+ * not to guarantee a slot is still there a moment later — the real cap is enforced where it has
+ * always been enforced, per call.
+ */
+export function turnSlotAvailable(): boolean {
+  return turnsInFlight < SANDBOX_TURNS;
+}
+
+/**
+ * How long a call already admitted into a run waits for a slot before giving up — or, with no
+ * bound given at all, for as long as it takes.
+ *
+ * This used to default to `TIMEOUT_MS` (`lib/ai/openrouter.ts`) on the premise that whoever
+ * holds "your" slot right now can run for at most one model call's own worst case before it
+ * times out on its own. That premise was false: a slot here is held for an entire `replayCase`
+ * call, not one model call — every message in a case, up to two attempts each, each attempt up
+ * to `TIMEOUT_MS` on its own — so a holder's true ceiling is that multiplied by however many
+ * messages the case it is replaying happens to have, a number nothing in this module (or the
+ * schema `test_cases.messages` is stored in) bounds. A 60-second wait timed out on a holder
+ * that was never going to be done in 60 seconds, refusing a run for a reason that had nothing
+ * to do with anything actually wrong.
+ *
+ * `api/drafts.ts`'s run route is the one caller, and it now answers its own HTTP request
+ * before this is ever called — see that file's header comment. Nothing is waiting on this
+ * finishing quickly any more, so there is nothing left to bound the wait against: called with
+ * no `timeoutMs` at all, this waits for as long as the run it belongs to is alive, which is
+ * exactly as long as it should. `timeoutMs` stays a parameter, not deleted, for a caller that
+ * genuinely does have something to bound the wait by — none exists today — and the three tests
+ * below exercise both an explicit bound and the unbounded default.
+ */
+export async function takeTurnSlotWaiting(timeoutMs?: number): Promise<boolean> {
+  const deadline = timeoutMs === undefined ? null : Date.now() + timeoutMs;
+  for (;;) {
+    if (tryTakeTurnSlot()) return true;
+    if (deadline !== null && Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}

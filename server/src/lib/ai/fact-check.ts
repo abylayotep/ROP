@@ -45,6 +45,7 @@
 import { and, eq } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import { agentRules, kbChunks, kbNotes } from '../../db/schema.js';
+import { isUuid } from '../uuid.js';
 import type { CoachProposal } from './coach.js';
 import { unsourcedNumber } from './turn.js';
 
@@ -105,17 +106,29 @@ function ownText(proposal: CoachProposal): string | undefined {
  * The rule text this proposal would make part of `assembleRules` if applied unchanged — what
  * `checkProposal` actually has to check.
  *
- * A `rule` or a `rule_edit` carrying its own `text` is checked on that text, same as always —
- * `ownText` alone answers it, no query needed. A `rule_edit { enabled: true }` with no `text`
- * of its own is checked on the *target rule's current text* instead — see the file comment's
- * "Why `enabled: true` alone is enough to trigger a check". Anything else (a `rule_edit` that
- * only disables, or names a rule that no longer exists) has nothing to check and returns
- * `undefined`, same as before.
+ * A `rule` or a `rule_edit` carrying its own non-blank `text` is checked on that text, same as
+ * always — `ownText` alone answers it, no query needed. An *empty or whitespace-only* `text` on
+ * a `rule_edit` is treated the same as no `text` field at all: the zod schema allows `text: ''`
+ * through, but a blank string names no text of its own any more than an absent field does, so
+ * it falls through to the same fallback below rather than short-circuiting `checkProposal` on a
+ * blank string (the hole a re-review found: `{ ruleId, text: '', enabled: true }` used to skip
+ * the check entirely because `'' !== undefined`).
+ *
+ * A `rule_edit { enabled: true }` with no text of its own (blank or absent) is checked on the
+ * *target rule's current text* instead — see the file comment's "Why `enabled: true` alone is
+ * enough to trigger a check". `ruleId` is model-written and never validated before it reaches
+ * here, so it is checked against `isUuid` first: `agent_rules.id` is a `uuid` column, and
+ * querying it with text that is not a uuid raises Postgres `22P02` instead of returning no row,
+ * which would 500 the whole coaching turn on a hallucinated id. A non-uuid `ruleId` names no
+ * rule, so it is treated exactly like a `ruleId` that is a well-formed uuid but matches no row:
+ * nothing to check. Anything else (a `rule_edit` that only disables) has nothing to check and
+ * returns `undefined`, same as before.
  */
 async function effectiveText(db: Db, agentId: string, proposal: CoachProposal): Promise<string | undefined> {
   const own = ownText(proposal);
-  if (own !== undefined) return own;
+  if (own !== undefined && own.trim() !== '') return own;
   if (proposal.kind !== 'rule_edit' || proposal.enabled !== true) return undefined;
+  if (!isUuid(proposal.ruleId)) return undefined;
 
   const [row] = await db
     .select({ text: agentRules.text })

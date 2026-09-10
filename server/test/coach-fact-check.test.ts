@@ -206,6 +206,56 @@ describe('checkProposal', () => {
     expect(checked.warning).toBeNull();
   });
 
+  it('does not crash on a hallucinated non-UUID ruleId; treats it as naming no rule', async () => {
+    // The model writes `ruleId`, not this code — a hallucinated id is not a shape bug, it is
+    // an expected input. `agent_rules.id` is a `uuid` column: querying it with text that is
+    // not a uuid must not reach Postgres at all, or it raises `22P02` and the whole request
+    // 500s after the OpenRouter call has already been billed.
+    const checked = await checkProposal(db, agentId, {
+      kind: 'rule_edit',
+      ruleId: 'правило-про-доставку',
+      enabled: true,
+    });
+    expect(checked.proposal).toEqual({
+      kind: 'rule_edit',
+      ruleId: 'правило-про-доставку',
+      enabled: true,
+    });
+    expect(checked.warning).toBeNull();
+  });
+
+  it('checks the target rule`s own text when a rule_edit re-enables it with an empty text field', async () => {
+    // The zod schema allows `text: ''` on a rule_edit — that is not "carries its own text",
+    // it is the same "nothing of its own" shape as an absent `text`, so the target rule's
+    // current text is what must be checked, exactly as when `text` is omitted entirely.
+    const [rule] = await db
+      .insert(agentRules)
+      .values({
+        agentId,
+        category: 'business',
+        text: 'Доставка по городу 1500 ₸.',
+        origin: 'manual',
+        position: 0,
+        enabled: false,
+      })
+      .returning();
+
+    const checked = await checkProposal(db, agentId, {
+      kind: 'rule_edit',
+      ruleId: rule!.id,
+      text: '',
+      enabled: true,
+    });
+
+    expect(checked.proposal.kind).toBe('note');
+    expect(checked.warning).toContain('1500');
+
+    // The re-enable itself never happened: the rule this proposal named is exactly as
+    // disabled as it was before the check ran.
+    const [after] = await db.select().from(agentRules).where(eq(agentRules.id, rule!.id));
+    expect(after!.enabled).toBe(false);
+  });
+
   it('maps a slash in the rule text so it cannot open a folder, the way api/knowledge.ts does', async () => {
     const checked = await checkProposal(db, agentId, {
       kind: 'rule',

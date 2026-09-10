@@ -1,5 +1,5 @@
 import { and, eq, inArray } from 'drizzle-orm';
-import { categorySize, lockCategories, type Tx } from '../../api/rules.js';
+import { categorySize, lockCategories, type Tx } from '../rules/lock.js';
 import type { Db } from '../../db/client.js';
 import { agentRules, kbNotes } from '../../db/schema.js';
 import { clampTitle } from '../knowledge/split.js';
@@ -199,6 +199,18 @@ export async function baseOf(db: Db, agentId: string, ops: DraftOp[]): Promise<D
  * called to decide *whether* to open a transaction at all — the apply route calls this first,
  * outside any transaction, and only opens one (to run `applyOps` for real) once nothing here
  * comes back stale.
+ *
+ * **What this can't see.** A neighbouring reorder or delete shifts a rule's `position`
+ * through a raw `position ± 1` update (`shiftForMove` and the close-the-gap updates in
+ * `api/rules.ts`) that touches only `position`, never `updatedAt` — so a rule that only moved
+ * because some *other* rule in its category was reordered or deleted reads here as unchanged,
+ * and this function will not name it. That is not this function's job to catch: every write
+ * branch in `api/rules.ts` (create, both PATCH branches, delete — five call sites) bumps the
+ * agent's `config_version` regardless of which rows it touches, and the apply route refuses
+ * to apply any draft whose test run wasn't against the *current* `config_version`. So a draft
+ * built before that reorder still cannot land silently — the owner is stopped either way, just
+ * by the version check instead of by a named rule here. `staleOps` names what it can name;
+ * `config_version` is the catch-all standing behind it for the rest.
  */
 export async function staleOps(db: Db, agentId: string, ops: DraftOp[], base: DraftBase): Promise<string[]> {
   const stale: string[] = [];

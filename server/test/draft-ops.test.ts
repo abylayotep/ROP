@@ -59,6 +59,8 @@ describe('applyOps', () => {
 
   it('does not bump the agent\'s config version', async () => {
     await applyOps(db, agentId, [{ op: 'note_create', path: 'Доставка', body: '1500 ₸.' }]);
+    const [note] = await db.select().from(kbNotes).where(eq(kbNotes.agentId, agentId));
+    expect(note).toMatchObject({ path: 'Доставка', body: '1500 ₸.' });
     const [row] = await db.select().from(agents).where(eq(agents.id, agentId));
     expect(row!.configVersion).toBe(1);
   });
@@ -90,7 +92,12 @@ describe('staleOps', () => {
   });
 
   it('says nothing is stale when nothing moved', async () => {
-    const ops = [{ op: 'rule_create' as const, category: 'tone' as const, text: 'На «вы».' }];
+    const [rule] = await db.insert(agentRules).values({ agentId, category: 'tone', text: 'На «вы».' }).returning();
+    const note = await saveNote(db, { agentId, path: 'Доставка', body: '1500 ₸.' });
+    const ops = [
+      { op: 'rule_update' as const, ruleId: rule!.id, enabled: true },
+      { op: 'note_update' as const, noteId: note.id, body: '1500 ₸.' },
+    ];
     expect(await staleOps(db, agentId, ops, await baseOf(db, agentId, ops))).toEqual([]);
   });
 

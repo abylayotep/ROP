@@ -152,6 +152,60 @@ describe('checkProposal', () => {
     expect(checked.warning).toBeNull();
   });
 
+  it('checks the target rule`s own text when a rule_edit only re-enables it', async () => {
+    // Disabled, so `knownSources` does not credit its own number as already known — exactly
+    // the case the file comment says re-enabling must not walk around.
+    const [rule] = await db
+      .insert(agentRules)
+      .values({
+        agentId,
+        category: 'business',
+        text: 'Доставка по городу 1500 ₸.',
+        origin: 'manual',
+        position: 0,
+        enabled: false,
+      })
+      .returning();
+
+    const checked = await checkProposal(db, agentId, {
+      kind: 'rule_edit',
+      ruleId: rule!.id,
+      enabled: true,
+    });
+
+    expect(checked.proposal.kind).toBe('note');
+    expect(checked.warning).toContain('1500');
+
+    // The re-enable itself never happened: the rule this proposal named is exactly as
+    // disabled as it was before the check ran.
+    const [after] = await db.select().from(agentRules).where(eq(agentRules.id, rule!.id));
+    expect(after!.enabled).toBe(false);
+  });
+
+  it('re-enables a rule through a rule_edit when its own number is backed by a note', async () => {
+    await saveNote(db, { agentId, path: 'Доставка', body: 'По городу 1500 ₸.' });
+    const [rule] = await db
+      .insert(agentRules)
+      .values({
+        agentId,
+        category: 'business',
+        text: 'Доставка по городу 1500 ₸.',
+        origin: 'manual',
+        position: 0,
+        enabled: false,
+      })
+      .returning();
+
+    const checked = await checkProposal(db, agentId, {
+      kind: 'rule_edit',
+      ruleId: rule!.id,
+      enabled: true,
+    });
+
+    expect(checked.proposal).toEqual({ kind: 'rule_edit', ruleId: rule!.id, enabled: true });
+    expect(checked.warning).toBeNull();
+  });
+
   it('maps a slash in the rule text so it cannot open a folder, the way api/knowledge.ts does', async () => {
     const checked = await checkProposal(db, agentId, {
       kind: 'rule',

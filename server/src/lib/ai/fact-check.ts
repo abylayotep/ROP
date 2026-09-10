@@ -30,6 +30,17 @@
  * source the number guard itself would ever credit — a number backed only by a disabled rule
  * is, for every purpose the guard cares about, backed by nothing, and treating it as known here
  * would let a coach reintroduce a number that was turned off for a reason nobody logged.
+ *
+ * ## Why `enabled: true` alone is enough to trigger a check
+ *
+ * A `rule_edit { ruleId, enabled: true }` carries no `text` of its own, but applying it reads
+ * the *target rule's* text into `assembleRules` on the very next turn — exactly the same
+ * reintroduction `knownSources` refuses to credit a disabled rule for. Checking only a
+ * proposal's own `text` field and calling anything else "nothing to check" would let a coach
+ * walk straight around the rule above: turn a price rule back on and the guard accepts it with
+ * nothing behind it, because nobody re-checked the number the rule has carried all along. So
+ * `effectiveText` below reads the target rule's current text for this one case, the same text
+ * `assembleRules` would read if the edit were applied unchanged.
  */
 import { and, eq } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
@@ -83,11 +94,34 @@ async function freeNotePath(db: Db, agentId: string, base: string): Promise<stri
   }
 }
 
-/** The rule text a proposal carries, or `undefined` when there is none to check. */
-function ruleText(proposal: CoachProposal): string | undefined {
+/** The rule text a proposal carries on its own, or `undefined` when it carries none. */
+function ownText(proposal: CoachProposal): string | undefined {
   if (proposal.kind === 'rule') return proposal.text;
   if (proposal.kind === 'rule_edit') return proposal.text;
   return undefined;
+}
+
+/**
+ * The rule text this proposal would make part of `assembleRules` if applied unchanged — what
+ * `checkProposal` actually has to check.
+ *
+ * A `rule` or a `rule_edit` carrying its own `text` is checked on that text, same as always —
+ * `ownText` alone answers it, no query needed. A `rule_edit { enabled: true }` with no `text`
+ * of its own is checked on the *target rule's current text* instead — see the file comment's
+ * "Why `enabled: true` alone is enough to trigger a check". Anything else (a `rule_edit` that
+ * only disables, or names a rule that no longer exists) has nothing to check and returns
+ * `undefined`, same as before.
+ */
+async function effectiveText(db: Db, agentId: string, proposal: CoachProposal): Promise<string | undefined> {
+  const own = ownText(proposal);
+  if (own !== undefined) return own;
+  if (proposal.kind !== 'rule_edit' || proposal.enabled !== true) return undefined;
+
+  const [row] = await db
+    .select({ text: agentRules.text })
+    .from(agentRules)
+    .where(and(eq(agentRules.id, proposal.ruleId), eq(agentRules.agentId, agentId)));
+  return row?.text;
 }
 
 /**
@@ -95,16 +129,27 @@ function ruleText(proposal: CoachProposal): string | undefined {
  * rewrites it into a note when it fails.
  *
  * Only `rule` and `rule_edit` proposals are checked — see the file comment — and only when
- * they carry text at all: a `rule_edit` that merely toggles `enabled` states no fact and has
- * nothing to check. `note` and `note_edit` proposals pass through untouched: a note is where a
- * fact belongs, and where the fact-check's job ends.
+ * there is text to check: a `rule` or `rule_edit` carrying its own `text`, or a `rule_edit`
+ * that turns a rule back on (checked against that rule's current text — see `effectiveText`).
+ * A `rule_edit` that only disables a rule states no fact and has nothing to check. `note` and
+ * `note_edit` proposals pass through untouched: a note is where a fact belongs, and where the
+ * fact-check's job ends.
+ *
+ * When the number in question turns out to belong to a rule that already exists — the
+ * `rule_edit { enabled: true }` case — this still rewrites the proposal into a `note` rather
+ * than into, say, a `rule_edit` carrying a warning: the owner asked to reintroduce a number
+ * nothing backs, and the answer is the same one a brand-new rule with the same number gets,
+ * for the same reason (see the file comment). The rule this proposal named is left exactly as
+ * disabled as it was — nothing here writes `agent_rules` — so re-enabling it is a decision the
+ * owner makes again, deliberately, once the number either gets a record or the owner insists
+ * through `agent_rules.warning` (POST /rules, once a later plan wires a writer to it).
  */
 export async function checkProposal(
   db: Db,
   agentId: string,
   proposal: CoachProposal,
 ): Promise<{ proposal: CoachProposal; warning: string | null }> {
-  const text = ruleText(proposal);
+  const text = await effectiveText(db, agentId, proposal);
   if (text === undefined || text.trim() === '') return { proposal, warning: null };
 
   const sources = await knownSources(db, agentId);

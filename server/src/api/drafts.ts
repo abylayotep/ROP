@@ -229,6 +229,7 @@ import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
 import {
+  agents,
   coachMessages,
   kbDrafts,
   testCases,
@@ -242,8 +243,9 @@ import type { CoachProposal } from '../lib/ai/coach.js';
 import { addCost, keyAad } from '../lib/ai/turn.js';
 import { annotate, type AnnotateDeps } from '../lib/drafts/annotate.js';
 import { baselineResults } from '../lib/drafts/baseline.js';
-import { baseOf, MissingDraftRowError, type DraftBase, type DraftOp } from '../lib/drafts/ops.js';
+import { applyOps, baseOf, MissingDraftRowError, staleOps, type DraftBase, type DraftOp } from '../lib/drafts/ops.js';
 import { replayCase, type AiDeps, type ReplayResult } from '../lib/drafts/replay.js';
+import { bumpConfigVersion } from '../lib/drafts/version.js';
 import { ApiError } from '../lib/errors.js';
 import { clampTitle } from '../lib/knowledge/split.js';
 import { credentialsKey, decryptSecret } from '../lib/secret-box.js';
@@ -873,6 +875,154 @@ export function registerDraftRoutes(
         finishedAt: run.finishedAt === null ? null : run.finishedAt.toISOString(),
         results,
       };
+    },
+  );
+
+  /**
+   * Applying a draft: the moment the promise it made — what was tested is what lands — is
+   * either kept or refused. Refused for one of four reasons, checked in this order and each
+   * inside the same transaction as the write it guards, because a stale check would be exactly
+   * the promise this route exists to keep:
+   *
+   * 1. The draft is not `open` — already applied, already discarded, or (once concurrent
+   *    requests are considered) applied by the request that beat this one to the row lock
+   *    below.
+   * 2. No run of this draft ever finished `done`, at any version. "Finished" excludes a run
+   *    still `'running'` — it has not settled on an answer yet — and excludes one
+   *    `reconcileOrphanedRuns` marked `'failed'` after a restart orphaned it (see
+   *    `api/drafts.ts`'s own file comment on that sweep): neither ever proved anything. A
+   *    draft with no `done` run at all has never been checked, full stop, which is a different
+   *    fact than "checked, but against an older store" — see (4) — and calls for the same next
+   *    step either way (run it) named more plainly.
+   * 3. `staleOps` names a note or a rule the draft touches that moved since the draft's own
+   *    `base` was taken. Checked *before* (4) on purpose, even though every write that moves a
+   *    note or a rule also bumps the version — so a row this step names would fail (4) too:
+   *    `staleOps` is what turns "the store moved" into "here is what moved", which is what an
+   *    owner actually needs to hear, and showing the version's generic sentence first when this
+   *    step could have named the exact row would be worse for no reason but check order.
+   * 4. The run found in (2) finished at some `config_version` other than the agent's *current*
+   *    one. The catch-all standing behind (3), not a duplicate of it: a version bumps on *any*
+   *    change that could change an answer, including one `staleOps` has no way to see at all —
+   *    a neighbouring rule reorder, say (see that function's own comment on what it cannot see)
+   *    — so this still refuses a draft (3) let through clean.
+   *
+   * A red verdict from Task 7's annotator blocks none of this — `test_results.verdict` is read
+   * nowhere below. The button that applies a draft is under a human hand; the model's opinion
+   * is a column beside it, not a fifth gate.
+   *
+   * Bumping the version here is not merely correct but the whole point: every baseline this
+   * bump invalidates (`baselineResults` only ever reuses a run whose `config_version` still
+   * matches the agent's current one) is a baseline that measured the agent *before* this
+   * draft's ops landed — reusing one after would silently compare a future run against an
+   * answer the agent can no longer give. Nothing in this route tries to carry one forward, and
+   * nothing should: nightly disqualifying every open baseline is what makes the next run's
+   * «было» trustworthy again, and it costs nothing until then, since a run only pays for a
+   * baseline it actually needs (see the file's opening comment).
+   */
+  app.post(
+    '/api/agents/:agentId/drafts/:draftId/apply',
+    { preHandler: [guard, ownerOnly] },
+    async (req) => {
+      const agentId = req.agent!.id;
+      const { draftId } = req.params as { draftId: string };
+      // Fast 404 before opening a transaction, the same shape `rules.ts`'s own PATCH route
+      // uses for the same reason — everything this read could tell us is re-read, under lock,
+      // inside the transaction below; this is only here so a stranger's id or a foreign
+      // agent's draft answers 404 without ever opening one.
+      await loadDraft(agentId, draftId);
+
+      const applied = await db.transaction(async (tx) => {
+        // Locks this one row for the rest of the transaction — a second `apply` racing the
+        // first waits here rather than both reading `status: 'open'` and both proceeding. A
+        // single-row lock by primary key, not the category-wide lock `lockCategories` uses:
+        // that one exists because a *range* of rows (a whole category's positions) has to stay
+        // consistent across the lock; this is one row, so the ordinary tool is the right one.
+        const [draft] = await tx
+          .select()
+          .from(kbDrafts)
+          .where(and(eq(kbDrafts.id, draftId), eq(kbDrafts.agentId, agentId)))
+          .for('update');
+        if (!draft) throw new ApiError(404, 'Черновик не найден');
+        if (draft.status !== 'open') {
+          throw new ApiError(409, 'Черновик уже применён или отклонён');
+        }
+
+        const [agent] = await tx
+          .select({ configVersion: agents.configVersion })
+          .from(agents)
+          .where(eq(agents.id, agentId));
+        if (!agent) throw new ApiError(404, 'Агент не найден');
+
+        // The newest run of *this* draft that actually finished — see the file comment above
+        // for why `'running'` and a restart-orphaned `'failed'` both fail this the same way a
+        // draft nobody ever ran does. Ordered rather than filtered by version up front: a run
+        // at an older version still answers "was this ever tested at all", which is the first
+        // question, before "was it tested against what the store looks like *now*".
+        const [latestDoneRun] = await tx
+          .select({ configVersion: testRuns.configVersion })
+          .from(testRuns)
+          .where(and(eq(testRuns.draftId, draft.id), eq(testRuns.status, 'done')))
+          .orderBy(desc(testRuns.startedAt))
+          .limit(1);
+        if (!latestDoneRun) {
+          throw new ApiError(409, 'Черновик не прогнан — сначала проверьте его');
+        }
+
+        // Checked *before* the version comparison below, even though a row this names has
+        // already bumped the version too (every write that moves a note or a rule bumps it —
+        // `version.ts`) and so would also fail that check. `staleOps` is what turns "the store
+        // moved" into "here is what moved", which is what the owner actually needs to hear;
+        // falling through to the version check first would show the generic sentence even when
+        // this file can name the exact row, for no reason but the order two checks happen to
+        // run in.
+        const stale = await staleOps(tx as unknown as Db, agentId, draft.ops, draft.base);
+        if (stale.length > 0) {
+          const names = stale.map((name) => `«${name}»`).join(', ');
+          throw new ApiError(409, `Изменилось с тех пор, как черновик проверен: ${names} — прогоните черновик заново`);
+        }
+
+        // The catch-all standing behind `staleOps` — see that function's own comment on what
+        // it cannot see (a neighbouring reorder, say): anything that bumped the version without
+        // moving a row this draft names still fails here, with the one message left that fits.
+        if (latestDoneRun.configVersion !== agent.configVersion) {
+          throw new ApiError(409, 'База изменилась после проверки — прогоните черновик заново');
+        }
+
+        await applyOps(tx as unknown as Db, agentId, draft.ops);
+        await bumpConfigVersion(tx as unknown as Db, agentId);
+
+        const [row] = await tx
+          .update(kbDrafts)
+          .set({ status: 'applied', appliedAt: sql`now()` })
+          .where(eq(kbDrafts.id, draft.id))
+          .returning();
+        return row!;
+      });
+
+      return toDraft(applied);
+    },
+  );
+
+  /** Throwing a draft away. No ops are ever applied for real — see the file comment — so
+   * there is nothing here to undo; the only write is the draft's own status. */
+  app.post(
+    '/api/agents/:agentId/drafts/:draftId/discard',
+    { preHandler: [guard, ownerOnly] },
+    async (req) => {
+      const agentId = req.agent!.id;
+      const { draftId } = req.params as { draftId: string };
+      const draft = await loadDraft(agentId, draftId);
+      if (draft.status !== 'open') {
+        throw new ApiError(409, 'Черновик уже применён или отклонён');
+      }
+
+      const [row] = await db
+        .update(kbDrafts)
+        .set({ status: 'discarded' })
+        .where(eq(kbDrafts.id, draft.id))
+        .returning();
+
+      return toDraft(row!);
     },
   );
 

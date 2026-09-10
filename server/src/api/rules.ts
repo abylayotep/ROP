@@ -58,11 +58,18 @@ const toRule = (row: typeof agentRules.$inferSelect) => ({
   updatedAt: row.updatedAt.toISOString(),
 });
 
-/** The transaction handle, shared by every write below that has to move more than one row. */
-type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
+/**
+ * The transaction handle, shared by every write below that has to move more than one row.
+ *
+ * Exported so `applyOps` (`lib/drafts/ops.ts`) can place a `rule_create` through the exact
+ * same `lockCategories` / `categorySize` pair rather than a second implementation that would
+ * have to be kept in sync by hand — see `lockCategories` for why a second advisory-lock key
+ * formula would not even serialize against this one.
+ */
+export type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
 
 /** How many rules an agent already has in a category — and so, the next dense position. */
-async function categorySize(tx: Tx, agentId: string, category: string): Promise<number> {
+export async function categorySize(tx: Tx, agentId: string, category: string): Promise<number> {
   const [row] = await tx
     .select({ n: count() })
     .from(agentRules)
@@ -118,7 +125,7 @@ async function categorySize(tx: Tx, agentId: string, category: string): Promise<
  * `DELETE`, same-category `PATCH`) only ever hold one lock at a time, so they can't be a link
  * in a two-resource cycle either.
  */
-async function lockCategories(tx: Tx, agentId: string, categories: readonly string[]): Promise<void> {
+export async function lockCategories(tx: Tx, agentId: string, categories: readonly string[]): Promise<void> {
   for (const category of [...new Set(categories)].sort()) {
     await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${agentId} || ':' || ${category}, 0))`);
   }

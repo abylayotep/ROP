@@ -12,6 +12,7 @@ import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
 import { kbChunks, kbLinks, kbNotes, kbSources } from '../db/schema.js';
+import { bumpConfigVersion } from '../lib/drafts/version.js';
 import { ApiError } from '../lib/errors.js';
 import {
   PAGE_REFUSED,
@@ -425,6 +426,7 @@ export function registerKnowledgeRoutes(
             path: parsed.data.path,
             body: parsed.data.body,
           });
+          await bumpConfigVersion(tx as unknown as Db, req.agent!.id);
           return note.id;
         });
       } catch (error) {
@@ -455,8 +457,8 @@ export function registerKnowledgeRoutes(
       if (!parsed.success) throw noteError(parsed.error.issues[0]);
 
       try {
-        await db.transaction((tx) =>
-          saveNote(tx as unknown as Db, {
+        await db.transaction(async (tx) => {
+          await saveNote(tx as unknown as Db, {
             agentId: req.agent!.id,
             noteId: current.id,
             path: parsed.data.path ?? current.path,
@@ -465,8 +467,9 @@ export function registerKnowledgeRoutes(
             // Set here and only here. It is what a reimport reads to decide what it may
             // replace: a page the owner corrected by hand outranks the page it came from.
             edited: true,
-          }),
-        );
+          });
+          await bumpConfigVersion(tx as unknown as Db, req.agent!.id);
+        });
       } catch (error) {
         if (isDuplicate(error)) throw new ApiError(409, 'Заметка с таким названием уже есть');
         throw error;
@@ -481,7 +484,10 @@ export function registerKnowledgeRoutes(
     async (req): Promise<{ ok: true }> => {
       const { noteId } = req.params as { noteId: string };
       const current = await loadNote(req.agent!.id, noteId);
-      await db.transaction((tx) => deleteNote(tx as unknown as Db, req.agent!.id, current.id));
+      await db.transaction(async (tx) => {
+        await deleteNote(tx as unknown as Db, req.agent!.id, current.id);
+        await bumpConfigVersion(tx as unknown as Db, req.agent!.id);
+      });
       return { ok: true };
     },
   );
@@ -627,6 +633,7 @@ export function registerKnowledgeRoutes(
         .returning();
 
       const rows = await insertPasteNotes(tx, agentId, created!.id, kind, parts);
+      await bumpConfigVersion(tx as unknown as Db, agentId);
 
       return {
         source: toKbSource(created!),
@@ -726,6 +733,8 @@ export function registerKnowledgeRoutes(
         })
         .where(and(eq(kbSources.id, source.id), eq(kbSources.agentId, agentId)))
         .returning();
+
+      await bumpConfigVersion(tx as unknown as Db, agentId);
 
       return {
         source: toKbSource(updated!),
@@ -880,6 +889,7 @@ export function registerKnowledgeRoutes(
           body: page.markdown,
           sourceId: created!.id,
         });
+        await bumpConfigVersion(tx as unknown as Db, req.agent!.id);
 
         return {
           source: toKbSource(created!),

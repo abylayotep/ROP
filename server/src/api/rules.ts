@@ -3,6 +3,7 @@ import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
 import { agentRules } from '../db/schema.js';
+import { bumpConfigVersion } from '../lib/drafts/version.js';
 import { ApiError } from '../lib/errors.js';
 import { RULE_CATEGORY_ORDER } from '../lib/ai/rules.js';
 import { isUuid } from '../lib/uuid.js';
@@ -197,6 +198,7 @@ export function registerRuleRoutes(app: FastifyInstance, db: Db, guard: preHandl
           .insert(agentRules)
           .values({ agentId, category, text, position })
           .returning();
+        await bumpConfigVersion(tx as unknown as Db, agentId);
         return created!;
       });
       return toRule(row);
@@ -326,6 +328,7 @@ export function registerRuleRoutes(app: FastifyInstance, db: Db, guard: preHandl
             })
             .where(eq(agentRules.id, current.id))
             .returning();
+          await bumpConfigVersion(tx as unknown as Db, agentId);
           return updated!;
         }
 
@@ -348,6 +351,7 @@ export function registerRuleRoutes(app: FastifyInstance, db: Db, guard: preHandl
             })
             .where(eq(agentRules.id, current.id))
             .returning();
+          await bumpConfigVersion(tx as unknown as Db, agentId);
           return updated!;
         }
 
@@ -360,6 +364,7 @@ export function registerRuleRoutes(app: FastifyInstance, db: Db, guard: preHandl
           })
           .where(eq(agentRules.id, current.id))
           .returning();
+        await bumpConfigVersion(tx as unknown as Db, agentId);
         return updated!;
       });
 
@@ -408,6 +413,8 @@ export function registerRuleRoutes(app: FastifyInstance, db: Db, guard: preHandl
               gt(agentRules.position, current.position),
             ),
           );
+
+        await bumpConfigVersion(tx as unknown as Db, agentId);
       });
 
       return { ok: true };

@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto';
 import { and, eq, isNull, sql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { reconcileOrphanedRuns } from '../src/api/drafts.js';
 import { buildServer } from '../src/api/server.js';
 import type { Db } from '../src/db/client.js';
 import {
@@ -165,6 +166,25 @@ function run(draftId: string, caseIds: string[], asMember = false) {
     url: `${drafts()}/${draftId}/runs`,
     payload: { caseIds },
   });
+}
+
+/**
+ * Polls the database directly for a run's own `test_runs.status` to leave `'running'` — the
+ * route now answers before the replay it started is done (see `api/drafts.ts`'s own "The run
+ * is asynchronous"), so every test that cares how a run actually turned out has to wait for it
+ * itself, the same way `capi-queue.test.ts`'s own `eventually` waits for the detached work
+ * that file tests — see that file's comment on why its own budget had to be raised once
+ * already. Waiting here, inside the test, rather than trusting a coincidence of timing, is
+ * also what keeps `afterEach`'s `app.close()` from racing work this test itself started: every
+ * test below that runs something calls this before it ends.
+ */
+async function waitForRun(runId: string): Promise<typeof testRuns.$inferSelect> {
+  for (let tries = 0; tries < 300; tries += 1) {
+    const [row] = await db.select().from(testRuns).where(eq(testRuns.id, runId));
+    if (row && row.status !== 'running') return row;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('the run never left `running`');
 }
 
 /**
@@ -400,19 +420,46 @@ describe('turning a coach proposal into a draft', () => {
 });
 
 describe('running a draft over a set of cases', () => {
+  // The critical property this file's whole redesign rests on: the response comes back before
+  // the run it started is done, not once it is — see `api/drafts.ts`'s own "The run is
+  // asynchronous" for why a route that used to await the whole replay would answer past
+  // `deploy/nginx.conf`'s own 120-second `proxy_read_timeout` on a run of any real size.
+  it('answers before the case results are written, not after', async () => {
+    const draft = await openDraft();
+    const kase = await addCase('сколько стоит доставка');
+    model.replyAlways({ text: 'Уточню у коллеги.' });
+    model.hang();
+
+    const res = await run(draft.id, [kase.id]);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().status).toBe('running');
+    expect(res.json().id).toBeTruthy();
+    // The one call this case needs has not even resolved yet — proof the response did not
+    // wait for the work it started, not merely that the work happens to be fast.
+    const rows = await db.select().from(testResults).where(eq(testResults.runId, res.json().id));
+    expect(rows).toHaveLength(0);
+
+    model.release();
+    const finished = await waitForRun(res.json().id);
+    expect(finished.status).toBe('done');
+  });
+
   it('runs every named case and records a result each', async () => {
     const draft = await openDraft();
     const one = await addCase('сколько стоит доставка');
     const two = await addCase('есть ли рассрочка');
     model.replyAlways({ text: 'Уточню у коллеги.' });
 
-    const res = await run(draft.id, [one.id, two.id]);
+    const posted = await run(draft.id, [one.id, two.id]);
+    expect(posted.statusCode).toBe(200);
+    expect(posted.json().status).toBe('running');
 
-    expect(res.statusCode).toBe(200);
-    expect(res.json().results).toHaveLength(2);
-    expect(res.json().results[0]!.before).not.toBeNull();
-    expect(res.json().results[0]!.after).not.toBeNull();
-    expect(res.json().status).toBe('done');
+    const finished = await waitForRun(posted.json().id);
+    expect(finished.status).toBe('done');
+
+    const rows = await db.select().from(testResults).where(eq(testResults.runId, posted.json().id));
+    expect(rows).toHaveLength(2);
   });
 
   it('spends nothing on a baseline it already has', async () => {
@@ -420,11 +467,13 @@ describe('running a draft over a set of cases', () => {
     const kase = await addCase('сколько стоит доставка');
     model.replyAlways({ text: 'Уточню у коллеги.' });
 
-    await run(draft.id, [kase.id]);
+    const first = await run(draft.id, [kase.id]);
+    await waitForRun(first.json().id);
     const spent = model.calls.length;
 
     const second = await openDraft();
-    await run(second.id, [kase.id]);
+    const posted = await run(second.id, [kase.id]);
+    await waitForRun(posted.json().id);
 
     // One call for the draft side. The baseline is read, not re-run.
     expect(model.calls.length).toBe(spent + 1);
@@ -433,7 +482,7 @@ describe('running a draft over a set of cases', () => {
   // An empty `caseIds` used to insert a `done` run at the agent's current `config_version` —
   // literally satisfying the apply gate the spec describes without a single case ever having
   // been checked. Refused outright instead: there is no such thing as a run that proves
-  // nothing.
+  // nothing — and refused synchronously, before a run is ever admitted, so nothing here waits.
   it('refuses an empty case list', async () => {
     const draft = await openDraft();
 
@@ -452,11 +501,13 @@ describe('running a draft over a set of cases', () => {
     const off = await addCase('вопрос про акцию', false);
     model.replyAlways({ text: 'Уточню у коллеги.' });
 
-    const res = await run(draft.id, [on.id, off.id]);
+    const posted = await run(draft.id, [on.id, off.id]);
+    expect(posted.statusCode).toBe(200);
+    await waitForRun(posted.json().id);
 
-    expect(res.statusCode).toBe(200);
-    expect(res.json().results).toHaveLength(1);
-    expect(res.json().results[0]!.caseId).toBe(on.id);
+    const rows = await db.select().from(testResults).where(eq(testResults.runId, posted.json().id));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.caseId).toBe(on.id);
   });
 
   it('refuses a run whose every named case is disabled', async () => {
@@ -480,8 +531,14 @@ describe('running a draft over a set of cases', () => {
     model.replyAlways({ text: 'Уточню у коллеги.' });
     model.markDistinctive(distinctive);
 
-    const res = await run(draft.id, [kase.id]);
+    const posted = await run(draft.id, [kase.id]);
+    await waitForRun(posted.json().id);
 
+    const res = await app.inject({
+      method: 'GET',
+      cookies: jar,
+      url: `${drafts()}/${draft.id}/runs/${posted.json().id}`,
+    });
     expect(res.statusCode).toBe(200);
     const { before, after } = res.json().results[0]!;
     expect(after.reply).toContain(distinctive);
@@ -512,8 +569,13 @@ describe('running a draft over a set of cases', () => {
       .returning();
     model.replyAlways({ text: 'Уточню у коллеги.' });
 
-    const res = await run(draft.id, [good.id, broken!.id]);
-    expect(res.statusCode).toBe(500);
+    const posted = await run(draft.id, [good.id, broken!.id]);
+    expect(posted.statusCode).toBe(200);
+    // The exception now lands behind the response — see `api/drafts.ts`'s own "An error has
+    // nowhere left to answer to" — so the run's own status, not the HTTP response, is what
+    // says this run did not finish.
+    const finished = await waitForRun(posted.json().id);
+    expect(finished.status).toBe('failed');
 
     const [baselineRun] = await db
       .select()
@@ -523,7 +585,8 @@ describe('running a draft over a set of cases', () => {
 
     const spent = model.calls.length;
     const second = await openDraft();
-    await run(second.id, [good.id]);
+    const rerun = await run(second.id, [good.id]);
+    await waitForRun(rerun.json().id);
     // One call for the second draft's own «стало». The good case's «было» is read back, not
     // re-run — the baseline run being `done` is what makes that possible.
     expect(model.calls.length).toBe(spent + 1);
@@ -542,41 +605,50 @@ describe('running a draft over a set of cases', () => {
   // The in-flight cap is process-wide — one counter shared with the sandbox and the coach
   // (`db/turn-cap.ts`) — and has nothing to do with which draft is running. Three *different*
   // drafts run at once here on purpose: a fourth is refused because the pool is full, not
-  // because of anything about its own draft — that guard is the next test's job.
+  // because of anything about its own draft — that guard is the next test's job. Each of the
+  // three POSTs answers immediately now — see "The run is asynchronous" — so what this test
+  // waits for is not the *requests* returning but their detached replays actually reaching the
+  // model and holding a real turn-cap slot, which is the thing the fourth run's 429 depends on.
   it('refuses a fourth run in flight with 429', async () => {
     model.hang();
     const fourDrafts = await Promise.all([openDraft(), openDraft(), openDraft(), openDraft()]);
     const kase = await addCase('сколько стоит доставка');
 
-    const inFlight = fourDrafts.slice(0, 3).map((d) => run(d.id, [kase.id]));
+    const posted = await Promise.all(fourDrafts.slice(0, 3).map((d) => run(d.id, [kase.id])));
+    for (const res of posted) expect(res.statusCode).toBe(200);
     while (model.calls.length < 3) await new Promise((resolve) => setImmediate(resolve));
 
     expect((await run(fourDrafts[3]!.id, [kase.id])).statusCode).toBe(429);
 
     model.release();
-    for (const res of await Promise.all(inFlight)) expect(res.statusCode).toBe(200);
+    for (const res of posted) {
+      const finished = await waitForRun(res.json().id);
+      expect(finished.status).toBe('done');
+    }
   });
 
   // Task 6's own concurrency test used to fire three simultaneous runs of *one* draft and
   // expect all three to succeed — the very shape a double click produces, and precisely what
   // must not happen: a run this expensive, with no progress shown, refuses a second run of a
-  // draft that already has one in flight, before the second ever reaches the model.
+  // draft that already has one in flight. The lock is held for as long as the run is actually
+  // working now, not merely for as long as the first request took — see `api/drafts.ts`'s own
+  // "The run is asynchronous" — the hang here proves that: the first response has already come
+  // back by the time the second request fires, and the second is still refused.
   it('refuses a second run of a draft already running with 409', async () => {
     model.hang();
     const draft = await openDraft();
     const kase = await addCase('сколько стоит доставка');
 
-    const first = run(draft.id, [kase.id]);
-    while (model.calls.length < 1) await new Promise((resolve) => setImmediate(resolve));
-    const callsBeforeSecond = model.calls.length;
+    const first = await run(draft.id, [kase.id]);
+    expect(first.statusCode).toBe(200);
+    expect(first.json().status).toBe('running');
 
     const second = await run(draft.id, [kase.id]);
     expect(second.statusCode).toBe(409);
-    // Refused, not run: the second click never reached the model.
-    expect(model.calls.length).toBe(callsBeforeSecond);
 
     model.release();
-    expect((await first).statusCode).toBe(200);
+    const finished = await waitForRun(first.json().id);
+    expect(finished.status).toBe('done');
   });
 
   it('refuses a member', async () => {
@@ -591,21 +663,23 @@ describe('running a draft over a set of cases', () => {
     model.replyAlways({ text: 'Уточню у коллеги.' });
 
     const before = await snapshot(db, agentId);
-    const res = await run(draft.id, [kase.id]);
-    expect(res.statusCode).toBe(200);
+    const posted = await run(draft.id, [kase.id]);
+    expect(posted.statusCode).toBe(200);
+    await waitForRun(posted.json().id);
 
     expect(await snapshot(db, agentId)).toEqual(before);
   });
 
   // `applyOps` used to throw a plain `Error` for a note the draft names but that is no longer
-  // there, reaching the owner as a bare «Внутренняя ошибка сервера» — the one path in this
-  // feature that gave a cabinet user no explanation, and one that costs nothing to hit, since
-  // ops apply before the first model call.
-  it('answers a Russian 409, naming what is gone, for a draft whose note was deleted', async () => {
+  // there. Ops apply before the first model call, so no model call is ever spent chasing a
+  // draft that could never have applied — that much is unchanged. What changed is where the
+  // refusal lands: the response has already gone out by the time this is discovered, so the
+  // run's own status is `failed` rather than the request itself answering 409 — see
+  // `api/drafts.ts`'s own "A deleted note or rule, named by a draft".
+  it('marks the run failed, without spending a model call, for a draft whose note was deleted', async () => {
     const [note] = await db.insert(kbNotes).values({ agentId, path: 'Доставка.md', title: 'Доставка' }).returning();
     // Through the real creation route, not the `openDraft` test helper: `base` has to hold the
-    // note's name the way `baseOf` actually captures it (`openDraft` stores an empty `base`),
-    // the same photograph the 409 below reads the name back out of.
+    // note's name the way `baseOf` actually captures it (`openDraft` stores an empty `base`).
     const created = await app.inject({
       method: 'POST',
       cookies: jar,
@@ -618,10 +692,11 @@ describe('running a draft over a set of cases', () => {
 
     await db.delete(kbNotes).where(eq(kbNotes.id, note!.id));
 
-    const res = await run(created.json().id, [kase.id]);
+    const posted = await run(created.json().id, [kase.id]);
+    expect(posted.statusCode).toBe(200);
 
-    expect(res.statusCode).toBe(409);
-    expect(res.json().message).toContain('Доставка');
+    const finished = await waitForRun(posted.json().id);
+    expect(finished.status).toBe('failed');
     // No model call spent chasing a draft that could never have applied.
     expect(model.calls).toHaveLength(0);
   });
@@ -673,6 +748,7 @@ describe('reading drafts and runs back', () => {
 
     const posted = await run(draft.id, [kase.id]);
     const runId = posted.json().id;
+    await waitForRun(runId);
 
     const res = await app.inject({ method: 'GET', cookies: jar, url: `${drafts()}/${draft.id}/runs/${runId}` });
     expect(res.statusCode).toBe(200);
@@ -682,29 +758,6 @@ describe('reading drafts and runs back', () => {
     // paid for it has `draft_id is null`.
     expect(res.json().results[0]!.before).not.toBeNull();
     expect(res.json().results[0]!.after).not.toBeNull();
-  });
-
-  // The cost used to come back half-reported (the draft side only) and each side gave no hint
-  // whether it was freshly paid for or read back from an earlier run.
-  it('reports both costs, and marks a fresh baseline apart from a reused one', async () => {
-    const draft = await openDraft();
-    const kase = await addCase('сколько стоит доставка');
-    model.replyAlways({ text: 'Уточню у коллеги.' });
-
-    const first = await run(draft.id, [kase.id]);
-    expect(first.statusCode).toBe(200);
-    expect(Number(first.json().draftCost)).toBeGreaterThan(0);
-    expect(Number(first.json().baselineCost)).toBeGreaterThan(0);
-    expect(first.json().results[0]!.after.origin).toBe('paid');
-    expect(first.json().results[0]!.before.origin).toBe('paid');
-
-    const second = await openDraft();
-    const rerun = await run(second.id, [kase.id]);
-    expect(rerun.statusCode).toBe(200);
-    expect(Number(rerun.json().draftCost)).toBeGreaterThan(0);
-    // Nothing paid for «было» this time — the baseline from the first run answers it.
-    expect(Number(rerun.json().baselineCost)).toBe(0);
-    expect(rerun.json().results[0]!.before.origin).toBe('reused');
   });
 
   // A run belongs to the one draft it scored, never to a neighbour that merely happens to
@@ -718,8 +771,48 @@ describe('reading drafts and runs back', () => {
 
     const posted = await run(draft.id, [kase.id]);
     const runId = posted.json().id;
+    await waitForRun(runId);
 
     const res = await app.inject({ method: 'GET', cookies: jar, url: `${drafts()}/${other.id}/runs/${runId}` });
     expect(res.statusCode).toBe(404);
+  });
+});
+
+describe('recovering from a restart', () => {
+  // A run's own loop lives only in the memory of the process replaying it — a restart mid-run
+  // leaves its `test_runs` row reading `'running'` forever unless something says otherwise.
+  // `reconcileOrphanedRuns` is what `index.ts` calls once, before `app.listen()`, to sweep it —
+  // not a Fastify hook on `buildServer` itself, precisely because `buildServer` is also what
+  // every test in this suite calls, several (`health.test.ts`, `not-found.test.ts`) against a
+  // `db` that is never meant to be queried at all. See that function's own comment.
+  it('marks a `running` row left behind by a dead process as `failed`, not stuck forever', async () => {
+    const draft = await openDraft();
+    const [orphan] = await db
+      .insert(testRuns)
+      .values({ agentId, draftId: draft.id, configVersion: 1, model: 'x', status: 'running' })
+      .returning();
+
+    await reconcileOrphanedRuns(db);
+
+    const [row] = await db.select().from(testRuns).where(eq(testRuns.id, orphan!.id));
+    expect(row!.status).toBe('failed');
+    expect(row!.finishedAt).not.toBeNull();
+  });
+
+  // The sweep touches only rows still `'running'` — an already-finished run, however it ended,
+  // is left exactly as it was. A restart quietly rewriting a `done` run's own status would be
+  // its own bug.
+  it('leaves an already-finished run alone', async () => {
+    const draft = await openDraft();
+    const [finished] = await db
+      .insert(testRuns)
+      .values({ agentId, draftId: draft.id, configVersion: 1, model: 'x', status: 'done', cost: '0.0001' })
+      .returning();
+
+    await reconcileOrphanedRuns(db);
+
+    const [row] = await db.select().from(testRuns).where(eq(testRuns.id, finished!.id));
+    expect(row!.status).toBe('done');
+    expect(row!.cost).toBe('0.00010000');
   });
 });

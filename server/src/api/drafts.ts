@@ -29,6 +29,63 @@
  * read alongside each case row and filtered before anything is spent, not merely before it is
  * shown.
  *
+ * ## The run is asynchronous
+ *
+ * `POST …/drafts/:draftId/runs` answers the instant a run is admitted — before a single case
+ * has been replayed, not once every case has a result. `deploy/nginx.conf` gives every request
+ * 120 seconds before it gives up on it (`proxy_read_timeout`), and twenty cases at up to two
+ * sides each, up to two model attempts a call, each attempt bounded at the model's own sixty
+ * seconds, blows past that in the ordinary case, not only a pathological one — the owner would
+ * watch their own request die with a 504 while the run it started keeps spending their balance
+ * behind a response that never arrives, never even learning the run's own id to look it up by.
+ * `test_runs.status` already had `'running'` as a value before this fix; that value only means
+ * something if the request that inserted the row can answer before the row leaves it.
+ *
+ * So the route still does exactly the validating, refusing and bookkeeping it always did — same
+ * order, same refusals, same two rows inserted — and then, instead of awaiting the replay loop
+ * before answering, hands that loop to `setImmediate` and answers right away with the run's id
+ * and `status: 'running'`. `GET …/runs/:runId` (below) is how the rest is read: it answers with
+ * whatever `test_results` rows exist yet, so a client polling it watches the table fill, the
+ * same way `api/whatsapp-webhook.ts` already answers Meta before draining the CAPI queue behind
+ * the response — see that file's own comment for the pattern this follows.
+ *
+ * Two things change shape once nothing is waiting on the HTTP response any more:
+ *
+ * - **The `runningDrafts` lock** (below) used to be released in a `finally` wrapped around the
+ *   whole handler. It still is, but "the whole handler" now means the detached replay too — the
+ *   lock is only ever dropped once that finishes, in *its own* `finally`, not when the response
+ *   goes out. A second run of the same draft is refused with 409 for exactly as long as the
+ *   first one is actually still working, not merely for as long as its request took.
+ * - **An error has nowhere left to answer to.** A `MissingDraftRowError` (see "A deleted note
+ *   or rule" below) used to become a synchronous Russian 409, the response itself. It cannot any
+ *   more — the response already went out — so every error the loop throws, this one included,
+ *   is caught in one place: the run's own `test_runs` rows are marked the way they always were
+ *   on failure (see "Answering as the table fills" below), and the error is logged
+ *   (`app.log.error`) rather than thrown further, the same shape `whatsapp-webhook.ts` already
+ *   uses for its own detached work. The owner's signal is the run's `status`, not a message
+ *   naming what went wrong — `test_runs` has no column for that, and adding one to recover
+ *   detail this feature has never promised felt like more schema than any of this asked for;
+ *   the exact reason is one `app.log.error` line away for whoever is debugging it.
+ *
+ * `takeTurnSlotWaiting`'s own bound — see "The turn-cap slot" below — is unaffected by this
+ * change; it still refuses to wait forever the same way it always has, only now from inside the
+ * detached loop rather than the request itself.
+ *
+ * ## A restart, and the `running` row it leaves behind
+ *
+ * A run's own loop lives only in the memory of the process replaying it — nothing about it is
+ * written anywhere durable enough for a different process, or this one restarted, to pick back
+ * up. If the process dies mid-run, its `test_runs` row is left reading `'running'` forever, and
+ * the in-memory `runningDrafts` lock that would have refused a second run of the same draft is
+ * gone the moment the process is: nothing left standing says the row is a lie.
+ * `reconcileOrphanedRuns` below sweeps every row still `'running'` to `'failed'` — called once
+ * from `index.ts`, before `app.listen()`, early enough that nothing legitimately `running` can
+ * exist yet to be caught by mistake (see that function's own comment for why it lives there and
+ * not on a Fastify hook every test's own `buildServer` would trip too). Nothing already paid for is
+ * lost by marking it so: `baselineResults` only ever reuses a run with `status = 'done'`, so a
+ * `running` row was never going to be reused either way, and the owner's screen gets an honest
+ * `'failed'` instead of a progress bar that was never going to move again.
+ *
  * ## Refusing a run before it costs anything
  *
  * Three refusals happen before a single row is written or a single call is made, because a run
@@ -74,12 +131,13 @@
  * unconditional, the same shape `api/ai.ts`'s sandbox and `api/coach.ts`'s coach already use
  * around their own one call.
  *
- * ## Answering when everything is done
+ * ## Answering as the table fills
  *
  * Twenty cases at up to two calls each is a request that can run long — there is no attempt
- * here to make it short. The route answers once every case has a result, the same shape
- * `POST …/ai/sandbox` already commits to for one call: the owner's screen has one round trip
- * to show «было» against «стало», not a job id to poll.
+ * here to make it short, and (see "The run is asynchronous" above) no reason left to: the owner
+ * gets the run's id back immediately and watches «было»/«стало» fill in over `GET …/runs/:runId`
+ * as `test_results` gains a row per case, rather than one round trip that answers only once
+ * everything is done.
  *
  * `test_runs.status` means three different things depending on which run and which column you
  * are looking at, and all three are spelled `'failed'`:
@@ -113,10 +171,15 @@
  *
  * `applyOps` (`lib/drafts/ops.ts`) throws `MissingDraftRowError` when an update op names a row
  * that is gone — deleted between the draft being made and the run that replays it. Ops apply
- * before the first model call in every case (see `replayCase`), so this is caught, and answered
- * as a Russian 409 naming what is gone, before a single call is spent: the draft's own `base`
- * (`baseOf`, captured when the draft was made) still holds the display name of a row that no
- * longer exists to read one from, the same photograph `staleOps` reads for the same reason.
+ * before the first model call in every case (see `replayCase`), so no model call is ever spent
+ * chasing a draft that could never have applied; the draft's own `base` (`baseOf`, captured
+ * when the draft was made) still holds the display name of the missing row, the same photograph
+ * `staleOps` reads for the same reason, and `missingRowMessage` below turns the two into a
+ * Russian sentence. What happens to that sentence is the general answer "The run is
+ * asynchronous" above already gives for any error the loop throws: it is logged, and the run's
+ * own `test_runs` row is marked `failed` — it is no longer, itself, a 409 the caller reads,
+ * because by the time this can be discovered the response admitting the run has already gone
+ * out.
  *
  * ## Mapping a `CoachProposal` onto a `DraftOp`
  *
@@ -194,9 +257,10 @@ const RULE_CATEGORIES = ['business', 'tone', 'order', 'forbid'] as const;
  * same reason: there is exactly one process in production, so this needs no more than that to
  * be correct, and a second `registerDraftRoutes` call sharing it (as every test file's rebuilt
  * `app` does across that file's own tests) is the same "belongs to the process, not to one
- * server instance" reasoning `turnsInFlight` already rests on. Entries are always added and
- * removed in the same request's own `try`/`finally`, so nothing here outlives the request that
- * put it in — see the run route below.
+ * server instance" reasoning `turnsInFlight` already rests on. An entry is added synchronously
+ * by the request that admits a run and removed once that run's own detached replay finishes —
+ * not once the request that started it answers, which happens first — so nothing here outlives
+ * the *run*, even though it outlives the request that opened it. See the run route below.
  */
 const runningDrafts = new Set<string>();
 
@@ -344,6 +408,27 @@ function missingRowMessage(error: MissingDraftRowError, base: DraftBase): string
   return `${name ? `«${name}»` : label} была удалена с тех пор, как сделан черновик — обновите его и повторите`;
 }
 
+/**
+ * Marks every run this process finds still `running` at boot as `failed` — see the file
+ * comment's "A restart, and the `running` row it leaves behind".
+ *
+ * Deliberately **not** wired to a Fastify `onReady` hook inside `registerDraftRoutes`: a test
+ * builds a server the same way production does, but many of them (`health.test.ts`,
+ * `not-found.test.ts`) do it against a `db` that never actually connects — `createDb` is lazy,
+ * and those tests' whole point is answering without touching Postgres. A hook that ran on
+ * every `app.ready()` would query on their behalf too, and fail them for a reason that has
+ * nothing to do with what they test. `index.ts` calls this once, explicitly, before
+ * `app.listen()` — the one place `buildServer` is not also stood up by a test — the same
+ * reasoning that keeps the CAPI drain's own timer out of `buildServer` and in that file
+ * instead (see its own comment).
+ */
+export async function reconcileOrphanedRuns(db: Db): Promise<void> {
+  await db
+    .update(testRuns)
+    .set({ status: 'failed', finishedAt: new Date() })
+    .where(eq(testRuns.status, 'running'));
+}
+
 export function registerDraftRoutes(
   app: FastifyInstance,
   db: Db,
@@ -419,6 +504,99 @@ export function registerDraftRoutes(
     },
   );
 
+  /**
+   * Everything a run does after `POST …/drafts/:draftId/runs` has already answered — see the
+   * file comment's "The run is asynchronous". Runs detached, behind the response, the same
+   * loop this route used to await before replying: «стало» always paid, «было» read back or
+   * paid once, one `test_results` row per side per case, `test_runs` marked `done` or `failed`
+   * on the way out. The one thing that changes is where an error that escapes the loop goes:
+   * nowhere a caller can read any more, only into a log and the run's own `status`.
+   */
+  async function runReplay(input: {
+    agentId: string;
+    numberId: string;
+    draft: typeof kbDrafts.$inferSelect;
+    casesById: Map<string, { id: string; messages: string[]; enabled: boolean }>;
+    runIds: string[];
+    existingBaselines: Map<string, typeof testResults.$inferSelect>;
+    draftRun: typeof testRuns.$inferSelect;
+    baselineRun: typeof testRuns.$inferSelect | null;
+  }): Promise<void> {
+    const { agentId, numberId, draft, casesById, runIds, existingBaselines, draftRun, baselineRun } = input;
+
+    /** Takes a slot for exactly one `replayCase` call and gives it back immediately after —
+     * see the file comment for why per-call, not per-case or per-run, and why this waits
+     * rather than throws now that the run is admitted. */
+    async function replayOneSide(ops: DraftOp[], messages: string[]): Promise<ReplayResult> {
+      const acquired = await takeTurnSlotWaiting();
+      if (!acquired) {
+        throw new ApiError(503, 'Модель не отвечает слишком долго — прогон прерван, попробуйте ещё раз');
+      }
+      try {
+        return await replayCase(db, deps, { agentId, numberId, key, messages, ops });
+      } finally {
+        releaseTurnSlot();
+      }
+    }
+
+    let draftCost = '0';
+    let baselineCost = '0';
+    // How many baseline rows this run itself wrote — not merely attempted. Decides the
+    // baseline run's own final status on the way out; see the file comment on `failed`.
+    let baselineWritten = 0;
+
+    try {
+      for (const caseId of runIds) {
+        const kase = casesById.get(caseId)!;
+
+        // «Стало» — always paid, every case, every run.
+        const after = await replayOneSide(draft.ops, kase.messages);
+        draftCost = addCost(draftCost, after.cost);
+        await db.insert(testResults).values(resultRow(draftRun.id, caseId, sideFromReplay(after)));
+
+        // «Было» — read back when a baseline already exists at this version and model, paid
+        // for and stored as one only when it does not.
+        if (!existingBaselines.has(caseId)) {
+          const baseline = await replayOneSide([], kase.messages);
+          baselineCost = addCost(baselineCost, baseline.cost);
+          await db.insert(testResults).values(resultRow(baselineRun!.id, caseId, sideFromReplay(baseline)));
+          baselineWritten += 1;
+        }
+      }
+
+      await db
+        .update(testRuns)
+        .set({ status: 'done', cost: draftCost, finishedAt: new Date() })
+        .where(eq(testRuns.id, draftRun.id));
+      if (baselineRun) {
+        await db
+          .update(testRuns)
+          .set({ status: 'done', cost: baselineCost, finishedAt: new Date() })
+          .where(eq(testRuns.id, baselineRun.id));
+      }
+    } catch (error) {
+      // The run could not finish — the wait for a slot ran out, or something below
+      // `replayCase` broke outright, or (see "A deleted note or rule" above) a draft op named a
+      // row that is gone. Whatever `test_results` rows already landed stay; the run itself is
+      // marked so nothing later mistakes it for a complete answer, and the error goes to the
+      // log — see the file comment's "An error has nowhere left to answer to".
+      await db
+        .update(testRuns)
+        .set({ status: 'failed', cost: draftCost, finishedAt: new Date() })
+        .where(eq(testRuns.id, draftRun.id));
+      if (baselineRun) {
+        // `done` the moment at least one result landed — see the file comment on what `failed`
+        // means for a baseline run versus a draft-side one.
+        await db
+          .update(testRuns)
+          .set({ status: baselineWritten > 0 ? 'done' : 'failed', cost: baselineCost, finishedAt: new Date() })
+          .where(eq(testRuns.id, baselineRun.id));
+      }
+      const detail = error instanceof MissingDraftRowError ? missingRowMessage(error, draft.base) : undefined;
+      app.log.error({ error, runId: draftRun.id, detail }, 'draft run: replay failed');
+    }
+  }
+
   app.post(
     '/api/agents/:agentId/drafts/:draftId/runs',
     {
@@ -436,12 +614,16 @@ export function registerDraftRoutes(
       // A run is expensive and shows no progress — precisely the shape of request a double
       // click repeats. Refused before the body is even parsed, so a second click never spends
       // what the first click is already spending. See the file comment's "Refusing a run
-      // before it costs anything".
+      // before it costs anything". Not released until the run itself is over, not merely once
+      // this request answers — see "The run is asynchronous" above.
       if (runningDrafts.has(draft.id)) {
         throw new ApiError(409, 'Этот черновик уже проверяется — дождитесь окончания прогона');
       }
       runningDrafts.add(draft.id);
 
+      // Released here only on an early throw below, before the run is ever admitted; once
+      // admitted, the detached replay's own `finally` takes over instead — see below.
+      let admitted = false;
       try {
         const parsed = runBody.safeParse(req.body);
         if (!parsed.success) throw new ApiError(400, 'Не удалось разобрать список случаев');
@@ -484,8 +666,8 @@ export function registerDraftRoutes(
         const needsBaseline = runIds.filter((id) => !existingBaselines.has(id));
 
         // The run-level admission check — see the file comment's "The turn-cap slot". A peek,
-        // not a reservation: the real, per-call reservation happens below, once the run is
-        // admitted and committed to finishing.
+        // not a reservation: the real, per-call reservation happens inside `runReplay`, once
+        // the run is admitted and committed to finishing.
         if (!turnSlotAvailable()) {
           throw new ApiError(429, 'Прогоны заняты. Попробуйте через несколько секунд.');
         }
@@ -502,103 +684,37 @@ export function registerDraftRoutes(
                 .values({ agentId, draftId: null, configVersion, model, status: 'running' })
                 .returning();
 
-        /** Takes a slot for exactly one `replayCase` call and gives it back immediately after
-         * — see the file comment for why per-call, not per-case or per-run, and why this waits
-         * rather than throws now that the run is admitted. */
-        async function replayOneSide(ops: DraftOp[], messages: string[]): Promise<ReplayResult> {
-          const acquired = await takeTurnSlotWaiting();
-          if (!acquired) {
-            throw new ApiError(503, 'Модель не отвечает слишком долго — прогон прерван, попробуйте ещё раз');
-          }
-          try {
-            return await replayCase(db, deps, { agentId, numberId, key, messages, ops });
-          } finally {
-            releaseTurnSlot();
-          }
-        }
+        admitted = true;
 
-        const results: { caseId: string; before: CaseSideOut; after: CaseSideOut }[] = [];
-        let draftCost = '0';
-        let baselineCost = '0';
-        // How many baseline rows this run itself wrote — not merely attempted. Decides the
-        // baseline run's own final status on the way out; see the file comment on `failed`.
-        let baselineWritten = 0;
-
-        try {
-          for (const caseId of runIds) {
-            const kase = casesById.get(caseId)!;
-
-            // «Стало» — always paid, every case, every run.
-            const after = await replayOneSide(draft.ops, kase.messages);
-            draftCost = addCost(draftCost, after.cost);
-            await db.insert(testResults).values(resultRow(draftRun!.id, caseId, sideFromReplay(after)));
-
-            // «Было» — read back when a baseline already exists at this version and model,
-            // paid for and stored as one only when it does not.
-            const cached = existingBaselines.get(caseId);
-            let before: CaseSide;
-            let beforeOrigin: 'paid' | 'reused';
-            if (cached) {
-              before = sideFromRow(cached);
-              beforeOrigin = 'reused';
-            } else {
-              const baseline = await replayOneSide([], kase.messages);
-              baselineCost = addCost(baselineCost, baseline.cost);
-              await db.insert(testResults).values(resultRow(baselineRun!.id, caseId, sideFromReplay(baseline)));
-              baselineWritten += 1;
-              before = sideFromReplay(baseline);
-              beforeOrigin = 'paid';
-            }
-
-            results.push({
-              caseId,
-              before: { ...before, origin: beforeOrigin },
-              after: { ...sideFromReplay(after), origin: 'paid' },
-            });
-          }
-
-          await db
-            .update(testRuns)
-            .set({ status: 'done', cost: draftCost, finishedAt: new Date() })
-            .where(eq(testRuns.id, draftRun!.id));
-          if (baselineRun) {
-            await db
-              .update(testRuns)
-              .set({ status: 'done', cost: baselineCost, finishedAt: new Date() })
-              .where(eq(testRuns.id, baselineRun.id));
-          }
-        } catch (error) {
-          // The run could not finish — the wait for a slot ran out, or something below
-          // `replayCase` broke outright. Whatever `test_results` rows already landed stay; the
-          // run itself is marked so nothing later mistakes it for a complete answer.
-          await db
-            .update(testRuns)
-            .set({ status: 'failed', cost: draftCost, finishedAt: new Date() })
-            .where(eq(testRuns.id, draftRun!.id));
-          if (baselineRun) {
-            // `done` the moment at least one result landed — see the file comment on what
-            // `failed` means for a baseline run versus a draft-side one.
-            await db
-              .update(testRuns)
-              .set({ status: baselineWritten > 0 ? 'done' : 'failed', cost: baselineCost, finishedAt: new Date() })
-              .where(eq(testRuns.id, baselineRun.id));
-          }
-          if (error instanceof MissingDraftRowError) {
-            throw new ApiError(409, missingRowMessage(error, draft.base));
-          }
-          throw error;
-        }
+        // Everything from here runs behind the response already on its way out — see the file
+        // comment's "The run is asynchronous". `setImmediate` rather than a bare `void`: the
+        // same way `whatsapp-webhook.ts` queues its own post-response work, so this handler's
+        // own `return` stays the last thing it does, before Node hands the response to the
+        // socket.
+        setImmediate(() => {
+          void runReplay({
+            agentId,
+            numberId,
+            draft,
+            casesById,
+            runIds,
+            existingBaselines,
+            draftRun: draftRun!,
+            baselineRun,
+          }).finally(() => {
+            runningDrafts.delete(draft.id);
+          });
+        });
 
         return {
           id: draftRun!.id,
           draftId: draft.id,
-          status: 'done',
-          draftCost,
-          baselineCost,
-          results,
+          status: 'running' as const,
+          draftCost: '0',
+          baselineCost: '0',
         };
       } finally {
-        runningDrafts.delete(draft.id);
+        if (!admitted) runningDrafts.delete(draft.id);
       }
     },
   );

@@ -1,3 +1,4 @@
+import { reconcileOrphanedRuns } from './api/drafts.js';
 import { buildServer } from './api/server.js';
 import { createDb } from './db/client.js';
 import { loadEnv } from './env.js';
@@ -21,6 +22,11 @@ const db = createDb(env.DATABASE_URL);
 // are the same client and one deadline governs both.
 const capi = createCapiClient();
 const app = buildServer(env, db, { capi });
+
+// Before this process takes a single request — see `api/drafts.ts`'s own comment on why a
+// `running` test run left behind by a dead process needs this, and why it runs here rather
+// than on a hook every test's own `buildServer` would trip too.
+await reconcileOrphanedRuns(db);
 
 await app.listen({ port: env.PORT, host: '0.0.0.0' });
 

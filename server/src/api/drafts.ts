@@ -243,6 +243,7 @@ import type { Env } from '../env.js';
 import type { CoachProposal } from '../lib/ai/coach.js';
 import { addCost, keyAad } from '../lib/ai/turn.js';
 import { annotate, type AnnotateDeps } from '../lib/drafts/annotate.js';
+import { isDraftApplicable } from '../lib/drafts/applicable.js';
 import { baselineResults } from '../lib/drafts/baseline.js';
 import { applyOps, baseOf, MissingDraftRowError, staleOps, type DraftBase, type DraftOp } from '../lib/drafts/ops.js';
 import { replayCase, type AiDeps, type ReplayResult } from '../lib/drafts/replay.js';
@@ -354,6 +355,45 @@ const toDraft = (row: typeof kbDrafts.$inferSelect) => ({
   createdAt: row.createdAt.toISOString(),
   appliedAt: row.appliedAt === null ? null : row.appliedAt.toISOString(),
 });
+
+/**
+ * The baseline run a given draft run's own POST paired with, if it needed one — found without
+ * a column linking the two, because the POST that makes a draft run inserts the two back to
+ * back, in the same request, with nothing awaited in between: any baseline run at the same
+ * `agentId`/`configVersion`/`model` that started at or after `run` did is the one that POST
+ * created for it. `baselineResults` can answer a case from an *older* baseline too (one that
+ * already existed and was simply reused) — those necessarily started before `run` did, since
+ * the POST read them before `run`'s own row was even inserted — so the `>=` here is what tells
+ * "paid by this run" apart from "reused from an earlier one". This can misattribute a case to
+ * a different, unrelated run that happens to start immediately after `run` and share its
+ * agent/version/model while `run` itself needed no fresh baseline at all — accepted as the
+ * rare edge a heuristic without a new column has to leave, not a case this feature promises to
+ * get right.
+ *
+ * Shared between `GET .../runs/:runId` (the route this heuristic was written for) and
+ * `GET .../drafts/:draftId`'s own run list, so a run's reported `baselineCost` means the same
+ * thing regardless of which route asked.
+ */
+async function pairedBaselineRun(
+  db: Db,
+  run: typeof testRuns.$inferSelect,
+): Promise<typeof testRuns.$inferSelect | null> {
+  const [row] = await db
+    .select()
+    .from(testRuns)
+    .where(
+      and(
+        eq(testRuns.agentId, run.agentId),
+        isNull(testRuns.draftId),
+        eq(testRuns.configVersion, run.configVersion),
+        eq(testRuns.model, run.model),
+        gte(testRuns.startedAt, run.startedAt),
+      ),
+    )
+    .orderBy(asc(testRuns.startedAt))
+    .limit(1);
+  return row ?? null;
+}
 
 /** The seven `test_results` columns a replay actually fills — never `fields` or `detail`,
  * which `ReplayResult` also carries but which have no column of their own (see that type's
@@ -521,9 +561,39 @@ export function registerDraftRoutes(
     '/api/agents/:agentId/drafts/:draftId',
     { preHandler: [guard, ownerOnly] },
     async (req) => {
+      const agentId = req.agent!.id;
       const { draftId } = req.params as { draftId: string };
-      const row = await loadDraft(req.agent!.id, draftId);
-      return toDraft(row);
+      const row = await loadDraft(agentId, draftId);
+
+      // What a reload used to have no way to know — see the file comment's opening section on
+      // why this exists at all. Newest first, so a screen can show the most recent run without
+      // sorting it itself.
+      const runRows = await db
+        .select()
+        .from(testRuns)
+        .where(and(eq(testRuns.agentId, agentId), eq(testRuns.draftId, row.id)))
+        .orderBy(desc(testRuns.startedAt));
+
+      const runs = await Promise.all(
+        runRows.map(async (run) => {
+          const baseline = await pairedBaselineRun(db, run);
+          return {
+            id: run.id,
+            status: run.status as 'running' | 'done' | 'failed',
+            configVersion: run.configVersion,
+            draftCost: run.cost,
+            baselineCost: baseline?.cost ?? '0',
+            startedAt: run.startedAt.toISOString(),
+            finishedAt: run.finishedAt === null ? null : run.finishedAt.toISOString(),
+          };
+        }),
+      );
+
+      // The exact predicate the apply route itself checks — see `isDraftApplicable`'s own
+      // comment for why this is one shared function rather than a second copy of the query.
+      const applicable = await isDraftApplicable(db, row.id, req.agent!.configVersion);
+
+      return { ...toDraft(row), runs, applicable };
     },
   );
 
@@ -822,32 +892,9 @@ export function registerDraftRoutes(
       const caseIds = rows.map((row) => row.caseId);
       const baselines = await baselineResults(db, agentId, caseIds, run.configVersion, run.model);
 
-      // The baseline run *this* draft run's own POST paired with, if it needed one — found
-      // without a column linking the two, because the POST that made `run` inserts them back
-      // to back, in the same request, with nothing awaited in between: any baseline run at the
-      // same `agentId`/`configVersion`/`model` that started at or after `run` did is the one
-      // POST created for it. `baselineResults` above can answer a case from an *older* baseline
-      // too (one that already existed and was simply reused) — those necessarily started
-      // before `run` did, since the POST read them before `run`'s own row was even inserted —
-      // so the `>=` here is what tells "paid by this run" apart from "reused from an earlier
-      // one" below. This can misattribute a case to a different, unrelated run that happens to
-      // start immediately after `run` and share its agent/version/model while `run` itself
-      // needed no fresh baseline at all — accepted as the rare edge a heuristic without a new
-      // column has to leave, not a case this feature promises to get right.
-      const [pairedBaseline] = await db
-        .select()
-        .from(testRuns)
-        .where(
-          and(
-            eq(testRuns.agentId, agentId),
-            isNull(testRuns.draftId),
-            eq(testRuns.configVersion, run.configVersion),
-            eq(testRuns.model, run.model),
-            gte(testRuns.startedAt, run.startedAt),
-          ),
-        )
-        .orderBy(asc(testRuns.startedAt))
-        .limit(1);
+      // The baseline run *this* draft run's own POST paired with, if it needed one — see
+      // `pairedBaselineRun`'s own comment for the heuristic and what it can misattribute.
+      const pairedBaseline = await pairedBaselineRun(db, run);
 
       const results = rows.map((row) => {
         const baseline = baselines.get(row.caseId);
@@ -961,18 +1008,17 @@ export function registerDraftRoutes(
           .where(eq(agents.id, agentId));
         if (!agent) throw new ApiError(404, 'Агент не найден');
 
-        // The newest run of *this* draft that actually finished — see the file comment above
-        // for why `'running'` and a restart-orphaned `'failed'` both fail this the same way a
-        // draft nobody ever ran does. Ordered rather than filtered by version up front: a run
-        // at an older version still answers "was this ever tested at all", which is the first
-        // question, before "was it tested against what the store looks like *now*".
-        const [latestDoneRun] = await tx
-          .select({ configVersion: testRuns.configVersion })
+        // Was this draft ever tested at all — any `done` run, at any version? See the file
+        // comment above for why `'running'` and a restart-orphaned `'failed'` both fail this
+        // the same way a draft nobody ever ran does. Asked before the version-specific
+        // question below (`isDraftApplicable`), because "never tested" and "tested, but
+        // against an older store" are different facts and call for different sentences.
+        const [everRun] = await tx
+          .select({ id: testRuns.id })
           .from(testRuns)
           .where(and(eq(testRuns.draftId, draft.id), eq(testRuns.status, 'done')))
-          .orderBy(desc(testRuns.startedAt))
           .limit(1);
-        if (!latestDoneRun) {
+        if (!everRun) {
           throw new ApiError(409, 'Черновик не прогнан — сначала проверьте его');
         }
 
@@ -992,7 +1038,10 @@ export function registerDraftRoutes(
         // The catch-all standing behind `staleOps` — see that function's own comment on what
         // it cannot see (a neighbouring reorder, say): anything that bumped the version without
         // moving a row this draft names still fails here, with the one message left that fits.
-        if (latestDoneRun.configVersion !== agent.configVersion) {
+        // `isDraftApplicable` is the exact same call `GET .../drafts/:draftId` makes to report
+        // `applicable` — see that function's own comment for why it is shared rather than
+        // copied.
+        if (!(await isDraftApplicable(tx as unknown as Db, draft.id, agent.configVersion))) {
           throw new ApiError(409, 'База изменилась после проверки — прогоните черновик заново');
         }
 

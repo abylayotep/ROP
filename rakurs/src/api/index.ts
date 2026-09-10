@@ -19,6 +19,7 @@ import type {
   KbNote,
   KbNoteDetail,
   KbDraft,
+  KbDraftDetail,
   KbNoteKind,
   KbSection,
   KbSource,
@@ -520,7 +521,7 @@ export const draftCoachMessage = (agentId: string, messageId: string) =>
 // ── Черновики и прогоны ──────────────────────────────────────────────────────
 
 export const getDraft = (agentId: string, draftId: string, signal?: AbortSignal) =>
-  request<KbDraft>(`/agents/${agentId}/drafts/${draftId}`, { signal });
+  request<KbDraftDetail>(`/agents/${agentId}/drafts/${draftId}`, { signal });
 
 /**
  * Starts a run and returns the instant it is admitted — `status: 'running'`, before a single

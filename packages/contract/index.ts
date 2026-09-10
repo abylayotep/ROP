@@ -785,6 +785,31 @@ export interface KbDraft {
   appliedAt: string | null;
 }
 
+/** One run in a draft's own history, as `GET .../drafts/:draftId` lists it — enough for a
+ * screen to say «прогнан тогда-то» without guessing, and to reopen the full `TestRun` (with
+ * its per-case results) through `GET .../runs/:runId` by `id`. Newest first. */
+export interface DraftRunSummary {
+  id: string;
+  status: 'running' | 'done' | 'failed';
+  configVersion: number;
+  draftCost: string;
+  baselineCost: string;
+  startedAt: string;
+  finishedAt: string | null;
+}
+
+/**
+ * `GET .../drafts/:draftId`'s own answer — `KbDraft` plus what a reload needs and cannot
+ * otherwise know: the draft's run history, and whether it is provably safe to apply *right
+ * now*. `applicable` is exactly the predicate the apply route itself checks (a `done` run at
+ * the agent's current `config_version`), computed by the one function both share — so a
+ * screen's «Применить» can never disagree with what the apply route would actually do.
+ */
+export interface KbDraftDetail extends KbDraft {
+  runs: DraftRunSummary[];
+  applicable: boolean;
+}
+
 export interface TestCase {
   id: string;
   title: string;

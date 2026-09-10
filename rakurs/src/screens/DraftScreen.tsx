@@ -10,7 +10,7 @@ import { Async, EmptyState, Skeleton } from '@/components/ui/states';
 import { useToast } from '@/components/ui/Toast';
 import { useApi } from '@/hooks/useApi';
 import { useAgent } from '@/store/agent';
-import type { KbDraft, TestCase, TestRun } from '@/types';
+import type { KbDraft, KbDraftDetail, TestCase, TestRun } from '@/types';
 
 /**
  * «Было — стало», read and decided. Reached only from `ProposalCard`'s «В черновик» — there
@@ -43,7 +43,7 @@ export function DraftScreen() {
   const { draftId } = useParams<{ draftId: string }>();
   const owner = role === 'owner';
 
-  const draft = useApi<KbDraft>(
+  const draft = useApi<KbDraftDetail>(
     (signal) => (owner ? api.getDraft(agent.id, draftId!, signal) : Promise.resolve(null as never)),
     [agent.id, draftId, owner],
   );
@@ -63,7 +63,7 @@ export function DraftScreen() {
   );
 }
 
-function Draft({ agentId, draftId, initial }: { agentId: string; draftId: string; initial: KbDraft }) {
+function Draft({ agentId, draftId, initial }: { agentId: string; draftId: string; initial: KbDraftDetail }) {
   const navigate = useNavigate();
   const toast = useToast();
 
@@ -82,15 +82,40 @@ function Draft({ agentId, draftId, initial }: { agentId: string; draftId: string
     setSelected(new Set(cases.data.filter((c) => c.enabled).map((c) => c.id)));
   }, [cases.data]);
 
-  // No route lists a draft's past runs — the only run this screen can ever know about is one
-  // it started itself, in this session. `requestedCount` is remembered alongside it because
-  // `run.results` only grows once cases actually finish, and «готово N из M» needs the M from
-  // the moment the run was asked for, not from whatever has landed so far.
+  // `requestedCount` rides alongside `run` because `run.results` only grows once cases
+  // actually finish, and «готово N из M» needs the M from the moment the run was asked for,
+  // not from whatever has landed so far.
   const [run, setRun] = useState<TestRun | null>(null);
   const [requestedCount, setRequestedCount] = useState(0);
   const [starting, setStarting] = useState(false);
   const [applying, setApplying] = useState(false);
   const [discarding, setDiscarding] = useState(false);
+
+  // Reopens the draft's own most recent run on load. `initial.runs` (newest first) is what
+  // `GET .../drafts/:draftId` now carries for exactly this — a reload used to leave `run` null
+  // until the owner started a fresh one, with no way to tell whether the draft had already
+  // been proven. Runs once, on mount: `Draft` is remounted with `key={draftId}` per draft
+  // (`DraftScreen` above), so a new draft always gets its own fresh look at its own history.
+  useEffect(() => {
+    const latest = initial.runs[0];
+    if (!latest) return;
+    let alive = true;
+    (async () => {
+      try {
+        const fresh = await api.getDraftRun(agentId, draftId, latest.id);
+        if (!alive) return;
+        setRequestedCount(fresh.results.length);
+        setRun(fresh);
+      } catch (error) {
+        if (!alive) return;
+        toast.fail(error);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (!run || run.status !== 'running') return;
@@ -119,10 +144,13 @@ function Draft({ agentId, draftId, initial }: { agentId: string; draftId: string
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [run?.id, run?.status]);
 
-  // The best guess this screen can make about which cases would reuse a baseline — the ones
-  // that already carried one in the run just polled. There is no route that answers "does a
-  // baseline exist" without running one; see `cost.ts`'s own comment on why being wrong here
-  // only changes what the sentence says, never what the run itself spends.
+  // Which cases would reuse a baseline — the ones that already carried one in `run`, which is
+  // now always the draft's own most recent run (reopened on load above, or the one just
+  // started), never a guess left over from a session that has since reloaded. There is still
+  // no route that answers "does a baseline exist" for an *unrun* case, so this can be stale
+  // the moment a case is added or its baseline expires between polls — see `cost.ts`'s own
+  // comment on why being wrong here only changes what the sentence says, never what a run
+  // itself spends.
   const baselineIds = useMemo(
     () => new Set((run?.results ?? []).filter((r) => r.before !== null).map((r) => r.caseId)),
     [run],
@@ -136,7 +164,11 @@ function Draft({ agentId, draftId, initial }: { agentId: string; draftId: string
   const isOpen = draft.status === 'open';
   const running = run?.status === 'running';
   const canRun = isOpen && !running && selectedCases.length > 0;
-  const canApply = isOpen && run !== null && run.status === 'done';
+  // The server's own answer to "is this draft provably safe to apply right now" — the exact
+  // predicate the apply route itself checks (`server/src/api/drafts.ts`'s `isDraftApplicable`),
+  // not a local guess from `run.status` that a reload used to lose and that never accounted
+  // for the store having moved since the run finished.
+  const canApply = isOpen && draft.applicable;
 
   async function startRun() {
     if (!canRun || starting) return;
@@ -158,7 +190,11 @@ function Draft({ agentId, draftId, initial }: { agentId: string; draftId: string
     setApplying(true);
     try {
       const applied = await api.applyDraft(agentId, draftId);
-      setDraft(applied);
+      // The apply route answers with the plain `KbDraft` it always has — `runs` and
+      // `applicable` are the GET route's own addition (see `packages/contract/index.ts`'s
+      // `KbDraftDetail`) and stay whatever they last were rather than being re-fetched for a
+      // screen that is about to navigate away regardless.
+      setDraft((prev) => ({ ...prev, ...applied }));
       toast.ok('Черновик применён — правки уже в базе');
       navigate('../coach');
     } catch (error) {
@@ -178,7 +214,7 @@ function Draft({ agentId, draftId, initial }: { agentId: string; draftId: string
     setDiscarding(true);
     try {
       const discarded = await api.discardDraft(agentId, draftId);
-      setDraft(discarded);
+      setDraft((prev) => ({ ...prev, ...discarded }));
       toast.ok('Черновик отброшен');
       navigate('../coach');
     } catch (error) {
@@ -253,9 +289,11 @@ function Draft({ agentId, draftId, initial }: { agentId: string; draftId: string
               <button type="button" className="btn" disabled={!isOpen || discarding} onClick={discard}>
                 {discarding ? 'Отбрасываем…' : 'Отбросить'}
               </button>
-              {isOpen && run === null && (
+              {isOpen && !draft.applicable && (
                 <span style={{ fontSize: 11.5, color: 'var(--text-dim)' }}>
-                  Прогоните черновик хотя бы раз — иначе применить будет нечего проверить.
+                  {draft.runs.length === 0
+                    ? 'Прогоните черновик хотя бы раз — иначе применить будет нечего проверить.'
+                    : 'База изменилась после последнего прогона — прогоните черновик заново.'}
                 </span>
               )}
             </div>

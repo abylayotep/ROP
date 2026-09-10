@@ -180,6 +180,10 @@ function apply(draftId: string) {
   return app.inject({ method: 'POST', cookies: jar, url: `${drafts()}/${draftId}/apply` });
 }
 
+function getDraft(draftId: string) {
+  return app.inject({ method: 'GET', cookies: jar, url: `${drafts()}/${draftId}` });
+}
+
 beforeEach(async () => {
   db = await withDb();
   const { accountId } = await createAccountWithOwner(db, {
@@ -295,5 +299,74 @@ describe('applying a draft', () => {
     expect(
       (await app.inject({ method: 'POST', cookies: memberJar, url: `${drafts()}/${draft.id}/apply` })).statusCode,
     ).toBe(403);
+  });
+});
+
+/**
+ * `GET .../drafts/:draftId` reporting `applicable` and `runs` — the whole point being that a
+ * reloaded tab, with no memory of any run it polled itself, answers the same question the
+ * apply route itself would. See `api/drafts.ts`'s own comment on `isDraftApplicable` for why
+ * both routes call the one function rather than keeping two copies of the same check.
+ */
+describe('reporting whether a draft is applicable', () => {
+  it('reports not applicable, with no run history, for a draft that has never been run', async () => {
+    const draft = await openDraft();
+    const res = await getDraft(draft.id);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().applicable).toBe(false);
+    expect(res.json().runs).toEqual([]);
+  });
+
+  it('reports applicable once a run finishes at the current version — surviving a reload', async () => {
+    const draft = await openDraft([{ op: 'rule_create', category: 'tone', text: 'На «вы».' }]);
+    const finished = await runOver(draft, [await addCase('здравствуйте')]);
+
+    // A fresh request, exactly what a reloaded tab would make — nothing here carries any
+    // memory of the run `runOver` just polled above.
+    const res = await getDraft(draft.id);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().applicable).toBe(true);
+    expect(res.json().runs).toHaveLength(1);
+    expect(res.json().runs[0]).toMatchObject({
+      id: finished.id,
+      status: 'done',
+      configVersion: finished.configVersion,
+    });
+  });
+
+  it('reports not applicable once the store moves past the run that proved it', async () => {
+    const draft = await openDraft();
+    await runOver(draft, [await addCase('сколько стоит доставка')]);
+    await addRule({ category: 'tone', text: 'На «вы».' });
+
+    const res = await getDraft(draft.id);
+    expect(res.json().applicable).toBe(false);
+  });
+
+  it('agrees with the apply route about whether a draft may be applied', async () => {
+    const draft = await openDraft([{ op: 'rule_create', category: 'forbid', text: 'Не обещай скидку.' }]);
+    await runOver(draft, [await addCase('дадите скидку?')]);
+
+    expect((await getDraft(draft.id)).json().applicable).toBe(true);
+    expect((await apply(draft.id)).statusCode).toBe(200);
+  });
+
+  it('lists runs newest first, each with its own costs', async () => {
+    const draft = await openDraft();
+    const kase = await addCase('первый вопрос');
+    const first = await runOver(draft, [kase]);
+    const second = await runOver(draft, [kase]);
+
+    const res = await getDraft(draft.id);
+    const ids = (res.json().runs as { id: string }[]).map((r) => r.id);
+    expect(ids).toEqual([second.id, first.id]);
+    expect(res.json().runs[0].draftCost).toBeDefined();
+    expect(res.json().runs[0].baselineCost).toBeDefined();
+  });
+
+  it('refuses a member', async () => {
+    const draft = await openDraft();
+    const res = await app.inject({ method: 'GET', cookies: memberJar, url: `${drafts()}/${draft.id}` });
+    expect(res.statusCode).toBe(403);
   });
 });

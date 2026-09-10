@@ -5,8 +5,9 @@
  * fact out of a rule proposal; both run inside `runCoach` itself. This file is the seam that
  * turns an HTTP request into the `CoachContext` those two need, and the one table this whole
  * feature is allowed to write on the way there: a `coach_messages` row per turn, never
- * `agent_rules`, never `kb_notes` — a proposal only ever reaches those tables through a draft,
- * which belongs to a later plan (`POST …/messages/:id/draft`, not written here).
+ * `agent_rules`, never `kb_notes` — a proposal only ever reaches those tables through a draft.
+ * `POST …/messages/:id/draft`, the route that turns one into a draft, is registered by
+ * `api/drafts.ts` instead — see this file's trailing comment.
  *
  * ## Why the route queries `agent_rules` itself rather than calling `loadRules`
  *
@@ -387,7 +388,9 @@ export function registerCoachRoutes(
     },
   );
 
-  // POST /api/agents/:agentId/coach/messages/:id/draft belongs to a later plan: it is what
-  // turns a checked proposal into an `agent_rules` or `kb_notes` row. Not written here — see
-  // the file comment.
+  // POST /api/agents/:agentId/coach/messages/:id/draft is what turns a checked proposal into
+  // a draft — registered by `api/drafts.ts`, not here: turning a proposal into a `DraftOp` is
+  // that file's whole job, the same mapping a manually-built draft goes through. A proposal
+  // still never reaches `agent_rules` or `kb_notes` directly from this route — only through
+  // the draft it becomes, and later, an apply this plan does not yet write.
 }

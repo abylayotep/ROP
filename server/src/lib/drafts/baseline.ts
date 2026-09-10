@@ -58,8 +58,11 @@ export async function baselineResults(
       ),
     )
     // `DISTINCT ON` requires its leading order to be the distinct columns themselves; the
-    // `finished_at desc` after it is what picks the newest row within each case.
-    .orderBy(testResults.caseId, desc(testRuns.finishedAt));
+    // `finished_at desc` after it is what picks the newest row within each case. `run id desc`
+    // is a final tiebreaker for two runs that finished at the exact same instant — both are
+    // equally legitimate «было», but which one wins has to be fixed, or «было» could flip
+    // between two calls that ask the same question at the same configVersion and model.
+    .orderBy(testResults.caseId, desc(testRuns.finishedAt), desc(testRuns.id));
 
   return new Map(rows.map(({ result }) => [result.caseId, result]));
 }

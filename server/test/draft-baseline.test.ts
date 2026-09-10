@@ -196,4 +196,50 @@ describe('the baseline a draft is measured against', () => {
 
     expect((await baselineResults(db, agentId, [], 3, 'openai/gpt-4o-mini')).size).toBe(0);
   });
+
+  // The ordering used to be `(caseId, finishedAt desc)` alone, which leaves the tie between
+  // two runs that finished at the exact same instant unspecified — both are legitimate
+  // «было», but which one wins has to stay fixed, or the same call made twice could answer
+  // differently. `finishedAt` is set explicitly here (not `sql\`now()\`` like the other
+  // helpers) so the two runs land on the identical instant this test needs; the expected
+  // winner is derived from the run ids themselves (`desc(testRuns.id)` is the tiebreaker),
+  // not hard-coded, since ids are random.
+  it('breaks a tie between two runs that finished at the exact same instant', async () => {
+    const kase = await addCase('сколько стоит доставка');
+    const shared = new Date('2026-01-01T00:00:00.000Z');
+
+    const insertRun = async (reply: string) => {
+      const [run] = await db
+        .insert(testRuns)
+        .values({
+          agentId,
+          draftId: null,
+          configVersion: 3,
+          model: 'openai/gpt-4o-mini',
+          status: 'done',
+          finishedAt: shared,
+        })
+        .returning();
+      await db.insert(testResults).values({
+        runId: run!.id,
+        caseId: kase.id,
+        reply,
+        usedChunkIds: [],
+        handoff: false,
+        outcome: 'unrecorded',
+      });
+      return run!;
+    };
+
+    const first = await insertRun('первый');
+    const second = await insertRun('второй');
+    const winner = first.id > second.id ? 'первый' : 'второй';
+
+    const found = await baselineResults(db, agentId, [kase.id], 3, 'openai/gpt-4o-mini');
+    expect(found.get(kase.id)!.reply).toBe(winner);
+
+    // Same question, asked again: the answer must not move.
+    const again = await baselineResults(db, agentId, [kase.id], 3, 'openai/gpt-4o-mini');
+    expect(again.get(kase.id)!.reply).toBe(winner);
+  });
 });

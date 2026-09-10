@@ -40,6 +40,8 @@ function setFetcher(next: FakeFetcher) {
 const notes = () => `/api/agents/${agentId}/knowledge/notes`;
 const rules = () => `/api/agents/${agentId}/rules`;
 const sources = () => `/api/agents/${agentId}/knowledge/sources`;
+const aiSettings = () => `/api/agents/${agentId}/ai`;
+const agent = () => `/api/agents/${agentId}`;
 
 beforeEach(async () => {
   db = await withDb();
@@ -268,6 +270,77 @@ describe('config version', () => {
     setFetcher(fakeFetcher({ [PAGE_URL]: new Error('HTTP 500') }));
     const res = await reimportSource(imported.json().source.id);
     expect(res.statusCode).toBe(502);
+    expect(await version()).toBe(before);
+  });
+
+  // Four owner-facing settings feed the prompt (or, for temperature, the sampling call) the
+  // same way a knowledge note or a rule does — each is checked one at a time so a bump wired
+  // into only one field of the route can't hide behind the others passing.
+  it('moves when temperature is changed', async () => {
+    const before = await version();
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: aiSettings(),
+      cookies: jar,
+      payload: { temperature: 0.9 },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(await version()).toBe(before + 1);
+  });
+
+  it('moves when replyLanguage is changed', async () => {
+    const before = await version();
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: aiSettings(),
+      cookies: jar,
+      payload: { replyLanguage: 'русский' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(await version()).toBe(before + 1);
+  });
+
+  it('moves when the agent name is changed', async () => {
+    const before = await version();
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: agent(),
+      cookies: jar,
+      payload: { name: 'Сафина Двери' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(await version()).toBe(before + 1);
+  });
+
+  it('moves when the timezone is changed', async () => {
+    const before = await version();
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: agent(),
+      cookies: jar,
+      payload: { timezone: 'Asia/Yekaterinburg' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(await version()).toBe(before + 1);
+  });
+
+  // `description` is the one field `patch` on `agents.ts` accepts that never reaches the
+  // prompt (see `PromptAgent` in `prompt.ts`) — pinned separately so its exclusion reads as
+  // deliberate rather than a field the route forgot to wire up.
+  it('does not move when the description is changed', async () => {
+    const before = await version();
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: agent(),
+      cookies: jar,
+      payload: { description: 'Продажа дверей и фурнитуры.' },
+    });
+    expect(res.statusCode).toBe(200);
     expect(await version()).toBe(before);
   });
 });

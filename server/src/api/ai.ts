@@ -30,6 +30,7 @@ import type { Env } from '../env.js';
 import { MODELS } from '../lib/ai/openrouter.js';
 import { keyAad } from '../lib/ai/turn.js';
 import { replayCase, type AiDeps } from '../lib/drafts/replay.js';
+import { bumpConfigVersion } from '../lib/drafts/version.js';
 import { ApiError } from '../lib/errors.js';
 import { periodQuery, periodSince } from '../lib/period.js';
 import { credentialsKey, encryptSecret } from '../lib/secret-box.js';
@@ -184,12 +185,25 @@ export function registerAiRoutes(
         );
       }
 
-      const [row] = await db
-        .update(agents)
-        .set(changes)
-        .where(eq(agents.id, req.agent!.id))
-        .returning();
-      return toApi(row!);
+      // `temperature` and `replyLanguage` change what the agent would say for the same
+      // input — the former through sampling, the latter through `rulesSection` in
+      // `prompt.ts` — so either one has to bump `configVersion` the same way a knowledge
+      // note or a rule does, or a baseline recorded before the change would look reusable
+      // after it. `model` does not: `baselineResults` already filters on it directly, and
+      // `aiEnabled`/`openrouterKey` change whether the agent answers at all, not what it
+      // would say. Bumped inside the same transaction as the write it describes, so a
+      // version can never land ahead of — or behind — the row it is meant to describe.
+      const bumps = temperature !== undefined || replyLanguage !== undefined;
+      const row = await db.transaction(async (tx) => {
+        const [updated] = await tx
+          .update(agents)
+          .set(changes)
+          .where(eq(agents.id, req.agent!.id))
+          .returning();
+        if (bumps) await bumpConfigVersion(tx as unknown as Db, req.agent!.id);
+        return updated!;
+      });
+      return toApi(row);
     },
   );
 

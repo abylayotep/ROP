@@ -97,7 +97,11 @@ export async function saveNote(tx: Db, input: SaveNoteInput): Promise<typeof kbN
     tags: parsed.tags,
     sourceId: input.sourceId ?? null,
     ...(input.edited === undefined ? {} : { edited: input.edited }),
-    updatedAt: new Date(),
+    // Postgres's own clock, not the app server's: `api/drafts.ts`'s coach-draft route compares
+    // this column against `coach_messages.created_at` (`defaultNow()`, also Postgres's clock)
+    // to catch an edit that lands after a coach proposal was written — a comparison that is
+    // only trustworthy when both sides are stamped by the same clock.
+    updatedAt: sql`now()`,
   };
 
   const [note] = input.noteId

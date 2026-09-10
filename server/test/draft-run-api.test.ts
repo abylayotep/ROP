@@ -7,7 +7,7 @@
  * had nothing to call until this file exists.
  */
 import { randomUUID } from 'node:crypto';
-import { eq } from 'drizzle-orm';
+import { and, eq, isNull, sql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildServer } from '../src/api/server.js';
@@ -28,6 +28,8 @@ import {
   notes,
   stageTransitions,
   testCases,
+  testResults,
+  testRuns,
   whatsappNumbers,
 } from '../src/db/schema.js';
 import type { CoachProposal } from '../src/lib/ai/coach.js';
@@ -55,6 +57,14 @@ const OPENROUTER_KEY = 'sk-or-v1-draft-run-api-0123456789';
 interface FakeModel extends ModelClient {
   calls: CompletionInput[];
   replyAlways(payload: { text: string; handoff?: { reason: string } | null }): void;
+  /**
+   * Makes the reply say so whenever a call's own prompt contains `marker` — the only way a
+   * test here can tell «стало» from «было» without hand-computing a chunk id: a case's draft
+   * ops are applied fresh inside `replayCase`'s own transaction before the model is ever
+   * called, so a distinctive note only the draft carries shows up in the prompt on the
+   * «стало» call and nowhere else. See the swap-test finding this exists to close.
+   */
+  markDistinctive(marker: string): void;
   hang(): void;
   release(): void;
 }
@@ -62,6 +72,7 @@ interface FakeModel extends ModelClient {
 function fakeModel(): FakeModel {
   const calls: CompletionInput[] = [];
   let script = { text: '', handoff: null as { reason: string } | null };
+  let distinctive: string | null = null;
   let gate: Promise<void> | null = null;
   let open = () => {};
 
@@ -69,6 +80,9 @@ function fakeModel(): FakeModel {
     calls,
     replyAlways(payload) {
       script = { text: payload.text, handoff: payload.handoff ?? null };
+    },
+    markDistinctive(marker) {
+      distinctive = marker;
     },
     hang() {
       gate = new Promise((resolve) => {
@@ -84,9 +98,10 @@ function fakeModel(): FakeModel {
       if (gate) await gate;
       const prompt = input.messages.map((m) => m.content).join('\n');
       const usedItemIds = [...prompt.matchAll(/<запись id="([^"]+)"/g)].map((m) => m[1]);
+      const seen = distinctive !== null && prompt.includes(distinctive);
       return {
         text: JSON.stringify({
-          reply: script.text,
+          reply: seen ? `${script.text} ${distinctive}` : script.text,
           stageId: null,
           fields: {},
           handoff: script.handoff,
@@ -135,10 +150,10 @@ async function openDraft(ops: DraftOp[] = []) {
   return row!;
 }
 
-async function addCase(text: string) {
+async function addCase(text: string, enabled = true) {
   const [row] = await db
     .insert(testCases)
-    .values({ agentId, title: text, messages: [text], origin: 'manual' })
+    .values({ agentId, title: text, messages: [text], origin: 'manual', enabled })
     .returning();
   return row!;
 }
@@ -348,6 +363,40 @@ describe('turning a coach proposal into a draft', () => {
     });
     expect(res.statusCode).toBe(403);
   });
+
+  // The coach's proposal is written against the text it saw. If the owner edits that same row
+  // themselves before clicking «В черновик», the draft's `base` — taken only now, when the
+  // draft is made — would record the *post-edit* timestamp and see nothing stale: the owner's
+  // own edit would silently be overwritten later by a body the coach wrote against older text.
+  // `config_version`'s catch-all does not reach this, because the edit already happened before
+  // the draft (and so its version check) exists at all.
+  it('refuses to draft a note the owner edited after the coach proposed against it', async () => {
+    const [note] = await db
+      .insert(kbNotes)
+      .values({ agentId, path: 'Доставка.md', title: 'Доставка', body: 'Старая цена.' })
+      .returning();
+    const message = await coachProposed({ kind: 'note_edit', noteId: note!.id, body: 'Предложение коуча.' });
+
+    // The owner's own edit, landing after the proposal was written. `sql\`now()\`` rather than
+    // a JS `new Date()`: the route compares this row's `updated_at` against
+    // `coach_messages.created_at`, both Postgres-stamped columns, and a JS-side clock is not
+    // guaranteed to agree with Postgres's own to the sub-second precision this test needs.
+    await db
+      .update(kbNotes)
+      .set({ body: 'Правка владельца.', updatedAt: sql`now()` })
+      .where(eq(kbNotes.id, note!.id));
+
+    const res = await app.inject({
+      method: 'POST',
+      cookies: jar,
+      url: `/api/agents/${agentId}/coach/messages/${message.id}/draft`,
+    });
+
+    expect(res.statusCode).toBe(409);
+    const [stored] = await db.select().from(coachMessages).where(eq(coachMessages.id, message.id));
+    // Still pending — refused before the draft (or the status flip) was ever written.
+    expect(stored!.status).toBe('pending');
+  });
 });
 
 describe('running a draft over a set of cases', () => {
@@ -381,6 +430,105 @@ describe('running a draft over a set of cases', () => {
     expect(model.calls.length).toBe(spent + 1);
   });
 
+  // An empty `caseIds` used to insert a `done` run at the agent's current `config_version` —
+  // literally satisfying the apply gate the spec describes without a single case ever having
+  // been checked. Refused outright instead: there is no such thing as a run that proves
+  // nothing.
+  it('refuses an empty case list', async () => {
+    const draft = await openDraft();
+
+    const res = await run(draft.id, []);
+
+    expect(res.statusCode).toBe(400);
+    const [row] = await db.select().from(testRuns).where(eq(testRuns.agentId, agentId));
+    expect(row).toBeUndefined();
+  });
+
+  // The spec says a disabled case stays in the set but is not run. A stale list from an open
+  // tab must not pay for a case the owner has since switched off.
+  it('does not run a case the owner has switched off, even if asked to', async () => {
+    const draft = await openDraft();
+    const on = await addCase('сколько стоит доставка');
+    const off = await addCase('вопрос про акцию', false);
+    model.replyAlways({ text: 'Уточню у коллеги.' });
+
+    const res = await run(draft.id, [on.id, off.id]);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().results).toHaveLength(1);
+    expect(res.json().results[0]!.caseId).toBe(on.id);
+  });
+
+  it('refuses a run whose every named case is disabled', async () => {
+    const draft = await openDraft();
+    const off = await addCase('вопрос про акцию', false);
+
+    const res = await run(draft.id, [off.id]);
+
+    expect(res.statusCode).toBe(400);
+  });
+
+  // The property the whole feature rests on: swap `before` and `after` and every other test in
+  // this file still passes, while the owner is shown an inverted comparison and a
+  // draft-contaminated row is written as the reusable baseline for every future run. A note
+  // only the draft's own ops add is the tracer: it can show up in «стало», must never show up
+  // in «было», and must never land in the baseline row the *next* run would reuse.
+  it('shows a draft\'s own note in «стало», never in «было» or in the stored baseline', async () => {
+    const distinctive = `особая-цена-${randomUUID()}`;
+    const draft = await openDraft([{ op: 'note_create', path: 'Особое.md', body: distinctive }]);
+    const kase = await addCase('расскажи что-нибудь особое');
+    model.replyAlways({ text: 'Уточню у коллеги.' });
+    model.markDistinctive(distinctive);
+
+    const res = await run(draft.id, [kase.id]);
+
+    expect(res.statusCode).toBe(200);
+    const { before, after } = res.json().results[0]!;
+    expect(after.reply).toContain(distinctive);
+    expect(before.reply).not.toContain(distinctive);
+
+    const [baselineRow] = await db
+      .select({ reply: testResults.reply })
+      .from(testResults)
+      .innerJoin(testRuns, eq(testResults.runId, testRuns.id))
+      .where(and(eq(testRuns.agentId, agentId), isNull(testRuns.draftId)));
+    expect(baselineRow!.reply).not.toContain(distinctive);
+  });
+
+  // A baseline pass that gets through several cases before one blows up used to throw the
+  // whole thing away: the run that produced it was marked `failed`, and `baselineResults` only
+  // ever reuses a `done` row, so every already-paid-for baseline in it became permanently
+  // unreachable. A baseline run's status describes whether its rows may be reused, not whether
+  // the request that made it finished.
+  it("keeps an interrupted baseline run's own good results reusable", async () => {
+    const draft = await openDraft();
+    const good = await addCase('сколько стоит доставка');
+    // No `addCase` here on purpose: an empty `messages` array makes `replayCase` itself throw
+    // (see its own guard), a real exception rather than an ordinary per-case model failure —
+    // exactly the shape of thing that used to take the whole baseline run down with it.
+    const [broken] = await db
+      .insert(testCases)
+      .values({ agentId, title: 'пустой случай', messages: [], origin: 'manual' })
+      .returning();
+    model.replyAlways({ text: 'Уточню у коллеги.' });
+
+    const res = await run(draft.id, [good.id, broken!.id]);
+    expect(res.statusCode).toBe(500);
+
+    const [baselineRun] = await db
+      .select()
+      .from(testRuns)
+      .where(and(eq(testRuns.agentId, agentId), isNull(testRuns.draftId)));
+    expect(baselineRun!.status).toBe('done');
+
+    const spent = model.calls.length;
+    const second = await openDraft();
+    await run(second.id, [good.id]);
+    // One call for the second draft's own «стало». The good case's «было» is read back, not
+    // re-run — the baseline run being `done` is what makes that possible.
+    expect(model.calls.length).toBe(spent + 1);
+  });
+
   it('refuses more than twenty cases', async () => {
     const draft = await openDraft();
     const ids = await Promise.all(Array.from({ length: 21 }, (_, i) => addCase(`вопрос ${i}`)));
@@ -391,18 +539,44 @@ describe('running a draft over a set of cases', () => {
     expect(res.json().message).toBe('За один прогон можно проверить не больше двадцати случаев');
   });
 
+  // The in-flight cap is process-wide — one counter shared with the sandbox and the coach
+  // (`db/turn-cap.ts`) — and has nothing to do with which draft is running. Three *different*
+  // drafts run at once here on purpose: a fourth is refused because the pool is full, not
+  // because of anything about its own draft — that guard is the next test's job.
   it('refuses a fourth run in flight with 429', async () => {
+    model.hang();
+    const fourDrafts = await Promise.all([openDraft(), openDraft(), openDraft(), openDraft()]);
+    const kase = await addCase('сколько стоит доставка');
+
+    const inFlight = fourDrafts.slice(0, 3).map((d) => run(d.id, [kase.id]));
+    while (model.calls.length < 3) await new Promise((resolve) => setImmediate(resolve));
+
+    expect((await run(fourDrafts[3]!.id, [kase.id])).statusCode).toBe(429);
+
+    model.release();
+    for (const res of await Promise.all(inFlight)) expect(res.statusCode).toBe(200);
+  });
+
+  // Task 6's own concurrency test used to fire three simultaneous runs of *one* draft and
+  // expect all three to succeed — the very shape a double click produces, and precisely what
+  // must not happen: a run this expensive, with no progress shown, refuses a second run of a
+  // draft that already has one in flight, before the second ever reaches the model.
+  it('refuses a second run of a draft already running with 409', async () => {
     model.hang();
     const draft = await openDraft();
     const kase = await addCase('сколько стоит доставка');
 
-    const inFlight = [run(draft.id, [kase.id]), run(draft.id, [kase.id]), run(draft.id, [kase.id])];
-    while (model.calls.length < 3) await new Promise((resolve) => setImmediate(resolve));
+    const first = run(draft.id, [kase.id]);
+    while (model.calls.length < 1) await new Promise((resolve) => setImmediate(resolve));
+    const callsBeforeSecond = model.calls.length;
 
-    expect((await run(draft.id, [kase.id])).statusCode).toBe(429);
+    const second = await run(draft.id, [kase.id]);
+    expect(second.statusCode).toBe(409);
+    // Refused, not run: the second click never reached the model.
+    expect(model.calls.length).toBe(callsBeforeSecond);
 
     model.release();
-    for (const res of await Promise.all(inFlight)) expect(res.statusCode).toBe(200);
+    expect((await first).statusCode).toBe(200);
   });
 
   it('refuses a member', async () => {
@@ -421,6 +595,35 @@ describe('running a draft over a set of cases', () => {
     expect(res.statusCode).toBe(200);
 
     expect(await snapshot(db, agentId)).toEqual(before);
+  });
+
+  // `applyOps` used to throw a plain `Error` for a note the draft names but that is no longer
+  // there, reaching the owner as a bare «Внутренняя ошибка сервера» — the one path in this
+  // feature that gave a cabinet user no explanation, and one that costs nothing to hit, since
+  // ops apply before the first model call.
+  it('answers a Russian 409, naming what is gone, for a draft whose note was deleted', async () => {
+    const [note] = await db.insert(kbNotes).values({ agentId, path: 'Доставка.md', title: 'Доставка' }).returning();
+    // Through the real creation route, not the `openDraft` test helper: `base` has to hold the
+    // note's name the way `baseOf` actually captures it (`openDraft` stores an empty `base`),
+    // the same photograph the 409 below reads the name back out of.
+    const created = await app.inject({
+      method: 'POST',
+      cookies: jar,
+      url: drafts(),
+      payload: { title: 'Правка доставки', ops: [{ op: 'note_update', noteId: note!.id, body: 'Новый текст.' }] },
+    });
+    expect(created.statusCode).toBe(200);
+    const kase = await addCase('сколько стоит доставка');
+    model.replyAlways({ text: 'Уточню у коллеги.' });
+
+    await db.delete(kbNotes).where(eq(kbNotes.id, note!.id));
+
+    const res = await run(created.json().id, [kase.id]);
+
+    expect(res.statusCode).toBe(409);
+    expect(res.json().message).toContain('Доставка');
+    // No model call spent chasing a draft that could never have applied.
+    expect(model.calls).toHaveLength(0);
   });
 
   it('refuses a draft that does not belong to this agent', async () => {
@@ -463,7 +666,7 @@ describe('reading drafts and runs back', () => {
     expect(read.json().ops).toEqual([{ op: 'rule_create', category: 'forbid', text: 'Не обещай скидку.' }]);
   });
 
-  it('reads a finished run back by id', async () => {
+  it('reads a finished run back by id, «было» and «стало» still paired', async () => {
     const draft = await openDraft();
     const kase = await addCase('сколько стоит доставка');
     model.replyAlways({ text: 'Уточню у коллеги.' });
@@ -475,6 +678,33 @@ describe('reading drafts and runs back', () => {
     expect(res.statusCode).toBe(200);
     expect(res.json().status).toBe('done');
     expect(res.json().results).toHaveLength(1);
+    // The reload's whole job: «было» sits beside «стало» again, not lost because the run that
+    // paid for it has `draft_id is null`.
+    expect(res.json().results[0]!.before).not.toBeNull();
+    expect(res.json().results[0]!.after).not.toBeNull();
+  });
+
+  // The cost used to come back half-reported (the draft side only) and each side gave no hint
+  // whether it was freshly paid for or read back from an earlier run.
+  it('reports both costs, and marks a fresh baseline apart from a reused one', async () => {
+    const draft = await openDraft();
+    const kase = await addCase('сколько стоит доставка');
+    model.replyAlways({ text: 'Уточню у коллеги.' });
+
+    const first = await run(draft.id, [kase.id]);
+    expect(first.statusCode).toBe(200);
+    expect(Number(first.json().draftCost)).toBeGreaterThan(0);
+    expect(Number(first.json().baselineCost)).toBeGreaterThan(0);
+    expect(first.json().results[0]!.after.origin).toBe('paid');
+    expect(first.json().results[0]!.before.origin).toBe('paid');
+
+    const second = await openDraft();
+    const rerun = await run(second.id, [kase.id]);
+    expect(rerun.statusCode).toBe(200);
+    expect(Number(rerun.json().draftCost)).toBeGreaterThan(0);
+    // Nothing paid for «было» this time — the baseline from the first run answers it.
+    expect(Number(rerun.json().baselineCost)).toBe(0);
+    expect(rerun.json().results[0]!.before.origin).toBe('reused');
   });
 
   // A run belongs to the one draft it scored, never to a neighbour that merely happens to

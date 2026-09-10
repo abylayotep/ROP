@@ -1,4 +1,5 @@
 import { POOL_MAX } from './client.js';
+import { TIMEOUT_MS } from '../lib/ai/openrouter.js';
 
 /**
  * How many turns that hold a database connection across a slow model call may run at once,
@@ -77,4 +78,56 @@ export function releaseTurnSlot(): void {
  */
 export function turnSlotHeld(): boolean {
   return turnsInFlight >= 1;
+}
+
+/**
+ * Whether a slot is free right now — a peek, not a reservation.
+ *
+ * `api/drafts.ts`'s run route uses this once, at the door, before it writes a single row: if
+ * the pool already reads full, refusing there costs the owner nothing. It is deliberately not
+ * a reservation — nothing here is held between this call and the real, per-call
+ * `tryTakeTurnSlot`/`takeTurnSlotWaiting` below, so two callers can both see a slot free and
+ * both proceed. That race is fine for what this answers: an admission heuristic that only ever
+ * needs to catch the common case (the pool is visibly saturated *before* a run even starts),
+ * not to guarantee a slot is still there a moment later — the real cap is enforced where it has
+ * always been enforced, per call.
+ */
+export function turnSlotAvailable(): boolean {
+  return turnsInFlight < SANDBOX_TURNS;
+}
+
+/**
+ * How long a call already admitted into a run waits for a slot before giving up.
+ *
+ * Bounded at `TIMEOUT_MS` (`lib/ai/openrouter.ts`) — one model call's own worst case. Whatever
+ * call is holding "your" slot right now can run for at most that long before it times out on
+ * its own, so waiting that long gives a fair shot at the slot actually freeing up without
+ * waiting on a queue with no end in sight.
+ */
+export const TURN_SLOT_WAIT_MS = TIMEOUT_MS;
+
+/**
+ * Waits for a slot, taking it the moment one frees rather than refusing outright.
+ *
+ * `api/drafts.ts`'s run route calls this for every case once the run has passed its one
+ * up-front admission check and written its bookkeeping rows: a run that has already started —
+ * and, from case two on, already spent real money — must finish once it is let in, not be
+ * refused for a case that merely happened to arrive while every slot was briefly taken. The
+ * sandbox and the coach do not use this: each is one call, so there is no "already spent"
+ * money a mid-call refusal would waste, and Task 4's ruling that they should fail fast still
+ * holds for them.
+ *
+ * Polls rather than queuing exactly-in-order: `SANDBOX_TURNS` is at most three, so a tight poll
+ * is cheap, and a real wait queue with per-waiter resolvers is more machinery than three slots
+ * are ever going to need. A poll cannot guarantee first-in-first-out among waiters, and that is
+ * an acceptable trade here — nothing about a run's own cases depends on which of several
+ * concurrent runs gets the next slot first, only that each of them eventually does.
+ */
+export async function takeTurnSlotWaiting(timeoutMs: number = TURN_SLOT_WAIT_MS): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (tryTakeTurnSlot()) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
 }

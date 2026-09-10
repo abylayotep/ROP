@@ -185,6 +185,11 @@ export function registerRuleRoutes(app: FastifyInstance, db: Db, guard: preHandl
   app.patch(
     '/api/agents/:agentId/rules/:ruleId',
     { preHandler: [guard, ownerOnly] },
+    // Every `updatedAt` this route writes below is `sql\`now()\`` — Postgres's own clock —
+    // rather than a JS `new Date()`: `api/drafts.ts`'s coach-draft route compares this column
+    // against `coach_messages.created_at` (also `defaultNow()`) to catch a rule edited after a
+    // coach proposal was written, and that comparison is only trustworthy when both sides come
+    // from the same clock.
     async (req) => {
       const { ruleId } = req.params as { ruleId: string };
       const agentId = req.agent!.id;
@@ -259,7 +264,7 @@ export function registerRuleRoutes(app: FastifyInstance, db: Db, guard: preHandl
               position: target,
               text: text ?? current.text,
               enabled: enabled ?? current.enabled,
-              updatedAt: new Date(),
+              updatedAt: sql`now()`,
             })
             .where(eq(agentRules.id, current.id))
             .returning();
@@ -282,7 +287,7 @@ export function registerRuleRoutes(app: FastifyInstance, db: Db, guard: preHandl
               position: target,
               text: text ?? current.text,
               enabled: enabled ?? current.enabled,
-              updatedAt: new Date(),
+              updatedAt: sql`now()`,
             })
             .where(eq(agentRules.id, current.id))
             .returning();
@@ -295,7 +300,7 @@ export function registerRuleRoutes(app: FastifyInstance, db: Db, guard: preHandl
           .set({
             text: text ?? current.text,
             enabled: enabled ?? current.enabled,
-            updatedAt: new Date(),
+            updatedAt: sql`now()`,
           })
           .where(eq(agentRules.id, current.id))
           .returning();

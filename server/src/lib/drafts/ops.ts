@@ -1,4 +1,4 @@
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { categorySize, lockCategories, type Tx } from '../rules/lock.js';
 import type { Db } from '../../db/client.js';
 import { agentRules, kbNotes } from '../../db/schema.js';
@@ -12,6 +12,25 @@ export type DraftOp =
   | { op: 'note_update'; noteId: string; body: string }
   | { op: 'rule_create'; category: RuleCategory; text: string; warning?: string | null }
   | { op: 'rule_update'; ruleId: string; text?: string; enabled?: boolean };
+
+/**
+ * Thrown by `applyOps` when an update op names a row that is no longer there.
+ *
+ * A plain `Error` here used to reach a run route's handler unconverted and answer «Внутренняя
+ * ошибка сервера» — true, but useless: the one thing an owner actually needs to hear is *what*
+ * is gone. `kind` and `id` are what the route needs to look the display name up in the draft's
+ * own `base` (`baseOf` below already photographed it) and name it in a proper 409, rather than
+ * the caller having to parse a sentence back apart to find out which op failed.
+ */
+export class MissingDraftRowError extends Error {
+  constructor(
+    readonly kind: 'note' | 'rule',
+    readonly id: string,
+  ) {
+    super(`draft ${kind}_update: ${kind} not found (${id})`);
+    this.name = 'MissingDraftRowError';
+  }
+}
 
 /**
  * The `updatedAt` of everything the ops touch, as ISO strings, taken when the draft was made.
@@ -80,7 +99,7 @@ export async function applyOps(tx: Db, agentId: string, ops: DraftOp[]): Promise
           .select({ path: kbNotes.path })
           .from(kbNotes)
           .where(and(eq(kbNotes.id, op.noteId), eq(kbNotes.agentId, agentId)));
-        if (!current) throw new Error(`draft note_update: note not found (${op.noteId})`);
+        if (!current) throw new MissingDraftRowError('note', op.noteId);
         await saveNote(tx, { agentId, noteId: op.noteId, path: current.path, body: op.body });
         break;
       }
@@ -105,11 +124,13 @@ export async function applyOps(tx: Db, agentId: string, ops: DraftOp[]): Promise
           .set({
             ...(op.text === undefined ? {} : { text: op.text }),
             ...(op.enabled === undefined ? {} : { enabled: op.enabled }),
-            updatedAt: new Date(),
+            // Postgres's own clock — see `api/rules.ts`'s PATCH route for why every writer of
+            // this column agrees on which clock stamps it.
+            updatedAt: sql`now()`,
           })
           .where(and(eq(agentRules.id, op.ruleId), eq(agentRules.agentId, agentId)))
           .returning({ id: agentRules.id });
-        if (!updated) throw new Error(`draft rule_update: rule not found (${op.ruleId})`);
+        if (!updated) throw new MissingDraftRowError('rule', op.ruleId);
         break;
       }
 

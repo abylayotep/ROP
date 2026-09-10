@@ -138,6 +138,52 @@ export interface CoachTurn {
 }
 
 /**
+ * How many characters of coaching history one turn's prompt may spend, at most.
+ *
+ * `api/coach.ts`'s `HISTORY_LIMIT` (100 messages) bounds *how many rows* a query returns, not
+ * how large they are: an owner's own line is capped at 4 000 characters (`COACH_LIMIT`), but
+ * nothing caps a model reply, and a hundred turns of either is hundreds of kilobytes on every
+ * single coaching message — billed to the owner's OpenRouter balance on a "спасибо" the same
+ * as on a real question, and eventually large enough to overflow the model's own context
+ * window outright.
+ *
+ * `prompt.ts` already answers the identical problem for the agent's own turn, and the number
+ * here is picked by matching it rather than guessing fresh: `KNOWLEDGE_LIMIT` (6) times
+ * `CONTENT_MAX` (8 000, `lib/knowledge/split.ts`) is 48 000 characters — the single largest
+ * bounded thing one live turn ever spends, by that file's own accounting of its worst case.
+ * The coaching chat gets that same order of magnitude for its history, because there is no
+ * sharper number to derive it from: a coaching turn has no records to size a budget against,
+ * only messages, and 48 000 characters is roughly a dozen owner messages at the cap or a
+ * handful of longer back-and-forths — generous enough that an ordinary coaching session never
+ * feels the cut, while still bounded by the same order of magnitude `prompt.ts` already
+ * trusts for one turn.
+ */
+export const HISTORY_BUDGET_CHARS = 48_000;
+
+/**
+ * `turns`, newest-last as `buildCoachMessages` expects them, trimmed from the front until what
+ * remains fits under `budgetChars` — the newest turn is never the one dropped, because it is
+ * the line the owner is actually continuing; a turn from the start of a long-running coaching
+ * conversation is the first thing worth losing.
+ *
+ * Whole turns only: a turn that does not fit is dropped entirely, never cut down to what
+ * remains of the budget. Half a model's sentence quoted back to it next turn is a worse prompt
+ * than one turn fewer of history, the same reasoning `prompt.ts`'s own `KNOWLEDGE_LIMIT`
+ * comment gives for never truncating a single knowledge record.
+ */
+export function budgetHistory(turns: readonly CoachTurn[], budgetChars: number): CoachTurn[] {
+  let spent = 0;
+  let from = turns.length;
+  for (let i = turns.length - 1; i >= 0; i -= 1) {
+    const next = spent + turns[i]!.text.length;
+    if (next > budgetChars) break;
+    spent = next;
+    from = i;
+  }
+  return turns.slice(from);
+}
+
+/**
  * One line of a live customer dialog, carried into the coaching chat as data.
  *
  * `author` is `messages.author` as `prompt.ts`'s `PromptMessage` already spells it —

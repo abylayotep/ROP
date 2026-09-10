@@ -79,6 +79,8 @@ import { releaseTurnSlot, tryTakeTurnSlot } from '../db/turn-cap.js';
 import type { Env } from '../env.js';
 import {
   runCoach,
+  budgetHistory,
+  HISTORY_BUDGET_CHARS,
   type CoachContext,
   type CoachRule,
   type CoachTurn,
@@ -152,9 +154,10 @@ async function notePathsFor(db: Db, agentId: string): Promise<string[]> {
   return rows.map((row) => row.path);
 }
 
-/** The coaching chat so far, oldest first, capped at `HISTORY_LIMIT`. Read before this turn's
- * own owner line is written, so the caller can append that line itself without asking this
- * function to somehow exclude a row it has not written yet. */
+/** The coaching chat so far, oldest first, capped at `HISTORY_LIMIT` rows and then at
+ * `HISTORY_BUDGET_CHARS` characters — see that constant for why a row count alone is not
+ * enough. Read before this turn's own owner line is written, so the caller can append that
+ * line itself without asking this function to somehow exclude a row it has not written yet. */
 async function recentHistory(db: Db, agentId: string): Promise<CoachTurn[]> {
   const rows = await db
     .select({ role: coachMessages.role, text: coachMessages.text })
@@ -162,7 +165,8 @@ async function recentHistory(db: Db, agentId: string): Promise<CoachTurn[]> {
     .where(eq(coachMessages.agentId, agentId))
     .orderBy(desc(coachMessages.createdAt))
     .limit(HISTORY_LIMIT);
-  return rows.reverse().map((row) => ({ role: row.role as 'owner' | 'model', text: row.text }));
+  const turns = rows.reverse().map((row) => ({ role: row.role as 'owner' | 'model', text: row.text }));
+  return budgetHistory(turns, HISTORY_BUDGET_CHARS);
 }
 
 /** The named conversation's last `TRANSCRIPT_LIMIT` messages, oldest first — data for the

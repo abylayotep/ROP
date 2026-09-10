@@ -289,6 +289,31 @@ describe('the coaching conversation', () => {
     expect(modelRow.warning).toBeNull();
   });
 
+  it('drops the oldest history once it would cost more than the prompt budget, keeping the rest whole', async () => {
+    // Three old turns totalling 60 000 characters — over `HISTORY_BUDGET_CHARS` (48 000) —
+    // written straight to the table rather than through `say`, which caps a single owner
+    // message at 4 000 characters and could never build this on its own. `createdAt` is set
+    // explicitly and strictly increasing: a single multi-row `INSERT` evaluates `now()` once
+    // for every row it writes, so three rows left to the column's own default would tie, and
+    // `ORDER BY created_at` gives no guarantee which of three equal timestamps sorts first.
+    const base = Date.now();
+    await db.insert(coachMessages).values([
+      { agentId, role: 'owner', text: 'A'.repeat(20_000), createdAt: new Date(base) },
+      { agentId, role: 'model', text: 'B'.repeat(20_000), createdAt: new Date(base + 1_000) },
+      { agentId, role: 'owner', text: 'C'.repeat(20_000), createdAt: new Date(base + 2_000) },
+    ]);
+
+    model.reply({ message: 'Понял.', proposal: null });
+    await say('Ещё одно сообщение.');
+
+    const sentText = model.lastMessages.map((m) => m.content).join('\n');
+    // The newest two turns (40 000 characters) fit; the oldest, which would push the total
+    // to 60 000, does not — and is dropped whole, not truncated into the prompt.
+    expect(sentText).toContain('B'.repeat(20_000));
+    expect(sentText).toContain('C'.repeat(20_000));
+    expect(sentText).not.toContain('A'.repeat(20_000));
+  });
+
   it('carries the dialog when one is named', async () => {
     const { conversationId } = await dialogWith([{ author: 'client', body: 'дадите скидку?' }]);
     model.reply({ message: 'Понял.', proposal: null });

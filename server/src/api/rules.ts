@@ -17,8 +17,6 @@ const RULE_MAX = 500;
 const createRule = z.object({
   category: z.enum(CATEGORIES),
   text: z.string().trim().min(1).max(RULE_MAX),
-  // Set only when the owner insisted past the fact check; the coach route passes it.
-  warning: z.string().max(200).nullish(),
 });
 
 const updateRule = z.object({
@@ -182,7 +180,7 @@ export function registerRuleRoutes(app: FastifyInstance, db: Db, guard: preHandl
     async (req) => {
       const parsed = createRule.safeParse(req.body);
       if (!parsed.success) throw ruleError(parsed.error.issues[0]);
-      const { category, text, warning } = parsed.data;
+      const { category, text } = parsed.data;
       const agentId = req.agent!.id;
 
       const row = await db.transaction(async (tx) => {
@@ -197,7 +195,7 @@ export function registerRuleRoutes(app: FastifyInstance, db: Db, guard: preHandl
         const position = await categorySize(tx, agentId, category);
         const [created] = await tx
           .insert(agentRules)
-          .values({ agentId, category, text, position, warning: warning ?? null })
+          .values({ agentId, category, text, position })
           .returning();
         return created!;
       });

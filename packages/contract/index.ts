@@ -369,8 +369,11 @@ export interface AgentRule {
   origin: 'manual' | 'coach';
   position: number;
   /**
-   * Set when the owner kept a rule the fact check wanted to be a note. Shown beside the rule,
-   * because a number in instructions is a number no record backs.
+   * Meant to be set when the owner keeps a rule the fact check wanted to be a note — shown
+   * beside the rule, because a number in instructions is a number no record backs. No writer
+   * exists yet: `POST /rules` does not accept it, and the «Всё равно правилом» escape hatch
+   * this field was meant to back was never built. Kept so the plan that does build it does not
+   * also need to add the field.
    */
   warning: string | null;
   updatedAt: string;

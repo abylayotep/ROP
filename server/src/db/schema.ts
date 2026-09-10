@@ -724,8 +724,14 @@ export const agentRules = pgTable(
     // Order inside a category. The prompt follows it, so a reordered list reorders the rules
     // the model reads.
     position: integer('position').notNull().default(0),
-    // Set when the owner insisted on a rule the fact check wanted to be a note. Shown beside
-    // the rule, because a number in instructions is a number no record backs.
+    // Meant to be set when the owner insists on a rule the fact check wanted to be a note —
+    // shown beside the rule, because a number in instructions is a number no record backs.
+    // No writer exists yet: `POST /rules` (api/rules.ts) does not accept this field, and the
+    // spec's «Всё равно правилом» escape hatch was never built (the fact check discards a
+    // rule's category the moment it rewrites the proposal into a note, so there is nothing
+    // for that button to keep). A later plan that actually builds the escape hatch is what
+    // gives this column its writer; the column stays so that plan does not also need a
+    // migration.
     warning: text('warning'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),

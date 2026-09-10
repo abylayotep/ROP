@@ -458,10 +458,8 @@ export const listRules = (agentId: string, signal?: AbortSignal) =>
   request<AgentRule[]>(`/agents/${agentId}/rules`, { signal });
 
 /** A new rule joins the end of its category. */
-export const createRule = (
-  agentId: string,
-  body: { category: RuleCategory; text: string; warning?: string | null },
-) => request<AgentRule>(`/agents/${agentId}/rules`, { method: 'POST', body });
+export const createRule = (agentId: string, body: { category: RuleCategory; text: string }) =>
+  request<AgentRule>(`/agents/${agentId}/rules`, { method: 'POST', body });
 
 export const updateRule = (
   agentId: string,

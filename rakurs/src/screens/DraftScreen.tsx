@@ -197,8 +197,10 @@ function Draft({ agentId, draftId, initial }: { agentId: string; draftId: string
     [run],
   );
 
+  // Ticked *and* switched on. The server drops a disabled case from the run, so counting one
+  // here would price work nobody pays for and leave «готово N из M» one short forever.
   const selectedCases = useMemo(
-    () => (cases.data ?? []).filter((c) => selected.has(c.id)),
+    () => (cases.data ?? []).filter((c) => selected.has(c.id) && c.enabled),
     [cases.data, selected],
   );
 

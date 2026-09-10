@@ -265,6 +265,17 @@ function OpenDrafts({ agentId }: { agentId: string }) {
   const drafts = useApi<KbDraft[]>((signal) => api.listOpenDrafts(agentId, signal), [agentId]);
   const list = drafts.data ?? [];
 
+  // A failed list must not read as «черновиков нет»: an owner who left one here would believe
+  // it had been applied or thrown away, and stop looking for it.
+  if (drafts.error) {
+    return (
+      <Card>
+        <CardHead title="Черновики на проверке" />
+        <div className="muted">Не удалось загрузить список. Обновите страницу.</div>
+      </Card>
+    );
+  }
+
   if (list.length === 0) return null;
 
   return (

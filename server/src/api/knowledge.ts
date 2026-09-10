@@ -13,7 +13,7 @@ import { z } from 'zod';
 import type { Db } from '../db/client.js';
 import { kbChunks, kbLinks, kbNotes, kbSources } from '../db/schema.js';
 import { bumpConfigVersion } from '../lib/drafts/version.js';
-import { ApiError } from '../lib/errors.js';
+import { ApiError, isDuplicate } from '../lib/errors.js';
 import {
   PAGE_REFUSED,
   PageError,
@@ -135,15 +135,6 @@ function importError(issue: { code: string; path: readonly PropertyKey[] } | und
     default:
       return new ApiError(400, 'Не удалось разобрать запись');
   }
-}
-
-/**
- * Postgres reports a unique violation with this code. Drizzle wraps the driver error in
- * its own `DrizzleQueryError`, so the code sits on `.cause`, not on the error itself.
- */
-function isDuplicate(error: unknown): boolean {
-  const cause = error instanceof Error ? error.cause : undefined;
-  return typeof cause === 'object' && cause !== null && (cause as { code?: string }).code === '23505';
 }
 
 /**

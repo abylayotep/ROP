@@ -13,6 +13,7 @@ import {
   agentRules,
   agents,
   kbDrafts,
+  kbNotes,
   testCases,
   testResults,
   testRuns,
@@ -268,6 +269,33 @@ describe('applying a draft', () => {
     const [stored] = await db.select().from(kbDrafts).where(eq(kbDrafts.id, draft.id));
     expect(stored!.status).toBe('applied');
     expect(await db.select().from(agentRules)).toHaveLength(1);
+  });
+
+  // `note_create` names no existing row, so `staleOps` — which only ever compares a row a
+  // draft's `note_update`/`rule_update` already names — has nothing to catch here, and neither
+  // does the version check: both drafts are run and applied at the very same `config_version`,
+  // so `isDraftApplicable` passes for both. The two applies race for real, at the same instant,
+  // over the same `kb_notes(agent_id, path)` unique index `saveNote` writes through — the one
+  // gap this route's own checks cannot see coming. The loser must answer a Russian 409, not
+  // Postgres's raw `23505` surfacing as a bare 500.
+  it('turns two drafts creating the same note path landing at the same instant into one 200 and one 409, never a 500', async () => {
+    const path = 'Доставка';
+    const draftA = await openDraft([{ op: 'note_create', path, body: 'Курьером, 1500 ₸.' }]);
+    const draftB = await openDraft([{ op: 'note_create', path, body: 'Самовывоз, бесплатно.' }]);
+    await runOver(draftA, [await addCase('сколько стоит доставка')]);
+    await runOver(draftB, [await addCase('есть ли самовывоз')]);
+
+    const [resA, resB] = await Promise.all([apply(draftA.id), apply(draftB.id)]);
+    const codes = [resA.statusCode, resB.statusCode].sort();
+    expect(codes).toEqual([200, 409]);
+
+    const refused = resA.statusCode === 409 ? resA : resB;
+    expect(refused.json().message).toContain('уже занят');
+
+    // Exactly one note landed — the loser's op never wrote anything, whatever Postgres's own
+    // error looked like from the inside.
+    const [note] = await db.select({ body: kbNotes.body }).from(kbNotes).where(eq(kbNotes.path, path));
+    expect(note).toBeDefined();
   });
 
   it('refuses to apply an applied draft a second time', async () => {

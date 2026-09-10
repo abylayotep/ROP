@@ -551,6 +551,30 @@ describe('running a draft over a set of cases', () => {
     expect(model.calls.length).toBe(spent + 2);
   });
 
+  // This file's own fake model always answers the annotation call with a turn-shaped reply
+  // (`{reply, stageId, ...}`, never `{verdict, reason}`), so it never parses as a verdict — see
+  // `draft-annotate.test.ts` for that behaviour in isolation. Before `annotate` carried its
+  // cost back on a parse failure, that call's `0.0001` simply vanished from `draftCost`: paid
+  // for, but not on the total anyone ever saw.
+  it("counts the annotation's cost even though its reply never parses as a verdict", async () => {
+    const draft = await openDraft();
+    const kase = await addCase('сколько стоит доставка');
+    model.replyAlways({ text: 'Уточню у коллеги.' });
+
+    const posted = await run(draft.id, [kase.id]);
+    await waitForRun(posted.json().id);
+
+    const res = await app.inject({
+      method: 'GET',
+      cookies: jar,
+      url: `${drafts()}/${draft.id}/runs/${posted.json().id}`,
+    });
+    expect(res.json().results[0]!.verdict).toBeNull();
+    // «Стало» plus the annotation — two real calls at this fake model's fixed cost each, not
+    // just the reply's own.
+    expect(res.json().draftCost).toBe('0.00020000');
+  });
+
   // An empty `caseIds` used to insert a `done` run at the agent's current `config_version` —
   // literally satisfying the apply gate the spec describes without a single case ever having
   // been checked. Refused outright instead: there is no such thing as a run that proves
@@ -663,6 +687,30 @@ describe('running a draft over a set of cases', () => {
     // case's «было» is read back, not re-run — the baseline run being `done` is what makes
     // that possible.
     expect(model.calls.length).toBe(spent + 2);
+  });
+
+  // `applyOps` (`ops.ts`) writes a `note_create` op through `saveNote`, the same path a real
+  // note create goes through — and a real note already sitting at that path (created after the
+  // draft was made) makes it raise Postgres's own `23505` rather than the typed
+  // `MissingDraftRowError` this loop already knew how to name. Before this fix that reached
+  // `runReplay`'s catch as an unlabelled error: the run still ended `failed` — nothing here
+  // ever throws past that catch — but with no hint at all of what actually went wrong.
+  it('fails a run gracefully when a note_create op collides with a note that already exists', async () => {
+    await db.insert(kbNotes).values({ agentId, path: 'Доставка.md', title: 'Доставка' });
+    const draft = await openDraft([{ op: 'note_create', path: 'Доставка.md', body: 'Новая доставка.' }]);
+    const kase = await addCase('сколько стоит доставка');
+    model.replyAlways({ text: 'Уточню у коллеги.' });
+
+    const posted = await run(draft.id, [kase.id]);
+    expect(posted.statusCode).toBe(200);
+    const finished = await waitForRun(posted.json().id);
+    expect(finished.status).toBe('failed');
+
+    // The case's own transaction rolled back — the real note is exactly as it was, not
+    // overwritten and not duplicated.
+    const notes = await db.select().from(kbNotes).where(eq(kbNotes.agentId, agentId));
+    expect(notes).toHaveLength(1);
+    expect(notes[0]!.title).toBe('Доставка');
   });
 
   it('refuses more than twenty cases', async () => {

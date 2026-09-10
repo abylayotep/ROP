@@ -248,7 +248,7 @@ import { baselineResults } from '../lib/drafts/baseline.js';
 import { applyOps, baseOf, MissingDraftRowError, staleOps, type DraftBase, type DraftOp } from '../lib/drafts/ops.js';
 import { replayCase, type AiDeps, type ReplayResult } from '../lib/drafts/replay.js';
 import { bumpConfigVersion } from '../lib/drafts/version.js';
-import { ApiError } from '../lib/errors.js';
+import { ApiError, isDuplicate } from '../lib/errors.js';
 import { clampTitle } from '../lib/knowledge/split.js';
 import { credentialsKey, decryptSecret } from '../lib/secret-box.js';
 import { isUuid } from '../lib/uuid.js';
@@ -470,6 +470,15 @@ function missingRowMessage(error: MissingDraftRowError, base: DraftBase): string
   const label = error.kind === 'note' ? 'Заметка' : 'Правило';
   return `${name ? `«${name}»` : label} была удалена с тех пор, как сделан черновик — обновите его и повторите`;
 }
+
+/** The Russian 409 for a `note_create` op landing on a path another note already took —
+ * `applyOps` (`ops.ts`) writes through `saveNote`, which raises a raw Postgres unique
+ * violation rather than a typed error, so this is not a `MissingDraftRowError` and is caught
+ * separately, wherever that one is: a run's own catch (below) and the apply route both need
+ * it, for the same reason neither can rely on `staleOps` to see a *new* path collide with a
+ * row the draft never touched and so never photographed. */
+const DUPLICATE_NOTE_PATH_MESSAGE =
+  'Черновик создаёт заметку с путём, который уже занят другой заметкой — переименуйте или удалите её и повторите';
 
 /**
  * Marks every run this process finds still `running` at boot as `failed` — see the file
@@ -722,9 +731,11 @@ export function registerDraftRoutes(
 
         // The annotation — one model call, advice in a column, never a gate. Only the draft's
         // own «стало» row carries a verdict: the baseline row is what «было» *is*, not a
-        // comparison of anything, so there is nothing for it to be annotated against. A failed
-        // call (`annotate` never throws — see its own file comment) simply leaves both columns
-        // null; the case result itself, already computed above, is unaffected either way.
+        // comparison of anything, so there is nothing for it to be annotated against. A call
+        // that never got an answer at all (`annotate` never throws — see its own file comment)
+        // returns `null` and costs nothing; a call that answered but did not parse still cost
+        // real money, and `annotate` carries that cost back rather than losing it — added here
+        // regardless of whether there is a verdict worth writing to `verdict`/`verdictReason`.
         const annotation = annotateDeps
           ? await annotate(annotateDeps, {
               expectation: kase.expectation,
@@ -734,8 +745,10 @@ export function registerDraftRoutes(
             })
           : null;
         if (annotation) draftCost = addCost(draftCost, annotation.cost);
+        const verdict =
+          annotation && annotation.verdict !== null ? { verdict: annotation.verdict, reason: annotation.reason! } : null;
 
-        await db.insert(testResults).values(resultRow(draftRun.id, caseId, sideFromReplay(after), annotation));
+        await db.insert(testResults).values(resultRow(draftRun.id, caseId, sideFromReplay(after), verdict));
       }
 
       await db
@@ -766,7 +779,11 @@ export function registerDraftRoutes(
           .set({ status: baselineWritten > 0 ? 'done' : 'failed', cost: baselineCost, finishedAt: sql`now()` })
           .where(eq(testRuns.id, baselineRun.id));
       }
-      const detail = error instanceof MissingDraftRowError ? missingRowMessage(error, draft.base) : undefined;
+      const detail = error instanceof MissingDraftRowError
+        ? missingRowMessage(error, draft.base)
+        : isDuplicate(error)
+          ? DUPLICATE_NOTE_PATH_MESSAGE
+          : undefined;
       app.log.error({ error, runId: draftRun.id, detail }, 'draft run: replay failed');
     }
   }
@@ -1119,7 +1136,19 @@ export function registerDraftRoutes(
           throw new ApiError(409, 'База изменилась после проверки — прогоните черновик заново');
         }
 
-        await applyOps(tx as unknown as Db, agentId, draft.ops);
+        // `staleOps` and `isDraftApplicable` above only see a row this draft's own `note_update`
+        // or `rule_update` names moving out from under it — neither has anything to check a
+        // `note_create` op against, because it names no existing row at all. So a `note_create`
+        // landing on a path some *other* note has since taken (a real, unrelated note, or an
+        // earlier draft's own apply) reaches `saveNote` clean and raises a raw Postgres unique
+        // violation instead — caught here and turned into the same Russian 409 shape every
+        // other refusal in this route already is, rather than an uncaught throw answering 500.
+        try {
+          await applyOps(tx as unknown as Db, agentId, draft.ops);
+        } catch (error) {
+          if (isDuplicate(error)) throw new ApiError(409, DUPLICATE_NOTE_PATH_MESSAGE);
+          throw error;
+        }
         await bumpConfigVersion(tx as unknown as Db, agentId);
 
         const [row] = await tx

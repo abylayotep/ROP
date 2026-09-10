@@ -356,6 +356,35 @@ describe('pulling a case out of a real dialog', () => {
     expect(res.json().messages[0]).toBe('реплика 4');
   });
 
+  // `patchCaseBody` caps every message at 4000 characters — `createCaseBody` does too, so a
+  // case `from-dialog` makes has to obey the same limit or it can never be edited afterwards.
+  // A real customer message carries no length limit of its own, so this clamps rather than
+  // refuses the whole import over one long line.
+  it('clamps a message longer than the edit limit, so the case stays editable afterwards', async () => {
+    const long = 'а'.repeat(4500);
+    const { conversationId } = await dialogWith([{ author: 'client', body: long }]);
+
+    const created = await app.inject({
+      method: 'POST',
+      cookies: jar,
+      url: `${cases()}/from-dialog`,
+      payload: { conversationId },
+    });
+    expect(created.statusCode).toBe(200);
+    const kase = created.json();
+    expect(kase.messages[0]!.length).toBeLessThanOrEqual(4000);
+
+    // The clamp is only proven by what it was for: `PATCH` accepting the very messages
+    // `from-dialog` just saved, unchanged.
+    const saved = await app.inject({
+      method: 'PATCH',
+      url: `${cases()}/${kase.id}`,
+      cookies: jar,
+      payload: { messages: kase.messages },
+    });
+    expect(saved.statusCode).toBe(200);
+  });
+
   it('refuses a dialog with no client messages', async () => {
     const { conversationId } = await dialogWith([{ author: 'agent', body: 'Здравствуйте!' }]);
 

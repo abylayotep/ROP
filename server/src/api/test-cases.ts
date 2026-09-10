@@ -239,7 +239,12 @@ export function registerTestCaseRoutes(
         .orderBy(messages.sentAt);
 
       const bodies = inbound.map((row) => row.body).filter((body): body is string => body !== null && body !== '');
-      const selected = bodies.slice(-MAX_MESSAGES);
+      // A real customer message carries no length limit of its own, but `patchCaseBody` above
+      // caps every message at `MESSAGE_MAX` — without the same clamp here, a long enough line
+      // would make it into a case only `POST` could write, and `PATCH` could never save back
+      // even unchanged. `clampTitle` is the same truncate-with-ellipsis this file already uses
+      // for the case's own title, just at a longer bound.
+      const selected = bodies.slice(-MAX_MESSAGES).map((body) => clampTitle(body, MESSAGE_MAX));
       if (selected.length === 0) {
         throw new ApiError(400, 'В этом диалоге нет сообщений клиента');
       }

@@ -1,9 +1,12 @@
 import { useState, type CSSProperties, type FormEvent } from 'react';
 import * as api from '@/api';
+import { ruPlural } from '@/components/drafts/cost';
 import { CheckBox, Toggle } from '@/components/ui/primitives';
 import { EmptyState } from '@/components/ui/states';
 import { useToast } from '@/components/ui/Toast';
 import type { SuggestedCase, TestCase } from '@/types';
+
+const messagesWord = (n: number) => ruPlural(n, 'сообщение', 'сообщения', 'сообщений');
 
 /**
  * The case set a draft is proven against — kept by hand, pulled out of a real dialog
@@ -327,8 +330,7 @@ export function CaseList({
                     {kase.title}
                   </div>
                   <div style={{ fontSize: 10.5, color: 'var(--text-dim)', marginTop: 4 }}>
-                    {ORIGIN_LABEL[kase.origin]} · {kase.messages.length}{' '}
-                    {kase.messages.length === 1 ? 'сообщение' : 'сообщений'}
+                    {ORIGIN_LABEL[kase.origin]} · {kase.messages.length} {messagesWord(kase.messages.length)}
                   </div>
                 </div>
 

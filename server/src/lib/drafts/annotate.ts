@@ -88,7 +88,22 @@ export interface AnnotateDeps {
 }
 
 /**
- * One case's verdict, or `null` — see the file comment for why a failure here never throws.
+ * What one call to `annotate` answers: a verdict and its reason when the model's reply parsed,
+ * `null` for both when it did not — either way, `cost` is what the call actually spent. Not a
+ * plain `null` on a parse failure: the model was still paid the moment `complete` returned, and
+ * a caller that only ever sees `null` there has no way to add that cost to a run's own total.
+ * `null` only for `annotate` itself — no completion was ever in hand, nothing was spent.
+ */
+export interface AnnotateResult {
+  verdict: 'better' | 'worse' | 'same' | null;
+  reason: string | null;
+  cost: string;
+}
+
+/**
+ * One case's verdict, or `null` when the call itself never answered — see the file comment for
+ * why a failure here never throws, and `AnnotateResult`'s own comment for why a reply that
+ * answered but would not parse is not the same `null`.
  *
  * Exactly one model call, no retry: `runCoach` and `runTurn` retry once because a parse
  * failure is worth a second attempt when the answer is the thing the caller is waiting on.
@@ -96,7 +111,7 @@ export interface AnnotateDeps {
  * attempt would only be a second charge to the owner's balance for a coin flip on the same
  * question.
  */
-export async function annotate(deps: AnnotateDeps, input: VerdictInput): Promise<{ verdict: string; reason: string; cost: string } | null> {
+export async function annotate(deps: AnnotateDeps, input: VerdictInput): Promise<AnnotateResult | null> {
   let completion: { text: string; cost: string };
   try {
     completion = await deps.model.complete({
@@ -106,21 +121,22 @@ export async function annotate(deps: AnnotateDeps, input: VerdictInput): Promise
       messages: buildVerdictMessages(input),
     });
   } catch {
+    // No completion in hand — the call itself never landed, so nothing was spent to carry out.
     return null;
   }
 
   const json = extractJson(completion.text);
-  if (json === null) return null;
+  if (json === null) return { verdict: null, reason: null, cost: completion.cost };
 
   let value: unknown;
   try {
     value = JSON.parse(json) as unknown;
   } catch {
-    return null;
+    return { verdict: null, reason: null, cost: completion.cost };
   }
 
   const parsed = VERDICT_SCHEMA.safeParse(value);
-  if (!parsed.success) return null;
+  if (!parsed.success) return { verdict: null, reason: null, cost: completion.cost };
 
   return { verdict: parsed.data.verdict, reason: parsed.data.reason, cost: completion.cost };
 }

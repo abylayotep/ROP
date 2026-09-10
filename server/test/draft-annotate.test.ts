@@ -51,12 +51,21 @@ describe('annotate', () => {
     ).resolves.toBeNull();
   });
 
-  it('returns null on a reply that does not parse as a verdict', async () => {
+  it('carries the cost of a reply that does not parse, rather than losing it', async () => {
     const model = fakeModel('не JSON вовсе');
 
-    await expect(
-      annotate(deps(model), { expectation: null, question: 'привет', before: null, after: 'Здравствуйте.' }),
-    ).resolves.toBeNull();
+    const result = await annotate(deps(model), {
+      expectation: null,
+      question: 'привет',
+      before: null,
+      after: 'Здравствуйте.',
+    });
+
+    // The model was already paid the instant it answered — a call that cannot be turned into
+    // a verdict is not a call that cost nothing, and this is `null`, not `undefined`, exactly
+    // so the caller can tell "no completion at all" (the previous test) apart from "a
+    // completion that would not parse" without a third shape.
+    expect(result).toEqual({ verdict: null, reason: null, cost: '0.00010000' });
   });
 
   it('returns the verdict, the reason and the cost on a good reply', async () => {

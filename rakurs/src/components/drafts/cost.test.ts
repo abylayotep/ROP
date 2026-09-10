@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { describeRun } from './cost.js';
 
-const cases = (n: number) => Array.from({ length: n }, (_, i) => ({ id: String(i) }) as never);
+const cases = (n: number) => Array.from({ length: n }, (_, i) => ({ id: String(i), enabled: true }) as never);
 
 describe('describeRun', () => {
   it('counts both sides when nothing is cached', () => {
@@ -22,5 +22,18 @@ describe('describeRun', () => {
   it('declines the Russian noun for one and for five', () => {
     expect(describeRun(cases(1), new Set())).toContain('1 проверка');
     expect(describeRun(cases(5), new Set())).toContain('5 проверок');
+  });
+
+  // A disabled case can stay ticked in the selection — its own toggle, not the checkbox, is
+  // what took it out of the next run — and the server skips it before spending anything.
+  // Counting it here priced work nobody was about to pay for.
+  it('does not price a case that is ticked but switched off', () => {
+    const ticked = [
+      { id: '0', enabled: true },
+      { id: '1', enabled: false },
+      { id: '2', enabled: true },
+    ] as never[];
+
+    expect(describeRun(ticked, new Set())).toBe('2 проверки: 4 вызова модели плюс 2 сравнения');
   });
 });

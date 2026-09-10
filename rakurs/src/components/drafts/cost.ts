@@ -19,8 +19,10 @@ import type { TestCase } from '@/types';
 /** Russian has three plural forms, not two — «1 проверка», «2 проверки», «5 проверок» — and
  * the branch a count falls into depends on its last two digits, not merely its last one:
  * eleven through nineteen all take the "many" form despite ending in a digit that otherwise
- * would not. */
-function ruPlural(n: number, one: string, few: string, many: string): string {
+ * would not. Exported so every other "N of something" caption in the drafts screens — a case's
+ * own message count in `CaseList.tsx`, say — declines the same way instead of reinventing (or
+ * skipping) the three-form rule for itself. */
+export function ruPlural(n: number, one: string, few: string, many: string): string {
   const mod10 = n % 10;
   const mod100 = n % 100;
   if (mod10 === 1 && mod100 !== 11) return one;
@@ -33,8 +35,13 @@ const callsWord = (n: number) => ruPlural(n, 'вызов', 'вызова', 'вы
 const comparisonsWord = (n: number) => ruPlural(n, 'сравнение', 'сравнения', 'сравнений');
 
 export function describeRun(cases: TestCase[], baselines: Set<string>): string {
-  const n = cases.length;
-  const reused = cases.filter((c) => baselines.has(c.id)).length;
+  // A case can stay ticked in `selected` while its own toggle turns it off — the run route
+  // filters a disabled case out before spending anything on it (`api/drafts.ts`), and this
+  // caption has to price the same set the server actually runs, not merely the set the owner
+  // happened to have checked.
+  const runnable = cases.filter((c) => c.enabled);
+  const n = runnable.length;
+  const reused = runnable.filter((c) => baselines.has(c.id)).length;
 
   // «Стало» every case, «было» only for the ones with no baseline to reuse.
   const calls = 2 * n - reused;

@@ -1,14 +1,14 @@
 import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import * as api from '@/api';
 import { ProposalCard } from '@/components/coach/ProposalCard';
 import { RuleList } from '@/components/coach/RuleList';
-import { Card } from '@/components/ui/primitives';
+import { Card, CardHead } from '@/components/ui/primitives';
 import { Async, EmptyState, Skeleton } from '@/components/ui/states';
 import { useToast } from '@/components/ui/Toast';
 import { useApi } from '@/hooks/useApi';
 import { useAgent } from '@/store/agent';
-import type { AgentRule, CoachMessage, ConversationThread } from '@/types';
+import type { AgentRule, CoachMessage, ConversationThread, KbDraft } from '@/types';
 
 /**
  * Обучение: a chat where the owner teaches the agent, and the rules that chat has already
@@ -246,10 +246,57 @@ function Coach({ agentId, loaded }: { agentId: string; loaded: Loaded }) {
         </form>
       </div>
 
-      <div style={{ flex: '1 1 46%', minWidth: 340 }}>
+      <div style={{ flex: '1 1 46%', minWidth: 340, display: 'flex', flexDirection: 'column', gap: 16 }}>
+        <OpenDrafts agentId={agentId} />
         <RuleList agentId={agentId} rules={rules} onChanged={setRules} />
       </div>
     </div>
+  );
+}
+
+/**
+ * The way back into a draft an owner left before deciding — «В черновик» already lands on one
+ * directly, but leaving `DraftScreen` used to lose it for good: nothing named where to find it
+ * again. Shown only when there is something to show; an owner with no open draft sees nothing
+ * extra here.
+ */
+function OpenDrafts({ agentId }: { agentId: string }) {
+  const navigate = useNavigate();
+  const drafts = useApi<KbDraft[]>((signal) => api.listOpenDrafts(agentId, signal), [agentId]);
+  const list = drafts.data ?? [];
+
+  if (list.length === 0) return null;
+
+  return (
+    <Card>
+      <CardHead title="Черновики на проверке" />
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {list.map((draft) => (
+          <button
+            key={draft.id}
+            type="button"
+            className="sunken-box"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 8,
+              padding: '9px 10px',
+              border: 0,
+              cursor: 'pointer',
+              font: 'inherit',
+              fontSize: 12.5,
+              color: 'var(--text)',
+              textAlign: 'left',
+            }}
+            onClick={() => navigate(`../drafts/${draft.id}`)}
+          >
+            <span className="ellipsis">{draft.title}</span>
+            <span style={{ fontSize: 11, color: 'var(--text-dim)', flex: '0 0 auto' }}>Открыть →</span>
+          </button>
+        ))}
+      </div>
+    </Card>
   );
 }
 

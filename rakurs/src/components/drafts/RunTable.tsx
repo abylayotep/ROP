@@ -65,11 +65,18 @@ export function RunTable({
     return <EmptyState>Черновик ещё не прогоняли.</EmptyState>;
   }
 
+  // The POST that starts a run answers the instant it is admitted, before `results` has a
+  // single row — `server/src/api/drafts.ts` now answers `results: []` for exactly that state,
+  // matching what the `TestRun` contract promises, but this reads the field defensively rather
+  // than trusting a network response's shape blindly a second time: `request<TestRun>` on the
+  // client is an unchecked cast, and a guard here costs nothing.
+  const results = run.results ?? [];
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
       {run.status === 'running' && (
         <div style={{ fontSize: 12, color: 'var(--text-dim)' }}>
-          Прогон идёт: готово {run.results.length} из {requestedCount}. Строки появляются по мере
+          Прогон идёт: готово {results.length} из {requestedCount}. Строки появляются по мере
           готовности.
         </div>
       )}
@@ -79,7 +86,7 @@ export function RunTable({
         </div>
       )}
 
-      {run.results.length === 0 ? (
+      {results.length === 0 ? (
         <EmptyState>Результатов пока нет.</EmptyState>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -94,7 +101,7 @@ export function RunTable({
             <div>Оценка</div>
           </div>
 
-          {run.results.map((row) => (
+          {results.map((row) => (
             <ResultRow
               key={row.caseId}
               row={row}

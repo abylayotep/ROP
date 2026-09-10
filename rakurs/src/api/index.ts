@@ -520,6 +520,12 @@ export const draftCoachMessage = (agentId: string, messageId: string) =>
 
 // ── Черновики и прогоны ──────────────────────────────────────────────────────
 
+/** Every open draft of this agent, newest first — the way back in for an owner who left
+ * `DraftScreen` before deciding. Shown in «Обучение», beside the coaching chat that made most
+ * drafts in the first place. */
+export const listOpenDrafts = (agentId: string, signal?: AbortSignal) =>
+  request<KbDraft[]>(`/agents/${agentId}/drafts`, { signal });
+
 export const getDraft = (agentId: string, draftId: string, signal?: AbortSignal) =>
   request<KbDraftDetail>(`/agents/${agentId}/drafts/${draftId}`, { signal });
 

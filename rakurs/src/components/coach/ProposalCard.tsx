@@ -145,8 +145,15 @@ export function ProposalCard({
         <button type="button" className="btn-sm" disabled={rejecting || decided} onClick={reject}>
           {message.status === 'rejected' ? 'Отклонено' : rejecting ? 'Отклоняем…' : 'Отклонить'}
         </button>
-        {message.status === 'drafted' && (
-          <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>В черновиках</span>
+        {message.status === 'drafted' && message.draftId && (
+          <button
+            type="button"
+            className="btn-link"
+            style={{ fontSize: 11, color: 'var(--text-dim)' }}
+            onClick={() => navigate(`../drafts/${message.draftId}`)}
+          >
+            В черновиках →
+          </button>
         )}
       </div>
     </div>

@@ -70,6 +70,28 @@ function Draft({ agentId, draftId, initial }: { agentId: string; draftId: string
   const [draft, setDraft] = useState(initial);
   const [tab, setTab] = useState<'run' | 'cases'>('run');
 
+  // Whether `Draft` itself is still mounted — not the polling effect's own `alive`, below.
+  // `[run?.id, run?.status]` in that effect's own deps means its cleanup fires and sets *its*
+  // `alive` to `false` the instant the poll that reads a run's final status calls `setRun`,
+  // because that status change is itself one of the effect's dependencies — before the nested
+  // `api.getDraft` call a few lines down ever resolves. Gating that call's `setDraft` on the
+  // same `alive` silently threw the fresh draft away every time: the effect had already torn
+  // itself down by the time the fetch it started came back. This ref outlives that teardown.
+  //
+  // The setup function sets `mounted.current = true` itself, not only the initial `useRef`
+  // value — `<StrictMode>` (`main.tsx`) runs every effect's setup, then its cleanup, then its
+  // setup again on mount in development, precisely to catch an effect that only tears down and
+  // never restores; a cleanup-only body here would leave `mounted.current` stuck `false` after
+  // that simulated remount, with nothing left to ever set it back — caught by hand-testing
+  // this exact fix against a live server, not by any type check.
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
   const cases = useApi<TestCase[]>((signal) => api.listTestCases(agentId, signal), [agentId]);
 
   // Defaults to every enabled case, exactly once — a reload after an edit must not silently
@@ -128,7 +150,26 @@ function Draft({ agentId, draftId, initial }: { agentId: string; draftId: string
           const fresh = await api.getDraftRun(agentId, draftId, run.id);
           if (!alive) return;
           setRun(fresh);
-          if (fresh.status === 'running') poll();
+          if (fresh.status === 'running') {
+            poll();
+            return;
+          }
+          // The run just left `'running'` — `draft.applicable` is whatever `GET
+          // .../drafts/:draftId` answered at mount (`initial`, above) and nothing since has
+          // touched it, so «Применить» would stay disabled and the caption below it would go
+          // on naming a reason that is no longer true until the page is reloaded. Re-fetching
+          // the draft and writing straight into this component's own `draft` state — not a
+          // `reload()` on the parent's `useApi` — is what actually fixes it: `Draft` took
+          // `initial` into `useState` once, at mount, and a parent re-render does not by itself
+          // push a new value into state a child already initialised from a stale prop. Gated on
+          // `mounted`, not this effect's own `alive`: `alive` is already `false` by the time
+          // this resolves — see `mounted`'s own comment above for why.
+          try {
+            const freshDraft = await api.getDraft(agentId, draftId);
+            if (mounted.current) setDraft(freshDraft);
+          } catch (error) {
+            if (mounted.current) toast.fail(error);
+          }
         } catch (error) {
           if (!alive) return;
           toast.fail(error);

@@ -484,6 +484,38 @@ describe('running a draft over a set of cases', () => {
     expect(finished.status).toBe('done');
   });
 
+  // `request<TestRun>` on the client (`rakurs/src/api/index.ts`) is an unchecked cast — nothing
+  // there catches a response that is missing a field the contract promises. `RunTable.tsx`
+  // reads `run.results.length` unguarded the instant a run is `'running'`, which is exactly the
+  // state this response answers in, so `results` missing here is a `TypeError` on the very
+  // first render after the click, not a type error anywhere a build would catch it. Checked
+  // field by field, against `TestRun` (`@rakurs/contract`) in full, not only `results`.
+  it('answers POST with every field TestRun promises, not just the ones a client happened to read', async () => {
+    const draft = await openDraft();
+    const kase = await addCase('сколько стоит доставка');
+    model.hang();
+
+    const posted = await run(draft.id, [kase.id]);
+    expect(posted.statusCode).toBe(200);
+    const body = posted.json();
+
+    expect(body).toMatchObject({
+      draftId: draft.id,
+      status: 'running',
+      draftCost: '0',
+      baselineCost: '0',
+      results: [],
+      finishedAt: null,
+    });
+    expect(typeof body.id).toBe('string');
+    expect(typeof body.configVersion).toBe('number');
+    expect(typeof body.model).toBe('string');
+    expect(typeof body.startedAt).toBe('string');
+
+    model.release();
+    await waitForRun(posted.json().id);
+  });
+
   it('runs every named case and records a result each', async () => {
     const draft = await openDraft();
     const one = await addCase('сколько стоит доставка');

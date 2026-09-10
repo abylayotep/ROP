@@ -130,10 +130,10 @@ const toMessage = (row: typeof coachMessages.$inferSelect) => ({
   proposal: row.proposal ?? null,
   warning: row.warning,
   status: row.status as 'pending' | 'drafted' | 'rejected',
-  // `coach_messages` has no `draft_id` column yet — the drafts plan (`…/messages/:id/draft`)
-  // is what adds both the column and its one writer. Until then every row answers the
-  // contract's `draftId: null` honestly: no proposal here has ever become a draft.
-  draftId: null,
+  // `POST …/messages/:id/draft` (`api/drafts.ts`) is the one writer of this column — set in
+  // the same transaction as the draft it makes, so a row reading `status: 'drafted'` always
+  // carries the id of the draft it became.
+  draftId: row.draftId,
   conversationId: row.conversationId,
   createdAt: row.createdAt.toISOString(),
 });

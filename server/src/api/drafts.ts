@@ -557,6 +557,23 @@ export function registerDraftRoutes(
     },
   );
 
+  /** Every open draft of this agent, newest first — the way back in for an owner who left
+   * `DraftScreen` before deciding. `ProposalCard`'s own «В черновик» already lands on one
+   * directly, but nothing before this route named where to find one again after leaving —
+   * shown in «Обучение», next to the coaching chat that made most drafts in the first place. */
+  app.get(
+    '/api/agents/:agentId/drafts',
+    { preHandler: [guard, ownerOnly] },
+    async (req) => {
+      const rows = await db
+        .select()
+        .from(kbDrafts)
+        .where(and(eq(kbDrafts.agentId, req.agent!.id), eq(kbDrafts.status, 'open')))
+        .orderBy(desc(kbDrafts.createdAt));
+      return rows.map(toDraft);
+    },
+  );
+
   app.get(
     '/api/agents/:agentId/drafts/:draftId',
     { preHandler: [guard, ownerOnly] },
@@ -730,7 +747,7 @@ export function registerDraftRoutes(
       // what stops a script from starting run after run after each finishes.
       config: { rateLimit: { max: 20, timeWindow: '1 minute' } },
     },
-    async (req) => {
+    async (req): Promise<TestRun> => {
       const agentId = req.agent!.id;
       const { draftId } = req.params as { draftId: string };
       const draft = await loadDraft(agentId, draftId);
@@ -854,9 +871,21 @@ export function registerDraftRoutes(
         return {
           id: draftRun!.id,
           draftId: draft.id,
+          configVersion: draftRun!.configVersion,
+          model: draftRun!.model,
           status: 'running' as const,
           draftCost: '0',
           baselineCost: '0',
+          // `RunTable.tsx` reads `run.results.length` unguarded while a run is `'running'` —
+          // this is what `POST` answers with the instant it admits one, before a single case
+          // has a result, and the contract's own `TestRun.results` is not optional. Answering
+          // without it let TypeScript's unchecked `request<TestRun>` cast hide a `TypeError` on
+          // the very first render after the click; see `packages/contract/index.ts`. The
+          // `Promise<TestRun>` return type just above this route is what makes the compiler
+          // actually hold this object to that shape rather than trusting the client's cast.
+          results: [],
+          startedAt: draftRun!.startedAt.toISOString(),
+          finishedAt: null,
         };
       } finally {
         if (!admitted) runningDrafts.delete(draft.id);

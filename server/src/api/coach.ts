@@ -125,7 +125,12 @@ const toMessage = (row: typeof coachMessages.$inferSelect) => ({
   role: row.role as 'owner' | 'model',
   text: row.text,
   proposal: row.proposal ?? null,
+  warning: row.warning,
   status: row.status as 'pending' | 'drafted' | 'rejected',
+  // `coach_messages` has no `draft_id` column yet — the drafts plan (`…/messages/:id/draft`)
+  // is what adds both the column and its one writer. Until then every row answers the
+  // contract's `draftId: null` honestly: no proposal here has ever become a draft.
+  draftId: null,
   conversationId: row.conversationId,
   createdAt: row.createdAt.toISOString(),
 });
@@ -341,6 +346,7 @@ export function registerCoachRoutes(
             role: 'model',
             text: result.text,
             proposal: result.proposal,
+            warning: result.warning,
             conversationId,
             aiReplyId: replyId,
           })

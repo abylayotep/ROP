@@ -749,6 +749,12 @@ export const coachMessages = pgTable(
     text: text('text').notNull(),
     // A `CoachProposal`, or null on the owner's own lines and on a plain reply.
     proposal: jsonb('proposal').$type<CoachProposal>(),
+    // Why the fact check rewrote a rule proposal into a note, when it did. Null on the
+    // owner's own lines, on a plain reply, and on a proposal the check left alone. Stored
+    // rather than returned only on the POST response: a reload of the coaching chat has to
+    // show the same explanation the owner saw the moment the card appeared, not lose it the
+    // instant they leave the screen.
+    warning: text('warning'),
     // 'pending' | 'drafted' | 'rejected'
     status: text('status').notNull().default('pending'),
     // The dialog this coaching started from, and the turn inside it, so the model reads what

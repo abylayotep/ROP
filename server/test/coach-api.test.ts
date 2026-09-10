@@ -266,6 +266,29 @@ describe('the coaching conversation', () => {
     expect(res.json().warning).toContain('1500');
   });
 
+  it('still carries the warning after a reload, not only on the turn that produced it', async () => {
+    model.reply({ message: '', proposal: { kind: 'rule', category: 'business', text: 'Доставка 1500 ₸.' } });
+    const posted = await say('Скажи про доставку.');
+    expect(posted.json().warning).toContain('1500');
+
+    const list = await app.inject({ method: 'GET', url: coach(), cookies: jar });
+    expect(list.statusCode).toBe(200);
+    const modelRow = list.json().find((row: { id: string }) => row.id === posted.json().id);
+    expect(modelRow.warning).toContain('1500');
+    // The drafts plan is what fills this in — nothing writes it yet.
+    expect(modelRow.draftId).toBeNull();
+  });
+
+  it('returns a null warning on a plain reply, both on the turn and on reload', async () => {
+    model.reply({ message: 'Понял.', proposal: null });
+    const posted = await say('Агент должен обращаться на «вы».');
+    expect(posted.json().warning).toBeNull();
+
+    const list = await app.inject({ method: 'GET', url: coach(), cookies: jar });
+    const modelRow = list.json().find((row: { id: string }) => row.id === posted.json().id);
+    expect(modelRow.warning).toBeNull();
+  });
+
   it('carries the dialog when one is named', async () => {
     const { conversationId } = await dialogWith([{ author: 'client', body: 'дадите скидку?' }]);
     model.reply({ message: 'Понял.', proposal: null });

@@ -14,24 +14,22 @@ import type {
 } from '@rakurs/contract';
 import { and, asc, desc, eq, gte, inArray, sql } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
-import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
 import {
   agents,
   aiReplies,
-  contacts,
   conversations,
   kbChunks,
   leadFields,
-  messages,
   stages,
   whatsappNumbers,
 } from '../db/schema.js';
 import { releaseTurnSlot, sandboxTurns, SANDBOX_TURNS, tryTakeTurnSlot } from '../db/turn-cap.js';
 import type { Env } from '../env.js';
 import { MODELS, type ModelClient } from '../lib/ai/openrouter.js';
-import { keyAad, runTurn, type TurnResult } from '../lib/ai/turn.js';
+import { keyAad } from '../lib/ai/turn.js';
+import { replayCase } from '../lib/drafts/replay.js';
 import { ApiError } from '../lib/errors.js';
 import { periodQuery, periodSince } from '../lib/period.js';
 import { credentialsKey, encryptSecret } from '../lib/secret-box.js';
@@ -123,95 +121,6 @@ const toApi = (row: typeof agents.$inferSelect): AiSettings => ({
   replyLanguage: row.replyLanguage,
   keySet: row.openrouterKey !== null,
 });
-
-/**
- * The sandbox's result, carried out of the transaction by the exception that rolls it back.
- *
- * Drizzle rolls a transaction back when its callback throws and rethrows what was thrown, so
- * a throw is both the rollback and the return. Ours rather than `tx.rollback()`, because
- * that one is recognised by an error class this file would then have to import and keep in
- * step with the ORM; a private class cannot be confused with a real failure.
- */
-class SandboxDone extends Error {
-  constructor(readonly result: TurnResult) {
-    super('sandbox finished');
-    this.name = 'SandboxDone';
-  }
-}
-
-/**
- * One turn on a conversation that never existed.
- *
- * `runTurn` reads everything a turn knows from the database and takes no free text, so the
- * sandbox has to give it a conversation to read. It creates one — a contact, a thread on a
- * real number and the customer's line — inside a transaction that is always rolled back, so
- * the turn sees exactly the shape a real one sees and the cabinet is left as it was found.
- *
- * A transaction rather than «create, then delete afterwards»: a delete in a `finally` leaves
- * rows behind if the process dies mid-turn, and the one thing this must never do is put a
- * fake customer into somebody's inbox. `dryRun` already stops every write `runTurn` makes;
- * the rollback is what covers the rows this route makes to call it with, and it would cover
- * a regression in `dryRun` as well.
- *
- * The turn is handed the transaction, which is the same query interface under a type Drizzle
- * keeps separate from `Db` — hence the one cast. Nothing `runTurn` reaches for in a dry run
- * lives outside it: no `$client`, and the sending path stops before the Graph call.
- */
-async function sandboxTurn(
-  db: Db,
-  deps: AiDeps,
-  input: { agentId: string; numberId: string; key: Buffer; text: string },
-): Promise<TurnResult> {
-  try {
-    await db.transaction(async (tx) => {
-      const [contact] = await tx
-        .insert(contacts)
-        .values({
-          agentId: input.agentId,
-          // Unique per agent, and unlike any phone number, so it cannot collide with a real
-          // contact even in the instant before the rollback.
-          phone: `sandbox-${randomUUID()}`,
-          name: 'Песочница',
-        })
-        .returning();
-
-      const now = new Date();
-      const [conversation] = await tx
-        .insert(conversations)
-        .values({
-          agentId: input.agentId,
-          contactId: contact!.id,
-          whatsappNumberId: input.numberId,
-          // The window is checked in a dry run too, and a sandbox that refused because a
-          // conversation invented a second ago is stale would be answering nothing.
-          lastInboundAt: now,
-          lastMessageAt: now,
-        })
-        .returning();
-
-      await tx.insert(messages).values({
-        conversationId: conversation!.id,
-        direction: 'in',
-        author: 'client',
-        kind: 'text',
-        body: input.text,
-        sentAt: now,
-      });
-
-      const result = await runTurn(
-        tx as unknown as Db,
-        { model: deps.model, graph: deps.graph, key: input.key },
-        { agentId: input.agentId, conversationId: conversation!.id, dryRun: true },
-      );
-      throw new SandboxDone(result);
-    });
-  } catch (error) {
-    if (error instanceof SandboxDone) return error.result;
-    throw error;
-  }
-  // The callback above always throws, which the compiler has no way of knowing.
-  throw new Error('sandbox transaction returned without a result');
-}
 
 export function registerAiRoutes(
   app: FastifyInstance,
@@ -378,11 +287,15 @@ export function registerAiRoutes(
 
       let result;
       try {
-        result = await sandboxTurn(db, deps, {
+        // One message, no ops: the sandbox is a case of one, replayed against the store
+        // exactly as it stands — see `replayCase` for the transaction that makes this safe
+        // and generalises to the draft test runs built on top of it.
+        result = await replayCase(db, deps, {
           agentId: req.agent!.id,
           numberId: number.id,
           key: credentialsKey(env),
-          text: parsed.data.text,
+          messages: [parsed.data.text],
+          ops: [],
         });
       } finally {
         releaseTurnSlot();
@@ -392,12 +305,12 @@ export function registerAiRoutes(
       // the owner's own, and «Прайс на 2026 › Двери» is what tells them whether the answer
       // used the right one.
       const itemRows =
-        result.usedItemIds.length === 0
+        result.usedChunkIds.length === 0
           ? []
           : await db
               .select({ id: kbChunks.id, title: kbChunks.title })
               .from(kbChunks)
-              .where(inArray(kbChunks.id, result.usedItemIds));
+              .where(inArray(kbChunks.id, result.usedChunkIds));
       const fieldIds = Object.keys(result.fields);
       const fieldRows =
         fieldIds.length === 0
@@ -417,7 +330,7 @@ export function registerAiRoutes(
       return {
         reply: result.reply,
         // Mapped over the turn's own order, so the record the answer leaned on most is first.
-        usedItems: result.usedItemIds.flatMap((id) => {
+        usedItems: result.usedChunkIds.flatMap((id) => {
           const found = itemRows.find((item) => item.id === id);
           return found ? [{ id, title: found.title }] : [];
         }),
@@ -426,7 +339,7 @@ export function registerAiRoutes(
           const found = fieldRows.find((field) => field.id === id);
           return found ? [{ id, name: found.name, value }] : [];
         }),
-        handoff: result.handoff,
+        handoff: result.handoffReason,
         outcome: result.outcome,
         detail: result.detail,
       };

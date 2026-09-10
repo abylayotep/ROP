@@ -135,10 +135,10 @@ async function login(email = 'owner@example.com') {
 
 const drafts = () => `/api/agents/${agentId}/drafts`;
 
-async function coachProposed(proposal: CoachProposal) {
+async function coachProposed(proposal: CoachProposal, contextAt?: Date) {
   const [row] = await db
     .insert(coachMessages)
-    .values({ agentId, role: 'model', text: 'Предложение.', proposal, status: 'pending' })
+    .values({ agentId, role: 'model', text: 'Предложение.', proposal, status: 'pending', contextAt })
     .returning();
   return row!;
 }
@@ -416,6 +416,45 @@ describe('turning a coach proposal into a draft', () => {
     const [stored] = await db.select().from(coachMessages).where(eq(coachMessages.id, message.id));
     // Still pending — refused before the draft (or the status flip) was ever written.
     expect(stored!.status).toBe('pending');
+  });
+
+  // `coach_messages.created_at` is stamped when the model's reply is inserted — after up to two
+  // attempts, minutes later — not when the store the proposal was written against was read. An
+  // owner who edits the very row while the coach is still thinking moved it after the context
+  // was actually read, even though the edit lands *before* `created_at` is ever stamped —
+  // comparing against `created_at` alone, as the route used to, would have missed exactly this
+  // edit and let the draft through.
+  it('refuses a draft when the edit landed while the coach was still thinking, not just after it answered', async () => {
+    const [note] = await db
+      .insert(kbNotes)
+      .values({ agentId, path: 'Доставка.md', title: 'Доставка', body: 'Старая цена.' })
+      .returning();
+
+    // Stands in for the moment the store was read, well before the model answered — `createdAt`
+    // defaults to `now()` on insert below, minutes later in the real flow this simulates.
+    const contextAt = new Date(Date.now() - 5_000);
+    const message = await coachProposed(
+      { kind: 'note_edit', noteId: note!.id, body: 'Предложение коуча.' },
+      contextAt,
+    );
+    const [stored] = await db.select().from(coachMessages).where(eq(coachMessages.id, message.id));
+    expect(stored!.createdAt.getTime()).toBeGreaterThan(contextAt.getTime());
+
+    // Landed after `contextAt` but before `createdAt` — set explicitly rather than `now()`,
+    // since by wall-clock time this line runs strictly after the message above was inserted,
+    // and `now()` would land after `createdAt`, not inside the gap this test means to hit.
+    const editedAt = new Date(contextAt.getTime() + 1_000);
+    await db.update(kbNotes).set({ body: 'Правка владельца.', updatedAt: editedAt }).where(eq(kbNotes.id, note!.id));
+    const [editedNote] = await db.select().from(kbNotes).where(eq(kbNotes.id, note!.id));
+    expect(editedNote!.updatedAt.getTime()).toBeLessThan(stored!.createdAt.getTime());
+
+    const res = await app.inject({
+      method: 'POST',
+      cookies: jar,
+      url: `/api/agents/${agentId}/coach/messages/${message.id}/draft`,
+    });
+
+    expect(res.statusCode).toBe(409);
   });
 });
 
@@ -758,6 +797,46 @@ describe('reading drafts and runs back', () => {
     // paid for it has `draft_id is null`.
     expect(res.json().results[0]!.before).not.toBeNull();
     expect(res.json().results[0]!.after).not.toBeNull();
+  });
+
+  // The cost used to come back half-reported on GET (`draftCost: run.cost` and no
+  // `baselineCost`) and `before.origin` was hardcoded `'reused'` regardless of which run had
+  // actually paid for it — a side the POST that made it called `'paid'` came back `'reused'`
+  // on every reload. Fixed without a new column: the baseline run paired with a draft run is
+  // findable by matching agent/version/model and timing — see `api/drafts.ts`'s own comment on
+  // `pairedBaseline`.
+  it('reports both costs on GET, and marks a fresh baseline apart from a reused one', async () => {
+    const draft = await openDraft();
+    const kase = await addCase('сколько стоит доставка');
+    model.replyAlways({ text: 'Уточню у коллеги.' });
+
+    const first = await run(draft.id, [kase.id]);
+    await waitForRun(first.json().id);
+    const firstRead = await app.inject({
+      method: 'GET',
+      cookies: jar,
+      url: `${drafts()}/${draft.id}/runs/${first.json().id}`,
+    });
+    expect(firstRead.statusCode).toBe(200);
+    expect(Number(firstRead.json().draftCost)).toBeGreaterThan(0);
+    expect(Number(firstRead.json().baselineCost)).toBeGreaterThan(0);
+    expect(firstRead.json().results[0]!.after.origin).toBe('paid');
+    expect(firstRead.json().results[0]!.before.origin).toBe('paid');
+
+    const second = await openDraft();
+    const rerun = await run(second.id, [kase.id]);
+    await waitForRun(rerun.json().id);
+    const rerunRead = await app.inject({
+      method: 'GET',
+      cookies: jar,
+      url: `${drafts()}/${second.id}/runs/${rerun.json().id}`,
+    });
+    expect(rerunRead.statusCode).toBe(200);
+    expect(Number(rerunRead.json().draftCost)).toBeGreaterThan(0);
+    // Nothing paid for «было» this time — the baseline from the first run answers it, on both
+    // the total and the per-case label.
+    expect(Number(rerunRead.json().baselineCost)).toBe(0);
+    expect(rerunRead.json().results[0]!.before.origin).toBe('reused');
   });
 
   // A run belongs to the one draft it scored, never to a neighbour that merely happens to

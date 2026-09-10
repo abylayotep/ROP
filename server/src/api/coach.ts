@@ -323,13 +323,20 @@ export function registerCoachRoutes(
           conversationId === null ? Promise.resolve(null) : transcriptFor(db, conversationId),
         ]);
 
-        await db.insert(coachMessages).values({
-          agentId,
-          role: 'owner',
-          text: parsed.data.text,
-          conversationId,
-          aiReplyId: replyId,
-        });
+        // Returns its own `createdAt` — Postgres's clock, stamped right after the store above
+        // was read — so the model row below can carry it as `contextAt`: the instant the
+        // proposal it is about to write was actually written against, not the instant the
+        // model happens to finish answering. See `coach_messages.contextAt`'s own comment.
+        const [ownerRow] = await db
+          .insert(coachMessages)
+          .values({
+            agentId,
+            role: 'owner',
+            text: parsed.data.text,
+            conversationId,
+            aiReplyId: replyId,
+          })
+          .returning({ createdAt: coachMessages.createdAt });
 
         const context: CoachContext = {
           company: req.agent!.name,
@@ -354,6 +361,7 @@ export function registerCoachRoutes(
             warning: result.warning,
             conversationId,
             aiReplyId: replyId,
+            contextAt: ownerRow!.createdAt,
           })
           .returning();
 

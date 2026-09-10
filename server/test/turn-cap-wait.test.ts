@@ -9,7 +9,7 @@
  * needs: it waits for a slot that frees up in time, and it still gives up rather than waiting
  * forever.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { releaseTurnSlot, SANDBOX_TURNS, takeTurnSlotWaiting, tryTakeTurnSlot } from '../src/db/turn-cap.js';
 
 describe('waiting for a turn-cap slot', () => {
@@ -41,5 +41,41 @@ describe('waiting for a turn-cap slot', () => {
 
     expect(acquired).toBe(false);
     for (let i = 0; i < SANDBOX_TURNS; i++) releaseTurnSlot();
+  });
+
+  // The premise the old default rested on — "whoever holds your slot can run for at most one
+  // model timeout" — was never true for `api/drafts.ts`'s run route (see `turn-cap.ts`'s own
+  // comment): a holder there is a whole `replayCase` call, which can run far longer than one
+  // model timeout. Called with no bound at all, the wait must still be waiting long after the
+  // old 60-second default would have given up — proven here with fake timers, since a real
+  // five-minute sleep has no place in a unit test.
+  it('waits past what the old sixty-second default ever allowed, when given no bound at all', async () => {
+    vi.useFakeTimers();
+    try {
+      for (let i = 0; i < SANDBOX_TURNS; i++) expect(tryTakeTurnSlot()).toBe(true);
+
+      let settled = false;
+      const waiting = takeTurnSlotWaiting().then((result) => {
+        settled = true;
+        return result;
+      });
+
+      // Five minutes with no slot ever freed — five times the old default bound — and the
+      // wait is still going, not given up.
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      expect(settled).toBe(false);
+
+      releaseTurnSlot();
+      await vi.advanceTimersByTimeAsync(30);
+
+      expect(await waiting).toBe(true);
+      expect(settled).toBe(true);
+
+      // The slot the waiter just took, plus every other one still held from the fill loop.
+      releaseTurnSlot();
+      for (let i = 0; i < SANDBOX_TURNS - 1; i++) releaseTurnSlot();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

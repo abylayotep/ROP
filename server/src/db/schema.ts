@@ -779,6 +779,16 @@ export const coachMessages = pgTable(
     // The draft this message's proposal became, once one was opened. Null on the owner's own
     // lines, on a plain reply, and before the proposal has been drafted.
     draftId: uuid('draft_id').references((): AnyPgColumn => kbDrafts.id, { onDelete: 'set null' }),
+    // The instant the store (`allRules`/`notePathsFor`) was read to build this reply's own
+    // prompt — set only on a `role: 'model'` row, right after the owner's line that started
+    // this turn is written, and always null on that owner line itself. `createdAt` below is
+    // stamped when *this* row is inserted, which is after the model has answered — up to two
+    // attempts, each up to a model timeout, apart from the read. `POST …/coach/messages/:id/draft`
+    // compares an edited row's `updatedAt` against this column, not `createdAt`, so an owner who
+    // edits the very row the coach is still thinking about is refused — comparing against
+    // `createdAt` would miss exactly that edit, since it lands before `createdAt` is stamped but
+    // after the context this proposal was actually written against was read.
+    contextAt: timestamp('context_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index('coach_messages_agent_created_idx').on(t.agentId, t.createdAt)],

@@ -405,7 +405,11 @@ export function registerKnowledgeRoutes(
         .select()
         .from(kbNotes)
         .where(and(eq(kbNotes.agentId, req.agent!.id), kind === undefined ? undefined : eq(kbNotes.kind, kind)))
-        .orderBy(desc(kbNotes.updatedAt))
+        // `id` breaks a tie `updatedAt` alone cannot: every note a bulk import writes in one
+        // pass lands on the same `now()`, and without a second column the order between them —
+        // and so which hundred `LIST_LIMIT` keeps — would depend on whatever order Postgres
+        // happens to return equal timestamps in, which is not a guarantee it makes.
+        .orderBy(desc(kbNotes.updatedAt), desc(kbNotes.id))
         .limit(LIST_LIMIT);
       return rows.map((row) => toKbNote(row, titles.get(row.sourceId ?? '') ?? null));
     },

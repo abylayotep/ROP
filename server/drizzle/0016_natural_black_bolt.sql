@@ -1,0 +1,1 @@
+ALTER TABLE "coach_messages" ADD COLUMN "context_at" timestamp with time zone;

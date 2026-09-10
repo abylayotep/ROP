@@ -1,5 +1,4 @@
 import { POOL_MAX } from './client.js';
-import { TIMEOUT_MS } from '../lib/ai/openrouter.js';
 
 /**
  * How many turns that hold a database connection across a slow model call may run at once,
@@ -97,37 +96,32 @@ export function turnSlotAvailable(): boolean {
 }
 
 /**
- * How long a call already admitted into a run waits for a slot before giving up.
+ * How long a call already admitted into a run waits for a slot before giving up — or, with no
+ * bound given at all, for as long as it takes.
  *
- * Bounded at `TIMEOUT_MS` (`lib/ai/openrouter.ts`) — one model call's own worst case. Whatever
- * call is holding "your" slot right now can run for at most that long before it times out on
- * its own, so waiting that long gives a fair shot at the slot actually freeing up without
- * waiting on a queue with no end in sight.
+ * This used to default to `TIMEOUT_MS` (`lib/ai/openrouter.ts`) on the premise that whoever
+ * holds "your" slot right now can run for at most one model call's own worst case before it
+ * times out on its own. That premise was false: a slot here is held for an entire `replayCase`
+ * call, not one model call — every message in a case, up to two attempts each, each attempt up
+ * to `TIMEOUT_MS` on its own — so a holder's true ceiling is that multiplied by however many
+ * messages the case it is replaying happens to have, a number nothing in this module (or the
+ * schema `test_cases.messages` is stored in) bounds. A 60-second wait timed out on a holder
+ * that was never going to be done in 60 seconds, refusing a run for a reason that had nothing
+ * to do with anything actually wrong.
+ *
+ * `api/drafts.ts`'s run route is the one caller, and it now answers its own HTTP request
+ * before this is ever called — see that file's header comment. Nothing is waiting on this
+ * finishing quickly any more, so there is nothing left to bound the wait against: called with
+ * no `timeoutMs` at all, this waits for as long as the run it belongs to is alive, which is
+ * exactly as long as it should. `timeoutMs` stays a parameter, not deleted, for a caller that
+ * genuinely does have something to bound the wait by — none exists today — and the three tests
+ * below exercise both an explicit bound and the unbounded default.
  */
-export const TURN_SLOT_WAIT_MS = TIMEOUT_MS;
-
-/**
- * Waits for a slot, taking it the moment one frees rather than refusing outright.
- *
- * `api/drafts.ts`'s run route calls this for every case once the run has passed its one
- * up-front admission check and written its bookkeeping rows: a run that has already started —
- * and, from case two on, already spent real money — must finish once it is let in, not be
- * refused for a case that merely happened to arrive while every slot was briefly taken. The
- * sandbox and the coach do not use this: each is one call, so there is no "already spent"
- * money a mid-call refusal would waste, and Task 4's ruling that they should fail fast still
- * holds for them.
- *
- * Polls rather than queuing exactly-in-order: `SANDBOX_TURNS` is at most three, so a tight poll
- * is cheap, and a real wait queue with per-waiter resolvers is more machinery than three slots
- * are ever going to need. A poll cannot guarantee first-in-first-out among waiters, and that is
- * an acceptable trade here — nothing about a run's own cases depends on which of several
- * concurrent runs gets the next slot first, only that each of them eventually does.
- */
-export async function takeTurnSlotWaiting(timeoutMs: number = TURN_SLOT_WAIT_MS): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
+export async function takeTurnSlotWaiting(timeoutMs?: number): Promise<boolean> {
+  const deadline = timeoutMs === undefined ? null : Date.now() + timeoutMs;
   for (;;) {
     if (tryTakeTurnSlot()) return true;
-    if (Date.now() >= deadline) return false;
+    if (deadline !== null && Date.now() >= deadline) return false;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
 }

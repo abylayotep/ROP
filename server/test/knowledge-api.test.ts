@@ -124,6 +124,32 @@ describe('notes', () => {
     expect(res.json().length).toBeLessThanOrEqual(100);
   });
 
+  // A bulk import writes every note it produces in one pass, and `saveNote`'s `updatedAt` is
+  // Postgres's own `now()` — the same instant for every row of one paste. Without a second
+  // column to break the tie, which of those notes lands first (and so which hundred survives
+  // `LIST_LIMIT`) is whatever order Postgres happens to return equal timestamps in, not a
+  // promise it makes — this pins the order to `id` instead, forced here with an explicit
+  // shared timestamp rather than a race that may or may not land on the same instant.
+  it('breaks a tied updatedAt by id, so a bulk import lists deterministically', async () => {
+    const tied = new Date();
+    const rows = await db
+      .insert(kbNotes)
+      .values(
+        Array.from({ length: 5 }, (_, i) => ({
+          agentId,
+          path: `Пачка/${i}`,
+          title: `${i}`,
+          updatedAt: tied,
+        })),
+      )
+      .returning({ id: kbNotes.id });
+
+    const res = await app.inject({ method: 'GET', url: notes(), cookies: jar });
+
+    const byIdDesc = [...rows].sort((a, b) => (a.id < b.id ? 1 : -1)).map((r) => r.id);
+    expect(res.json().map((n: { id: string }) => n.id)).toEqual(byIdDesc);
+  });
+
   it('narrows the search branch of the list to a kind inside the query, not after the limit', async () => {
     // Twenty notes that outrank the one we actually want on the word alone, none of them a
     // product. If `kind` trimmed the answer after `searchKnowledge` had already cut to

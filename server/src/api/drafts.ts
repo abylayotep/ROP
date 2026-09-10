@@ -49,13 +49,19 @@
  * same way `api/whatsapp-webhook.ts` already answers Meta before draining the CAPI queue behind
  * the response — see that file's own comment for the pattern this follows.
  *
- * Two things change shape once nothing is waiting on the HTTP response any more:
+ * Three things change shape once nothing is waiting on the HTTP response any more:
  *
  * - **The `runningDrafts` lock** (below) used to be released in a `finally` wrapped around the
  *   whole handler. It still is, but "the whole handler" now means the detached replay too — the
  *   lock is only ever dropped once that finishes, in *its own* `finally`, not when the response
  *   goes out. A second run of the same draft is refused with 409 for exactly as long as the
  *   first one is actually still working, not merely for as long as its request took.
+ * - **A slot wait can no longer afford to give up quickly.** `takeTurnSlotWaiting` used to
+ *   default to one model timeout on the premise that whoever held a slot could only run that
+ *   long — false even before this change (see `db/turn-cap.ts`'s own comment) and pointless to
+ *   keep bounded now that giving up doesn't spare an HTTP client from waiting: the detached
+ *   replay calls it with no bound at all, so it simply waits for as long as the run itself is
+ *   still alive.
  * - **An error has nowhere left to answer to.** A `MissingDraftRowError` (see "A deleted note
  *   or rule" below) used to become a synchronous Russian 409, the response itself. It cannot any
  *   more — the response already went out — so every error the loop throws, this one included,
@@ -66,10 +72,6 @@
  *   naming what went wrong — `test_runs` has no column for that, and adding one to recover
  *   detail this feature has never promised felt like more schema than any of this asked for;
  *   the exact reason is one `app.log.error` line away for whoever is debugging it.
- *
- * `takeTurnSlotWaiting`'s own bound — see "The turn-cap slot" below — is unaffected by this
- * change; it still refuses to wait forever the same way it always has, only now from inside the
- * detached loop rather than the request itself.
  *
  * ## A restart, and the `running` row it leaves behind
  *
@@ -120,12 +122,13 @@
  *   costs the owner nothing: no row, no call. It can race (two runs might both see a slot free
  *   a moment before both actually need one) and that is fine — see that function's own comment.
  * - **From the first case on**, once the run is admitted and its rows exist, every
- *   `replayCase` call goes through `takeTurnSlotWaiting` instead: it waits for a slot, bounded,
- *   rather than throwing the instant none is free. A fourth run used to be able to pass at case
- *   one, spend real money through case *k*, and then be refused outright at case *k+1* for a
- *   reason that has nothing to do with what it had already paid for — once admitted, a run
- *   finishes rather than being cut off partway through. `takeTurnSlotWaiting`'s own comment
- *   says what the wait is bounded to and why.
+ *   `replayCase` call goes through `takeTurnSlotWaiting` instead: it waits for a slot rather
+ *   than throwing the instant none is free, and — called with no bound, now that the replay
+ *   loop runs detached from any HTTP response — waits for as long as the run itself is alive.
+ *   A fourth run used to be able to pass at case one, spend real money through case *k*, and
+ *   then be refused outright at case *k+1* for a reason that has nothing to do with what it had
+ *   already paid for — once admitted, a run finishes rather than being cut off partway through.
+ *   `takeTurnSlotWaiting`'s own comment says why a bound never described this caller honestly.
  *
  * A case that throws cannot leak the slot: the `try`/`finally` around each `replayCase` call is
  * unconditional, the same shape `api/ai.ts`'s sandbox and `api/coach.ts`'s coach already use
@@ -212,10 +215,16 @@
  * *before* the draft (and so before its own version check) exists at all — the gate never sees
  * anything stale to refuse. `POST …/coach/messages/:id/draft` closes it directly: it compares
  * the row's current `updatedAt` (already sitting in `base`, the same read `baseOf` always does)
- * against `coach_messages.createdAt` — the instant the proposal was written — and answers a
- * Russian 409 the moment the row moved after that instant, before the draft is ever written.
+ * against `coach_messages.contextAt` — the instant the *store* was read to write this proposal,
+ * not `createdAt`, the instant the model's reply was inserted once it finally answered (up to
+ * two attempts, minutes later). An edit landing in that gap — after the context was read, before
+ * the model was done thinking — moved the row after the instant the proposal was actually
+ * written against, even though it lands before `createdAt` is ever stamped; comparing against
+ * `createdAt` would have missed exactly that edit. See `coach_messages.contextAt`'s own comment
+ * in `db/schema.ts` for where it is set. Refused with a Russian 409 the moment the row moved
+ * after that instant, before the draft is ever written.
  */
-import { and, asc, desc, eq, inArray } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, isNull, sql } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
@@ -425,7 +434,7 @@ function missingRowMessage(error: MissingDraftRowError, base: DraftBase): string
 export async function reconcileOrphanedRuns(db: Db): Promise<void> {
   await db
     .update(testRuns)
-    .set({ status: 'failed', finishedAt: new Date() })
+    .set({ status: 'failed', finishedAt: sql`now()` })
     .where(eq(testRuns.status, 'running'));
 }
 
@@ -525,12 +534,17 @@ export function registerDraftRoutes(
     const { agentId, numberId, draft, casesById, runIds, existingBaselines, draftRun, baselineRun } = input;
 
     /** Takes a slot for exactly one `replayCase` call and gives it back immediately after —
-     * see the file comment for why per-call, not per-case or per-run, and why this waits
-     * rather than throws now that the run is admitted. */
+     * see the file comment for why per-call, not per-case or per-run. Waits with no bound:
+     * nothing is waiting on this returning quickly any more — see `db/turn-cap.ts`'s own
+     * comment on why a bound never described this caller honestly in the first place. */
     async function replayOneSide(ops: DraftOp[], messages: string[]): Promise<ReplayResult> {
       const acquired = await takeTurnSlotWaiting();
       if (!acquired) {
-        throw new ApiError(503, 'Модель не отвечает слишком долго — прогон прерван, попробуйте ещё раз');
+        // Unreachable with the unbounded wait above — `takeTurnSlotWaiting`'s return type is a
+        // `boolean`, not a proof, so this stays as a defensive fallback rather than an
+        // assertion. Kept in English, not the Russian a caller used to read: nothing reaches
+        // this any more except `runReplay`'s own `catch` below, on its way into a log.
+        throw new Error('turn-cap: gave up waiting for a slot other runs are holding');
       }
       try {
         return await replayCase(db, deps, { agentId, numberId, key, messages, ops });
@@ -566,30 +580,30 @@ export function registerDraftRoutes(
 
       await db
         .update(testRuns)
-        .set({ status: 'done', cost: draftCost, finishedAt: new Date() })
+        .set({ status: 'done', cost: draftCost, finishedAt: sql`now()` })
         .where(eq(testRuns.id, draftRun.id));
       if (baselineRun) {
         await db
           .update(testRuns)
-          .set({ status: 'done', cost: baselineCost, finishedAt: new Date() })
+          .set({ status: 'done', cost: baselineCost, finishedAt: sql`now()` })
           .where(eq(testRuns.id, baselineRun.id));
       }
     } catch (error) {
-      // The run could not finish — the wait for a slot ran out, or something below
-      // `replayCase` broke outright, or (see "A deleted note or rule" above) a draft op named a
-      // row that is gone. Whatever `test_results` rows already landed stay; the run itself is
-      // marked so nothing later mistakes it for a complete answer, and the error goes to the
-      // log — see the file comment's "An error has nowhere left to answer to".
+      // The run could not finish — something below `replayCase` broke outright, or (see "A
+      // deleted note or rule" above) a draft op named a row that is gone. Whatever
+      // `test_results` rows already landed stay; the run itself is marked so nothing later
+      // mistakes it for a complete answer, and the error goes to the log — see the file
+      // comment's "An error has nowhere left to answer to".
       await db
         .update(testRuns)
-        .set({ status: 'failed', cost: draftCost, finishedAt: new Date() })
+        .set({ status: 'failed', cost: draftCost, finishedAt: sql`now()` })
         .where(eq(testRuns.id, draftRun.id));
       if (baselineRun) {
         // `done` the moment at least one result landed — see the file comment on what `failed`
         // means for a baseline run versus a draft-side one.
         await db
           .update(testRuns)
-          .set({ status: baselineWritten > 0 ? 'done' : 'failed', cost: baselineCost, finishedAt: new Date() })
+          .set({ status: baselineWritten > 0 ? 'done' : 'failed', cost: baselineCost, finishedAt: sql`now()` })
           .where(eq(testRuns.id, baselineRun.id));
       }
       const detail = error instanceof MissingDraftRowError ? missingRowMessage(error, draft.base) : undefined;
@@ -747,14 +761,45 @@ export function registerDraftRoutes(
       const caseIds = rows.map((row) => row.caseId);
       const baselines = await baselineResults(db, agentId, caseIds, run.configVersion, run.model);
 
-      const results = rows.map((row) => {
+      // The baseline run *this* draft run's own POST paired with, if it needed one — found
+      // without a column linking the two, because the POST that made `run` inserts them back
+      // to back, in the same request, with nothing awaited in between: any baseline run at the
+      // same `agentId`/`configVersion`/`model` that started at or after `run` did is the one
+      // POST created for it. `baselineResults` above can answer a case from an *older* baseline
+      // too (one that already existed and was simply reused) — those necessarily started
+      // before `run` did, since the POST read them before `run`'s own row was even inserted —
+      // so the `>=` here is what tells "paid by this run" apart from "reused from an earlier
+      // one" below. This can misattribute a case to a different, unrelated run that happens to
+      // start immediately after `run` and share its agent/version/model while `run` itself
+      // needed no fresh baseline at all — accepted as the rare edge a heuristic without a new
+      // column has to leave, not a case this feature promises to get right.
+      const [pairedBaseline] = await db
+        .select()
+        .from(testRuns)
+        .where(
+          and(
+            eq(testRuns.agentId, agentId),
+            isNull(testRuns.draftId),
+            eq(testRuns.configVersion, run.configVersion),
+            eq(testRuns.model, run.model),
+            gte(testRuns.startedAt, run.startedAt),
+          ),
+        )
+        .orderBy(asc(testRuns.startedAt))
+        .limit(1);
+
+      const results: { caseId: string; before: CaseSideOut | null; after: CaseSideOut }[] = rows.map((row) => {
         const baseline = baselines.get(row.caseId);
+        // `'paid'` exactly when this case's «было» lives in the baseline run paired with `run`
+        // itself — the row this run's own POST is what wrote — and `'reused'` when it instead
+        // answers from an older run's own already-`done` row. Both are reads, as every `GET`
+        // is; the label describes which run originally spent the money, not whether this
+        // particular request did.
+        const beforeOrigin: 'paid' | 'reused' = pairedBaseline && baseline?.runId === pairedBaseline.id ? 'paid' : 'reused';
         return {
           caseId: row.caseId,
-          // `'reused'`: nothing is computed live by a `GET` — it only ever reads what is
-          // already there, whether or not this exact request is what originally paid for it.
-          before: baseline ? { ...sideFromRow(baseline), origin: 'reused' as const } : null,
-          after: { ...sideFromRow(row), origin: 'paid' as const },
+          before: baseline ? { ...sideFromRow(baseline), origin: beforeOrigin } : null,
+          after: { ...sideFromRow(row), origin: 'paid' },
         };
       });
 
@@ -765,6 +810,7 @@ export function registerDraftRoutes(
         model: run.model,
         status: run.status as 'running' | 'done' | 'failed',
         draftCost: run.cost,
+        baselineCost: pairedBaseline?.cost ?? '0',
         startedAt: run.startedAt.toISOString(),
         finishedAt: run.finishedAt === null ? null : run.finishedAt.toISOString(),
         results,
@@ -796,7 +842,14 @@ export function registerDraftRoutes(
       // has anything to compare: a create op names no existing row.
       const touchedAt =
         op.op === 'note_update' ? base.notes?.[op.noteId] : op.op === 'rule_update' ? base.rules?.[op.ruleId] : undefined;
-      if (touchedAt !== undefined && new Date(touchedAt) > message.createdAt) {
+      // `contextAt` — the instant the store was read to write this proposal — not `createdAt`,
+      // the instant the model's reply was inserted once it finally answered, up to two attempts
+      // later. A row edited while the coach was still thinking moved after the context it was
+      // actually written against was read, even though the edit lands before `createdAt` is
+      // ever stamped; falling back to `createdAt` here is only for a row from before this
+      // column existed. See `coach_messages.contextAt`'s own comment in `db/schema.ts`.
+      const proposedAt = message.contextAt ?? message.createdAt;
+      if (touchedAt !== undefined && new Date(touchedAt) > proposedAt) {
         const label = op.op === 'note_update' ? 'Заметка изменилась' : 'Правило изменилось';
         throw new ApiError(409, `${label} с тех пор, как это предложил коуч — задайте вопрос коучу заново`);
       }

@@ -157,7 +157,7 @@ A new `CoachScreen.tsx` at «Обучение», owner-only, two panes:
 
 | Route | Who | What |
 |---|---|---|
-| `GET  /api/agents/:agentId/rules` | any member | The list, for the screen and for the prompt assembler. |
+| `GET  /api/agents/:agentId/rules` | owner | The list, for the screen and for the prompt assembler. |
 | `POST /api/agents/:agentId/rules` | owner | Create by hand. |
 | `PATCH /api/agents/:agentId/rules/:ruleId` | owner | Text, category, enabled, position. |
 | `DELETE /api/agents/:agentId/rules/:ruleId` | owner | Delete. |

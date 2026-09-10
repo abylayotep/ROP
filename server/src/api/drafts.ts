@@ -239,13 +239,14 @@ import {
 import { releaseTurnSlot, takeTurnSlotWaiting, turnSlotAvailable } from '../db/turn-cap.js';
 import type { Env } from '../env.js';
 import type { CoachProposal } from '../lib/ai/coach.js';
-import { addCost } from '../lib/ai/turn.js';
+import { addCost, keyAad } from '../lib/ai/turn.js';
+import { annotate, type AnnotateDeps } from '../lib/drafts/annotate.js';
 import { baselineResults } from '../lib/drafts/baseline.js';
 import { baseOf, MissingDraftRowError, type DraftBase, type DraftOp } from '../lib/drafts/ops.js';
 import { replayCase, type AiDeps, type ReplayResult } from '../lib/drafts/replay.js';
 import { ApiError } from '../lib/errors.js';
 import { clampTitle } from '../lib/knowledge/split.js';
-import { credentialsKey } from '../lib/secret-box.js';
+import { credentialsKey, decryptSecret } from '../lib/secret-box.js';
 import { isUuid } from '../lib/uuid.js';
 import { requireAgent } from './require-agent.js';
 
@@ -394,7 +395,15 @@ const sideFromRow = (row: typeof testResults.$inferSelect): CaseSide => ({
   cost: row.cost,
 });
 
-const resultRow = (runId: string, caseId: string, side: CaseSide) => ({
+/** `verdict`/`verdictReason` are extra, optional columns rather than part of `CaseSide`:
+ * only the draft's own «стало» row ever carries them — see `runReplay`'s own comment on why
+ * the baseline side is never annotated. */
+const resultRow = (
+  runId: string,
+  caseId: string,
+  side: CaseSide,
+  verdict: { verdict: string; reason: string } | null = null,
+) => ({
   runId,
   caseId,
   reply: side.reply,
@@ -404,6 +413,8 @@ const resultRow = (runId: string, caseId: string, side: CaseSide) => ({
   handoffReason: side.handoffReason,
   outcome: side.outcome,
   cost: side.cost,
+  verdict: verdict?.verdict ?? null,
+  verdictReason: verdict?.reason ?? null,
 });
 
 /** The Russian 409 for a draft op naming a note or rule that is gone — see the file comment's
@@ -525,13 +536,18 @@ export function registerDraftRoutes(
     agentId: string;
     numberId: string;
     draft: typeof kbDrafts.$inferSelect;
-    casesById: Map<string, { id: string; messages: string[]; enabled: boolean }>;
+    casesById: Map<string, { id: string; messages: string[]; enabled: boolean; expectation: string | null }>;
     runIds: string[];
     existingBaselines: Map<string, typeof testResults.$inferSelect>;
     draftRun: typeof testRuns.$inferSelect;
     baselineRun: typeof testRuns.$inferSelect | null;
+    // Ready to call the moment a case needs it — decrypted once, up front, rather than once a
+    // case, twenty queries a run has no reason to make. Null exactly when the agent has no
+    // OpenRouter key at all, the same case a plain turn already answers 'skipped' for; no
+    // point building a call that can only fail the same way twenty times over.
+    annotateDeps: AnnotateDeps | null;
   }): Promise<void> {
-    const { agentId, numberId, draft, casesById, runIds, existingBaselines, draftRun, baselineRun } = input;
+    const { agentId, numberId, draft, casesById, runIds, existingBaselines, draftRun, baselineRun, annotateDeps } = input;
 
     /** Takes a slot for exactly one `replayCase` call and gives it back immediately after —
      * see the file comment for why per-call, not per-case or per-run. Waits with no bound:
@@ -566,16 +582,37 @@ export function registerDraftRoutes(
         // «Стало» — always paid, every case, every run.
         const after = await replayOneSide(draft.ops, kase.messages);
         draftCost = addCost(draftCost, after.cost);
-        await db.insert(testResults).values(resultRow(draftRun.id, caseId, sideFromReplay(after)));
 
         // «Было» — read back when a baseline already exists at this version and model, paid
-        // for and stored as one only when it does not.
-        if (!existingBaselines.has(caseId)) {
+        // for and stored as one only when it does not. Read (or paid) before the annotation
+        // call below, which needs both replies to compare.
+        let beforeReply: string | null;
+        if (existingBaselines.has(caseId)) {
+          beforeReply = existingBaselines.get(caseId)!.reply;
+        } else {
           const baseline = await replayOneSide([], kase.messages);
           baselineCost = addCost(baselineCost, baseline.cost);
           await db.insert(testResults).values(resultRow(baselineRun!.id, caseId, sideFromReplay(baseline)));
           baselineWritten += 1;
+          beforeReply = baseline.reply;
         }
+
+        // The annotation — one model call, advice in a column, never a gate. Only the draft's
+        // own «стало» row carries a verdict: the baseline row is what «было» *is*, not a
+        // comparison of anything, so there is nothing for it to be annotated against. A failed
+        // call (`annotate` never throws — see its own file comment) simply leaves both columns
+        // null; the case result itself, already computed above, is unaffected either way.
+        const annotation = annotateDeps
+          ? await annotate(annotateDeps, {
+              expectation: kase.expectation,
+              question: kase.messages[kase.messages.length - 1] ?? '',
+              before: beforeReply,
+              after: after.reply,
+            })
+          : null;
+        if (annotation) draftCost = addCost(draftCost, annotation.cost);
+
+        await db.insert(testResults).values(resultRow(draftRun.id, caseId, sideFromReplay(after), annotation));
       }
 
       await db
@@ -658,7 +695,12 @@ export function registerDraftRoutes(
         if (caseIds.some((id) => !isUuid(id))) throw new ApiError(404, 'Случай не найден');
 
         const caseRows = await db
-          .select({ id: testCases.id, messages: testCases.messages, enabled: testCases.enabled })
+          .select({
+            id: testCases.id,
+            messages: testCases.messages,
+            enabled: testCases.enabled,
+            expectation: testCases.expectation,
+          })
           .from(testCases)
           .where(and(eq(testCases.agentId, agentId), inArray(testCases.id, caseIds)));
         const casesById = new Map(caseRows.map((row) => [row.id, row]));
@@ -678,6 +720,21 @@ export function registerDraftRoutes(
         const model = req.agent!.model;
         const existingBaselines = await baselineResults(db, agentId, runIds, configVersion, model);
         const needsBaseline = runIds.filter((id) => !existingBaselines.has(id));
+
+        // Decrypted once, here, rather than once a case inside `runReplay` — the agent row is
+        // already in hand from `requireAgent`, so this is one decryption, not a query at all.
+        // Null exactly when the agent has no OpenRouter key: a run can still be admitted and
+        // its cases still replayed (each side call answers 'skipped' on its own, the same as
+        // it always has), but there is no key to spend on a hint nobody could act on either.
+        const annotateDeps: AnnotateDeps | null =
+          req.agent!.openrouterKey === null
+            ? null
+            : {
+                model: deps.model,
+                key: decryptSecret(req.agent!.openrouterKey, key, keyAad(agentId)),
+                modelId: model,
+                temperature: req.agent!.temperature,
+              };
 
         // The run-level admission check — see the file comment's "The turn-cap slot". A peek,
         // not a reservation: the real, per-call reservation happens inside `runReplay`, once
@@ -715,6 +772,7 @@ export function registerDraftRoutes(
             existingBaselines,
             draftRun: draftRun!,
             baselineRun,
+            annotateDeps,
           }).finally(() => {
             runningDrafts.delete(draft.id);
           });

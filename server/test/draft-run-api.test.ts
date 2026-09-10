@@ -514,8 +514,9 @@ describe('running a draft over a set of cases', () => {
     const posted = await run(second.id, [kase.id]);
     await waitForRun(posted.json().id);
 
-    // One call for the draft side. The baseline is read, not re-run.
-    expect(model.calls.length).toBe(spent + 1);
+    // Two calls for the draft side — the reply itself, and the annotation comparing it
+    // against the baseline. The baseline itself is read, not re-run.
+    expect(model.calls.length).toBe(spent + 2);
   });
 
   // An empty `caseIds` used to insert a `done` run at the agent's current `config_version` —
@@ -626,9 +627,10 @@ describe('running a draft over a set of cases', () => {
     const second = await openDraft();
     const rerun = await run(second.id, [good.id]);
     await waitForRun(rerun.json().id);
-    // One call for the second draft's own «стало». The good case's «было» is read back, not
-    // re-run — the baseline run being `done` is what makes that possible.
-    expect(model.calls.length).toBe(spent + 1);
+    // Two calls for the second draft's own «стало» — the reply and its annotation. The good
+    // case's «было» is read back, not re-run — the baseline run being `done` is what makes
+    // that possible.
+    expect(model.calls.length).toBe(spent + 2);
   });
 
   it('refuses more than twenty cases', async () => {

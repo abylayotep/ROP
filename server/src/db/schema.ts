@@ -20,6 +20,10 @@ import type { CapiEventBody } from '../lib/capi/events.js';
 // Type-only, so this stays a leaf module at runtime. `coach_messages.proposal` holds what the
 // coach suggested, and the brand is what stops anything but a real proposal filling it.
 import type { CoachProposal } from '../lib/ai/coach.js';
+// Type-only, so this stays a leaf module at runtime. `kb_drafts.ops` and `kb_drafts.base` hold
+// what a draft would write and what it was tested against, and the brand is what stops anything
+// but the drafts module filling them.
+import type { DraftBase, DraftOp } from '../lib/drafts/ops.js';
 
 /**
  * Tenancy plus authentication, plus WhatsApp: connected numbers, contacts,
@@ -124,6 +128,11 @@ export const agents = pgTable(
     stageHistorySince: timestamp('stage_history_since', { withTimezone: true })
       .notNull()
       .defaultNow(),
+    // What the agent would say, versioned. Every write that changes an answer — a note, an
+    // import, a rule, an applied draft — bumps it, and a test run records the version it ran
+    // at. That is what lets «было» be reused across runs and what makes a draft tested against
+    // a store that has since moved refuse to apply.
+    configVersion: integer('config_version').notNull().default(1),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index('agents_account_id_idx').on(t.accountId)],
@@ -767,7 +776,108 @@ export const coachMessages = pgTable(
     // the agent actually answered rather than what the owner remembers of it.
     conversationId: uuid('conversation_id').references(() => conversations.id, { onDelete: 'set null' }),
     aiReplyId: uuid('ai_reply_id').references(() => aiReplies.id, { onDelete: 'set null' }),
+    // The draft this message's proposal became, once one was opened. Null on the owner's own
+    // lines, on a plain reply, and before the proposal has been drafted.
+    draftId: uuid('draft_id').references((): AnyPgColumn => kbDrafts.id, { onDelete: 'set null' }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index('coach_messages_agent_created_idx').on(t.agentId, t.createdAt)],
+);
+
+/**
+ * One change, waiting to be proven.
+ *
+ * `ops` is what would be written; `base` is the `updatedAt` of everything the ops touch, taken
+ * when the draft was made. Applying compares the two, because a draft is a promise that what
+ * was tested is what lands, and a note edited underneath it makes that promise false.
+ */
+export const kbDrafts = pgTable(
+  'kb_drafts',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    agentId: uuid('agent_id').notNull().references(() => agents.id, { onDelete: 'cascade' }),
+    title: text('title').notNull(),
+    // 'coach' | 'manual'
+    origin: text('origin').notNull(),
+    // 'open' | 'applied' | 'discarded'
+    status: text('status').notNull().default('open'),
+    ops: jsonb('ops').$type<DraftOp[]>().notNull(),
+    base: jsonb('base').$type<DraftBase>().notNull().default({}),
+    createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    appliedAt: timestamp('applied_at', { withTimezone: true }),
+  },
+  (t) => [index('kb_drafts_agent_status_idx').on(t.agentId, t.status, t.createdAt)],
+);
+
+/**
+ * One conversation to replay. `messages` is the customer's side only — the agent's replies are
+ * what is being tested, and storing them here would be storing the answer in the question.
+ */
+export const testCases = pgTable(
+  'test_cases',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    agentId: uuid('agent_id').notNull().references(() => agents.id, { onDelete: 'cascade' }),
+    title: text('title').notNull(),
+    messages: jsonb('messages').$type<string[]>().notNull(),
+    // What the owner expects, in words. Read by a person and by the annotating model, never
+    // asserted on: turning it into an assertion is a feature with its own grammar.
+    expectation: text('expectation'),
+    // 'manual' | 'dialog' | 'generated'
+    origin: text('origin').notNull().default('manual'),
+    conversationId: uuid('conversation_id').references(() => conversations.id, { onDelete: 'set null' }),
+    enabled: boolean('enabled').notNull().default(true),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('test_cases_agent_enabled_idx').on(t.agentId, t.enabled)],
+);
+
+/** One pass over a set of cases. `draftId` null is a baseline: the store as it stands. */
+export const testRuns = pgTable(
+  'test_runs',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    agentId: uuid('agent_id').notNull().references(() => agents.id, { onDelete: 'cascade' }),
+    draftId: uuid('draft_id').references(() => kbDrafts.id, { onDelete: 'cascade' }),
+    // The agent's version at the moment the run started. A baseline is reusable only at the
+    // same version and the same model.
+    configVersion: integer('config_version').notNull(),
+    model: text('model').notNull(),
+    // 'running' | 'done' | 'failed'
+    status: text('status').notNull().default('running'),
+    cost: numeric('cost', { precision: 12, scale: 8 }).notNull().default('0'),
+    startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp('finished_at', { withTimezone: true }),
+  },
+  (t) => [index('test_runs_agent_draft_idx').on(t.agentId, t.draftId, t.startedAt),
+          index('test_runs_baseline_idx').on(t.agentId, t.configVersion)],
+);
+
+/** What one case produced in one run, and what the annotating model thought of it. */
+export const testResults = pgTable(
+  'test_results',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    runId: uuid('run_id').notNull().references(() => testRuns.id, { onDelete: 'cascade' }),
+    caseId: uuid('case_id').notNull().references(() => testCases.id, { onDelete: 'cascade' }),
+    reply: text('reply'),
+    usedChunkIds: jsonb('used_chunk_ids').$type<string[]>().notNull().default([]),
+    // A run records the stage a rolled-back turn *would* have moved to, and a foreign key would
+    // point from surviving data at a row somebody may later delete — so this is a plain uuid,
+    // not a reference.
+    stageId: uuid('stage_id'),
+    handoff: boolean('handoff').notNull().default(false),
+    handoffReason: text('handoff_reason'),
+    // The `TurnOutcome` the replay ended in.
+    outcome: text('outcome').notNull(),
+    cost: numeric('cost', { precision: 12, scale: 8 }).notNull().default('0'),
+    // 'better' | 'worse' | 'same', or null when the annotation did not run or failed. A hint
+    // in a column: it gates nothing.
+    verdict: text('verdict'),
+    verdictReason: text('verdict_reason'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [unique('test_results_run_case_key').on(t.runId, t.caseId)],
 );

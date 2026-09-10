@@ -1,6 +1,6 @@
 import { createHmac } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildServer } from '../src/api/server.js';
 import { whatsappEvents } from '../src/db/schema.js';
 import { withDb } from './helpers/db.js';
@@ -15,6 +15,15 @@ beforeEach(async () => {
   db = await withDb();
   app = buildServer(env, db);
   await app.ready();
+});
+
+// The inbound pass fires from a detached `setImmediate` after the response has already gone
+// out (see `whatsapp-webhook.ts`), so it can still be running against the shared test database
+// when the next test's `beforeEach` truncates and reseeds it — a cross-file race this file's
+// missing `app.close()` left open. Ten other test files already close their server for exactly
+// this reason.
+afterEach(async () => {
+  await app.close();
 });
 
 const payload = {

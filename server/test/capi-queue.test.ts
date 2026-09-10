@@ -1,7 +1,7 @@
 import { createHmac, randomUUID } from 'node:crypto';
 import { asc, eq, sql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { buildServer } from '../src/api/server.js';
 import type { Db } from '../src/db/client.js';
 import {
@@ -706,6 +706,16 @@ describe('an event nobody ever answered for', () => {
 
 describe('the drain on the webhook', () => {
   let app: FastifyInstance;
+
+  // The inbound pass and the CAPI drain both fire from a detached `setImmediate` after the
+  // response has already gone out (see `whatsapp-webhook.ts`) — work that can still be running
+  // against this shared test database when the next file's `beforeEach` truncates and seeds.
+  // Ten other test files already close their server for exactly this reason; this describe
+  // never did, which is why its own `eventually` budget had to be raised once already and why
+  // `whatsapp-attribution.test.ts` could lose a row it never got to read.
+  afterAll(async () => {
+    await app.close();
+  });
 
   const sign = (raw: string) =>
     `sha256=${createHmac('sha256', env.META_APP_SECRET).update(raw).digest('hex')}`;

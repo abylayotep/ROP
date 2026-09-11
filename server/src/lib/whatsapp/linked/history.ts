@@ -8,7 +8,7 @@ import {
   upsertConversation,
 } from '../store.js';
 import type { LinkedClient, LinkedEvent, RawLinkedHistory } from './client.js';
-import { jidToPhone, normalize } from './normalize.js';
+import { jidToPhone, mimeOf, normalize } from './normalize.js';
 
 /**
  * The chats already on the phone, brought in after pairing.
@@ -19,8 +19,9 @@ import { jidToPhone, normalize } from './normalize.js';
  *   today, and a shop that paired its phone on Monday must not spend Monday evening
  *   replying to everyone who ever wrote to it.
  * - **No file is downloaded.** Months of photos at pairing time is a long wait for bytes
- *   most conversations will never be scrolled back to. The row keeps the message; the file
- *   is fetched the first time someone opens it.
+ *   most conversations will never be scrolled back to. The row keeps the message and the
+ *   keys needed to fetch its file, and the media route downloads it the first time someone
+ *   opens it.
  */
 
 export interface LinkedHistoryDeps {
@@ -104,8 +105,10 @@ export async function applyHistoryChunk(
       body: line.body,
       status: line.fromMe ? 'sent' : null,
       sentAt: line.sentAt,
-      // Deliberately absent. See the file's own comment.
+      // Deliberately absent. See the file's own comment — the file itself is fetched on
+      // the first open, from the message kept here beside the row.
       media: null,
+      pending: line.hasMedia ? { ref: { key: raw.key, message: raw.message }, mime: mimeOf(raw) } : null,
     });
 
     await advanceConversation(db, conversationId, line.sentAt, !line.fromMe);

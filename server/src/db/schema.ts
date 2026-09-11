@@ -328,6 +328,12 @@ export const messages = pgTable(
     body: text('body'),
     mediaPath: text('media_path'),
     mediaMime: text('media_mime'),
+    // How to fetch the file when `mediaPath` is null: the WhatsApp message itself, kept
+    // exactly as the phone sent it. The history import writes rows for months of chats and
+    // downloads nothing — bytes most threads are never scrolled back to — so the file is
+    // fetched the first time someone opens it, and that fetch needs the message's own keys.
+    // Null once the file is on disk, and for every message that never had one.
+    mediaRef: jsonb('media_ref'),
     // Outbound only: sent, delivered, read, failed.
     status: text('status'),
     sentAt: timestamp('sent_at', { withTimezone: true }).notNull(),

@@ -123,6 +123,10 @@ describe('history import', () => {
     expect(client.calls.filter((c) => c.method === 'downloadMedia')).toHaveLength(0);
     const [stored] = await db.select().from(messages);
     expect(stored).toMatchObject({ kind: 'image', body: 'вот такой', mediaPath: null });
+    // The bytes are not here, but the way to fetch them is: without the message itself the
+    // photo could never be opened, because WhatsApp hands files over by key, not by id.
+    expect(stored?.mediaRef).toMatchObject({ key: { id: 'old.2' } });
+    expect(stored?.mediaMime).toBe('image/jpeg');
   });
 
   it('imports the same chunk twice without duplicating a message', async () => {

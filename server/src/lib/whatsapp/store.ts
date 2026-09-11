@@ -38,6 +38,14 @@ export interface LineToStore {
   /** Outbound only. An inbound line has no delivery status of ours. */
   status?: string | null;
   media?: StoredMedia | null;
+  /**
+   * Чем скачать файл позже, когда он не скачан сейчас.
+   *
+   * The history import stores rows and no bytes, so a photo from March exists as a line
+   * with no file. This is the WhatsApp message that line was made from, kept so the file
+   * can be fetched the first time somebody opens it — and the mime type to show until then.
+   */
+  pending?: { ref: unknown; mime: string | null } | null;
 }
 
 export async function upsertContact(
@@ -100,7 +108,8 @@ export async function storeLine(
       status: line.status ?? null,
       sentAt: line.sentAt,
       mediaPath: line.media?.path ?? null,
-      mediaMime: line.media?.mime ?? null,
+      mediaMime: line.media?.mime ?? line.pending?.mime ?? null,
+      mediaRef: line.media ? null : (line.pending?.ref ?? null),
     })
     .onConflictDoNothing({ target: messages.waMessageId })
     // Empty when the conflict fired, which is what makes the answer above trustworthy.

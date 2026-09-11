@@ -588,6 +588,96 @@ describe('media', () => {
     expect(res.statusCode).toBe(404);
   });
 
+  it('fetches a file the history import left behind, once', async () => {
+    // The import stores months of chats and no bytes; this is the moment the bytes are
+    // fetched. The second open must not ask the phone again.
+    const linked = fakeLinked();
+    linked.setOpen(numberId, true);
+    linked.media = Buffer.from([4, 5, 6]);
+    app = buildServer(env, db, { graph, linked });
+    await app.ready();
+    jar = await login();
+    await db
+      .update(whatsappNumbers)
+      .set({ connectionKind: 'linked', linkedJid: '77085807932@s.whatsapp.net', linkedState: 'open' })
+      .where(eq(whatsappNumbers.id, numberId));
+    const message = await seedMessage({
+      kind: 'image',
+      waMessageId: 'old.7',
+      mediaMime: 'image/jpeg',
+      mediaRef: { key: { id: 'old.7' }, message: { imageMessage: {} } },
+    });
+
+    const first = await app.inject({
+      method: 'GET',
+      url: `/api/agents/${agentId}/messages/${message.id}/media`,
+      cookies: jar,
+    });
+    const second = await app.inject({
+      method: 'GET',
+      url: `/api/agents/${agentId}/messages/${message.id}/media`,
+      cookies: jar,
+    });
+
+    expect(first.statusCode).toBe(200);
+    expect([...first.rawPayload]).toEqual([4, 5, 6]);
+    expect(second.statusCode).toBe(200);
+    expect(linked.calls.filter((call) => call.method === 'downloadMedia')).toHaveLength(1);
+    const [row] = await db.select().from(messages).where(eq(messages.id, message.id));
+    expect(row?.mediaPath).not.toBeNull();
+    expect(row?.mediaRef).toBeNull();
+  });
+
+  it('keeps the reference when the phone cannot give the file', async () => {
+    // The phone is off the air: the registry throws rather than answering with bytes.
+    const linked = fakeLinked({
+      downloadMedia: () => Promise.reject(new Error('phone offline')),
+    });
+    app = buildServer(env, db, { graph, linked });
+    await app.ready();
+    jar = await login();
+    await db
+      .update(whatsappNumbers)
+      .set({ connectionKind: 'linked', linkedJid: '77085807932@s.whatsapp.net', linkedState: 'open' })
+      .where(eq(whatsappNumbers.id, numberId));
+    const message = await seedMessage({
+      kind: 'audio',
+      waMessageId: 'old.8',
+      mediaMime: 'audio/ogg',
+      mediaRef: { key: { id: 'old.8' }, message: { audioMessage: {} } },
+    });
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/agents/${agentId}/messages/${message.id}/media`,
+      cookies: jar,
+    });
+
+    // The phone is off the air, so the download throws. The row is untouched: the file is
+    // one reconnect away, and forgetting the reference would lose it for good.
+    expect(res.statusCode).toBe(404);
+    const [row] = await db.select().from(messages).where(eq(messages.id, message.id));
+    expect(row?.mediaRef).not.toBeNull();
+  });
+
+  it('tells the thread a file exists before it is downloaded', async () => {
+    await seedMessage({
+      kind: 'video',
+      waMessageId: 'old.9',
+      mediaMime: 'video/mp4',
+      mediaRef: { key: { id: 'old.9' }, message: { videoMessage: {} } },
+    });
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/agents/${agentId}/conversations/${conversationId}`,
+      cookies: jar,
+    });
+
+    const video = res.json().messages.find((m: { kind: string }) => m.kind === 'video');
+    expect(video).toMatchObject({ hasMedia: true, mediaMime: 'video/mp4' });
+  });
+
   it('answers 404 for a message id that is not a uuid', async () => {
     const res = await app.inject({
       method: 'GET',

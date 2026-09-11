@@ -382,6 +382,8 @@ function Bubble({
 
   return (
     <div style={bubble(mine)}>
+      {/* A file from imported history is downloaded by the server on this very request, so
+          the first open of an old photo takes a moment longer than the rest. */}
       {message.hasMedia && message.mediaMime?.startsWith('image/') && (
         <img
           src={api.mediaUrl(agentId, message.id)}
@@ -389,11 +391,32 @@ function Bubble({
           style={{ maxWidth: '100%', borderRadius: 8, display: 'block', marginBottom: 6 }}
         />
       )}
-      {message.hasMedia && !message.mediaMime?.startsWith('image/') && (
-        <a href={api.mediaUrl(agentId, message.id)} style={{ fontSize: 12.5 }}>
-          Файл
-        </a>
+      {message.hasMedia && message.mediaMime?.startsWith('audio/') && (
+        // Голосовые — половина переписки продавца, и ссылка «Файл» вместо плеера означает
+        // скачать файл, открыть его в другой программе и потерять место в диалоге.
+        <audio
+          controls
+          preload="none"
+          src={api.mediaUrl(agentId, message.id)}
+          style={{ display: 'block', width: '100%', marginBottom: 6 }}
+        />
       )}
+      {message.hasMedia && message.mediaMime?.startsWith('video/') && (
+        <video
+          controls
+          preload="metadata"
+          src={api.mediaUrl(agentId, message.id)}
+          style={{ maxWidth: '100%', borderRadius: 8, display: 'block', marginBottom: 6 }}
+        />
+      )}
+      {message.hasMedia &&
+        !message.mediaMime?.startsWith('image/') &&
+        !message.mediaMime?.startsWith('audio/') &&
+        !message.mediaMime?.startsWith('video/') && (
+          <a href={api.mediaUrl(agentId, message.id)} style={{ fontSize: 12.5 }}>
+            Файл
+          </a>
+        )}
       {message.body && <div style={{ fontSize: 13.5 }}>{message.body}</div>}
       {!message.body && !message.hasMedia && (
         <div style={{ fontSize: 12.5, color: 'var(--text-dim)' }}>

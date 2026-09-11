@@ -114,6 +114,16 @@ export const getWebhookSetup = (agentId: string, signal?: AbortSignal) =>
 export const getEmbeddedSignupSetup = (agentId: string, signal?: AbortSignal) =>
   request<EmbeddedSignupSetup>(`/agents/${agentId}/whatsapp/embedded-signup`, { signal });
 
+export const startLinkedPairing = (agentId: string) =>
+  request<WhatsappNumber>(`/agents/${agentId}/whatsapp/linked`, { method: 'POST', body: {} });
+
+export const unlinkPhone = (agentId: string, numberId: string) =>
+  request<{ ok: true }>(`/agents/${agentId}/whatsapp/linked/${numberId}`, { method: 'DELETE' });
+
+/** The URL the browser opens an EventSource on while a QR code is on screen. */
+export const linkedPairingStream = (agentId: string, numberId: string) =>
+  `${API_URL}/agents/${agentId}/whatsapp/linked/${numberId}/qr`;
+
 export const connectCoexistenceNumber = (agentId: string, body: CoexistenceConnection) =>
   request<WhatsappNumber>(`/agents/${agentId}/whatsapp/coexistence`, { method: 'POST', body });
 

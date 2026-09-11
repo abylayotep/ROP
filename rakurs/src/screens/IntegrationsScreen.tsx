@@ -1,4 +1,5 @@
-import { useEffect, useState, type CSSProperties, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from 'react';
+import { toCanvas } from 'qrcode';
 import { Link } from 'react-router-dom';
 import * as api from '@/api';
 import { CapiEventRow } from '@/components/capi/EventRow';
@@ -8,7 +9,13 @@ import { useToast } from '@/components/ui/Toast';
 import { useApi } from '@/hooks/useApi';
 import { runCoexistenceSignup } from '@/lib/embedded-signup';
 import { useAgent } from '@/store/agent';
-import type { CapiEvent, CapiSettings, WebhookSetup, WhatsappNumber } from '@/types';
+import type {
+  CapiEvent,
+  CapiSettings,
+  LinkedPairingEvent,
+  WebhookSetup,
+  WhatsappNumber,
+} from '@/types';
 
 /** Where an owner takes the dataset id and the token. Linked rather than described twice. */
 const EVENTS_MANAGER_URL = 'https://business.facebook.com/events_manager2';
@@ -70,6 +77,7 @@ export function IntegrationsScreen() {
           {owner && (
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 16 }}>
               <PhoneNumberCard agentId={agent.id} onConnected={query.reload} />
+              <LinkedPhoneCard agentId={agent.id} onConnected={query.reload} />
               <ConnectForm agentId={agent.id} onConnected={query.reload} />
             </div>
           )}
@@ -120,9 +128,15 @@ function ConnectedNumbers({
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
             <div style={{ minWidth: 0 }}>
               <div style={{ fontSize: 13.5 }}>{number.displayPhone}</div>
-              <div style={hint}>ID номера {number.phoneNumberId}</div>
+              {number.phoneNumberId ? (
+                <div style={hint}>ID номера {number.phoneNumberId}</div>
+              ) : null}
               <div style={hint}>
-                {number.connectionKind === 'coexistence' ? 'Номер с телефона' : 'Отдельный номер'}
+                {number.connectionKind === 'coexistence'
+                  ? 'Номер с телефона'
+                  : number.connectionKind === 'linked'
+                    ? 'Телефон по QR'
+                    : 'Отдельный номер'}
               </div>
               {number.connectionKind === 'coexistence' && number.syncError && (
                 <div style={{ ...hint, color: 'var(--danger)' }}>
@@ -144,9 +158,18 @@ function ConnectedNumbers({
                   Business Platform.
                 </div>
               )}
+              {number.connectionKind === 'linked' && number.linkedState === 'logged_out' && (
+                <div style={{ ...hint, color: 'var(--danger)' }}>
+                  Телефон отвязал кабинет — подключите заново по QR.
+                </div>
+              )}
+              {number.connectionKind === 'linked' && number.linkedState === 'pairing' && (
+                <div style={hint}>Ждём сканирования кода.</div>
+              )}
               {/* The failure this line exists for: Meta took the number and delivers
-                  nothing, which looks identical to working until a client writes. */}
-              {!number.subscribed && (
+                  nothing, which looks identical to working until a client writes. A phone
+                  paired by QR has no WABA and no subscription to be missing. */}
+              {number.connectionKind !== 'linked' && !number.subscribed && (
                 <div style={{ ...hint, color: 'var(--danger)' }}>
                   Приложение не подписано на WABA — сообщения приходить не будут.
                 </div>
@@ -432,6 +455,122 @@ function PhoneNumberCard({ agentId, onConnected }: { agentId: string; onConnecte
           <button type="button" className="btn" disabled={busy} onClick={connect}>
             {busy ? 'Ждём Meta…' : 'Подключить через Meta'}
           </button>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+/**
+ * Pairing a phone by QR, with the code redrawn as WhatsApp reissues it.
+ *
+ * An `EventSource` rather than polling: the server already has the codes as they arrive,
+ * and a poll would show a code that has expired between two requests. The warning under
+ * the button is not decoration — the owner chose this connection knowing what it risks,
+ * and the next person to open this screen did not.
+ */
+function LinkedPhoneCard({ agentId, onConnected }: { agentId: string; onConnected: () => void }) {
+  const toast = useToast();
+  const [numberId, setNumberId] = useState<string | null>(null);
+  const [qr, setQr] = useState<string | null>(null);
+  const [failure, setFailure] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const canvas = useRef<HTMLCanvasElement | null>(null);
+
+  // Redrawn on every code. The canvas only exists while pairing, so the guard is not
+  // defensive — it is the first render after `qr` is set, before the ref is attached.
+  useEffect(() => {
+    if (!qr || !canvas.current) return;
+    void toCanvas(canvas.current, qr, { width: 232, margin: 1 }).catch(() => undefined);
+  }, [qr]);
+
+  useEffect(() => {
+    if (!numberId) return;
+    const source = new EventSource(api.linkedPairingStream(agentId, numberId), {
+      withCredentials: true,
+    });
+
+    source.onmessage = (event) => {
+      const payload = JSON.parse(event.data) as LinkedPairingEvent;
+      if (payload.type === 'qr') setQr(payload.qr);
+      if (payload.type === 'open') {
+        source.close();
+        setNumberId(null);
+        setQr(null);
+        toast.ok('Телефон подключён.');
+        onConnected();
+      }
+      if (payload.type === 'failed') {
+        source.close();
+        setNumberId(null);
+        setQr(null);
+        setFailure(payload.reason);
+      }
+    };
+
+    // The stream ends itself on every settled outcome; this fires when the connection
+    // drops instead. Saying nothing would leave a QR on screen that nobody is refreshing.
+    source.onerror = () => {
+      source.close();
+      setNumberId(null);
+      setQr(null);
+      setFailure('Связь с сервером прервалась. Попробуйте ещё раз.');
+    };
+
+    return () => source.close();
+  }, [agentId, numberId, onConnected, toast]);
+
+  async function start() {
+    setBusy(true);
+    setFailure(null);
+    try {
+      const number = await api.startLinkedPairing(agentId);
+      setNumberId(number.id);
+    } catch (error) {
+      toast.fail(error);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <div style={{ fontSize: 13.5, fontWeight: 650 }}>Телефон по QR</div>
+
+        {numberId ? (
+          <>
+            <div style={hint}>
+              Откройте WhatsApp на телефоне → Настройки → Связанные устройства → Привязка
+              устройства и наведите камеру на код.
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'center', padding: 8 }}>
+              {qr ? (
+                <canvas ref={canvas} style={{ background: '#fff', borderRadius: 8 }} />
+              ) : (
+                <Skeleton height={232} />
+              )}
+            </div>
+            <div style={hint}>Код обновляется каждые несколько секунд — это нормально.</div>
+          </>
+        ) : (
+          <>
+            <div style={hint}>
+              Номер остаётся на телефоне и продолжает работать. Кабинет видит переписку,
+              отвечает сам и показывает то, что вы написали с телефона.
+            </div>
+            {failure && <div style={{ ...hint, color: 'var(--danger)' }}>{failure}</div>}
+            <div>
+              <button type="button" className="btn" disabled={busy} onClick={start}>
+                {busy ? 'Открываем…' : failure ? 'Попробовать снова' : 'Подключить телефон по QR'}
+              </button>
+            </div>
+          </>
+        )}
+
+        <div style={{ ...hint, color: 'var(--danger)' }}>
+          Неофициальное подключение: WhatsApp может заблокировать номер. Групповые чаты и
+          звонки в кабинет не попадают, реклама без атрибуции.
         </div>
       </div>
     </Card>

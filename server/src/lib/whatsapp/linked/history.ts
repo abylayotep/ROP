@@ -25,6 +25,14 @@ import { jidToPhone, normalize } from './normalize.js';
 
 export interface LinkedHistoryDeps {
   onError?: (message: string) => void;
+  /**
+   * Called once per chunk the phone sent and the cabinet stored.
+   *
+   * The import is otherwise invisible: it runs minutes after a pairing, writes rows nobody
+   * is watching, and when the phone sends nothing at all the result looks exactly like a
+   * bug in this file. A line per chunk is what tells the two apart.
+   */
+  onImported?: (report: { messages: number; contacts: number; progress: number | null }) => void;
 }
 
 export function registerLinkedHistory(
@@ -34,9 +42,17 @@ export function registerLinkedHistory(
 ): void {
   client.on((event: LinkedEvent) => {
     if (event.type !== 'history') return;
-    void applyHistoryChunk(db, event.numberId, event.chunk).catch((error: unknown) => {
-      deps.onError?.(error instanceof Error ? error.message : String(error));
-    });
+    void applyHistoryChunk(db, event.numberId, event.chunk)
+      .then(() =>
+        deps.onImported?.({
+          messages: event.chunk.messages?.length ?? 0,
+          contacts: event.chunk.contacts?.length ?? 0,
+          progress: event.chunk.progress ?? null,
+        }),
+      )
+      .catch((error: unknown) => {
+        deps.onError?.(error instanceof Error ? error.message : String(error));
+      });
   });
 }
 

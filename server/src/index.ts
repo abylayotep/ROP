@@ -59,7 +59,10 @@ registerLinkedInbound(
 );
 registerLinkedHistory(
   db,
-  { onError: (message) => app.log.error({ message }, 'linked: history') },
+  {
+    onError: (message) => app.log.error({ message }, 'linked: history'),
+    onImported: (report) => app.log.info(report, 'linked: history imported'),
+  },
   linked,
 );
 

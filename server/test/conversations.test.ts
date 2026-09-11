@@ -207,6 +207,17 @@ describe('reading conversations', () => {
     ]);
   });
 
+  it('carries whether the agent still answers here, so the switch can sit above the messages', async () => {
+    expect((await thread()).json().aiEnabled).toBe(true);
+
+    await db
+      .update(conversations)
+      .set({ aiEnabled: false })
+      .where(eq(conversations.id, conversationId));
+
+    expect((await thread()).json().aiEnabled).toBe(false);
+  });
+
   it('names the ai_replies row a message came from, and leaves the rest of the thread without one', async () => {
     const clientMessage = await seedMessage({ author: 'client', direction: 'in', body: 'дадите скидку?' });
     const aiMessage = await seedMessage({

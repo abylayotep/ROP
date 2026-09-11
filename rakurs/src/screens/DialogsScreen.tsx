@@ -8,6 +8,7 @@ import {
 } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import * as api from '@/api';
+import { AiSwitch } from '@/components/lead/AiSwitch';
 import { LeadPanel } from '@/components/lead/LeadPanel';
 import { Card } from '@/components/ui/primitives';
 import { Async, EmptyState, Skeleton } from '@/components/ui/states';
@@ -69,6 +70,11 @@ export function DialogsScreen() {
     (signal) => api.listConversations(agent.id, signal),
     [agent.id],
   );
+
+  // The same switch lives above the messages and in the lead card. Bumping this remounts
+  // the card, which refetches the lead — otherwise the two would disagree until something
+  // else reloaded the panel.
+  const [aiNonce, setAiNonce] = useState(0);
 
   return (
     <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
@@ -151,13 +157,14 @@ export function DialogsScreen() {
                 agentId={agent.id}
                 conversationId={selected}
                 onSent={list.reload}
+                onAiChanged={() => setAiNonce((n) => n + 1)}
               />
             </div>
             <div style={{ width: 300, flex: '0 0 300px' }}>
               {/* The same key for the same reason: another client's card must not flash
                   on screen under the wrong name. */}
               <LeadPanel
-                key={selected}
+                key={`${selected}:${aiNonce}`}
                 agentId={agent.id}
                 conversationId={selected}
                 onChanged={list.reload}
@@ -174,14 +181,19 @@ function Thread({
   agentId,
   conversationId,
   onSent,
+  onAiChanged,
 }: {
   agentId: string;
   conversationId: string;
   onSent: () => void;
+  onAiChanged: () => void;
 }) {
   const toast = useToast();
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
+  // What the switch was last told by the server, if it has been flipped since the thread
+  // loaded. Null means nobody has touched it and the loaded thread still speaks for it.
+  const [ai, setAi] = useState<boolean | null>(null);
   const bottom = useRef<HTMLDivElement>(null);
 
   const thread = useApi<ConversationThread>(
@@ -237,12 +249,29 @@ function Thread({
     <Async state={thread} skeleton={<Skeleton height={420} />}>
       {(data) => (
         <Card>
-          <div style={{ fontSize: 13.5, fontWeight: 650 }}>
-            {data.contactName ?? data.contactPhone}
-          </div>
-          <div style={{ fontSize: 11.5, color: 'var(--text-dim)', marginTop: 2 }}>
-            {data.contactPhone}
-            {data.adHeadline ? ` · из рекламы «${data.adHeadline}»` : ''}
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 13.5, fontWeight: 650 }}>
+                {data.contactName ?? data.contactPhone}
+              </div>
+              <div style={{ fontSize: 11.5, color: 'var(--text-dim)', marginTop: 2 }}>
+                {data.contactPhone}
+                {data.adHeadline ? ` · из рекламы «${data.adHeadline}»` : ''}
+              </div>
+            </div>
+            {/* Over the messages, where an operator reading a reply they dislike already
+                is. The lead card carries the same switch for whoever is looking there. */}
+            <AiSwitch
+              compact
+              agentId={agentId}
+              conversationId={conversationId}
+              on={ai ?? data.aiEnabled}
+              onSet={(aiEnabled) => {
+                setAi(aiEnabled);
+                onAiChanged();
+              }}
+              onFailed={thread.reload}
+            />
           </div>
 
           <div

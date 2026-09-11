@@ -124,6 +124,7 @@ export function registerConversationRoutes(
         preview: thread.at(-1)?.message.body ?? null,
         windowOpen: windowOpen(conversation.lastInboundAt),
         adHeadline: conversation.adHeadline,
+        aiEnabled: conversation.aiEnabled,
         messages: thread.map((row) => toMessage(row.message, row.aiReplyId)),
       };
     },

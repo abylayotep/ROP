@@ -87,6 +87,21 @@ describe('history import', () => {
     expect(errors).toEqual([]);
   });
 
+  it('reports what each chunk carried, so a phone that sent nothing is visible', async () => {
+    const client = fakeLinked();
+    const reports: { messages: number; contacts: number; progress: number | null }[] = [];
+    registerLinkedHistory(db, { onImported: (report) => reports.push(report) }, client);
+
+    client.emit({ type: 'history', numberId, chunk: { ...chunk(), progress: 40 } });
+    client.emit({ type: 'history', numberId, chunk: { messages: [], contacts: [] } });
+    await new Promise((r) => setTimeout(r, 30));
+
+    expect(reports).toEqual([
+      { messages: 1, contacts: 0, progress: 40 },
+      { messages: 0, contacts: 0, progress: null },
+    ]);
+  });
+
   it('does not download a file during the import', async () => {
     const client = fakeLinked();
     registerLinkedHistory(db, {}, client);

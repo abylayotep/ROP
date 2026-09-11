@@ -144,6 +144,11 @@ export interface ConversationSummary {
 
 export interface ConversationThread extends ConversationSummary {
   messages: Message[];
+  /**
+   * Whether the agent still answers here. Carried by the thread, not only by the lead
+   * card, so the switch can sit above the messages an operator is reading.
+   */
+  aiEnabled: boolean;
 }
 
 /* ── Воронка ────────────────────────────────────────────────────────────────

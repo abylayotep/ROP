@@ -98,6 +98,13 @@ export function createLinkedSocket(db: Db, key: Buffer): LinkedSessionFactory {
       // We mirror what the phone sends; asking WhatsApp to mark chats read from here would
       // clear the owner's own unread badges on their handset.
       markOnlineOnConnect: false,
+      // The library's default asks the phone for a recent slice only, which is a handful of
+      // chats — not enough to read a shop's own selling back to it. The cabinet's whole
+      // reason for taking the history is the script it builds out of it, and that wants
+      // months, so the phone is asked for everything it still holds. The import stores rows
+      // and downloads no files, so the cost is a longer first sync, not a disk full of
+      // photos.
+      syncFullHistory: true,
     } as never);
 
     sock.ev.on('creds.update', () => void auth.saveCreds());

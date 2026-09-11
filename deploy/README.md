@@ -55,12 +55,27 @@ without it a refresh on `/a/:agentId/dialogs` returns 404.
 
 ## Updating
 
+Back up PostgreSQL and retain the current API image and frontend before updating. Rehearse
+new migrations on an isolated restored database. Build first, migrate before starting the
+new API, and publish the frontend only after the API health check succeeds. In particular,
+the knowledge-generation startup reconciliation requires migration `0021` to exist.
+
 ```bash
 npm --prefix rakurs run build
-rsync -a --delete rakurs/dist/ vps:/var/www/rakurs/
-docker compose -f deploy/compose.yml --env-file deploy/.env up -d --build
-docker compose -f deploy/compose.yml --env-file deploy/.env run --rm api npm run migrate
+docker compose -f deploy/compose.yml --env-file deploy/.env build api
+docker compose -f deploy/compose.yml --env-file deploy/.env run --rm --no-deps api npm run migrate
+docker compose -f deploy/compose.yml --env-file deploy/.env up -d --no-deps api
+curl --fail --retry 12 --retry-all-errors --retry-delay 1 --max-time 3 http://127.0.0.1:3000/api/health
+rsync -a --exclude=index.html rakurs/dist/ vps:/var/www/rakurs/
+rsync -a rakurs/dist/index.html vps:/var/www/rakurs/index.html.next
+ssh vps 'mv /var/www/rakurs/index.html.next /var/www/rakurs/index.html'
 ```
+
+These Compose commands run on the VPS; build and transfer the frontend from the release
+checkout. Keep old hashed assets for already-open browser sessions; do not use `--delete`
+during the cutover. For an application rollback, retain additive migration tables and
+restore the previous image and frontend. Restoring production data is a separate recovery
+decision, not an automatic rollback step.
 
 The `media` volume survives `down` and `up` — WhatsApp attachments are not lost on an
 update. Only `docker compose down -v`, or removing the `media` volume directly, deletes

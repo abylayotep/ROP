@@ -32,7 +32,7 @@ Extraction handles stored text only. Each run is limited to 100 conversations, 5
 
 ## Deployment and rollback
 
-No production deployment or commit was performed by this implementation workflow. Before rollout, back up PostgreSQL and apply generated migration `0021_ordinary_solo.sql` using the normal migration process. Validate the existing database migration on staging, then deploy server and frontend together.
+The implementation was committed as `eac49e2`, followed by the linked desktop-profile correction `1a58c5c`. See [release QA](whatsapp-knowledge-release-qa.md) for current deployment evidence and external limitations. Before rollout, back up PostgreSQL and rehearse generated migration `0021_ordinary_solo.sql` on an isolated restored database. Apply it before starting the new API, then publish the frontend after the API health check succeeds.
 
 The migration adds generation tables and indexes. Prefer rolling application code back while retaining these additive tables; do not drop them or remove migration-journal records as an automatic rollback. Retain reviewed proposals and provenance. A database restore is a separate, explicitly approved recovery operation.
 

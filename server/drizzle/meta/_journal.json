@@ -120,6 +120,13 @@
       "when": 1789062285009,
       "tag": "0016_natural_black_bolt",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1789086731191,
+      "tag": "0017_natural_bloodstrike",
+      "breakpoints": true
     }
   ]
 }

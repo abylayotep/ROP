@@ -32,7 +32,7 @@ const settings = z
   .refine((body) => body.enabled !== undefined || body.accessToken !== undefined);
 
 /** The access token is never part of this. It goes in and it does not come out. */
-const toApi = (row: typeof whatsappNumbers.$inferSelect): WhatsappNumber => ({
+export const toApi = (row: typeof whatsappNumbers.$inferSelect): WhatsappNumber => ({
   id: row.id,
   phoneNumberId: row.phoneNumberId,
   wabaId: row.wabaId,
@@ -40,15 +40,42 @@ const toApi = (row: typeof whatsappNumbers.$inferSelect): WhatsappNumber => ({
   enabled: row.enabled,
   subscribed: row.subscribedAt !== null,
   connectedAt: row.createdAt.toISOString(),
+  connectionKind: row.connectionKind === 'coexistence' ? 'coexistence' : 'manual',
+  historyProgress: row.historyProgress,
+  historyDeclined: row.historyDeclinedAt !== null,
+  syncError: row.syncError,
+  offboarded: row.offboardedAt !== null,
 });
 
 /**
  * Postgres reports a unique violation with this code. Drizzle wraps the driver error in
  * its own `DrizzleQueryError`, so the code sits on `.cause`, not on the error itself.
  */
-const isDuplicate = (error: unknown): boolean => {
+export const isDuplicate = (error: unknown): boolean => {
   const cause = error instanceof Error ? error.cause : undefined;
   return typeof cause === 'object' && cause !== null && (cause as { code?: string }).code === '23505';
+};
+
+/**
+ * The 409 for a phone number that is already stored. The commonest way to get here is an
+ * owner re-saving their own number, so say which agent holds it rather than sending them
+ * looking for a colleague.
+ */
+export const duplicateNumberError = async (
+  db: Db,
+  phoneNumberId: string,
+  agentId: string,
+): Promise<ApiError> => {
+  const [existing] = await db
+    .select({ agentId: whatsappNumbers.agentId })
+    .from(whatsappNumbers)
+    .where(eq(whatsappNumbers.phoneNumberId, phoneNumberId));
+  return new ApiError(
+    409,
+    existing?.agentId === agentId
+      ? 'Этот номер уже подключён к этому агенту'
+      : 'Этот номер уже подключён к другому агенту',
+  );
 };
 
 export function registerWhatsappNumberRoutes(
@@ -124,20 +151,7 @@ export function registerWhatsappNumberRoutes(
           .returning();
         return toApi(row!);
       } catch (error) {
-        if (isDuplicate(error)) {
-          // The commonest way to get here is an owner re-saving their own number, so say
-          // which agent holds it rather than sending them looking for a colleague.
-          const [existing] = await db
-            .select({ agentId: whatsappNumbers.agentId })
-            .from(whatsappNumbers)
-            .where(eq(whatsappNumbers.phoneNumberId, phoneNumberId));
-          throw new ApiError(
-            409,
-            existing?.agentId === req.agent!.id
-              ? 'Этот номер уже подключён к этому агенту'
-              : 'Этот номер уже подключён к другому агенту',
-          );
-        }
+        if (isDuplicate(error)) throw await duplicateNumberError(db, phoneNumberId, req.agent!.id);
         throw error;
       }
     },
@@ -165,6 +179,12 @@ export function registerWhatsappNumberRoutes(
 
       const [current] = await db.select().from(whatsappNumbers).where(owned);
       if (!current) throw new ApiError(404, 'Номер не найден');
+
+      if (accessToken !== undefined && current.connectionKind === 'coexistence') {
+        // Meta issued this token during Embedded Signup; a pasted one would belong to a
+        // different app or user and stop the phone's mirror from working.
+        throw new ApiError(400, 'Токен этого номера выдаёт Meta при подключении с телефона, вручную его не заменить');
+      }
 
       const changes: Partial<typeof whatsappNumbers.$inferInsert> = {};
       if (enabled !== undefined) changes.enabled = enabled;

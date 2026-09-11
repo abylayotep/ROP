@@ -333,7 +333,9 @@ function Bubble({
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
         <div style={{ fontSize: 10.5, color: 'var(--text-dim)' }}>
           {time(message.sentAt)}
-          {mine ? ` · ${message.author === 'ai' ? 'ИИ' : 'оператор'}` : ''}
+          {mine
+            ? ` · ${message.author === 'ai' ? 'ИИ' : message.author === 'phone' ? 'с телефона' : 'оператор'}`
+            : ''}
           {message.status ? ` · ${message.status}` : ''}
         </div>
         {canCoachFrom(message, role) && (

@@ -13,6 +13,8 @@ export function testEnv(overrides: Partial<NodeJS.ProcessEnv> = {}): Env {
     SESSION_SECRET: 'x'.repeat(32),
     META_APP_SECRET: 'test-app-secret',
     META_WEBHOOK_VERIFY_TOKEN: 'test-verify-token',
+    META_APP_ID: '1585667806534384',
+    META_ES_CONFIG_ID: '1234567890',
     CREDENTIALS_KEY: Buffer.alloc(32, 7).toString('base64'),
     MEDIA_DIR: 'var/media-test',
     PUBLIC_URL: 'https://rakurs.test',

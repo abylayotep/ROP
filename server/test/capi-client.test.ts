@@ -86,7 +86,7 @@ describe('a send', () => {
 
     await client.send(input);
 
-    expect(calls[0]!.url).toBe(`https://graph.facebook.com/v21.0/${DATASET}/events`);
+    expect(calls[0]!.url).toBe(`https://graph.facebook.com/v26.0/${DATASET}/events`);
     expect(calls[0]!.init.method).toBe('POST');
   });
 

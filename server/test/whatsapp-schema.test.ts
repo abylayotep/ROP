@@ -150,3 +150,37 @@ describe('whatsapp schema', () => {
     expect(event!.error).toBeNull();
   });
 });
+
+describe('coexistence columns', () => {
+  it('defaults a number to the manual kind with no sync state', async () => {
+    const number = await seedNumber();
+
+    expect(number).toMatchObject({
+      connectionKind: 'manual',
+      businessId: null,
+      syncRequestedAt: null,
+      syncError: null,
+      historyProgress: 0,
+      historyDeclinedAt: null,
+      offboardedAt: null,
+    });
+  });
+
+  it('stores a coexistence number with its portfolio', async () => {
+    const [row] = await db
+      .insert(whatsappNumbers)
+      .values({
+        agentId,
+        phoneNumberId: '555',
+        wabaId: '932647766535299',
+        displayPhone: '+7 771 523 03 42',
+        accessToken: 'encrypted',
+        connectionKind: 'coexistence',
+        businessId: '877624983685944',
+        historyProgress: 55,
+      })
+      .returning();
+
+    expect(row).toMatchObject({ connectionKind: 'coexistence', historyProgress: 55 });
+  });
+});

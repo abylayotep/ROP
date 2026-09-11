@@ -38,13 +38,13 @@ describe('graph client', () => {
 
     const number = await client.getPhoneNumber('136', TOKEN);
 
-    expect(number).toEqual({
+    expect(number).toMatchObject({
       id: '136',
       displayPhoneNumber: '+7 708 580 79 32',
       verifiedName: 'Aisham',
     });
     expect(calls[0]!.url).toBe(
-      'https://graph.facebook.com/v21.0/136?fields=id%2Cdisplay_phone_number%2Cverified_name',
+      'https://graph.facebook.com/v26.0/136?fields=id%2Cdisplay_phone_number%2Cverified_name%2Cplatform_type%2Cis_on_biz_app',
     );
     expect((calls[0]!.init.headers as Record<string, string>).Authorization).toBe(
       `Bearer ${TOKEN}`,
@@ -56,7 +56,7 @@ describe('graph client', () => {
 
     await client.subscribeApp('932', TOKEN);
 
-    expect(calls[0]!.url).toBe('https://graph.facebook.com/v21.0/932/subscribed_apps');
+    expect(calls[0]!.url).toBe('https://graph.facebook.com/v26.0/932/subscribed_apps');
     expect(calls[0]!.init.method).toBe('POST');
   });
 
@@ -66,7 +66,7 @@ describe('graph client', () => {
     const sent = await client.sendText('136', TOKEN, '77771234567', 'Здравствуйте!');
 
     expect(sent).toEqual({ messageId: 'wamid.OUT' });
-    expect(calls[0]!.url).toBe('https://graph.facebook.com/v21.0/136/messages');
+    expect(calls[0]!.url).toBe('https://graph.facebook.com/v26.0/136/messages');
     expect(JSON.parse(String(calls[0]!.init.body))).toEqual({
       messaging_product: 'whatsapp',
       recipient_type: 'individual',
@@ -165,6 +165,74 @@ describe('graph client', () => {
     );
 
     await expect(client.sendText('136', TOKEN, '777', 'hi')).rejects.toThrow('HTTP 502');
+  });
+
+  it('exchanges an Embedded Signup code for a business token, server-side', async () => {
+    answerWith({ access_token: 'EAAB-business', token_type: 'bearer' });
+
+    const token = await client.exchangeCode('AQD-code', '1585667806534384', 'app-secret');
+
+    expect(token).toBe('EAAB-business');
+    expect(calls[0]!.url).toBe(
+      'https://graph.facebook.com/v26.0/oauth/access_token?client_id=1585667806534384&client_secret=app-secret&code=AQD-code',
+    );
+    // No bearer header: there is no token yet, and the secret is in the query by Meta's design.
+    expect((calls[0]!.init.headers as Record<string, string>)?.Authorization).toBeUndefined();
+  });
+
+  it('refuses a successful exchange whose body carries no token', async () => {
+    answerWith({ token_type: 'bearer' });
+
+    await expect(client.exchangeCode('AQD-code', '1585667806534384', 'app-secret')).rejects.toThrow(
+      'Meta вернула ответ без токена',
+    );
+  });
+
+  it('reads whether a number is on the phone app', async () => {
+    answerWith({
+      id: '136',
+      display_phone_number: '+7 771 523 03 42',
+      verified_name: 'Sealhouse',
+      platform_type: 'CLOUD_API',
+      is_on_biz_app: true,
+    });
+
+    const number = await client.getPhoneNumber('136', TOKEN);
+
+    expect(number).toMatchObject({ platformType: 'CLOUD_API', isOnBizApp: true });
+    expect(calls[0]!.url).toBe(
+      'https://graph.facebook.com/v26.0/136?fields=id%2Cdisplay_phone_number%2Cverified_name%2Cplatform_type%2Cis_on_biz_app',
+    );
+  });
+
+  it('lists the numbers of a WABA', async () => {
+    answerWith({
+      data: [
+        { id: '136', display_phone_number: '+7 771 523 03 42', verified_name: 'Sealhouse', is_on_biz_app: true },
+      ],
+    });
+
+    const numbers = await client.listPhoneNumbers('932', TOKEN);
+
+    expect(numbers).toEqual([
+      { id: '136', displayPhoneNumber: '+7 771 523 03 42', verifiedName: 'Sealhouse', platformType: null, isOnBizApp: true },
+    ]);
+    expect(calls[0]!.url).toBe(
+      'https://graph.facebook.com/v26.0/932/phone_numbers?fields=id%2Cdisplay_phone_number%2Cverified_name%2Cplatform_type%2Cis_on_biz_app',
+    );
+  });
+
+  it('requests a phone-app sync and returns the request id', async () => {
+    answerWith({ messaging_product: 'whatsapp', request_id: 'req-1' });
+
+    const result = await client.requestSmbAppData('136', TOKEN, 'history');
+
+    expect(result).toEqual({ requestId: 'req-1' });
+    expect(calls[0]!.url).toBe('https://graph.facebook.com/v26.0/136/smb_app_data');
+    expect(JSON.parse(calls[0]!.init.body as string)).toEqual({
+      messaging_product: 'whatsapp',
+      sync_type: 'history',
+    });
   });
 });
 

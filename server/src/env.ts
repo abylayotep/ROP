@@ -17,6 +17,13 @@ const schema = z.object({
   /** The string Meta echoes back during the webhook handshake. */
   META_WEBHOOK_VERIFY_TOKEN: z.string().min(1),
   /**
+   * The Meta application's id. Public by nature — it is in every Embedded Signup URL — but
+   * it must match `META_APP_SECRET`, which is why both come from the same place.
+   */
+  META_APP_ID: z.string().min(1),
+  /** The Facebook Login for Business configuration Embedded Signup runs with. */
+  META_ES_CONFIG_ID: z.string().min(1),
+  /**
    * 32 bytes, base64. Losing it makes every stored access token unreadable and they have
    * to be pasted again; leaking it makes them readable to whoever has the database.
    */

@@ -11,6 +11,7 @@ import type { ModelClient } from '../ai/openrouter.js';
 import { runTurn } from '../ai/turn.js';
 import { decryptSecret } from '../secret-box.js';
 import { withoutSecret, type GraphClient } from './graph.js';
+import { applyHistory, type HistoryValue } from './history.js';
 import { downloadInboundMedia } from './media.js';
 
 /**
@@ -62,12 +63,28 @@ interface StatusUpdate {
   status: string;
 }
 
+/** A message the operator sent from the WhatsApp Business app. Same fields as inbound plus `to`. */
+interface EchoMessage extends InboundMessage {
+  to?: string;
+}
+
+interface ContactSync {
+  type: string;
+  action: 'add' | 'remove';
+  contact?: { full_name?: string; first_name?: string; phone_number?: string };
+}
+
 interface ChangeValue {
   metadata?: { phone_number_id?: string };
   contacts?: { profile?: { name?: string }; wa_id: string }[];
   messages?: InboundMessage[];
   statuses?: StatusUpdate[];
+  message_echoes?: EchoMessage[];
+  state_sync?: ContactSync[];
 }
+
+/** The number a delivery arrived on, as it is stored. */
+type NumberRow = typeof whatsappNumbers.$inferSelect;
 
 /** WhatsApp sends seconds; Postgres wants a Date. */
 const at = (timestamp: string) => new Date(Number(timestamp) * 1000);
@@ -262,9 +279,13 @@ async function applyPayload(db: Db, deps: InboundDeps, payload: unknown): Promis
     if (!Array.isArray(changes)) throw new Error('changes is not an array');
 
     for (const change of changes) {
-      errors.push(
-        ...(await applyChange(db, deps, (change as { value?: ChangeValue }).value ?? {}, touched)),
-      );
+      const { field, value } = change as { field?: string; value?: ChangeValue };
+      if (field === 'account_update') {
+        const wabaId = (entry as { id?: string }).id;
+        if (wabaId) await applyAccountUpdate(db, wabaId, (value ?? {}) as AccountUpdateValue);
+        continue;
+      }
+      errors.push(...(await applyChange(db, deps, field ?? 'messages', value ?? {}, touched)));
     }
   }
   // The turns are the caller's to run, after this delivery is stamped processed — and after
@@ -331,10 +352,70 @@ async function recordReferral(
     .where(and(eq(conversations.id, conversationId), isNull(conversations.referralSeenAt)));
 }
 
-/** Returns the media download errors collected while applying this change, if any. */
+/** The `account_update` payload, which speaks about the WABA rather than about a phone. */
+interface AccountUpdateValue {
+  event?: string;
+  disconnection_info?: { reason?: string; initiated_by?: string };
+}
+
+/**
+ * Meta's word on whether the phone still lets us in.
+ *
+ * Coexistence has no deregister call: the owner disconnects on the phone, Meta tells us
+ * here, and until they reconnect every send would fail. Disabling the number keeps the
+ * cabinet honest — the composer says why — and the row, with its conversations and click
+ * ids, stays for when they come back. Every number on the WABA is affected: the event is
+ * about the account, not one phone.
+ *
+ * The manual-kind filter keeps a pasted-token number on the same WABA untouched: Meta's
+ * offboard event is about the phone's companion, not about the system-user token.
+ */
+async function applyAccountUpdate(
+  db: Db,
+  wabaId: string,
+  value: AccountUpdateValue,
+): Promise<void> {
+  switch (value.event) {
+    case 'PARTNER_REMOVED':
+    case 'ACCOUNT_OFFBOARDED':
+      await db
+        .update(whatsappNumbers)
+        // `coalesce` so a redelivered offboard keeps the moment it first happened.
+        .set({ enabled: false, offboardedAt: sql`coalesce(${whatsappNumbers.offboardedAt}, now())` })
+        .where(
+          and(
+            eq(whatsappNumbers.wabaId, wabaId),
+            eq(whatsappNumbers.connectionKind, 'coexistence'),
+          ),
+        );
+      return;
+    case 'ACCOUNT_RECONNECTED':
+      await db
+        .update(whatsappNumbers)
+        .set({ enabled: true, offboardedAt: null })
+        .where(
+          and(
+            eq(whatsappNumbers.wabaId, wabaId),
+            eq(whatsappNumbers.connectionKind, 'coexistence'),
+          ),
+        );
+      return;
+    default:
+      // Verification, name and tier changes all arrive here. None of them change our access.
+      return;
+  }
+}
+
+/**
+ * Which handler a change belongs to, by the field Meta named it with.
+ *
+ * A coexistence number is subscribed to more than `messages`: the phone's own sends and its
+ * address book arrive under their own fields, in the same envelope.
+ */
 async function applyChange(
   db: Db,
   deps: InboundDeps,
+  field: string,
   value: ChangeValue,
   touched: Touched,
 ): Promise<string[]> {
@@ -350,6 +431,34 @@ async function applyChange(
   // we do not host is simply not ours.
   if (!number) return [];
 
+  switch (field) {
+    case 'messages':
+      return applyMessages(db, deps, number, value, touched);
+    case 'smb_message_echoes':
+      return applyEchoes(db, deps, number, value.message_echoes ?? []);
+    case 'smb_app_state_sync':
+      await applyContactSync(db, number.agentId, value.state_sync ?? []);
+      return [];
+    case 'history': {
+      // `ChangeValue` and `HistoryValue` overlap on `metadata`; the cast is honest.
+      const { errors } = await applyHistory(db, deps, number, value as HistoryValue);
+      return errors;
+    }
+    default:
+      // A field we did not subscribe to, or one a later stage will handle. Stored already;
+      // nothing to do.
+      return [];
+  }
+}
+
+/** Returns the media download errors collected while applying this change, if any. */
+async function applyMessages(
+  db: Db,
+  deps: InboundDeps,
+  number: NumberRow,
+  value: ChangeValue,
+  touched: Touched,
+): Promise<string[]> {
   for (const status of value.statuses ?? []) {
     await db
       .update(messages)
@@ -447,6 +556,123 @@ async function applyChange(
       .where(eq(conversations.id, conversationId));
   }
   return errors;
+}
+
+/** Digits only, the shape `wa_id` uses. Meta's contact sync sends `+7 777 …` with spaces. */
+const digits = (phone: string) => phone.replace(/\D/g, '');
+
+/**
+ * What the operator said from the phone. Stored so the thread in the cabinet is whole, and
+ * treated as the operator taking the thread: the agent stops answering here until someone in
+ * the cabinet turns it back on. No turn runs — a customer was just answered by a human.
+ *
+ * `last_inbound_at` is not touched: an app-sent message does not open a reply window, and
+ * pretending it did would let the cabinet send a free-form reply Meta will refuse.
+ */
+async function applyEchoes(
+  db: Db,
+  deps: InboundDeps,
+  number: NumberRow,
+  echoes: EchoMessage[],
+): Promise<string[]> {
+  const errors: string[] = [];
+  for (const echo of echoes) {
+    // Meta always names the recipient; a delivery that does not is malformed. There is no
+    // thread to file it under, so it is written down and skipped rather than thrown — one
+    // bad echo must not cost the whole delivery.
+    const to = digits(echo.to ?? '');
+    if (!to || !echo.id) {
+      errors.push('эхо без адресата пропущено');
+      continue;
+    }
+    const contactId = await upsertContact(db, number.agentId, to, undefined);
+    const conversationId = await upsertConversation(db, number.agentId, number.id, contactId);
+
+    const [known] = await db
+      .select({ id: messages.id })
+      .from(messages)
+      .where(eq(messages.waMessageId, echo.id));
+
+    let media: { path: string; mime: string } | null = null;
+    const mediaId = mediaIdOf(echo);
+    if (mediaId && !known) {
+      let token = '';
+      try {
+        token = decryptSecret(number.accessToken, deps.key, number.phoneNumberId);
+        media = await downloadInboundMedia(deps, {
+          mediaId,
+          token,
+          agentId: number.agentId,
+          waMessageId: echo.id,
+        });
+      } catch (error) {
+        errors.push(
+          withoutSecret(error instanceof Error ? error.message : String(error), token),
+        );
+      }
+    }
+
+    const stored = await db
+      .insert(messages)
+      .values({
+        conversationId,
+        waMessageId: echo.id,
+        direction: 'out',
+        author: 'phone',
+        kind: echo.type,
+        body: bodyOf(echo),
+        status: 'sent',
+        sentAt: at(echo.timestamp),
+        mediaPath: media?.path ?? null,
+        mediaMime: media?.mime ?? null,
+      })
+      .onConflictDoNothing({ target: messages.waMessageId })
+      // Empty when the conflict fired, which is what tells a first delivery from a redelivery.
+      .returning({ id: messages.id });
+
+    const sentAtParam = sql`${at(echo.timestamp).toISOString()}::timestamptz`;
+    await db
+      .update(conversations)
+      .set({
+        // Only ever forward, and a `greatest`, so a redelivery costs nothing.
+        lastMessageAt: sql`greatest(coalesce(${conversations.lastMessageAt}, to_timestamp(0)), ${sentAtParam})`,
+      })
+      .where(eq(conversations.id, conversationId));
+
+    // Switching the agent off is the operator taking the thread, and that happens once — on
+    // the delivery that actually stored this echo. Meta redelivers by design, and doing it
+    // again would silence a thread the operator has since re-enabled in the cabinet.
+    if (stored.length > 0) {
+      await db
+        .update(conversations)
+        .set({ aiEnabled: false })
+        .where(eq(conversations.id, conversationId));
+    }
+  }
+  return errors;
+}
+
+/**
+ * The phone's address book, as Meta streams it after onboarding and on every edit.
+ *
+ * `add` covers edits too. A name typed in the cabinet wins over the phone-book entry, so the
+ * upsert fills only a null name. `remove` changes nothing: the person may still write, and
+ * what they said is ours to keep.
+ */
+async function applyContactSync(db: Db, agentId: string, items: ContactSync[]): Promise<void> {
+  for (const item of items) {
+    if (item.type !== 'contact' || item.action !== 'add') continue;
+    const phone = digits(item.contact?.phone_number ?? '');
+    if (!phone) continue;
+    const name = item.contact?.full_name?.trim() || item.contact?.first_name?.trim() || null;
+    await db
+      .insert(contacts)
+      .values({ agentId, phone, name })
+      .onConflictDoUpdate({
+        target: [contacts.agentId, contacts.phone],
+        set: { name: sql`coalesce(${contacts.name}, ${name})` },
+      });
+  }
 }
 
 async function upsertContact(

@@ -6,6 +6,8 @@ const valid = {
   SESSION_SECRET: 'x'.repeat(32),
   META_APP_SECRET: 'test-app-secret',
   META_WEBHOOK_VERIFY_TOKEN: 'test-verify-token',
+  META_APP_ID: '1585667806534384',
+  META_ES_CONFIG_ID: '1234567890',
   CREDENTIALS_KEY: Buffer.alloc(32, 7).toString('base64'),
   PUBLIC_URL: 'https://rakurs.test',
 } as NodeJS.ProcessEnv;
@@ -26,6 +28,11 @@ describe('loadEnv', () => {
     expect(loadEnv({ ...valid, PORT: '8080' } as NodeJS.ProcessEnv).PORT).toBe(8080);
   });
 
+  it('requires the Meta application id and the Embedded Signup configuration id', () => {
+    expect(() => loadEnv({ ...valid, META_APP_ID: undefined } as NodeJS.ProcessEnv)).toThrow(/META_APP_ID/);
+    expect(() => loadEnv({ ...valid, META_ES_CONFIG_ID: '' } as NodeJS.ProcessEnv)).toThrow(/META_ES_CONFIG_ID/);
+  });
+
   it('refuses a credentials key that is not 32 bytes', () => {
     expect(() =>
       loadEnv({
@@ -34,6 +41,8 @@ describe('loadEnv', () => {
         SESSION_SECRET: 'x'.repeat(32),
         META_APP_SECRET: 's',
         META_WEBHOOK_VERIFY_TOKEN: 'v',
+        META_APP_ID: '1',
+        META_ES_CONFIG_ID: '1',
         CREDENTIALS_KEY: Buffer.alloc(16).toString('base64'),
       } as NodeJS.ProcessEnv),
     ).toThrow('must be 32 bytes, base64-encoded');

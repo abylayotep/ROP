@@ -1,6 +1,10 @@
 # Production stack. nginx stays on the host, where certbot manages TLS.
 #
 #   docker compose -f deploy/compose.yml --env-file deploy/.env up -d --build
+# Named explicitly: the default would be this directory's name, `deploy`, which says nothing
+# and would collide with any other product deployed the same way on the host.
+name: rakurs
+
 services:
   postgres:
     image: postgres:17-alpine
@@ -28,6 +32,8 @@ services:
       SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET}
       META_APP_SECRET: ${META_APP_SECRET:?set META_APP_SECRET}
       META_WEBHOOK_VERIFY_TOKEN: ${META_WEBHOOK_VERIFY_TOKEN:?set META_WEBHOOK_VERIFY_TOKEN}
+      META_APP_ID: ${META_APP_ID:?set META_APP_ID}
+      META_ES_CONFIG_ID: ${META_ES_CONFIG_ID:?set META_ES_CONFIG_ID}
       CREDENTIALS_KEY: ${CREDENTIALS_KEY:?set CREDENTIALS_KEY}
       MEDIA_DIR: /var/lib/rakurs/media
       PUBLIC_URL: ${PUBLIC_URL}

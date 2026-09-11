@@ -7,7 +7,7 @@
  */
 
 /** Pinned deliberately. Meta deprecates versions on a schedule; drifting silently is worse. */
-const GRAPH_VERSION = 'v21.0';
+const GRAPH_VERSION = 'v26.0';
 /**
  * Exported so that the one other place talking to the Graph API — the Conversions API client
  * in `../capi/client.ts` — pins the same version. Two literals would drift, and the one that
@@ -34,7 +34,13 @@ export interface PhoneNumber {
   id: string;
   displayPhoneNumber: string;
   verifiedName: string;
+  /** Meta's `platform_type`, e.g. `CLOUD_API`. Null when Meta does not send it. */
+  platformType: string | null;
+  /** True for a number that also lives in the WhatsApp Business app on a phone. */
+  isOnBizApp: boolean;
 }
+
+export type SmbSyncType = 'smb_app_state_sync' | 'history';
 
 export interface MediaDescriptor {
   url: string;
@@ -56,6 +62,19 @@ export interface GraphClient {
   /** The URL is short-lived, so callers must download immediately. */
   getMediaUrl(mediaId: string, token: string): Promise<MediaDescriptor>;
   downloadMedia(url: string, token: string): Promise<Buffer>;
+  /**
+   * Turns the code Embedded Signup hands the browser into a business token. Server-side
+   * only: the app secret goes in the request, and the code dies after thirty seconds.
+   */
+  exchangeCode(code: string, appId: string, appSecret: string): Promise<string>;
+  /** The numbers of a WABA; needed when Embedded Signup reports only the WABA. */
+  listPhoneNumbers(wabaId: string, token: string): Promise<PhoneNumber[]>;
+  /** Asks Meta to stream the phone's contacts or history to the webhook. Once each. */
+  requestSmbAppData(
+    phoneNumberId: string,
+    token: string,
+    syncType: SmbSyncType,
+  ): Promise<{ requestId: string }>;
 }
 
 /** Carries Meta's own words, so a failure can be shown and searched for. */
@@ -152,21 +171,72 @@ async function call<T>(url: string, token: string, init: RequestInit = {}): Prom
   });
 }
 
+const PHONE_FIELDS = encodeURIComponent(
+  'id,display_phone_number,verified_name,platform_type,is_on_biz_app',
+);
+
+interface RawPhone {
+  id: string;
+  display_phone_number: string;
+  verified_name: string;
+  platform_type?: string;
+  is_on_biz_app?: boolean;
+}
+
+const toPhone = (raw: RawPhone): PhoneNumber => ({
+  id: raw.id,
+  displayPhoneNumber: raw.display_phone_number,
+  verifiedName: raw.verified_name,
+  platformType: raw.platform_type ?? null,
+  isOnBizApp: raw.is_on_biz_app === true,
+});
+
 export function createGraphClient(): GraphClient {
   return {
     async getPhoneNumber(phoneNumberId, token) {
-      const fields = encodeURIComponent('id,display_phone_number,verified_name');
-      const raw = await call<{
-        id: string;
-        display_phone_number: string;
-        verified_name: string;
-      }>(`${GRAPH_ROOT}/${phoneNumberId}?fields=${fields}`, token);
+      return toPhone(
+        await call<RawPhone>(`${GRAPH_ROOT}/${phoneNumberId}?fields=${PHONE_FIELDS}`, token),
+      );
+    },
 
-      return {
-        id: raw.id,
-        displayPhoneNumber: raw.display_phone_number,
-        verifiedName: raw.verified_name,
-      };
+    async exchangeCode(code, appId, appSecret) {
+      const query = new URLSearchParams({ client_id: appId, client_secret: appSecret, code });
+      // Not `call`: there is no bearer token yet, and `call` would send an empty one.
+      return within(TIMEOUT_MS, async () => {
+        const response = await fetch(`${GRAPH_ROOT}/oauth/access_token?${query}`, {
+          signal: AbortSignal.timeout(TIMEOUT_MS),
+        });
+        if (!response.ok) throw await failure(response);
+        const text = await response.text();
+        try {
+          const parsed = JSON.parse(text) as { access_token?: string };
+          if (parsed.access_token) return parsed.access_token;
+        } catch {
+          // Not JSON. A gateway page answering 200 is not a token, and guessing at the
+          // shape of the body would hand one downstream to be stored and encrypted.
+        }
+        throw new GraphError('Meta вернула ответ без токена', response.status);
+      });
+    },
+
+    async listPhoneNumbers(wabaId, token) {
+      const raw = await call<{ data: RawPhone[] }>(
+        `${GRAPH_ROOT}/${wabaId}/phone_numbers?fields=${PHONE_FIELDS}`,
+        token,
+      );
+      return (raw.data ?? []).map(toPhone);
+    },
+
+    async requestSmbAppData(phoneNumberId, token, syncType) {
+      const raw = await call<{ request_id: string }>(
+        `${GRAPH_ROOT}/${phoneNumberId}/smb_app_data`,
+        token,
+        {
+          method: 'POST',
+          body: JSON.stringify({ messaging_product: 'whatsapp', sync_type: syncType }),
+        },
+      );
+      return { requestId: raw.request_id };
     },
 
     async subscribeApp(wabaId, token) {

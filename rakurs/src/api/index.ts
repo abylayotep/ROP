@@ -11,9 +11,11 @@ import type {
   CapiSettings,
   CoachMessage,
   CoachProposal,
+  CoexistenceConnection,
   ConversationSummary,
   ConversationThread,
   Customer,
+  EmbeddedSignupSetup,
   KbGraph,
   KbImport,
   KbNote,
@@ -108,6 +110,12 @@ export const disconnectWhatsappNumber = (agentId: string, numberId: string) =>
 
 export const getWebhookSetup = (agentId: string, signal?: AbortSignal) =>
   request<WebhookSetup>(`/agents/${agentId}/whatsapp/setup`, { signal });
+
+export const getEmbeddedSignupSetup = (agentId: string, signal?: AbortSignal) =>
+  request<EmbeddedSignupSetup>(`/agents/${agentId}/whatsapp/embedded-signup`, { signal });
+
+export const connectCoexistenceNumber = (agentId: string, body: CoexistenceConnection) =>
+  request<WhatsappNumber>(`/agents/${agentId}/whatsapp/coexistence`, { method: 'POST', body });
 
 // ── Диалоги ──────────────────────────────────────────────────────────────────
 

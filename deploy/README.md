@@ -15,9 +15,13 @@ docker compose -f deploy/compose.yml --env-file deploy/.env run --rm api npm run
 
 `deploy/.env` must hold:
 
-- `POSTGRES_PASSWORD`, `SESSION_SECRET` — generate each with `head -c 32 /dev/urandom | base64`;
+- `SESSION_SECRET` — generate with `head -c 32 /dev/urandom | base64`;
+- `POSTGRES_PASSWORD` — letters and digits only, it is spliced into `DATABASE_URL`:
+  `head -c 48 /dev/urandom | base64 | tr -dc A-Za-z0-9 | head -c 32`;
 - `META_APP_SECRET` — the Meta app's secret, signs every webhook delivery;
 - `META_WEBHOOK_VERIFY_TOKEN` — the string Meta echoes back during the webhook handshake;
+- `META_APP_ID` — the Meta application's id; the browser starts Embedded Signup with it;
+- `META_ES_CONFIG_ID` — the Facebook Login for Business configuration id for Embedded Signup;
 - `CREDENTIALS_KEY` — encrypts stored WhatsApp access tokens, exactly 32 bytes base64,
   generate with `head -c 32 /dev/urandom | base64`;
 - `MEDIA_DIR` — present for consistency with `server/.env`, but `compose.yml` does not read
@@ -94,3 +98,11 @@ network. Point the daemon at a mirror rather than working around it per-image �
 
 Then restart Docker. On a local colima setup: `colima ssh -- sudo …` followed by
 `colima restart`.
+
+## Behind Caddy
+
+On a host that already runs Caddy (the Tasbaqa VPS), skip `deploy/nginx.conf` and append
+`deploy/Caddyfile.rop` to `/etc/caddy/Caddyfile`, then `sudo systemctl reload caddy`. Caddy
+obtains the certificate itself once the domain's A record points at the host. The stack
+runs from `/opt/rakurs` with the same commands as above; the Compose project is named `rakurs` in
+`compose.yml`, so it cannot collide with the other product's.

@@ -96,6 +96,28 @@ export function registerLinkedLifecycle(
 }
 
 /**
+ * Pairings a previous process left behind.
+ *
+ * A row in `pairing` is a QR code on a screen that no longer exists: the socket that was
+ * issuing codes died with the process, and nothing will ever move the row forward. It is
+ * deleted rather than kept — there is no phone number on it and no history under it, and
+ * one left in place refuses every later attempt by the same account with «Подключение уже
+ * идёт».
+ */
+export async function clearStalePairings(db: Db): Promise<number> {
+  const removed = await db
+    .delete(whatsappNumbers)
+    .where(
+      and(
+        eq(whatsappNumbers.connectionKind, 'linked'),
+        eq(whatsappNumbers.linkedState, 'pairing'),
+      ),
+    )
+    .returning({ id: whatsappNumbers.id });
+  return removed.length;
+}
+
+/**
  * Reconnects every phone that was connected when the process last stopped.
  *
  * Sequential and forgiving: a server that refused to start because one owner's phone is

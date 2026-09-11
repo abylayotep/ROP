@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -14,6 +15,7 @@ import {
 import { createAccountWithOwner } from '../src/lib/provision.js';
 import { encryptSecret } from '../src/lib/secret-box.js';
 import { linkedAuthState } from '../src/lib/whatsapp/linked/auth-state.js';
+import { clearStalePairings } from '../src/lib/whatsapp/linked/lifecycle.js';
 import { withDb } from './helpers/db.js';
 import { testEnv } from './helpers/env.js';
 import { fakeLinked, type FakeLinked } from './helpers/fake-linked.js';
@@ -114,6 +116,49 @@ describe('starting a pairing', () => {
 
     expect(res.statusCode).toBe(502);
     expect(await numbers()).toEqual([]);
+  });
+
+  it('removes the row when the deadline passes and nobody ever watched the stream', async () => {
+    app = buildServer(env, db, { linked, pairingTimeoutMs: 30 });
+    await app.ready();
+    jar = await login();
+
+    await pair();
+    await new Promise((r) => setTimeout(r, 150));
+
+    expect(await numbers()).toEqual([]);
+    expect(linked.calls.some((c) => c.method === 'disconnect')).toBe(true);
+  });
+
+  it('lets the next pairing start once an abandoned one has expired', async () => {
+    app = buildServer(env, db, { linked, pairingTimeoutMs: 30 });
+    await app.ready();
+    jar = await login();
+    await pair();
+    await new Promise((r) => setTimeout(r, 150));
+
+    const res = await pair();
+
+    expect(res.statusCode).toBe(200);
+    expect(await numbers()).toHaveLength(1);
+  });
+
+  it('keeps the row once the phone has answered, deadline or not', async () => {
+    app = buildServer(env, db, { linked, pairingTimeoutMs: 30 });
+    await app.ready();
+    jar = await login();
+    await pair();
+    const [row] = await numbers();
+
+    linked.report({
+      type: 'open',
+      numberId: row!.id,
+      jid: '77085807932@s.whatsapp.net',
+      displayPhone: '+77085807932',
+    });
+    await new Promise((r) => setTimeout(r, 150));
+
+    expect(await numbers()).toHaveLength(1);
   });
 
   it('refuses a member who is not the owner', async () => {
@@ -229,6 +274,41 @@ describe('the pairing stream', () => {
     const res = await stream('7ad1e0f4-0000-4000-8000-000000000000');
 
     expect(res.statusCode).toBe(404);
+  });
+});
+
+describe('a pairing left behind by a dead process', () => {
+  it('is cleared on start, so the next attempt is not refused', async () => {
+    const id = randomUUID();
+    await db.insert(whatsappNumbers).values({
+      id,
+      agentId,
+      displayPhone: '',
+      connectionKind: 'linked',
+      linkedJid: `pending:${id}`,
+      linkedState: 'pairing',
+    });
+
+    const removed = await clearStalePairings(db);
+
+    expect(removed).toBe(1);
+    expect(await numbers()).toEqual([]);
+  });
+
+  it('leaves a number that is actually connected alone', async () => {
+    const id = randomUUID();
+    await db.insert(whatsappNumbers).values({
+      id,
+      agentId,
+      displayPhone: '+77085807932',
+      connectionKind: 'linked',
+      linkedJid: '77085807932@s.whatsapp.net',
+      linkedState: 'open',
+    });
+
+    await clearStalePairings(db);
+
+    expect(await numbers()).toHaveLength(1);
   });
 });
 

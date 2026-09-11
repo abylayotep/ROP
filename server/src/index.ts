@@ -9,6 +9,7 @@ import { createLinkedClient } from './lib/whatsapp/linked/client.js';
 import { registerLinkedHistory } from './lib/whatsapp/linked/history.js';
 import { registerLinkedInbound } from './lib/whatsapp/linked/inbound.js';
 import {
+  clearStalePairings,
   registerLinkedLifecycle,
   restoreLinkedSessions,
 } from './lib/whatsapp/linked/lifecycle.js';
@@ -66,6 +67,11 @@ registerLinkedHistory(
 // `running` test run left behind by a dead process needs this, and why it runs here rather
 // than on a hook every test's own `buildServer` would trip too.
 await reconcileOrphanedRuns(db);
+
+// A pairing is a QR code on somebody's screen, and that screen did not survive the
+// restart either. Left in place, one of them refuses every later attempt by that account.
+const stalePairings = await clearStalePairings(db);
+if (stalePairings > 0) app.log.info({ stalePairings }, 'linked: cleared stale pairings');
 
 await app.listen({ port: env.PORT, host: '0.0.0.0' });
 

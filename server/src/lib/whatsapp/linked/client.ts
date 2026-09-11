@@ -81,7 +81,14 @@ export interface LinkedClient {
   sendMedia(numberId: string, toJid: string, file: OutgoingFile): Promise<{ messageId: string }>;
   downloadMedia(numberId: string, message: RawLinkedMessage): Promise<Buffer>;
   isOpen(numberId: string): boolean;
-  on(handler: (event: LinkedEvent) => void): void;
+  /**
+   * Subscribes to every event, and answers with the way to stop.
+   *
+   * The unsubscribe is not a nicety: the pairing stream subscribes per request, and a
+   * handler left behind when the browser tab closes outlives the pairing and writes into
+   * a response that has already ended.
+   */
+  on(handler: (event: LinkedEvent) => void): () => void;
 }
 
 /** One live socket, as the registry uses it. Implemented by `socket.ts`. */
@@ -202,7 +209,13 @@ export function createLinkedClient(deps: LinkedClientDeps): LinkedRegistry {
     },
 
     isOpen: (numberId) => open.has(numberId),
-    on: (handler) => void handlers.push(handler),
+    on(handler) {
+      handlers.push(handler);
+      return () => {
+        const at = handlers.indexOf(handler);
+        if (at >= 0) handlers.splice(at, 1);
+      };
+    },
     report,
   };
 }

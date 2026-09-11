@@ -64,6 +64,17 @@ export interface WhatsappNumber {
   offboarded: boolean;
 }
 
+/**
+ * One frame of the pairing stream.
+ *
+ * `qr` arrives repeatedly — WhatsApp reissues the code every few seconds — and exactly one
+ * `open` or `failed` ends the stream.
+ */
+export type LinkedPairingEvent =
+  | { type: 'qr'; qr: string }
+  | { type: 'open' }
+  | { type: 'failed'; reason: string };
+
 /** What to paste into the Meta application's webhook settings. */
 export interface WebhookSetup {
   url: string;

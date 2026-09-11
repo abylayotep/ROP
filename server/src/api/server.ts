@@ -30,6 +30,7 @@ import { registerWhatsappNumberRoutes } from './whatsapp-numbers.js';
 import { registerWhatsappWebhook } from './whatsapp-webhook.js';
 import { createLinkedClient, type LinkedRegistry } from '../lib/whatsapp/linked/client.js';
 import { createLinkedSocket } from '../lib/whatsapp/linked/socket.js';
+import { registerWhatsappLinkedRoutes } from './whatsapp-linked.js';
 
 export interface ServerDeps {
   /** Injected by tests so a suite never reaches the network. Defaults to the real client. */
@@ -42,6 +43,8 @@ export interface ServerDeps {
   capi?: CapiClient;
   /** And for the phones: no test opens a socket to WhatsApp. */
   linked?: LinkedRegistry;
+  /** How long a pairing may go unscanned. Shortened by tests, five minutes otherwise. */
+  pairingTimeoutMs?: number;
 }
 
 /**
@@ -108,6 +111,7 @@ export function buildServer(env: Env, db: Db, deps: ServerDeps = {}): FastifyIns
     registerAgentRoutes(app, db, guard);
     registerWhatsappNumberRoutes(app, db, env, guard, graph);
     registerWhatsappCoexistenceRoutes(app, db, env, guard, graph);
+    registerWhatsappLinkedRoutes(app, db, env, guard, linked, { timeoutMs: deps.pairingTimeoutMs });
     registerConversationRoutes(app, db, env, guard, graph, linked);
     registerStageRoutes(app, db, guard);
     registerLeadRoutes(app, db, env, guard, graph);

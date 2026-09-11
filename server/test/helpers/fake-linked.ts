@@ -74,6 +74,10 @@ export function fakeLinked(overrides: Partial<LinkedClient> = {}): FakeLinked {
     isOpen: ((numberId: string) => open.has(numberId)) as LinkedClient['isOpen'],
     on(handler) {
       handlers.push(handler);
+      return () => {
+        const at = handlers.indexOf(handler);
+        if (at >= 0) handlers.splice(at, 1);
+      };
     },
 
     // `report` is the registry's own name for this; `emit` reads better in a test that is

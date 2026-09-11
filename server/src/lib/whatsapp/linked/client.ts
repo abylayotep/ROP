@@ -129,9 +129,9 @@ export interface LinkedRegistry extends LinkedClient {
 /**
  * Owns the live sessions and the handler list, and knows nothing about WhatsApp.
  *
- * `isOpen` follows the events rather than the presence of a session object: between a
- * `closed` and the reconnect that follows it there is still a session in the map, and
- * sending through it would hand a message to a socket that cannot deliver it.
+ * `isOpen` follows the events rather than the presence of a session object: a session is
+ * in the map from the moment it is asked for, before the socket has opened, and sending
+ * through it then would hand a message to a socket that cannot deliver it.
  */
 export function createLinkedClient(deps: LinkedClientDeps): LinkedRegistry {
   const sessions = new Map<string, Promise<LinkedSession>>();
@@ -141,7 +141,14 @@ export function createLinkedClient(deps: LinkedClientDeps): LinkedRegistry {
 
   const report = (event: LinkedEvent): void => {
     if (event.type === 'open') open.add(event.numberId);
-    if (event.type === 'closed') open.delete(event.numberId);
+    if (event.type === 'closed') {
+      open.delete(event.numberId);
+      // And the session with it. A closed socket never opens again — Baileys builds a new
+      // one — so keeping it in the map would make the lifecycle's reconnect a no-op: it
+      // calls `connect`, `connect` finds a session and returns, and the number stays dark
+      // for as long as the process lives.
+      sessions.delete(event.numberId);
+    }
     for (const handler of handlers) {
       try {
         handler(event);

@@ -208,6 +208,23 @@ describe('the pairing stream', () => {
     expect(res.body).toContain('Телефон отказал в подключении.');
   });
 
+  it('says the code series ended when WhatsApp stops issuing codes', async () => {
+    await pair();
+    const [row] = await numbers();
+
+    const pending = stream(row!.id);
+    await new Promise((r) => setTimeout(r, 120));
+    linked.report({ type: 'qr', numberId: row!.id, qr: '2@last' });
+    // WhatsApp hands out a finite list of codes and closes the socket when it runs out.
+    // Saying nothing leaves the last, dead code on screen for the rest of the deadline.
+    linked.report({ type: 'closed', numberId: row!.id, loggedOut: false });
+    const res = await pending;
+
+    expect(res.body).toContain('"type":"failed"');
+    expect(res.body).toContain('Код устарел');
+    expect(await numbers()).toEqual([]);
+  });
+
   it('answers 404 for a number that is not this agent’s', async () => {
     const res = await stream('7ad1e0f4-0000-4000-8000-000000000000');
 

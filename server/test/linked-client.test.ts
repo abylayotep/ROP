@@ -74,6 +74,20 @@ describe('linked client registry', () => {
     );
   });
 
+  it('builds a new session when connect follows a close', async () => {
+    const factory = vi.fn(opening());
+    const client = createLinkedClient({ session: factory });
+    await client.connect('n1');
+
+    // What the lifecycle does after a drop. The dead socket must not be reused: reconnecting
+    // through it is a no-op, and the number never comes back.
+    client.report({ type: 'closed', numberId: 'n1', loggedOut: false });
+    await client.connect('n1');
+
+    expect(factory).toHaveBeenCalledTimes(2);
+    expect(client.isOpen('n1')).toBe(true);
+  });
+
   it('sends through the session of the number it was asked about', async () => {
     const sent: string[] = [];
     const client = createLinkedClient({

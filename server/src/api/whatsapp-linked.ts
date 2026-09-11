@@ -182,28 +182,40 @@ export function registerWhatsappLinkedRoutes(
         resolve();
       };
 
+      /**
+       * Nobody is going to scan this pairing: the deadline passed, WhatsApp stopped issuing
+       * codes, or the browser walked away. The row is removed rather than left in `pairing`,
+       * where it would block every later attempt with «Подключение уже идёт» and show as a
+       * number that does not work.
+       */
+      const abandon = (): Promise<void> =>
+        db
+          .delete(whatsappNumbers)
+          .where(and(eq(whatsappNumbers.id, numberId), eq(whatsappNumbers.linkedState, 'pairing')))
+          .catch(() => undefined)
+          .then(() => linked.disconnect(numberId).catch(() => undefined))
+          .then(() => undefined);
+
       const handler = (event: LinkedEvent): void => {
         if (event.numberId !== numberId) return;
         if (event.type === 'qr') send({ type: 'qr', qr: event.qr });
         if (event.type === 'open') finish({ type: 'open' });
-        if (event.type === 'closed' && event.loggedOut) {
-          finish({ type: 'failed', reason: 'Телефон отказал в подключении.' });
+        if (event.type === 'closed') {
+          // WhatsApp hands out a finite list of codes and closes the socket once it has run
+          // through them — about two and a half minutes in. Ignoring that leaves the last,
+          // dead code on the owner's screen until the deadline, looking like a code that
+          // simply stopped refreshing.
+          const reason = event.loggedOut
+            ? 'Телефон отказал в подключении.'
+            : 'Код устарел. Нажмите «Подключить телефон по QR» ещё раз.';
+          void abandon().finally(() => finish({ type: 'failed', reason }));
         }
       };
 
       const timer = setTimeout(() => {
-        // Nobody scanned. The row is removed rather than left in `pairing`, where it would
-        // block the next attempt and show as a number that does not work.
-        void db
-          .delete(whatsappNumbers)
-          .where(
-            and(eq(whatsappNumbers.id, numberId), eq(whatsappNumbers.linkedState, 'pairing')),
-          )
-          .catch(() => undefined)
-          .finally(() => {
-            void linked.disconnect(numberId).catch(() => undefined);
-            finish({ type: 'failed', reason: 'Код никто не отсканировал. Попробуйте ещё раз.' });
-          });
+        void abandon().finally(() =>
+          finish({ type: 'failed', reason: 'Код никто не отсканировал. Попробуйте ещё раз.' }),
+        );
       }, timeoutMs);
       timer.unref?.();
 
@@ -213,7 +225,9 @@ export function registerWhatsappLinkedRoutes(
         if (!settled) {
           settled = true;
           unsubscribe();
-          resolve();
+          // The tab is gone, so nobody can scan what is on it. Without this the row stays in
+          // `pairing` for as long as the process lives, and every later attempt is refused.
+          void abandon().finally(() => resolve());
         }
       });
     });

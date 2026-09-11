@@ -570,7 +570,10 @@ function LinkedPhoneCard({ agentId, onConnected }: { agentId: string; onConnecte
                 <Skeleton height={232} />
               )}
             </div>
-            <div style={hint}>Код обновляется каждые несколько секунд — это нормально.</div>
+            <div style={hint}>
+              Код сам меняется каждые 20 секунд — это нормально. Всего на сканирование
+              около двух с половиной минут, потом начните заново.
+            </div>
           </>
         ) : (
           <>

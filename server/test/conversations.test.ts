@@ -19,6 +19,7 @@ import { GraphError } from '../src/lib/whatsapp/graph.js';
 import { withDb } from './helpers/db.js';
 import { testEnv } from './helpers/env.js';
 import { fakeGraph, type FakeGraph } from './helpers/fake-graph.js';
+import { fakeLinked } from './helpers/fake-linked.js';
 
 const env = testEnv({ MEDIA_DIR: 'var/media-test' });
 const key = Buffer.from(env.CREDENTIALS_KEY, 'base64');
@@ -350,6 +351,60 @@ describe('answering', () => {
       'Окно ответа закрыто. Клиент должен написать первым, либо нужен шаблон.',
     );
     expect(graph.calls).toEqual([]);
+    expect(await db.select().from(messages)).toEqual([]);
+  });
+
+  it('answers outside the window through a phone connected by QR', async () => {
+    // The 24-hour window is Meta's rule. A linked device is an ordinary WhatsApp client:
+    // refusing here would refuse a send WhatsApp would have delivered.
+    const linked = fakeLinked();
+    linked.setOpen(numberId, true);
+    app = buildServer(env, db, { graph, linked });
+    await app.ready();
+    jar = await login();
+    await db
+      .update(whatsappNumbers)
+      .set({
+        connectionKind: 'linked',
+        phoneNumberId: null,
+        wabaId: null,
+        accessToken: null,
+        linkedJid: '77085807932@s.whatsapp.net',
+        linkedState: 'open',
+      })
+      .where(eq(whatsappNumbers.id, numberId));
+    await closeWindow();
+
+    const res = await answer({ body: 'ещё актуально?' });
+
+    expect(res.statusCode).toBe(200);
+    expect(linked.calls.at(-1)?.method).toBe('sendText');
+    expect(graph.calls).toEqual([]);
+  });
+
+  it('refuses to answer through a phone that is not on the air', async () => {
+    const linked = fakeLinked();
+    app = buildServer(env, db, { graph, linked });
+    await app.ready();
+    jar = await login();
+    await db
+      .update(whatsappNumbers)
+      .set({
+        connectionKind: 'linked',
+        phoneNumberId: null,
+        wabaId: null,
+        accessToken: null,
+        linkedJid: '77085807932@s.whatsapp.net',
+        linkedState: 'open',
+      })
+      .where(eq(whatsappNumbers.id, numberId));
+
+    const res = await answer({ body: 'здравствуйте' });
+
+    expect(res.statusCode).toBe(409);
+    expect(res.json().message).toBe(
+      'Телефон не на связи. Откройте WhatsApp на телефоне или подключите заново.',
+    );
     expect(await db.select().from(messages)).toEqual([]);
   });
 

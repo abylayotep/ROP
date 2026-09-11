@@ -76,6 +76,7 @@ beforeEach(async () => {
   deps = {
     model: fakeModel(),
     graph: fakeGraph(),
+    linked: fakeLinked(),
     key: randomBytes(32),
     mediaDir: await mkdtemp(join(tmpdir(), 'rakurs-media-')),
     onError: (message) => errors.push(message),

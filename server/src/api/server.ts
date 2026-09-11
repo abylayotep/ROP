@@ -28,6 +28,8 @@ import { registerTestCaseRoutes } from './test-cases.js';
 import { registerWhatsappCoexistenceRoutes } from './whatsapp-coexistence.js';
 import { registerWhatsappNumberRoutes } from './whatsapp-numbers.js';
 import { registerWhatsappWebhook } from './whatsapp-webhook.js';
+import { createLinkedClient, type LinkedRegistry } from '../lib/whatsapp/linked/client.js';
+import { createLinkedSocket } from '../lib/whatsapp/linked/socket.js';
 
 export interface ServerDeps {
   /** Injected by tests so a suite never reaches the network. Defaults to the real client. */
@@ -38,6 +40,8 @@ export interface ServerDeps {
   model?: ModelClient;
   /** And for Meta's Conversions API: no test reports a conversion to a real dataset. */
   capi?: CapiClient;
+  /** And for the phones: no test opens a socket to WhatsApp. */
+  linked?: LinkedRegistry;
 }
 
 /**
@@ -54,6 +58,10 @@ export function buildServer(env: Env, db: Db, deps: ServerDeps = {}): FastifyIns
   // Resolved here, alongside every other outbound client, so the settings routes and the
   // queue drain share one instance and a test replaces it once for all of them.
   const capi = deps.capi ?? createCapiClient();
+  // One registry for the whole process: it owns the live sockets, and two of them would
+  // mean two devices claiming one number.
+  const linked =
+    deps.linked ?? createLinkedClient({ session: createLinkedSocket(db, credentialsKey(env)) });
 
   app.register(cookie, { secret: env.SESSION_SECRET });
   app.register(rateLimit, { global: false });
@@ -100,7 +108,7 @@ export function buildServer(env: Env, db: Db, deps: ServerDeps = {}): FastifyIns
     registerAgentRoutes(app, db, guard);
     registerWhatsappNumberRoutes(app, db, env, guard, graph);
     registerWhatsappCoexistenceRoutes(app, db, env, guard, graph);
-    registerConversationRoutes(app, db, env, guard, graph);
+    registerConversationRoutes(app, db, env, guard, graph, linked);
     registerStageRoutes(app, db, guard);
     registerLeadRoutes(app, db, env, guard, graph);
     registerOrderRoutes(app, db, guard);
@@ -108,13 +116,13 @@ export function buildServer(env: Env, db: Db, deps: ServerDeps = {}): FastifyIns
     registerStatsRoutes(app, db, guard);
     registerKnowledgeRoutes(app, db, guard, pageFetcher);
     registerRuleRoutes(app, db, guard);
-    registerAiRoutes(app, db, env, guard, { model, graph });
+    registerAiRoutes(app, db, env, guard, { model, graph, linked });
     // The coach writes only `coach_messages` — see the file's own comment for why a
     // proposal never reaches `agent_rules` or `kb_notes` from here.
     registerCoachRoutes(app, db, env, guard, { model });
     // Drafts, their cases and their runs — including `POST …/coach/messages/:id/draft`,
     // which turns a checked proposal into the one thing the coach itself never writes.
-    registerDraftRoutes(app, db, env, guard, { model, graph });
+    registerDraftRoutes(app, db, env, guard, { model, graph, linked });
     // The conversations a draft is proven against — kept by hand, pulled from a real dialog,
     // or suggested by the model. Registered beside the drafts it serves.
     registerTestCaseRoutes(app, db, env, guard, { model });
@@ -127,7 +135,7 @@ export function buildServer(env: Env, db: Db, deps: ServerDeps = {}): FastifyIns
       app,
       db,
       env,
-      { graph, key: credentialsKey(env), mediaDir: env.MEDIA_DIR, model },
+      { graph, linked, key: credentialsKey(env), mediaDir: env.MEDIA_DIR, model },
       // The Conversions API queue is drained by the same delivery, once Meta has its 200.
       { capi, key: credentialsKey(env) },
     );

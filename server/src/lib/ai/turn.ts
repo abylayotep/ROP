@@ -39,8 +39,9 @@ import { recordStageMove } from '../funnel-history.js';
 import { sendStageMessage } from '../funnel-message.js';
 import { searchKnowledge } from '../knowledge/search.js';
 import { decryptSecret } from '../secret-box.js';
-import { asCloudNumber } from '../whatsapp/cloud-number.js';
 import { GraphError, withoutSecret, type GraphClient } from '../whatsapp/graph.js';
+import type { LinkedClient } from '../whatsapp/linked/client.js';
+import { transportFor, type MessageTransport } from '../whatsapp/transport.js';
 import { ModelError, type ChatMessage, type ModelClient } from './openrouter.js';
 import {
   buildMessages,
@@ -55,6 +56,8 @@ import { assembleRules, loadRules } from './rules.js';
 export interface TurnDeps {
   model: ModelClient;
   graph: GraphClient;
+  /** The other way out. A Cloud API number never touches it, and vice versa. */
+  linked: LinkedClient;
   /** The credentials key. Both secrets a turn touches are sealed with it. */
   key: Buffer;
 }
@@ -863,7 +866,7 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
         conversation,
         contact,
         number,
-        token: ready.token,
+        transport: ready.transport,
         body,
       });
       if (delivery.state !== 'sent') details.push(delivery.detail);
@@ -939,7 +942,7 @@ async function handOff(
   });
 }
 
-type Ready = { ok: true; token: string } | { ok: false; detail: string };
+type Ready = { ok: true; transport: MessageTransport } | { ok: false; detail: string };
 
 /**
  * Everything that has to be true before a reply can leave, and none of it a write.
@@ -952,9 +955,14 @@ function readySend(deps: TurnDeps, number: typeof whatsappNumbers.$inferSelect):
   if (!number.enabled) return { ok: false, detail: 'Ответ не отправлен: номер отключён.' };
 
   try {
-    const cloud = asCloudNumber(number);
-    return { ok: true, token: decryptSecret(cloud.accessToken, deps.key, cloud.phoneNumberId) };
+    return {
+      ok: true,
+      transport: transportFor(number, { graph: deps.graph, linked: deps.linked, key: deps.key }),
+    };
   } catch {
+    // The only way building a transport fails today is a credentials key that no longer
+    // opens the stored token. The sandbox reports this sentence too, which is the point of
+    // checking it here rather than at the send.
     return {
       ok: false,
       detail: 'Ответ не отправлен: не удалось прочитать токен номера. Подключите номер заново.',
@@ -986,22 +994,17 @@ async function deliver(
     conversation: typeof conversations.$inferSelect;
     contact: typeof contacts.$inferSelect;
     number: typeof whatsappNumbers.$inferSelect;
-    token: string;
+    transport: MessageTransport;
     body: string;
   },
 ): Promise<Delivery> {
-  const { conversation, contact, number, token, body } = input;
+  const { conversation, contact, number, transport, body } = input;
 
   // Set the instant Meta accepts the message, before any write of our own. It is the only
   // thing that can tell a failed send apart from a send we failed to record.
   let accepted = false;
   try {
-    const { messageId } = await deps.graph.sendText(
-      asCloudNumber(number).phoneNumberId,
-      token,
-      contact.phone,
-      body,
-    );
+    const { messageId } = await transport.sendText(contact.phone, body);
     accepted = true;
 
     const sentAt = new Date();
@@ -1025,10 +1028,11 @@ async function deliver(
 
     return { state: 'sent', messageId: stored!.id };
   } catch (error) {
-    const said =
+    // The transport has already redacted whatever Meta echoed back: a rejected token
+    // appears inside Meta's own error text, and `withoutSecret` runs where the token is
+    // known. Everything reaching here is safe to quote.
+    const reason =
       error instanceof GraphError || error instanceof Error ? error.message : String(error);
-    // Meta echoes a rejected token back inside its own error text.
-    const reason = withoutSecret(said, token);
     return accepted
       ? {
           state: 'unrecorded',

@@ -24,6 +24,10 @@ import { withDb } from './helpers/db.js';
 import { testEnv } from './helpers/env.js';
 import { fakeGraph } from './helpers/fake-graph.js';
 import { fakeModel } from './helpers/fake-model.js';
+import { fakeLinked } from './helpers/fake-linked.js';
+
+/** No test opens a socket: a linked number never appears in these fixtures. */
+const linked = fakeLinked();
 
 const env = testEnv();
 const key = Buffer.from(env.CREDENTIALS_KEY, 'base64');
@@ -380,7 +384,7 @@ describe('a lead reaching a qualified stage', () => {
 
     const result = await runTurn(
       db,
-      { model, graph: fakeGraph(), key },
+      { model, graph: fakeGraph(), linked, key },
       { agentId, conversationId: aiConversationId },
     );
     expect(result.stageId).toBe(qualified.id);

@@ -21,6 +21,10 @@ import { encryptSecret } from '../src/lib/secret-box.js';
 import { withDb } from './helpers/db.js';
 import { testEnv } from './helpers/env.js';
 import { fakeGraph } from './helpers/fake-graph.js';
+import { fakeLinked } from './helpers/fake-linked.js';
+
+/** No test opens a socket: a linked number never appears in these fixtures. */
+const linked = fakeLinked();
 
 const env = testEnv();
 const key = Buffer.from(env.CREDENTIALS_KEY, 'base64');
@@ -169,7 +173,7 @@ beforeEach(async () => {
   numberId = number!.id;
 
   model = scriptedModel();
-  deps = { model, graph: fakeGraph() };
+  deps = { model, graph: fakeGraph(), linked };
 });
 
 /**

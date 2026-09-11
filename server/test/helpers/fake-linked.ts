@@ -2,11 +2,12 @@ import {
   LinkedOffline,
   type LinkedClient,
   type LinkedEvent,
+  type LinkedRegistry,
   type OutgoingFile,
   type RawLinkedMessage,
 } from '../../src/lib/whatsapp/linked/client.js';
 
-export interface FakeLinked extends LinkedClient {
+export interface FakeLinked extends LinkedRegistry {
   /** Every call in order, so a test can assert what was asked of the phone. */
   calls: { method: keyof LinkedClient; args: unknown[] }[];
   /** Drives the registered handlers the way a real socket would. */
@@ -73,6 +74,12 @@ export function fakeLinked(overrides: Partial<LinkedClient> = {}): FakeLinked {
     isOpen: ((numberId: string) => open.has(numberId)) as LinkedClient['isOpen'],
     on(handler) {
       handlers.push(handler);
+    },
+
+    // `report` is the registry's own name for this; `emit` reads better in a test that is
+    // pretending to be a socket. Same function, so a fake can stand in for the registry.
+    report(event) {
+      fake.emit(event);
     },
 
     emit(event) {

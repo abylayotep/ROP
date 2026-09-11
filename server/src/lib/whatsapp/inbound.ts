@@ -11,6 +11,7 @@ import type { ModelClient } from '../ai/openrouter.js';
 import { runTurn } from '../ai/turn.js';
 import { decryptSecret } from '../secret-box.js';
 import { asCloudNumber } from './cloud-number.js';
+import type { LinkedClient } from './linked/client.js';
 import {
   advanceConversation,
   runTurns,
@@ -35,6 +36,8 @@ import { downloadInboundMedia } from './media.js';
 
 export interface InboundDeps {
   graph: GraphClient;
+  /** Passed straight through to the turn: a Cloud API delivery never sends through it. */
+  linked: LinkedClient;
   /** Decrypts a number's access token; media downloads and the agent's own send need it. */
   key: Buffer;
   mediaDir: string;

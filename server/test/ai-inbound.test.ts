@@ -42,6 +42,10 @@ import { withDb } from './helpers/db.js';
 import { testEnv } from './helpers/env.js';
 import { fakeGraph, type FakeGraph } from './helpers/fake-graph.js';
 import { fakeModel, type FakeModel } from './helpers/fake-model.js';
+import { fakeLinked } from './helpers/fake-linked.js';
+
+/** No test opens a socket: a linked number never appears in these fixtures. */
+const linked = fakeLinked();
 
 const env = testEnv();
 const key = Buffer.from(env.CREDENTIALS_KEY, 'base64');
@@ -98,7 +102,7 @@ function ruinousModel(): FakeModel {
   };
 }
 
-const deps = (): InboundDeps => ({ graph, key, mediaDir: env.MEDIA_DIR, model });
+const deps = (): InboundDeps => ({ graph, linked, key, mediaDir: env.MEDIA_DIR, model });
 
 /** Seconds, the way Meta counts them, and recent enough to leave the 24-hour window open. */
 const secondsAgo = (seconds: number) => String(Math.floor(Date.now() / 1000) - seconds);

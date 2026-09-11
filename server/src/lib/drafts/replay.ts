@@ -21,6 +21,7 @@ import type { ModelClient } from '../ai/openrouter.js';
 import { addCost, runTurn, type TurnOutcome, type TurnResult } from '../ai/turn.js';
 import type { GraphClient } from '../whatsapp/graph.js';
 import { applyOps, type DraftOp } from './ops.js';
+import type { LinkedClient } from '../whatsapp/linked/client.js';
 
 /**
  * What a case needs beyond the store it runs against: the model to call, and the Graph client
@@ -35,6 +36,8 @@ import { applyOps, type DraftOp } from './ops.js';
 export interface AiDeps {
   model: ModelClient;
   graph: GraphClient;
+  /** A replay never sends, but a turn's dependencies are a turn's dependencies. */
+  linked: LinkedClient;
 }
 
 export interface ReplayInput {
@@ -307,7 +310,7 @@ export async function replayCase(db: Db, deps: AiDeps, input: ReplayInput): Prom
 
         turn = await runTurn(
           tx as unknown as Db,
-          { model: metered.model, graph: deps.graph, key: input.key },
+          { model: metered.model, graph: deps.graph, linked: deps.linked, key: input.key },
           { agentId: input.agentId, conversationId: conversation!.id, dryRun: true },
         );
 

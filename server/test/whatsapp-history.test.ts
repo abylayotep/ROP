@@ -8,6 +8,7 @@ import { withDb } from './helpers/db.js';
 import { testEnv } from './helpers/env.js';
 import { fakeGraph, type FakeGraph } from './helpers/fake-graph.js';
 import { fakeModel, type FakeModel } from './helpers/fake-model.js';
+import { fakeLinked } from './helpers/fake-linked.js';
 
 const env = testEnv();
 const key = Buffer.from(env.CREDENTIALS_KEY, 'base64');
@@ -17,7 +18,7 @@ let agentId: string;
 let model: FakeModel;
 let graph: FakeGraph;
 
-const deps = () => ({ graph, key, mediaDir: env.MEDIA_DIR, model });
+const deps = () => ({ graph, linked: fakeLinked(), key, mediaDir: env.MEDIA_DIR, model });
 
 beforeEach(async () => {
   db = await withDb();

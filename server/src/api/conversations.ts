@@ -8,10 +8,11 @@ import type { Db } from '../db/client.js';
 import { aiReplies, contacts, conversations, messages, whatsappNumbers } from '../db/schema.js';
 import type { Env } from '../env.js';
 import { ApiError } from '../lib/errors.js';
-import { credentialsKey, decryptSecret } from '../lib/secret-box.js';
+import { credentialsKey } from '../lib/secret-box.js';
 import { isUuid } from '../lib/uuid.js';
-import { GraphError, withoutSecret, type GraphClient } from '../lib/whatsapp/graph.js';
-import { asCloudNumber } from '../lib/whatsapp/cloud-number.js';
+import type { GraphClient } from '../lib/whatsapp/graph.js';
+import type { LinkedClient } from '../lib/whatsapp/linked/client.js';
+import { transportFor } from '../lib/whatsapp/transport.js';
 import { requireAgent } from './require-agent.js';
 
 /** WhatsApp allows a free-form reply for 24 hours after the customer's last message. */
@@ -47,6 +48,7 @@ export function registerConversationRoutes(
   env: Env,
   guard: preHandlerHookHandler,
   graph: GraphClient,
+  linked: LinkedClient,
 ): void {
   const agentGuard = requireAgent(db);
 
@@ -133,38 +135,22 @@ export function registerConversationRoutes(
       if (!number.enabled) {
         throw new ApiError(409, 'Номер отключён. Включите его в интеграциях.');
       }
-      if (!windowOpen(conversation.lastInboundAt)) {
-        // Refused here rather than by Meta: the explanation stays in the operator's
-        // language, and a request nobody can satisfy is not worth sending.
+
+      // TransportRefusal is an ApiError: its status and Russian sentence reach the
+      // operator unchanged, which is the whole reason it carries them.
+      const transport = transportFor(number, { graph, linked, key: credentialsKey(env) });
+
+      // Asked of the transport rather than assumed: the 24-hour window is a Cloud API
+      // rule, and a linked device has none. Refused here rather than by Meta so the
+      // explanation stays in the operator's language.
+      if (transport.requiresOpenWindow && !windowOpen(conversation.lastInboundAt)) {
         throw new ApiError(
           409,
           'Окно ответа закрыто. Клиент должен написать первым, либо нужен шаблон.',
         );
       }
 
-      // A key that no longer matches the stored token throws an English developer message.
-      // The frontend renders `message` verbatim, so it is answered here in the operator's
-      // language, with the one thing they can do about it.
-      const cloud = asCloudNumber(number);
-      let token: string;
-      try {
-        token = decryptSecret(cloud.accessToken, credentialsKey(env), cloud.phoneNumberId);
-      } catch {
-        throw new ApiError(
-          409,
-          'Не удалось прочитать токен номера. Подключите номер заново в интеграциях.',
-        );
-      }
-
-      let messageId: string;
-      try {
-        ({ messageId } = await graph.sendText(cloud.phoneNumberId, token, contact.phone, body));
-      } catch (error) {
-        if (error instanceof GraphError) {
-          throw new ApiError(502, `Meta не отправила сообщение: ${withoutSecret(error.message, token)}`);
-        }
-        throw error;
-      }
+      const { messageId } = await transport.sendText(contact.phone, body);
 
       // Stored only after Meta accepted it. A row for a message that never left is a lie
       // the operator would act on.

@@ -35,6 +35,10 @@ import { withDb } from './helpers/db.js';
 import { testEnv } from './helpers/env.js';
 import { fakeGraph, type FakeGraph } from './helpers/fake-graph.js';
 import { fakeModel } from './helpers/fake-model.js';
+import { fakeLinked } from './helpers/fake-linked.js';
+
+/** No test opens a socket: a linked number never appears in these fixtures. */
+const linked = fakeLinked();
 
 const env = testEnv();
 const key = Buffer.from(env.CREDENTIALS_KEY, 'base64');
@@ -60,12 +64,12 @@ const answer = (over: Record<string, unknown> = {}): string =>
     ...over,
   });
 
-const deps = (): TurnDeps => ({ model: fakeModel(answer()), graph, key });
+const deps = (): TurnDeps => ({ model: fakeModel(answer()), graph, linked, key });
 
 const turn = (stageId: string | null, options: { dryRun?: boolean } = {}) =>
   runTurn(
     db,
-    { model: fakeModel(answer({ stageId, reply: 'Уточняю детали.' })), graph, key },
+    { model: fakeModel(answer({ stageId, reply: 'Уточняю детали.' })), graph, linked, key },
     { agentId, conversationId, ...options },
   );
 

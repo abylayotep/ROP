@@ -36,6 +36,10 @@ import { withDb } from './helpers/db.js';
 import { testEnv } from './helpers/env.js';
 import { fakeGraph, type FakeGraph } from './helpers/fake-graph.js';
 import { fakeModel, type FakeModel } from './helpers/fake-model.js';
+import { fakeLinked } from './helpers/fake-linked.js';
+
+/** No test opens a socket: a linked number never appears in these fixtures. */
+const linked = fakeLinked();
 
 const env = testEnv();
 const key = Buffer.from(env.CREDENTIALS_KEY, 'base64');
@@ -105,7 +109,7 @@ async function anotherConversation(): Promise<string> {
 }
 
 function deps(model: FakeModel): TurnDeps {
-  return { model, graph, key };
+  return { model, graph, linked, key };
 }
 
 /** One turn on the fixture's conversation. */

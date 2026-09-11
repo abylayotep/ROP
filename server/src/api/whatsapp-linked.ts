@@ -50,6 +50,47 @@ export function registerWhatsappLinkedRoutes(
   const ownerOnly = requireAgent(db, { role: 'owner' });
   const timeoutMs = options.timeoutMs ?? PAIRING_TIMEOUT_MS;
 
+  /**
+   * The deadline belongs to the server, not to the browser watching the QR code.
+   *
+   * It used to live inside the event stream, which meant a tab closed on a code — or one
+   * that never subscribed at all — left the row in `pairing` for good: the socket kept
+   * issuing codes nobody saw, and every later attempt by that account was refused with
+   * «Подключение уже идёт» and nothing to click.
+   */
+  const deadlines = new Map<string, NodeJS.Timeout>();
+
+  const clearDeadline = (numberId: string): void => {
+    const timer = deadlines.get(numberId);
+    if (timer) clearTimeout(timer);
+    deadlines.delete(numberId);
+  };
+
+  /** Idempotent: the stream and the deadline may both arrive at the same conclusion. */
+  const cancelPairing = async (numberId: string): Promise<void> => {
+    clearDeadline(numberId);
+    await db
+      .delete(whatsappNumbers)
+      .where(and(eq(whatsappNumbers.id, numberId), eq(whatsappNumbers.linkedState, 'pairing')))
+      .catch(() => undefined);
+    await linked.disconnect(numberId).catch(() => undefined);
+  };
+
+  const armDeadline = (numberId: string): void => {
+    clearDeadline(numberId);
+    const timer = setTimeout(() => void cancelPairing(numberId), timeoutMs);
+    timer.unref?.();
+    deadlines.set(numberId, timer);
+  };
+
+  // A pairing that settled has no deadline to keep: the phone answered, or WhatsApp
+  // refused it and the lifecycle has already marked the row.
+  linked.on((event) => {
+    if (event.type === 'open' || (event.type === 'closed' && event.loggedOut)) {
+      clearDeadline(event.numberId);
+    }
+  });
+
   const loadNumber = async (agentId: string, numberId: string) => {
     if (!isUuid(numberId)) throw new ApiError(404, 'Номер не найден');
     const [row] = await db
@@ -97,6 +138,7 @@ export function registerWhatsappLinkedRoutes(
       // A failure to even open a socket is the owner's to see, not a log line.
       try {
         await linked.connect(id);
+        armDeadline(id);
       } catch (error) {
         await db.delete(whatsappNumbers).where(eq(whatsappNumbers.id, id));
         throw new ApiError(
@@ -117,7 +159,7 @@ export function registerWhatsappLinkedRoutes(
       const number = await loadNumber(req.agent!.id, numberId);
       if (number.connectionKind !== 'linked') throw new ApiError(404, 'Номер не найден');
 
-      return streamPairing(reply, numberId);
+      return streamPairing(reply, numberId, number.createdAt);
     },
   );
 
@@ -130,6 +172,7 @@ export function registerWhatsappLinkedRoutes(
       if (number.connectionKind !== 'linked') {
         throw new ApiError(400, 'Этот номер подключён не по QR.');
       }
+      clearDeadline(numberId);
 
       // Best effort: the phone may already have dropped the pairing from its own side, and
       // that must not stop us forgetting it from ours.
@@ -155,7 +198,7 @@ export function registerWhatsappLinkedRoutes(
    * handler left registered after the browser walked away outlives the pairing and keeps
    * a closed response alive to write into.
    */
-  function streamPairing(reply: FastifyReply, numberId: string): Promise<void> {
+  function streamPairing(reply: FastifyReply, numberId: string, startedAt: Date): Promise<void> {
     reply.raw.writeHead(200, {
       'content-type': 'text/event-stream',
       'cache-control': 'no-cache',
@@ -191,20 +234,16 @@ export function registerWhatsappLinkedRoutes(
         }
       };
 
+      // What is left of the pairing's own deadline, not a fresh one: a browser that
+      // subscribes four minutes in must be told the code is dead in one, not in five.
+      const remaining = Math.max(0, timeoutMs - (Date.now() - startedAt.getTime()));
       const timer = setTimeout(() => {
         // Nobody scanned. The row is removed rather than left in `pairing`, where it would
         // block the next attempt and show as a number that does not work.
-        void db
-          .delete(whatsappNumbers)
-          .where(
-            and(eq(whatsappNumbers.id, numberId), eq(whatsappNumbers.linkedState, 'pairing')),
-          )
-          .catch(() => undefined)
-          .finally(() => {
-            void linked.disconnect(numberId).catch(() => undefined);
-            finish({ type: 'failed', reason: 'Код никто не отсканировал. Попробуйте ещё раз.' });
-          });
-      }, timeoutMs);
+        void cancelPairing(numberId).finally(() => {
+          finish({ type: 'failed', reason: 'Код никто не отсканировал. Попробуйте ещё раз.' });
+        });
+      }, remaining);
       timer.unref?.();
 
       unsubscribe = linked.on(handler);

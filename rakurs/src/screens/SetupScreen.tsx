@@ -25,7 +25,16 @@ import { WhatsappGuide } from '@/components/setup/WhatsappGuide';
 import { Card } from '@/components/ui/primitives';
 import { Async, Skeleton } from '@/components/ui/states';
 import { useApi } from '@/hooks/useApi';
-import { setupProgress, setupStatuses, type SetupFacts, type SetupState, type SetupStepId, type SetupStatus } from '@/lib/setup';
+import {
+  setupProgress,
+  setupStatuses,
+  whatsappGuideDone,
+  whatsappSetupPath,
+  type SetupFacts,
+  type SetupState,
+  type SetupStepId,
+  type SetupStatus,
+} from '@/lib/setup';
 import { useAgent } from '@/store/agent';
 import type { WebhookSetup } from '@/types';
 
@@ -160,6 +169,7 @@ function Checklist({ loaded, owner }: { loaded: Loaded; owner: boolean }) {
           open={open === step.id}
           onToggle={() => setOpen((current) => (current === step.id ? null : step.id))}
           setup={loaded.setup}
+          facts={loaded.facts}
         />
       ))}
     </div>
@@ -216,6 +226,7 @@ function StepCard({
   open,
   onToggle,
   setup,
+  facts,
 }: {
   n: number;
   step: StepDef;
@@ -223,6 +234,7 @@ function StepCard({
   open: boolean;
   onToggle: () => void;
   setup: WebhookSetup | null;
+  facts: SetupFacts;
 }) {
   const look = STATE_LOOK[status.state];
 
@@ -289,7 +301,7 @@ function StepCard({
 
       {open && (
         <div style={{ marginTop: 14 }}>
-          <StepGuide id={step.id} setup={setup} />
+          <StepGuide id={step.id} setup={setup} facts={facts} />
         </div>
       )}
     </Card>
@@ -302,10 +314,24 @@ function StepCard({
  * A switch rather than a lookup table: the WhatsApp guide is the only one that needs the
  * webhook values, and a table would have to type every guide as taking them.
  */
-function StepGuide({ id, setup }: { id: SetupStepId; setup: WebhookSetup | null }) {
+function StepGuide({
+  id,
+  setup,
+  facts,
+}: {
+  id: SetupStepId;
+  setup: WebhookSetup | null;
+  facts: SetupFacts;
+}) {
   switch (id) {
     case 'whatsapp':
-      return <WhatsappGuide setup={setup} />;
+      return (
+        <WhatsappGuide
+          setup={setup}
+          done={whatsappGuideDone(facts)}
+          path={whatsappSetupPath(facts.numbers)}
+        />
+      );
     case 'inbox':
       return <InboxGuide />;
     case 'funnel':

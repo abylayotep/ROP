@@ -38,7 +38,10 @@ const toMessage = (row: typeof messages.$inferSelect, aiReplyId: string | null):
   body: row.body,
   // A boolean, not a path: the browser learns that a file exists and is given a route to
   // ask for it. Where it sits on our disk is nobody else's business.
-  hasMedia: row.mediaPath !== null,
+  // `mediaRef` counts: an imported history line has its file still on WhatsApp, and the
+  // route below fetches it on the first open. Saying «нет файла» would hide a photo the
+  // customer did send.
+  hasMedia: row.mediaPath !== null || row.mediaRef !== null,
   mediaMime: row.mediaMime,
   status: row.status,
   sentAt: row.sentAt.toISOString(),
@@ -306,16 +309,77 @@ export function registerConversationRoutes(
         .innerJoin(conversations, eq(conversations.id, messages.conversationId))
         .where(and(eq(messages.id, messageId), eq(conversations.agentId, req.agent!.id)));
 
-      if (!row?.message.mediaPath) throw new ApiError(404, 'Файл не найден');
+      if (!row) throw new ApiError(404, 'Файл не найден');
+
+      // Imported history holds the message but not its bytes. The download happens here,
+      // the first time somebody opens the file, and the row is filled in afterwards so the
+      // second open is a disk read like any other.
+      const message = row.message.mediaPath
+        ? row.message
+        : await fetchPendingMedia(db, env, linked, row.message);
+
+      if (!message.mediaPath) throw new ApiError(404, 'Файл не найден');
 
       // The only path ever used is the one stored on the row. A path from the request
       // would be a way to read any file the process can reach.
-      const file = await readFile(join(env.MEDIA_DIR, row.message.mediaPath)).catch(() => null);
+      const file = await readFile(join(env.MEDIA_DIR, message.mediaPath)).catch(() => null);
       if (!file) throw new ApiError(404, 'Файл не найден');
 
-      return reply.type(row.message.mediaMime ?? 'application/octet-stream').send(file);
+      return reply.type(message.mediaMime ?? 'application/octet-stream').send(file);
     },
   );
+}
+
+/**
+ * Файл, который история принесла ссылкой, а не байтами.
+ *
+ * The phone is asked for it now, once, and the answer is written to the row: `mediaRef` is
+ * cleared, so a second open is a disk read and a photo does not cost a WhatsApp download
+ * every time somebody scrolls past it. A failure leaves the row alone — the file may be a
+ * reconnect away — and answers 404, the same as a file that was never there.
+ */
+async function fetchPendingMedia(
+  db: Db,
+  env: Env,
+  linked: LinkedClient,
+  message: typeof messages.$inferSelect,
+): Promise<typeof messages.$inferSelect> {
+  if (!message.mediaRef) return message;
+
+  const [row] = await db
+    .select({ number: whatsappNumbers })
+    .from(conversations)
+    .innerJoin(whatsappNumbers, eq(whatsappNumbers.id, conversations.whatsappNumberId))
+    .where(eq(conversations.id, message.conversationId));
+
+  // Only a linked phone can be asked: a Cloud API file is fetched when it arrives, and its
+  // id stops working after thirty days, so there is nothing here to ask Meta for.
+  const number = row?.number;
+  if (!number || number.connectionKind !== 'linked') return message;
+
+  try {
+    const bytes = await linked.downloadMedia(number.id, message.mediaRef as never);
+    const stored = await storeInboundMedia(
+      { mediaDir: env.MEDIA_DIR },
+      {
+        bytes,
+        mime: message.mediaMime ?? 'application/octet-stream',
+        agentId: number.agentId,
+        waMessageId: message.waMessageId ?? message.id,
+      },
+    );
+
+    const [updated] = await db
+      .update(messages)
+      .set({ mediaPath: stored.path, mediaMime: stored.mime, mediaRef: null })
+      .where(eq(messages.id, message.id))
+      .returning();
+    return updated ?? message;
+  } catch {
+    // The phone is off, or WhatsApp no longer holds the file. Both read the same to the
+    // person clicking: «файла нет». The row keeps its reference for the next attempt.
+    return message;
+  }
 }
 
 /** The conversation with everything the routes need, or a 404 that says nothing more. */

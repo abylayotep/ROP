@@ -78,12 +78,24 @@ export function IntegrationsScreen() {
             agentId={agent.id}
           />
           {owner && setup && <WebhookCard setup={setup} />}
-          {owner && (
+          {/* Способы подключения показываются, только пока подключать нечего: кабинет
+              работает с одним номером, и три карточки над уже подключённым номером
+              предлагают то, что всё равно не выйдет сделать. */}
+          {owner && numbers.length === 0 && (
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 16 }}>
               <PhoneNumberCard agentId={agent.id} onConnected={query.reload} />
               <LinkedPhoneCard agentId={agent.id} onConnected={query.reload} />
               <ConnectForm agentId={agent.id} onConnected={query.reload} />
             </div>
+          )}
+          {owner && numbers.length > 0 && (
+            <Card>
+              <div className="pretty" style={{ fontSize: 12, color: 'var(--text-4)', lineHeight: 1.55 }}>
+                Кабинет работает с одним номером. Чтобы подключить другой, сначала удалите
+                текущий — вместе с ним удалятся переписки и данные о рекламе, из которой
+                пришли клиенты.
+              </div>
+            </Card>
           )}
           {!owner && numbers.length === 0 && (
             <Card>
@@ -170,6 +182,17 @@ function ConnectedNumbers({
               )}
               {number.connectionKind === 'linked' && number.linkedState === 'pairing' && (
                 <div style={hint}>Ждём сканирования кода.</div>
+              )}
+              {/* Импорт истории идёт минутами после сканирования и виден только здесь:
+                  без этой строки «сообщений нет» и «история ещё едет» неразличимы. */}
+              {number.connectionKind === 'linked' && number.linkedState === 'open' && (
+                <div style={hint}>
+                  {number.historyProgress >= 100
+                    ? 'История с телефона импортирована.'
+                    : number.historyProgress > 0
+                      ? `Импорт истории: ${number.historyProgress} %`
+                      : 'История с телефона ещё не пришла. Телефон присылает её в первые минуты после сканирования.'}
+                </div>
               )}
               {/* The failure this line exists for: Meta took the number and delivers
                   nothing, which looks identical to working until a client writes. A phone

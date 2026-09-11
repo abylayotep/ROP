@@ -23,3 +23,4 @@ var/media-test/
 # Working notes from the implementation sessions: useful while the work is live,
 # not part of what the repository documents.
 .superpowers/
+server/var/

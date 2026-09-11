@@ -442,7 +442,7 @@ describe('answering', () => {
     await withGraph(
       fakeGraph({
         sendText: async () => {
-          throw new GraphError('Malformed access token EAAG-token', 401, 190);
+          throw new GraphError('Malformed access token EAAG-token', 401);
         },
       }),
     );
@@ -452,6 +452,56 @@ describe('answering', () => {
     expect(res.statusCode).toBe(502);
     expect(res.json().message).not.toContain('EAAG-token');
     expect(res.json().message).toContain('<токен скрыт>');
+  });
+
+  it('records that the token is dead when Meta refuses it, and says what to do', async () => {
+    // The stored deadline is a prediction. Meta can invalidate a token early — the
+    // business user loses access, the owner removes the application — and until this is
+    // written down the cabinet keeps calling the number healthy while nothing sends.
+    await db
+      .update(whatsappNumbers)
+      .set({ tokenExpiresAt: new Date(Date.now() + 30 * DAY) })
+      .where(eq(whatsappNumbers.id, numberId));
+    await withGraph(
+      fakeGraph({
+        sendText: async () => {
+          throw new GraphError('Error validating access token: Session has expired', 401, 190);
+        },
+      }),
+    );
+
+    const res = await answer({ body: 'привет' });
+
+    expect(res.statusCode).toBe(409);
+    expect(res.json().message).toBe(
+      'Доступ Meta к номеру истёк. Подключите номер заново в интеграциях.',
+    );
+    const [row] = await db.select().from(whatsappNumbers).where(eq(whatsappNumbers.id, numberId));
+    // Within a minute of now rather than «not in the future»: the deadline is written by
+    // Postgres' clock, and the test reads Node's. A month early is the point, not a second.
+    expect(row!.tokenExpiresAt!.getTime()).toBeLessThan(Date.now() + 60_000);
+    expect(row!.tokenExpiresAt!.getTime()).toBeGreaterThan(Date.now() - 60_000);
+    expect(await db.select().from(messages)).toEqual([]);
+  });
+
+  it('leaves the deadline alone when Meta refuses for a reason re-connecting will not fix', async () => {
+    const stated = new Date(Date.now() + 30 * DAY);
+    await db
+      .update(whatsappNumbers)
+      .set({ tokenExpiresAt: stated })
+      .where(eq(whatsappNumbers.id, numberId));
+    await withGraph(
+      fakeGraph({
+        sendText: async () => {
+          throw new GraphError('Recipient phone number not in allowed list', 400, 131030);
+        },
+      }),
+    );
+
+    await answer({ body: 'привет' });
+
+    const [row] = await db.select().from(whatsappNumbers).where(eq(whatsappNumbers.id, numberId));
+    expect(row!.tokenExpiresAt).toEqual(stated);
   });
 
   it('says in Russian that the number has to be reconnected when the token will not decrypt', async () => {

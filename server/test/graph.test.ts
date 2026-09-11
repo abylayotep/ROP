@@ -30,6 +30,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 describe('graph client', () => {
@@ -170,14 +171,47 @@ describe('graph client', () => {
   it('exchanges an Embedded Signup code for a business token, server-side', async () => {
     answerWith({ access_token: 'EAAB-business', token_type: 'bearer' });
 
-    const token = await client.exchangeCode('AQD-code', '1585667806534384', 'app-secret');
+    const issued = await client.exchangeCode('AQD-code', '1585667806534384', 'app-secret');
 
-    expect(token).toBe('EAAB-business');
+    expect(issued.token).toBe('EAAB-business');
     expect(calls[0]!.url).toBe(
       'https://graph.facebook.com/v26.0/oauth/access_token?client_id=1585667806534384&client_secret=app-secret&code=AQD-code',
     );
     // No bearer header: there is no token yet, and the secret is in the query by Meta's design.
     expect((calls[0]!.init.headers as Record<string, string>)?.Authorization).toBeUndefined();
+  });
+
+  it('turns the lifetime Meta states into the moment the token dies', async () => {
+    // The configuration built from Meta's «60-day token» template answers with
+    // `expires_in`. Without reading it nothing in the product knows the number has a
+    // deadline, and the first sign of it is every send failing at once.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-11T09:00:00.000Z'));
+    answerWith({ access_token: 'EAAB-business', token_type: 'bearer', expires_in: 5_184_000 });
+
+    const issued = await client.exchangeCode('AQD-code', '1585667806534384', 'app-secret');
+
+    expect(issued.expiresAt).toEqual(new Date('2026-11-10T09:00:00.000Z'));
+  });
+
+  it('reports no deadline when Meta names none', async () => {
+    // A configuration without the 60-day variant issues a token that does not expire, and
+    // a made-up deadline would warn an owner about a number that is working perfectly.
+    answerWith({ access_token: 'EAAB-business', token_type: 'bearer' });
+
+    const issued = await client.exchangeCode('AQD-code', '1585667806534384', 'app-secret');
+
+    expect(issued.expiresAt).toBeNull();
+  });
+
+  it('reports no deadline when Meta says the lifetime is zero', async () => {
+    // Meta writes `expires_in: 0` for a token that never expires. Read literally that is
+    // «died at the moment it was issued», which would lock the number out on arrival.
+    answerWith({ access_token: 'EAAB-business', token_type: 'bearer', expires_in: 0 });
+
+    const issued = await client.exchangeCode('AQD-code', '1585667806534384', 'app-secret');
+
+    expect(issued.expiresAt).toBeNull();
   });
 
   it('refuses a successful exchange whose body carries no token', async () => {

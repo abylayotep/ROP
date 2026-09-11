@@ -62,6 +62,17 @@ export interface WhatsappNumber {
   syncError: string | null;
   /** The phone disconnected the API; reconnect happens on the phone, not here. */
   offboarded: boolean;
+  /**
+   * When the Meta token behind this number stops working, ISO, or null when no deadline
+   * is known — a pasted system-user token may be permanent, and a linked device has no
+   * token at all.
+   *
+   * The cabinet compares it with the current time rather than being told «expired»: the
+   * warning has to appear days early, and a boolean could not say how many days are left.
+   * A moment already in the past means the number neither sends nor receives until the
+   * owner runs Embedded Signup again.
+   */
+  tokenExpiresAt: string | null;
 }
 
 /**

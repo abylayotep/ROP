@@ -42,6 +42,20 @@ export interface PhoneNumber {
 
 export type SmbSyncType = 'smb_app_state_sync' | 'history';
 
+/**
+ * A token and the moment it stops working.
+ *
+ * `expiresAt` is null when Meta names no lifetime, which is what a permanent system-user
+ * token looks like. The distinction is the whole point of returning a pair rather than a
+ * string: the configuration this product runs on today is built from Meta's «WhatsApp
+ * Embedded Signup with 60-day token» template, so every token it issues has a deadline,
+ * and a deadline nobody wrote down arrives as every number falling silent at once.
+ */
+export interface IssuedToken {
+  token: string;
+  expiresAt: Date | null;
+}
+
 export interface MediaDescriptor {
   url: string;
   mimeType: string;
@@ -66,7 +80,7 @@ export interface GraphClient {
    * Turns the code Embedded Signup hands the browser into a business token. Server-side
    * only: the app secret goes in the request, and the code dies after thirty seconds.
    */
-  exchangeCode(code: string, appId: string, appSecret: string): Promise<string>;
+  exchangeCode(code: string, appId: string, appSecret: string): Promise<IssuedToken>;
   /** The numbers of a WABA; needed when Embedded Signup reports only the WABA. */
   listPhoneNumbers(wabaId: string, token: string): Promise<PhoneNumber[]>;
   /** Asks Meta to stream the phone's contacts or history to the webhook. Once each. */
@@ -171,6 +185,18 @@ async function call<T>(url: string, token: string, init: RequestInit = {}): Prom
   });
 }
 
+/**
+ * Seconds of remaining life, as Meta reports them, turned into a moment.
+ *
+ * Meta writes `expires_in: 0` for a token that never expires, and omits the field
+ * entirely on some responses. Both mean «no deadline»: read literally, the zero would
+ * mean the token died on arrival and would lock the owner out of a number that works.
+ */
+function expiryFrom(expiresIn: number | undefined): Date | null {
+  if (typeof expiresIn !== 'number' || !Number.isFinite(expiresIn) || expiresIn <= 0) return null;
+  return new Date(Date.now() + expiresIn * 1000);
+}
+
 const PHONE_FIELDS = encodeURIComponent(
   'id,display_phone_number,verified_name,platform_type,is_on_biz_app',
 );
@@ -209,8 +235,10 @@ export function createGraphClient(): GraphClient {
         if (!response.ok) throw await failure(response);
         const text = await response.text();
         try {
-          const parsed = JSON.parse(text) as { access_token?: string };
-          if (parsed.access_token) return parsed.access_token;
+          const parsed = JSON.parse(text) as { access_token?: string; expires_in?: number };
+          if (parsed.access_token) {
+            return { token: parsed.access_token, expiresAt: expiryFrom(parsed.expires_in) };
+          }
         } catch {
           // Not JSON. A gateway page answering 200 is not a token, and guessing at the
           // shape of the body would hand one downstream to be stored and encrypted.

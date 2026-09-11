@@ -8,6 +8,7 @@ import { Async, EmptyState, RowsSkeleton, Skeleton } from '@/components/ui/state
 import { useToast } from '@/components/ui/Toast';
 import { useApi } from '@/hooks/useApi';
 import { runCoexistenceSignup } from '@/lib/embedded-signup';
+import { numbersToRenew, tokenDeadline } from '@/lib/whatsapp-token';
 import { useAgent } from '@/store/agent';
 import type {
   CapiEvent,
@@ -67,6 +68,9 @@ export function IntegrationsScreen() {
     <Async state={query} skeleton={<Skeleton height={200} />}>
       {({ numbers, setup }) => (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          {/* Above everything, including the numbers themselves: the sixty-day token is
+              the one failure that arrives on a working cabinet with no warning at all. */}
+          <TokenRenewalCard numbers={numbers} owner={owner} agentId={agent.id} onChanged={query.reload} />
           <ConnectedNumbers
             numbers={numbers}
             owner={owner}
@@ -158,6 +162,7 @@ function ConnectedNumbers({
                   Business Platform.
                 </div>
               )}
+              <TokenDeadlineLine number={number} />
               {number.connectionKind === 'linked' && number.linkedState === 'logged_out' && (
                 <div style={{ ...hint, color: 'var(--danger)' }}>
                   Телефон отвязал кабинет — подключите заново по QR.
@@ -428,14 +433,45 @@ function ConnectForm({ agentId, onConnected }: { agentId: string; onConnected: (
 }
 
 /**
- * Подключение номера, который уже живёт в WhatsApp Business на телефоне.
+ * Строка о сроке доступа Meta под самим номером.
  *
- * Окно открывает Meta; кабинет получает код и данные сессии и сразу отдаёт их серверу —
- * код живёт тридцать секунд. Сам сервер обменивает код на токен, подписывает приложение
- * и запрашивает у Meta контакты и историю. Всё, что здесь может пойти не так, приходит
- * текстом с сервера и показывается как есть.
+ * Said on the row as well as in the card above the list: an owner with two numbers has to
+ * know which of them is the one about to go quiet.
  */
-function PhoneNumberCard({ agentId, onConnected }: { agentId: string; onConnected: () => void }) {
+function TokenDeadlineLine({ number }: { number: WhatsappNumber }) {
+  const deadline = tokenDeadline(number);
+  if (deadline.note === '') return null;
+
+  return (
+    <div
+      style={{
+        ...hint,
+        color: deadline.state === 'expired' ? 'var(--danger)' : 'var(--warn)',
+      }}
+    >
+      {deadline.note}
+    </div>
+  );
+}
+
+/**
+ * Кнопка, которая открывает окно Meta, — одна на подключение и на продление.
+ *
+ * Renewing a token is the same Embedded Signup run against the same number: Meta issues a
+ * new one and the server writes it over the old row. Two buttons doing the same thing
+ * would be two places to fix when Meta changes the window.
+ */
+function CoexistenceButton({
+  agentId,
+  onConnected,
+  label,
+  done,
+}: {
+  agentId: string;
+  onConnected: () => void;
+  label: string;
+  done: string;
+}) {
   const toast = useToast();
   const [busy, setBusy] = useState(false);
 
@@ -445,7 +481,7 @@ function PhoneNumberCard({ agentId, onConnected }: { agentId: string; onConnecte
       const setup = await api.getEmbeddedSignupSetup(agentId);
       const connection = await runCoexistenceSignup(setup);
       await api.connectCoexistenceNumber(agentId, connection);
-      toast.ok('Номер подключён. Контакты и история подтянутся в течение нескольких минут.');
+      toast.ok(done);
       onConnected();
     } catch (error) {
       toast.fail(error);
@@ -454,6 +490,88 @@ function PhoneNumberCard({ agentId, onConnected }: { agentId: string; onConnecte
     }
   }
 
+  return (
+    <button type="button" className="btn" disabled={busy} onClick={connect}>
+      {busy ? 'Ждём Meta…' : label}
+    </button>
+  );
+}
+
+/**
+ * Предупреждение о токене Meta, который скоро закончится или уже закончился.
+ *
+ * Meta issues the cabinet's tokens from a configuration built on the «60-day token»
+ * template, and there is no refresh call: a permanent token needs Tech Provider status,
+ * which this application does not have. So the deadline is real, it arrives for every
+ * connected number at once, and nothing about a working cabinet hints at it. This card is
+ * the hint — it appears two weeks out and stays until somebody presses the button.
+ */
+function TokenRenewalCard({
+  numbers,
+  owner,
+  agentId,
+  onChanged,
+}: {
+  numbers: WhatsappNumber[];
+  owner: boolean;
+  agentId: string;
+  onChanged: () => void;
+}) {
+  const pending = numbersToRenew(numbers);
+  if (pending.length === 0) return null;
+
+  const expired = pending.filter((entry) => entry.deadline.state === 'expired');
+
+  return (
+    <Card>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        <div
+          style={{
+            fontSize: 13.5,
+            fontWeight: 650,
+            color: expired.length > 0 ? 'var(--danger)' : 'var(--warn)',
+          }}
+        >
+          {expired.length > 0
+            ? 'Доступ Meta к номеру истёк'
+            : 'Доступ Meta к номеру скоро закончится'}
+        </div>
+        {pending.map((entry) => (
+          <div key={entry.number.id} style={{ fontSize: 13 }}>
+            {entry.number.displayPhone} — {entry.deadline.note}
+          </div>
+        ))}
+        <div style={hint}>
+          Meta выдаёт кабинету доступ к номеру на 60 дней. Продлить его можно только тем же
+          окном Meta, что и при подключении: переписки, клиенты и настройки остаются на
+          месте.
+        </div>
+        {owner ? (
+          <div>
+            <CoexistenceButton
+              agentId={agentId}
+              onConnected={onChanged}
+              label="Подключить номер заново"
+              done="Доступ продлён. Переписки и настройки остались на месте."
+            />
+          </div>
+        ) : (
+          <div style={hint}>Продлевает доступ владелец компании.</div>
+        )}
+      </div>
+    </Card>
+  );
+}
+
+/**
+ * Подключение номера, который уже живёт в WhatsApp Business на телефоне.
+ *
+ * Окно открывает Meta; кабинет получает код и данные сессии и сразу отдаёт их серверу —
+ * код живёт тридцать секунд. Сам сервер обменивает код на токен, подписывает приложение
+ * и запрашивает у Meta контакты и историю. Всё, что здесь может пойти не так, приходит
+ * текстом с сервера и показывается как есть.
+ */
+function PhoneNumberCard({ agentId, onConnected }: { agentId: string; onConnected: () => void }) {
   return (
     <Card>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -470,10 +588,17 @@ function PhoneNumberCard({ agentId, onConnected }: { agentId: string; onConnecte
         <div style={hint}>
           Групповые чаты, звонки и рассылки из приложения в кабинет не попадают.
         </div>
+        <div style={hint}>
+          Meta выдаёт доступ к номеру на 60 дней. За две недели до конца кабинет напомнит
+          продлить его — это то же окно Meta, переписки при этом остаются.
+        </div>
         <div>
-          <button type="button" className="btn" disabled={busy} onClick={connect}>
-            {busy ? 'Ждём Meta…' : 'Подключить через Meta'}
-          </button>
+          <CoexistenceButton
+            agentId={agentId}
+            onConnected={onConnected}
+            label="Подключить через Meta"
+            done="Номер подключён. Контакты и история подтянутся в течение нескольких минут."
+          />
         </div>
       </div>
     </Card>

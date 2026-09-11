@@ -62,6 +62,7 @@ export const toApi = (row: typeof whatsappNumbers.$inferSelect): WhatsappNumber 
   historyDeclined: row.historyDeclinedAt !== null,
   syncError: row.syncError,
   offboarded: row.offboardedAt !== null,
+  tokenExpiresAt: row.tokenExpiresAt?.toISOString() ?? null,
 });
 
 /**

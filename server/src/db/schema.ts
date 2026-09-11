@@ -167,6 +167,12 @@ export const whatsappNumbers = pgTable(
     // Encrypted with the credentials key. Never selected into an API response.
     accessToken: text('access_token'),
     enabled: boolean('enabled').notNull().default(true),
+    // When the stored token stops working, as Meta stated it at issue, or as Meta proved
+    // it by refusing a request. Null means no deadline is known — a pasted system-user
+    // token may be permanent, and rows older than this column have nothing to report.
+    // The Embedded Signup configuration in production is built from Meta's «60-day token»
+    // template, so every token it issues fills this in and every one of them dies.
+    tokenExpiresAt: timestamp('token_expires_at', { withTimezone: true }),
     // Set when Meta confirms our application is subscribed to the WABA. Until then the
     // number is connected but silent, which is the failure this column makes visible.
     subscribedAt: timestamp('subscribed_at', { withTimezone: true }),

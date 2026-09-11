@@ -33,6 +33,7 @@ const number = (over: Partial<WhatsappNumber> = {}): WhatsappNumber => ({
   historyDeclined: false,
   syncError: null,
   offboarded: false,
+  tokenExpiresAt: null,
   ...over,
 });
 
@@ -56,6 +57,17 @@ const capi = (over: Partial<CapiSettings> = {}): CapiSettings => ({
 });
 
 describe('whatsappStatus', () => {
+  it('не называет готовым номер, у которого истёк доступ Meta', () => {
+    // Ровно тот случай, ради которого чек-лист читает данные, а не галочки: номер
+    // подключён, подписан, включён — и не работает со вчерашнего дня.
+    const status = whatsappStatus([
+      number({ connectionKind: 'coexistence', tokenExpiresAt: '2026-09-10T09:00:00.000Z' }),
+    ]);
+
+    expect(status.state).toBe('partial');
+    expect(status.note).toContain('Доступ Meta истёк');
+  });
+
   it('не называет готовым номер, на который не придут сообщения', () => {
     // Meta приняла номер, кабинет им отвечает, входящих не будет никогда. Снаружи это
     // неотличимо от рабочего номера до первого клиента.

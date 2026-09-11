@@ -134,6 +134,13 @@
       "when": 1789087145809,
       "tag": "0018_careless_shinobi_shaw",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1789095024644,
+      "tag": "0019_burly_ghost_rider",
+      "breakpoints": true
     }
   ]
 }

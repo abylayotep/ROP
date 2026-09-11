@@ -13,6 +13,7 @@ import { credentialsKey } from '../lib/secret-box.js';
 import { isUuid } from '../lib/uuid.js';
 import type { GraphClient } from '../lib/whatsapp/graph.js';
 import type { LinkedClient } from '../lib/whatsapp/linked/client.js';
+import { markTokenRejected } from '../lib/whatsapp/token-expiry.js';
 import { transportFor } from '../lib/whatsapp/transport.js';
 import { storeInboundMedia } from '../lib/whatsapp/media.js';
 import { requireAgent } from './require-agent.js';
@@ -151,7 +152,12 @@ export function registerConversationRoutes(
 
       // TransportRefusal is an ApiError: its status and Russian sentence reach the
       // operator unchanged, which is the whole reason it carries them.
-      const transport = transportFor(number, { graph, linked, key: credentialsKey(env) });
+      const transport = transportFor(number, {
+        graph,
+        linked,
+        key: credentialsKey(env),
+        onTokenRejected: () => markTokenRejected(db, number.id),
+      });
 
       // Asked of the transport rather than assumed: the 24-hour window is a Cloud API
       // rule, and a linked device has none. Refused here rather than by Meta so the
@@ -220,7 +226,12 @@ export function registerConversationRoutes(
         throw new ApiError(409, 'Номер отключён. Включите его в интеграциях.');
       }
 
-      const transport = transportFor(number, { graph, linked, key: credentialsKey(env) });
+      const transport = transportFor(number, {
+        graph,
+        linked,
+        key: credentialsKey(env),
+        onTokenRejected: () => markTokenRejected(db, number.id),
+      });
       if (transport.requiresOpenWindow && !windowOpen(conversation.lastInboundAt)) {
         throw new ApiError(
           409,

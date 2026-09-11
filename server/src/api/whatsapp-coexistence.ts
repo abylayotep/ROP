@@ -7,7 +7,13 @@ import { whatsappNumbers } from '../db/schema.js';
 import type { Env } from '../env.js';
 import { ApiError } from '../lib/errors.js';
 import { credentialsKey, encryptSecret } from '../lib/secret-box.js';
-import { GraphError, withoutSecret, type GraphClient, type PhoneNumber } from '../lib/whatsapp/graph.js';
+import {
+  GraphError,
+  withoutSecret,
+  type GraphClient,
+  type IssuedToken,
+  type PhoneNumber,
+} from '../lib/whatsapp/graph.js';
 import { requireAgent } from './require-agent.js';
 import { duplicateNumberError, isDuplicate, toApi } from './whatsapp-numbers.js';
 
@@ -52,15 +58,16 @@ export function registerWhatsappCoexistenceRoutes(
       if (!parsed.success) throw new ApiError(400, 'Meta не вернула данные для подключения');
       const { code, wabaId, businessId, phoneNumberId } = parsed.data;
 
-      let token: string;
+      let issued: IssuedToken;
       try {
-        token = await graph.exchangeCode(code, env.META_APP_ID, env.META_APP_SECRET);
+        issued = await graph.exchangeCode(code, env.META_APP_ID, env.META_APP_SECRET);
       } catch (error) {
         if (error instanceof GraphError) {
           throw new ApiError(400, `Meta не приняла подтверждение: ${withoutSecret(error.message, env.META_APP_SECRET)}`);
         }
         throw error;
       }
+      const token = issued.token;
 
       // The finish event of the coexistence flow may carry only the WABA. One number on it
       // is the common case; two is the owner's choice to make in Meta's own window.
@@ -103,6 +110,39 @@ export function registerWhatsappCoexistenceRoutes(
         throw error;
       }
 
+      const secret = encryptSecret(token, credentialsKey(env), number.id);
+
+      // Running Embedded Signup again on a number we already hold is a renewal, not a
+      // mistake: Meta's sixty-day token has no other cure, and the button the owner is
+      // told to press is this same button. Only the owner's own coexistence number is
+      // renewed — a manual number is a deliberate setup with a system-user token, and
+      // another agent's number is not this owner's to take.
+      const [existing] = await db
+        .select()
+        .from(whatsappNumbers)
+        .where(eq(whatsappNumbers.phoneNumberId, number.id));
+      if (existing) {
+        if (existing.agentId !== req.agent!.id || existing.connectionKind !== 'coexistence') {
+          throw await duplicateNumberError(db, number.id, req.agent!.id);
+        }
+        const [renewed] = await db
+          .update(whatsappNumbers)
+          .set({
+            accessToken: secret,
+            tokenExpiresAt: issued.expiresAt,
+            displayPhone: number.displayPhoneNumber,
+            wabaId,
+            businessId: businessId ?? existing.businessId,
+            subscribedAt: new Date(),
+          })
+          .where(eq(whatsappNumbers.id, existing.id))
+          .returning();
+        // No `smb_app_data` here. Both requests are one-shot on Meta's side; asking again
+        // would trade a clean row for «already requested» in red, and the contacts and
+        // history this number has are already in the cabinet.
+        return toApi(renewed!);
+      }
+
       let row: typeof whatsappNumbers.$inferSelect;
       try {
         const inserted = await db
@@ -113,13 +153,16 @@ export function registerWhatsappCoexistenceRoutes(
             wabaId,
             businessId: businessId ?? null,
             displayPhone: number.displayPhoneNumber,
-            accessToken: encryptSecret(token, credentialsKey(env), number.id),
+            accessToken: secret,
+            tokenExpiresAt: issued.expiresAt,
             subscribedAt: new Date(),
             connectionKind: 'coexistence',
           })
           .returning();
         row = inserted[0]!;
       } catch (error) {
+        // Still guarded: the select above and this insert are not one transaction, and two
+        // finished signup windows arriving together would both find nothing.
         if (isDuplicate(error)) throw await duplicateNumberError(db, number.id, req.agent!.id);
         throw error;
       }

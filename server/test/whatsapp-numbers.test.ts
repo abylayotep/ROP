@@ -208,6 +208,33 @@ describe('listing and changing a number', () => {
     expect(res.json()[0].accessToken).toBeUndefined();
   });
 
+  it('reports the token deadline so the cabinet can warn before it passes', async () => {
+    await connect(valid);
+    await db
+      .update(whatsappNumbers)
+      .set({ tokenExpiresAt: new Date('2026-11-10T09:00:00.000Z') });
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/agents/${agentId}/whatsapp/numbers`,
+      cookies: jar,
+    });
+
+    expect(res.json()[0].tokenExpiresAt).toBe('2026-11-10T09:00:00.000Z');
+  });
+
+  it('reports no deadline for a number whose token has none', async () => {
+    await connect(valid);
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/agents/${agentId}/whatsapp/numbers`,
+      cookies: jar,
+    });
+
+    expect(res.json()[0].tokenExpiresAt).toBeNull();
+  });
+
   it('lets a member read the list', async () => {
     await connect(valid);
     await db

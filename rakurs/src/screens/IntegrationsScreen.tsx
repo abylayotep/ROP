@@ -183,6 +183,17 @@ function ConnectedNumbers({
               {number.connectionKind === 'linked' && number.linkedState === 'pairing' && (
                 <div style={hint}>Ждём сканирования кода.</div>
               )}
+              {/* Импорт истории идёт минутами после сканирования и виден только здесь:
+                  без этой строки «сообщений нет» и «история ещё едет» неразличимы. */}
+              {number.connectionKind === 'linked' && number.linkedState === 'open' && (
+                <div style={hint}>
+                  {number.historyProgress >= 100
+                    ? 'История с телефона импортирована.'
+                    : number.historyProgress > 0
+                      ? `Импорт истории: ${number.historyProgress} %`
+                      : 'История с телефона ещё не пришла. Телефон присылает её в первые минуты после сканирования.'}
+                </div>
+              )}
               {/* The failure this line exists for: Meta took the number and delivers
                   nothing, which looks identical to working until a client writes. A phone
                   paired by QR has no WABA and no subscription to be missing. */}

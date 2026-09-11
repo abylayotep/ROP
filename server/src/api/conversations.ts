@@ -11,6 +11,7 @@ import { ApiError } from '../lib/errors.js';
 import { credentialsKey, decryptSecret } from '../lib/secret-box.js';
 import { isUuid } from '../lib/uuid.js';
 import { GraphError, withoutSecret, type GraphClient } from '../lib/whatsapp/graph.js';
+import { asCloudNumber } from '../lib/whatsapp/cloud-number.js';
 import { requireAgent } from './require-agent.js';
 
 /** WhatsApp allows a free-form reply for 24 hours after the customer's last message. */
@@ -144,9 +145,10 @@ export function registerConversationRoutes(
       // A key that no longer matches the stored token throws an English developer message.
       // The frontend renders `message` verbatim, so it is answered here in the operator's
       // language, with the one thing they can do about it.
+      const cloud = asCloudNumber(number);
       let token: string;
       try {
-        token = decryptSecret(number.accessToken, credentialsKey(env), number.phoneNumberId);
+        token = decryptSecret(cloud.accessToken, credentialsKey(env), cloud.phoneNumberId);
       } catch {
         throw new ApiError(
           409,
@@ -156,7 +158,7 @@ export function registerConversationRoutes(
 
       let messageId: string;
       try {
-        ({ messageId } = await graph.sendText(number.phoneNumberId, token, contact.phone, body));
+        ({ messageId } = await graph.sendText(cloud.phoneNumberId, token, contact.phone, body));
       } catch (error) {
         if (error instanceof GraphError) {
           throw new ApiError(502, `Meta не отправила сообщение: ${withoutSecret(error.message, token)}`);

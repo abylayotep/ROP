@@ -28,6 +28,7 @@ const number = (over: Partial<WhatsappNumber> = {}): WhatsappNumber => ({
   subscribed: true,
   connectedAt: '2026-09-01T10:00:00.000Z',
   connectionKind: 'manual',
+  linkedState: null,
   historyProgress: 0,
   historyDeclined: false,
   syncError: null,

@@ -39,6 +39,7 @@ import { recordStageMove } from '../funnel-history.js';
 import { sendStageMessage } from '../funnel-message.js';
 import { searchKnowledge } from '../knowledge/search.js';
 import { decryptSecret } from '../secret-box.js';
+import { asCloudNumber } from '../whatsapp/cloud-number.js';
 import { GraphError, withoutSecret, type GraphClient } from '../whatsapp/graph.js';
 import { ModelError, type ChatMessage, type ModelClient } from './openrouter.js';
 import {
@@ -951,7 +952,8 @@ function readySend(deps: TurnDeps, number: typeof whatsappNumbers.$inferSelect):
   if (!number.enabled) return { ok: false, detail: 'Ответ не отправлен: номер отключён.' };
 
   try {
-    return { ok: true, token: decryptSecret(number.accessToken, deps.key, number.phoneNumberId) };
+    const cloud = asCloudNumber(number);
+    return { ok: true, token: decryptSecret(cloud.accessToken, deps.key, cloud.phoneNumberId) };
   } catch {
     return {
       ok: false,
@@ -995,7 +997,7 @@ async function deliver(
   let accepted = false;
   try {
     const { messageId } = await deps.graph.sendText(
-      number.phoneNumberId,
+      asCloudNumber(number).phoneNumberId,
       token,
       contact.phone,
       body,

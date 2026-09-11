@@ -11,6 +11,7 @@ import {
   text,
   timestamp,
   unique,
+  uniqueIndex,
   uuid,
   type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
@@ -139,11 +140,17 @@ export const agents = pgTable(
 );
 
 /**
- * A WhatsApp number connected through the Cloud API.
+ * A WhatsApp number the cabinet answers on, whichever way it was connected.
  *
  * `phoneNumberId` is unique across the whole product, not per agent: it identifies the number
  * inside Meta, an incoming webhook carries only that, and two agents claiming one number would
- * make the routing ambiguous.
+ * make the routing ambiguous. It is null for a linked device, which Meta knows nothing about —
+ * hence a partial unique index rather than a column constraint.
+ *
+ * The three Cloud API columns and the two linked ones are each required for their own kind and
+ * absent for the other, which the migration states as two check constraints. One table rather
+ * than two because `conversations.whatsapp_number_id` points here: a second table would fork
+ * that chain and every query along it.
  */
 export const whatsappNumbers = pgTable(
   'whatsapp_numbers',
@@ -152,11 +159,13 @@ export const whatsappNumbers = pgTable(
     agentId: uuid('agent_id')
       .notNull()
       .references(() => agents.id, { onDelete: 'cascade' }),
-    phoneNumberId: text('phone_number_id').notNull().unique(),
-    wabaId: text('waba_id').notNull(),
+    // Null for a linked device: the three columns below are Meta's, and a linked device
+    // never reaches Meta. Required for the two Cloud API kinds, by check constraint.
+    phoneNumberId: text('phone_number_id'),
+    wabaId: text('waba_id'),
     displayPhone: text('display_phone').notNull(),
     // Encrypted with the credentials key. Never selected into an API response.
-    accessToken: text('access_token').notNull(),
+    accessToken: text('access_token'),
     enabled: boolean('enabled').notNull().default(true),
     // Set when Meta confirms our application is subscribed to the WABA. Until then the
     // number is connected but silent, which is the failure this column makes visible.
@@ -164,6 +173,7 @@ export const whatsappNumbers = pgTable(
     // 'manual' — ids and a system-user token pasted by the owner (stage 2).
     // 'coexistence' — the phone's own number, onboarded through Embedded Signup; the token
     // came from Meta, registration was skipped, and the phone keeps working (stage 7).
+    // 'linked' — the phone's own number through a linked device, no Meta at all (stage 8).
     connectionKind: text('connection_kind').notNull().default('manual'),
     // The customer's business portfolio id, as Embedded Signup reported it. Informational.
     businessId: text('business_id'),
@@ -177,9 +187,47 @@ export const whatsappNumbers = pgTable(
     historyDeclinedAt: timestamp('history_declined_at', { withTimezone: true }),
     // `account_update` said the phone disconnected the API. Cleared on reconnect.
     offboardedAt: timestamp('offboarded_at', { withTimezone: true }),
+    // Linked only: the number's own id inside WhatsApp, and how the pairing stands.
+    // `linkedJid` is what routes an incoming socket event to this row, the way
+    // `phoneNumberId` routes a webhook delivery. 'pairing' | 'open' | 'logged_out'.
+    linkedJid: text('linked_jid'),
+    linkedState: text('linked_state'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index('whatsapp_numbers_agent_id_idx').on(t.agentId)],
+  (t) => [
+    index('whatsapp_numbers_agent_id_idx').on(t.agentId),
+    // Partial, because a linked device has no such id and many rows may hold null. Postgres
+    // already treats nulls as distinct in a total unique index; saying `where … is not null`
+    // out loud is what stops a later reader from "fixing" the index back into a total one.
+    uniqueIndex('whatsapp_numbers_phone_number_id_key')
+      .on(t.phoneNumberId)
+      .where(sql`${t.phoneNumberId} is not null`),
+  ],
+);
+
+/**
+ * One entry of a linked device's Baileys session.
+ *
+ * A row per key rather than one blob per number: the key store is written on almost every
+ * message, and rewriting a whole session each time would make a busy number the busiest
+ * writer in the database. `value` is encrypted with the credentials key, the same way an
+ * access token is — a session is the ability to send as the owner, and a database dump
+ * holding it plainly would hand that over.
+ */
+export const linkedSessionKeys = pgTable(
+  'linked_session_keys',
+  {
+    whatsappNumberId: uuid('whatsapp_number_id')
+      .notNull()
+      .references(() => whatsappNumbers.id, { onDelete: 'cascade' }),
+    // Baileys' own key type: 'creds', 'pre-key', 'session', 'sender-key', 'app-state-sync-key'…
+    category: text('category').notNull(),
+    // Identity inside the category. 'creds' stores a single row, under the id 'me'.
+    keyId: text('key_id').notNull(),
+    value: text('value').notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.whatsappNumberId, t.category, t.keyId] })],
 );
 
 /** A person who wrote to us. Digits only, the shape WhatsApp uses in `wa_id`. */

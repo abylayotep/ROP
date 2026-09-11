@@ -2,6 +2,7 @@ import { and, eq, isNull, sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import { contacts, conversations, messages, whatsappNumbers } from '../../db/schema.js';
 import { decryptSecret } from '../secret-box.js';
+import { asCloudNumber } from './cloud-number.js';
 import { withoutSecret } from './graph.js';
 import type { InboundDeps } from './inbound.js';
 import { downloadInboundMedia } from './media.js';
@@ -162,7 +163,8 @@ export async function applyHistory(
         if (!placeholder) continue;
         let token = '';
         try {
-          token = decryptSecret(number.accessToken, deps.key, number.phoneNumberId);
+          const cloud = asCloudNumber(number);
+          token = decryptSecret(cloud.accessToken, deps.key, cloud.phoneNumberId);
           const media = await downloadInboundMedia(deps, {
             mediaId,
             token,

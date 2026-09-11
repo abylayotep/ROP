@@ -10,6 +10,7 @@ import {
 import type { ModelClient } from '../ai/openrouter.js';
 import { runTurn } from '../ai/turn.js';
 import { decryptSecret } from '../secret-box.js';
+import { asCloudNumber } from './cloud-number.js';
 import { withoutSecret, type GraphClient } from './graph.js';
 import { applyHistory, type HistoryValue } from './history.js';
 import { downloadInboundMedia } from './media.js';
@@ -503,7 +504,8 @@ async function applyMessages(
         // whole delivery. `withoutSecret` with an empty secret returns the message
         // unchanged, which is right: there is no token to hide when decryption itself
         // is what failed.
-        token = decryptSecret(number.accessToken, deps.key, number.phoneNumberId);
+        const cloud = asCloudNumber(number);
+        token = decryptSecret(cloud.accessToken, deps.key, cloud.phoneNumberId);
         media = await downloadInboundMedia(deps, {
           mediaId,
           token,
@@ -598,7 +600,8 @@ async function applyEchoes(
     if (mediaId && !known) {
       let token = '';
       try {
-        token = decryptSecret(number.accessToken, deps.key, number.phoneNumberId);
+        const cloud = asCloudNumber(number);
+        token = decryptSecret(cloud.accessToken, deps.key, cloud.phoneNumberId);
         media = await downloadInboundMedia(deps, {
           mediaId,
           token,

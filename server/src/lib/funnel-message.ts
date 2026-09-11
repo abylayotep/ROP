@@ -3,6 +3,7 @@ import { windowOpen } from '../api/conversations.js';
 import type { Db } from '../db/client.js';
 import { contacts, conversations, messages, notes, stages, whatsappNumbers } from '../db/schema.js';
 import { decryptSecret } from './secret-box.js';
+import { asCloudNumber } from './whatsapp/cloud-number.js';
 import { GraphError, withoutSecret, type GraphClient } from './whatsapp/graph.js';
 
 export interface StageMessageDeps {
@@ -77,7 +78,8 @@ export async function sendStageMessage(
     // note is read by an operator who needs to be told what to do about it instead.
     let token: string;
     try {
-      token = decryptSecret(row.number.accessToken, deps.key, row.number.phoneNumberId);
+      const cloud = asCloudNumber(row.number);
+      token = decryptSecret(cloud.accessToken, deps.key, cloud.phoneNumberId);
     } catch {
       await note(
         `Автосообщение стадии «${stage!.name}» не отправлено: не удалось прочитать токен ` +
@@ -91,7 +93,7 @@ export async function sendStageMessage(
     let sent = false;
     try {
       const { messageId } = await deps.graph.sendText(
-        row.number.phoneNumberId,
+        asCloudNumber(row.number).phoneNumberId,
         token,
         row.contact.phone,
         body,

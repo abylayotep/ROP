@@ -38,16 +38,22 @@ export interface Me {
 
 export interface WhatsappNumber {
   id: string;
-  phoneNumberId: string;
-  wabaId: string;
+  /** Null for a linked device: Meta issued no id, because Meta was never involved. */
+  phoneNumberId: string | null;
+  wabaId: string | null;
   /** As Meta formats it, for a human to recognise. */
   displayPhone: string;
   enabled: boolean;
   /** False means Meta accepted the number but will not deliver anything yet. */
   subscribed: boolean;
   connectedAt: string;
-  /** 'manual' — pasted ids and token. 'coexistence' — the phone's number via Embedded Signup. */
-  connectionKind: 'manual' | 'coexistence';
+  /**
+   * 'manual' — pasted ids and token. 'coexistence' — the phone's number via Embedded Signup.
+   * 'linked' — the phone's number through a linked device, outside Meta entirely.
+   */
+  connectionKind: 'manual' | 'coexistence' | 'linked';
+  /** Linked only: how the pairing stands. Null for the two Cloud API kinds. */
+  linkedState: 'pairing' | 'open' | 'logged_out' | null;
   /** 0..100. Meaningful for coexistence only; manual numbers stay at 0. */
   historyProgress: number;
   /** The owner turned history sharing off on the phone. */

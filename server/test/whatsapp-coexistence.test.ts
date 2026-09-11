@@ -8,6 +8,7 @@ import { GraphError } from '../src/lib/whatsapp/graph.js';
 import { withDb } from './helpers/db.js';
 import { testEnv } from './helpers/env.js';
 import { fakeGraph, type FakeGraph } from './helpers/fake-graph.js';
+import { asCloudNumber } from '../src/lib/whatsapp/cloud-number.js';
 
 const env = testEnv({ META_APP_ID: '1585667806534384', META_ES_CONFIG_ID: '777' });
 const PASSWORD = 'correct-horse-battery';
@@ -85,7 +86,7 @@ describe('connecting the phone number', () => {
     const [row] = await db.select().from(whatsappNumbers);
     expect(row!.businessId).toBe('877');
     expect(row!.syncRequestedAt).not.toBeNull();
-    expect(decryptSecret(row!.accessToken, Buffer.from(env.CREDENTIALS_KEY, 'base64'), '136')).toBe('EAAB-business-token');
+    expect(decryptSecret(asCloudNumber(row!).accessToken, Buffer.from(env.CREDENTIALS_KEY, 'base64'), '136')).toBe('EAAB-business-token');
   });
 
   it('resolves the number from the WABA when Embedded Signup reported only the WABA', async () => {

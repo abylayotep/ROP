@@ -9,6 +9,7 @@ import { GraphError } from '../src/lib/whatsapp/graph.js';
 import { withDb } from './helpers/db.js';
 import { testEnv } from './helpers/env.js';
 import { fakeGraph, type FakeGraph } from './helpers/fake-graph.js';
+import { asCloudNumber } from '../src/lib/whatsapp/cloud-number.js';
 
 const env = testEnv({ PUBLIC_URL: 'https://rakurs.test' });
 const PASSWORD = 'correct-horse-battery';
@@ -93,7 +94,7 @@ describe('connecting a number', () => {
     const [stored] = await db.select().from(whatsappNumbers);
     expect(stored!.accessToken).not.toContain('EAAG-token');
     expect(
-      decryptSecret(stored!.accessToken, Buffer.from(env.CREDENTIALS_KEY, 'base64'), '136'),
+      decryptSecret(asCloudNumber(stored!).accessToken, Buffer.from(env.CREDENTIALS_KEY, 'base64'), '136'),
     ).toBe('EAAG-token');
   });
 
@@ -252,7 +253,7 @@ describe('listing and changing a number', () => {
     const [stored] = await db.select().from(whatsappNumbers);
     expect(stored!.accessToken).not.toContain('EAAG-fresh');
     expect(
-      decryptSecret(stored!.accessToken, Buffer.from(env.CREDENTIALS_KEY, 'base64'), '136'),
+      decryptSecret(asCloudNumber(stored!).accessToken, Buffer.from(env.CREDENTIALS_KEY, 'base64'), '136'),
     ).toBe('EAAG-fresh');
     // The subscription belongs to the WABA, not to the token that requested it.
     expect(stored!.subscribedAt).toBeInstanceOf(Date);
@@ -279,7 +280,7 @@ describe('listing and changing a number', () => {
 
     const [stored] = await db.select().from(whatsappNumbers);
     expect(
-      decryptSecret(stored!.accessToken, Buffer.from(env.CREDENTIALS_KEY, 'base64'), '136'),
+      decryptSecret(asCloudNumber(stored!).accessToken, Buffer.from(env.CREDENTIALS_KEY, 'base64'), '136'),
     ).toBe('EAAG-token');
   });
 

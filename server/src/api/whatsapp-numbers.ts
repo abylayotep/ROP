@@ -9,6 +9,7 @@ import { ApiError } from '../lib/errors.js';
 import { credentialsKey, encryptSecret } from '../lib/secret-box.js';
 import { isUuid } from '../lib/uuid.js';
 import { GraphError, withoutSecret, type GraphClient } from '../lib/whatsapp/graph.js';
+import { asCloudNumber } from '../lib/whatsapp/cloud-number.js';
 import { requireAgent } from './require-agent.js';
 
 const connection = z.object({
@@ -31,6 +32,21 @@ const settings = z
   })
   .refine((body) => body.enabled !== undefined || body.accessToken !== undefined);
 
+/**
+ * The column holds text; the contract names three values. Anything else is a row written by
+ * a version of this code that does not exist yet, and reading it as `manual` would describe
+ * a number the cabinet cannot actually send through.
+ */
+const asConnectionKind = (value: string): WhatsappNumber['connectionKind'] => {
+  if (value === 'coexistence' || value === 'linked') return value;
+  return 'manual';
+};
+
+const asLinkedState = (value: string | null): WhatsappNumber['linkedState'] => {
+  if (value === 'pairing' || value === 'open' || value === 'logged_out') return value;
+  return null;
+};
+
 /** The access token is never part of this. It goes in and it does not come out. */
 export const toApi = (row: typeof whatsappNumbers.$inferSelect): WhatsappNumber => ({
   id: row.id,
@@ -40,7 +56,8 @@ export const toApi = (row: typeof whatsappNumbers.$inferSelect): WhatsappNumber 
   enabled: row.enabled,
   subscribed: row.subscribedAt !== null,
   connectedAt: row.createdAt.toISOString(),
-  connectionKind: row.connectionKind === 'coexistence' ? 'coexistence' : 'manual',
+  connectionKind: asConnectionKind(row.connectionKind),
+  linkedState: asLinkedState(row.linkedState),
   historyProgress: row.historyProgress,
   historyDeclined: row.historyDeclinedAt !== null,
   syncError: row.syncError,
@@ -186,15 +203,22 @@ export function registerWhatsappNumberRoutes(
         throw new ApiError(400, 'Токен этого номера выдаёт Meta при подключении с телефона, вручную его не заменить');
       }
 
+      if (accessToken !== undefined && current.connectionKind === 'linked') {
+        // There is no token at all: a linked device authenticates with a session, and the
+        // way to renew that is to scan a QR code again.
+        throw new ApiError(400, 'У номера, подключённого по QR, нет токена. Подключите телефон заново.');
+      }
+
       const changes: Partial<typeof whatsappNumbers.$inferInsert> = {};
       if (enabled !== undefined) changes.enabled = enabled;
 
       if (accessToken !== undefined) {
         // Proved before anything is written: a mistyped token must leave the working one
         // in place, not replace it with one Meta will refuse on the next message.
+        const cloud = asCloudNumber(current);
         let displayPhone: string;
         try {
-          displayPhone = (await graph.getPhoneNumber(current.phoneNumberId, accessToken))
+          displayPhone = (await graph.getPhoneNumber(cloud.phoneNumberId, accessToken))
             .displayPhoneNumber;
         } catch (error) {
           if (error instanceof GraphError) {
@@ -205,7 +229,7 @@ export function registerWhatsappNumberRoutes(
         // The same associated data as the original: the row's identity has not changed,
         // only its secret. `subscribedAt` is left alone — the subscription belongs to the
         // WABA, not to the token that was used to request it.
-        changes.accessToken = encryptSecret(accessToken, credentialsKey(env), current.phoneNumberId);
+        changes.accessToken = encryptSecret(accessToken, credentialsKey(env), cloud.phoneNumberId);
         changes.displayPhone = displayPhone;
       }
 

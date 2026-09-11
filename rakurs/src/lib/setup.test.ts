@@ -16,6 +16,8 @@ import {
   inboxStatus,
   knowledgeStatus,
   setupProgress,
+  whatsappGuideDone,
+  whatsappSetupPath,
   whatsappStatus,
 } from './setup';
 
@@ -162,5 +164,69 @@ describe('setupProgress', () => {
       stats: { state: 'done', note: '' },
     });
     expect(progress).toEqual({ done: 3, total: 7 });
+  });
+});
+
+describe('whatsappStatus: номер по QR', () => {
+  it('не обвиняет телефон по QR в неподписанной WABA — её у него нет', () => {
+    const qr = number({ connectionKind: 'linked', subscribed: false, linkedState: 'open' });
+
+    expect(whatsappStatus([qr])).toEqual({ state: 'done', note: 'Номер подключён и работает' });
+  });
+
+  it('держит этап наполовину, пока код не отсканирован', () => {
+    const qr = number({ connectionKind: 'linked', subscribed: false, linkedState: 'pairing' });
+
+    expect(whatsappStatus([qr]).state).toBe('partial');
+  });
+
+  it('говорит про отвязанный телефон вместо чужой ошибки про WABA', () => {
+    const qr = number({ connectionKind: 'linked', subscribed: false, linkedState: 'logged_out' });
+
+    expect(whatsappStatus([qr]).note).toContain('QR');
+  });
+});
+
+describe('whatsappGuideDone', () => {
+  it('не считает пройденным ничего, пока номера нет', () => {
+    expect(whatsappGuideDone({ numbers: [], conversations: 0 }).size).toBe(0);
+  });
+
+  it('оставляет вебхук и живую проверку, пока не пришло ни одного сообщения', () => {
+    const done = whatsappGuideDone({ numbers: [number()], conversations: 0 });
+
+    // Шаги в Meta: адрес вебхука и подписка на messages отсюда не видны вовсе.
+    expect(done.has(5)).toBe(false);
+    expect(done.has(6)).toBe(false);
+    expect(done.has(8)).toBe(false);
+    expect(done.has(1)).toBe(true);
+    expect(done.has(7)).toBe(true);
+  });
+
+  it('закрывает вебхук и проверку первым же входящим диалогом', () => {
+    const done = whatsappGuideDone({ numbers: [number()], conversations: 1 });
+
+    expect([5, 6, 8].every((step) => done.has(step))).toBe(true);
+  });
+
+  it('возвращает шаг о постоянном токене, когда доступ Meta истёк', () => {
+    const expired = number({ tokenExpiresAt: '2020-01-01T00:00:00.000Z' });
+
+    expect(whatsappGuideDone({ numbers: [expired], conversations: 0 }).has(4)).toBe(false);
+  });
+});
+
+describe('whatsappSetupPath', () => {
+  it('называет путь через Meta, пока все номера заведены вручную', () => {
+    expect(whatsappSetupPath([number()])).toBe('meta');
+  });
+
+  it('называет номер с телефона, чтобы инструкции про Meta ему не показывали', () => {
+    expect(whatsappSetupPath([number({ connectionKind: 'coexistence' })])).toBe('phone');
+    expect(whatsappSetupPath([number({ connectionKind: 'linked' })])).toBe('phone');
+  });
+
+  it('не выбирает путь, пока номера нет', () => {
+    expect(whatsappSetupPath([])).toBe('none');
   });
 });

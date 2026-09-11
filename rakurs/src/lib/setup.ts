@@ -62,7 +62,21 @@ export function whatsappStatus(numbers: WhatsappNumber[]): SetupStatus {
     return { state: 'todo', note: 'Ни одного номера не подключено' };
   }
 
-  const unsubscribed = numbers.filter((number) => !number.subscribed);
+  // Телефон по QR живёт без Meta вовсе: у него нет WABA, которую можно было бы подписать,
+  // и нет токена, которому истекать. Его половинчатые состояния — свои.
+  const linked = numbers.filter((number) => number.connectionKind === 'linked');
+  const waiting = linked.filter((number) => number.linkedState === 'pairing');
+  if (waiting.length === numbers.length && waiting.length > 0) {
+    return { state: 'partial', note: 'Код показан, телефон его ещё не отсканировал' };
+  }
+  const loggedOut = linked.filter((number) => number.linkedState === 'logged_out');
+  if (loggedOut.length > 0) {
+    return { state: 'partial', note: 'Телефон отвязал кабинет — подключите заново по QR' };
+  }
+
+  const unsubscribed = numbers.filter(
+    (number) => number.connectionKind !== 'linked' && !number.subscribed,
+  );
   if (unsubscribed.length === numbers.length) {
     return {
       state: 'partial',
@@ -213,4 +227,53 @@ export function setupProgress(statuses: Record<SetupStepId, SetupStatus>): {
 } {
   const all = Object.values(statuses);
   return { done: all.filter((status) => status.state === 'done').length, total: all.length };
+}
+
+/**
+ * Каким путём подключён номер.
+ *
+ * The guide in «Запуск» describes one of three paths — the manual Cloud API one, with a
+ * separate SIM card and an application in Meta for Developers. An owner who connected the
+ * phone they already sell from, by Embedded Signup or by QR, did none of that and never
+ * will: showing them eight steps about System users and webhook fields reads as work they
+ * forgot to do. So the path decides whether the instruction is shown at all, not just
+ * which of its steps are finished.
+ */
+export type WhatsappSetupPath = 'none' | 'meta' | 'phone';
+
+export function whatsappSetupPath(numbers: WhatsappNumber[]): WhatsappSetupPath {
+  if (numbers.length === 0) return 'none';
+  return numbers.every((number) => number.connectionKind === 'manual') ? 'meta' : 'phone';
+}
+
+/**
+ * Какие шаги инструкции по WhatsApp кабинет уже видит пройденными.
+ *
+ * The guide is eight steps long, and for an owner whose number is already connected most of
+ * it is work done last week: printing it again buries the step that is still undone. Only
+ * what the cabinet can see counts — a number exists, its token still works, a message has
+ * arrived. Nothing is inferred from the owner having read a step.
+ *
+ * Steps 5 and 6 — the webhook address and the `messages` field — happen entirely inside
+ * Meta and are invisible from here, so the only proof that both are right is an inbound
+ * message; until one arrives they stay in the list.
+ */
+export function whatsappGuideDone(
+  facts: Pick<SetupFacts, 'numbers' | 'conversations'>,
+): ReadonlySet<number> {
+  const done = new Set<number>();
+  if (facts.numbers.length === 0) return done;
+
+  // Номер в кабинете — значит приложение Meta, SIM-карта, идентификаторы и форма
+  // подключения уже позади: без каждого из этих шагов номера бы здесь не было.
+  for (const step of [1, 2, 3, 7]) done.add(step);
+
+  // Истёкший доступ Meta возвращает шаг о постоянном токене обратно в работу.
+  if (!facts.numbers.some((number) => tokenDeadline(number).state === 'expired')) done.add(4);
+
+  // Входящее сообщение — единственное доказательство, что вебхук прописан, поле messages
+  // отмечено и живая проверка пройдена.
+  if (facts.conversations > 0) for (const step of [5, 6, 8]) done.add(step);
+
+  return done;
 }

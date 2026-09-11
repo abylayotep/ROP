@@ -229,15 +229,14 @@ export function registerWhatsappLinkedRoutes(
         if (event.numberId !== numberId) return;
         if (event.type === 'qr') send({ type: 'qr', qr: event.qr });
         if (event.type === 'open') finish({ type: 'open' });
-        if (event.type === 'closed') {
-          // WhatsApp hands out a finite list of codes and closes the socket once it has run
-          // through them — about two and a half minutes in. Ignoring that leaves the last,
-          // dead code on the owner's screen until the deadline, looking like a code that
-          // simply stopped refreshing.
-          const reason = event.loggedOut
-            ? 'Телефон отказал в подключении.'
-            : 'Код устарел. Нажмите «Подключить телефон по QR» ещё раз.';
-          void cancelPairing(numberId).finally(() => finish({ type: 'failed', reason }));
+        // Only a logout ends a pairing. Every other close is expected and temporary: the
+        // scan itself closes the socket — WhatsApp answers `pair-success` and then asks for
+        // a restart — and so does running out of codes, which WhatsApp does about two and a
+        // half minutes in. Both are the lifecycle's to reconnect, and the codes of the new
+        // socket flow down this same stream. Treating them as failure is what made a
+        // scanned code produce nothing at all.
+        if (event.type === 'closed' && event.loggedOut) {
+          finish({ type: 'failed', reason: 'Телефон отказал в подключении.' });
         }
       };
 

@@ -253,21 +253,30 @@ describe('the pairing stream', () => {
     expect(res.body).toContain('Телефон отказал в подключении.');
   });
 
-  it('says the code series ended when WhatsApp stops issuing codes', async () => {
+  it('keeps waiting through the close that a scan itself causes', async () => {
     await pair();
     const [row] = await numbers();
 
     const pending = stream(row!.id);
     await new Promise((r) => setTimeout(r, 120));
-    linked.report({ type: 'qr', numberId: row!.id, qr: '2@last' });
-    // WhatsApp hands out a finite list of codes and closes the socket when it runs out.
-    // Saying nothing leaves the last, dead code on screen for the rest of the deadline.
+    linked.report({ type: 'qr', numberId: row!.id, qr: '2@scanned' });
+    // WhatsApp answers a successful scan by closing the socket and asking for a restart,
+    // and it closes the same way when it runs out of codes. Both are the lifecycle's to
+    // reconnect: ending the stream here is what made a scanned code produce nothing.
     linked.report({ type: 'closed', numberId: row!.id, loggedOut: false });
+    linked.report({ type: 'qr', numberId: row!.id, qr: '2@after-restart' });
+    linked.report({
+      type: 'open',
+      numberId: row!.id,
+      jid: '77085807932@s.whatsapp.net',
+      displayPhone: '+77085807932',
+    });
     const res = await pending;
 
-    expect(res.body).toContain('"type":"failed"');
-    expect(res.body).toContain('Код устарел');
-    expect(await numbers()).toEqual([]);
+    expect(res.body).not.toContain('"type":"failed"');
+    expect(res.body).toContain('2@after-restart');
+    expect(res.body).toContain('{"type":"open"}');
+    expect(await numbers()).toHaveLength(1);
   });
 
   it('answers 404 for a number that is not this agent’s', async () => {

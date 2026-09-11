@@ -1,4 +1,5 @@
 import type {
+  InstagramSetup,
   KbGraph,
   KbImport,
   KbNote,
@@ -12,6 +13,14 @@ import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
 import { kbChunks, kbLinks, kbNotes, kbSources } from '../db/schema.js';
+import type { Env } from '../env.js';
+import {
+  InstagramError,
+  type InstagramAccount,
+  type InstagramClient,
+  type InstagramPost,
+} from '../lib/instagram/graph.js';
+import type { GraphClient } from '../lib/whatsapp/graph.js';
 import { bumpConfigVersion } from '../lib/drafts/version.js';
 import { ApiError, isDuplicate } from '../lib/errors.js';
 import {
@@ -269,12 +278,21 @@ const NOTHING_TO_SAVE = 'На странице нечего сохранить';
 /** The transaction handle, so the insert below can be shared by both imports. */
 type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
 
+export interface KnowledgeDeps {
+  pageFetcher: PageFetcher;
+  /** Exchanges the browser's Meta login code for a token. Same client the WhatsApp routes use. */
+  graph: GraphClient;
+  instagram: InstagramClient;
+}
+
 export function registerKnowledgeRoutes(
   app: FastifyInstance,
   db: Db,
+  env: Env,
   guard: preHandlerHookHandler,
-  pageFetcher: PageFetcher,
+  deps: KnowledgeDeps,
 ): void {
+  const { pageFetcher, graph, instagram } = deps;
   // Any member: an operator who watches the agent give a wrong answer is the fastest way
   // it gets corrected, and a lock would put a day between noticing and fixing.
   const anyMember = requireAgent(db);
@@ -823,6 +841,179 @@ export function registerKnowledgeRoutes(
       error: reason,
     });
   }
+
+  /* ── Instagram ───────────────────────────────────────────────────────── */
+
+  /**
+   * Подписи под постами продавца, забранные через Meta.
+   *
+   * The browser runs Meta's login, gets a code that lives seconds and sends it here; this
+   * spends it for a token, reads the account once and keeps nothing. No stored key means
+   * «Обновить» is the same button pressed again, and an owner who revokes the app in Meta
+   * has actually revoked it.
+   *
+   * A post whose note already exists is left exactly as it is — the seller may have
+   * rewritten a caption into something the agent can use, and an import must not undo that.
+   */
+  const instagramImport = z.object({ code: z.string().trim().min(1) });
+
+  /** «12 марта 2026 — Двери из массива» — a date a person recognises, then the first words. */
+  function postTitle(post: InstagramPost): string {
+    const date = new Date(post.timestamp);
+    const day = Number.isNaN(date.getTime())
+      ? ''
+      : date.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' });
+    const firstLine = (post.caption ?? '').split('\n').find((line) => line.trim() !== '') ?? '';
+    const words = firstLine.trim().slice(0, TITLE_MAX - day.length - 3);
+    return words === '' ? day || post.id : `${day} — ${words}`;
+  }
+
+  /** The note as a person reads it: the caption, then where it came from. */
+  function postBody(post: InstagramPost): string {
+    return `${post.caption ?? ''}\n\n[Пост в Instagram](${post.permalink})`.trim();
+  }
+
+  function profileBody(account: InstagramAccount): string {
+    const lines = [account.biography ?? ''];
+    if (account.website) lines.push('', account.website);
+    lines.push('', `[Профиль в Instagram](https://www.instagram.com/${account.username}/)`);
+    return lines.join('\n').trim();
+  }
+
+  app.get(
+    '/api/agents/:agentId/knowledge/instagram',
+    { preHandler: [guard, ownerOnly] },
+    async (): Promise<InstagramSetup> => ({ appId: env.META_APP_ID }),
+  );
+
+  app.post(
+    '/api/agents/:agentId/knowledge/import/instagram',
+    { preHandler: [guard, ownerOnly] },
+    async (req): Promise<KbImport> => {
+      const parsed = instagramImport.safeParse(req.body);
+      if (!parsed.success) throw new ApiError(400, 'Meta не вернула код входа');
+      const agentId = req.agent!.id;
+
+      let account: InstagramAccount;
+      let posts: InstagramPost[];
+      try {
+        const issued = await graph.exchangeCode(
+          parsed.data.code,
+          env.META_APP_ID,
+          env.META_APP_SECRET,
+        );
+        account = await instagram.account(issued.token);
+        posts = await instagram.posts(issued.token, account.id);
+      } catch (error) {
+        // Meta's own sentence, which is the only one that says what to change — a missing
+        // permission, an account that is not a business one, an app that is not live.
+        const detail = error instanceof Error ? error.message : String(error);
+        app.log.warn({ detail }, 'knowledge instagram import failed');
+        throw new ApiError(error instanceof InstagramError ? 400 : 502, detail);
+      }
+
+      const withText = posts.filter((post) => (post.caption ?? '').trim() !== '');
+      if (withText.length === 0 && !account.biography) {
+        throw new ApiError(
+          400,
+          'В этом Instagram нечего сохранить: ни подписей под постами, ни описания профиля.',
+        );
+      }
+
+      const url = `https://www.instagram.com/${account.username}/`;
+      const [existing] = await db
+        .select()
+        .from(kbSources)
+        .where(
+          and(
+            eq(kbSources.agentId, agentId),
+            eq(kbSources.kind, 'instagram'),
+            eq(kbSources.url, url),
+          ),
+        );
+
+      return withImportRetry(() =>
+        db.transaction(async (tx) => {
+          const source =
+            existing ??
+            (
+              await tx
+                .insert(kbSources)
+                .values({
+                  agentId,
+                  kind: 'instagram',
+                  title: `@${account.username}`,
+                  url,
+                  status: 'ready',
+                  itemCount: 0,
+                  importedAt: new Date(),
+                })
+                .returning()
+            )[0]!;
+
+          const written: (typeof kbNotes.$inferSelect)[] = [];
+          const folder = `Instagram/@${account.username}`;
+
+          if (account.biography) {
+            const path = `${folder}/О магазине`;
+            const [already] = await tx
+              .select({ id: kbNotes.id })
+              .from(kbNotes)
+              .where(and(eq(kbNotes.agentId, agentId), eq(kbNotes.path, path)));
+            if (!already) {
+              written.push(
+                await saveNoteAtUniquePath(tx, agentId, folder, 'О магазине', {
+                  body: profileBody(account),
+                  sourceId: source.id,
+                }),
+              );
+            }
+          }
+
+          for (const post of withText) {
+            const title = postTitle(post);
+            const [already] = await tx
+              .select({ id: kbNotes.id })
+              .from(kbNotes)
+              .where(and(eq(kbNotes.agentId, agentId), eq(kbNotes.path, `${folder}/${title}`)));
+            // Already imported — and possibly rewritten since by the person who sells with
+            // it. Skipped rather than overwritten: their words beat Instagram's.
+            if (already) continue;
+
+            written.push(
+              await saveNoteAtUniquePath(tx, agentId, folder, title, {
+                body: postBody(post),
+                sourceId: source.id,
+              }),
+            );
+          }
+
+          const [updated] = await tx
+            .update(kbSources)
+            .set({
+              title: `@${account.username}`,
+              status: 'ready',
+              error: null,
+              itemCount: withText.length + (account.biography ? 1 : 0),
+              importedAt: new Date(),
+            })
+            .where(eq(kbSources.id, source.id))
+            .returning();
+
+          await bumpConfigVersion(tx as unknown as Db, agentId);
+
+          return {
+            source: toKbSource(updated!),
+            notes: written.map((row) => toKbNote(row, updated!.title)),
+            reimported: existing !== undefined,
+            // Nothing is overwritten here, so nothing is «kept instead of overwritten»
+            // either: a post already imported simply stays as it is.
+            keptEdited: 0,
+          };
+        }),
+      );
+    },
+  );
 
   app.post(
     '/api/agents/:agentId/knowledge/import/page',

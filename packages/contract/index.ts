@@ -343,7 +343,7 @@ export interface KbGraph {
   truncated: boolean;
 }
 
-export type KbSourceKind = 'text' | 'page';
+export type KbSourceKind = 'text' | 'page' | 'instagram';
 
 export interface KbSource {
   id: string;
@@ -364,6 +364,21 @@ export interface KbSource {
 }
 
 /** What an import produced, answered by the import routes so the owner sees it at once. */
+/**
+ * Что браузер отдаёт серверу после входа через Meta, чтобы забрать посты Instagram.
+ *
+ * A code and nothing else: it lives seconds, the server spends it for a token, reads the
+ * account once and keeps neither. An import is a button pressed again, not a stored key.
+ */
+export interface InstagramImportRequest {
+  code: string;
+}
+
+/** Что нужно браузеру, чтобы открыть окно входа Meta. */
+export interface InstagramSetup {
+  appId: string;
+}
+
 export interface KbImport {
   source: KbSource;
   notes: KbNote[];

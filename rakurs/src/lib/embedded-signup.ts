@@ -1,4 +1,4 @@
-import type { CoexistenceConnection, EmbeddedSignupSetup } from '@/types';
+import type { CoexistenceConnection, EmbeddedSignupSetup, InstagramSetup } from '@/types';
 
 /** Pinned to what the server talks; the SDK refuses a version it has retired. */
 const GRAPH_VERSION = 'v26.0';
@@ -12,12 +12,14 @@ interface FacebookSdk {
   init(options: { appId: string; autoLogAppEvents: boolean; xfbml: boolean; version: string }): void;
   login(
     callback: (response: { authResponse?: { code?: string }; status?: string }) => void,
-    options: {
-      config_id: string;
-      response_type: 'code';
-      override_default_response_type: true;
-      extras: { setup: Record<string, never>; featureType: string; sessionInfoVersion: string };
-    },
+    options:
+      | {
+          config_id: string;
+          response_type: 'code';
+          override_default_response_type: true;
+          extras: { setup: Record<string, never>; featureType: string; sessionInfoVersion: string };
+        }
+      | { scope: string; response_type: 'code'; override_default_response_type: true },
   ): void;
 }
 
@@ -152,6 +154,45 @@ export function runCoexistenceSignup(setup: EmbeddedSignupSetup): Promise<Coexis
               featureType: 'whatsapp_business_app_onboarding',
               sessionInfoVersion: '3',
             },
+          },
+        );
+      }),
+  );
+}
+
+/**
+ * Разрешения, которых хватает ровно на чтение постов и ничего сверх.
+ *
+ * `instagram_basic` is the captions; the two page permissions are how Meta gets from the
+ * person logging in to the Instagram account attached to their Page, which is the only way
+ * an Instagram Business account is addressable at all.
+ */
+const INSTAGRAM_SCOPE = 'instagram_basic,pages_show_list,pages_read_engagement';
+
+/**
+ * Вход через Meta ради постов Instagram: возвращает код, который живёт секунды.
+ *
+ * Nothing is stored in the browser and nothing is stored on the server: the code is spent
+ * once, the posts are read once, and importing again is this window again. An owner who
+ * removes the application in Meta has actually removed our access, with nothing of theirs
+ * left behind here.
+ */
+export function runInstagramLogin(setup: InstagramSetup): Promise<string> {
+  return loadSdk(setup.appId).then(
+    (fb) =>
+      new Promise<string>((resolve, reject) => {
+        fb.login(
+          (response) => {
+            if (response.authResponse?.code) {
+              resolve(response.authResponse.code);
+              return;
+            }
+            reject(new Error('Вход через Meta не завершён'));
+          },
+          {
+            scope: INSTAGRAM_SCOPE,
+            response_type: 'code',
+            override_default_response_type: true,
           },
         );
       }),

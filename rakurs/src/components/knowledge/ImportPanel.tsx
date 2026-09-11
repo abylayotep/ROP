@@ -5,6 +5,7 @@ import { Card, CardHead } from '@/components/ui/primitives';
 import { Async, Skeleton } from '@/components/ui/states';
 import { useToast } from '@/components/ui/Toast';
 import { useApi } from '@/hooks/useApi';
+import { runInstagramLogin } from '@/lib/embedded-signup';
 import type { KbImport, KbNote, KbNoteKind, KbSource } from '@/types';
 
 /**
@@ -32,6 +33,13 @@ const control: CSSProperties = {
 const label: CSSProperties = { fontSize: 11.5, color: 'var(--text-dim)', marginBottom: 5 };
 
 const hint: CSSProperties = { fontSize: 11, color: 'var(--text-dim)', lineHeight: 1.45 };
+
+/** Откуда пришёл источник — одним словом в его строке. */
+const SOURCE_LABELS: Record<KbSource['kind'], string> = {
+  text: 'Текст',
+  page: 'Страница',
+  instagram: 'Instagram',
+};
 
 /** One name per kind, used by this panel's paste form. */
 export const KIND_LABELS: { id: KbNoteKind; label: string }[] = [
@@ -107,6 +115,7 @@ export function ImportPanel({
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 18, alignItems: 'flex-start' }}>
         <PasteForm agentId={agentId} onImported={handleImported} />
         <PageForm agentId={agentId} onImported={handleImported} />
+        <InstagramForm agentId={agentId} onImported={handleImported} />
       </div>
 
       {imported && <ImportResult result={imported} onHide={() => setImported(null)} />}
@@ -224,6 +233,64 @@ function PasteForm({
         </button>
       </div>
     </form>
+  );
+}
+
+/**
+ * Посты Instagram — то, чем магазин уже описал свои товары.
+ *
+ * Instagram serves none of this to a server that simply asks for the profile page, so the
+ * road is Meta's own: the owner signs in, Meta hands the browser a code that lives seconds,
+ * and the server spends it to read the captions. Nothing is stored — no token, no session —
+ * so «обновить» is this button again, and revoking the application in Meta actually revokes
+ * it. The account has to be an Instagram Business or Creator profile attached to a Facebook
+ * Page, which is Meta's rule, not ours; the refusal below says so in Meta's own words.
+ */
+function InstagramForm({
+  agentId,
+  onImported,
+}: {
+  agentId: string;
+  onImported: (result: KbImport) => void;
+}) {
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+
+  async function connect() {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const setup = await api.getInstagramSetup(agentId);
+      const code = await runInstagramLogin(setup);
+      onImported(await api.importKbInstagram(agentId, code));
+    } catch (error) {
+      toast.fail(error);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div
+      style={{ flex: '1 1 260px', minWidth: 240, display: 'flex', flexDirection: 'column', gap: 10 }}
+    >
+      <div style={{ fontSize: 12, fontWeight: 650 }}>Забрать из Instagram</div>
+
+      <div style={hint}>
+        Подписи под постами и описание профиля станут заметками. Нужен профиль Instagram
+        «Бизнес» или «Автор», привязанный к странице Facebook, — вход через Meta это
+        проверит. Пост, который уже загружен, второй раз не перезапишется: то, что вы в нём
+        поправили, останется вашим.
+      </div>
+
+      <div>
+        {/* Meta's window, then the import, in one press: both take seconds, and a button
+            that looks idle gets pressed twice. */}
+        <button type="button" className="btn-sm" disabled={busy} onClick={connect}>
+          {busy ? 'Читаем Instagram…' : 'Подключить Instagram'}
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -433,7 +500,7 @@ function SourceList({
                 </div>
               )}
               <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 4 }}>
-                {source.kind === 'page' ? 'Страница' : 'Текст'} · {when(source.createdAt)} ·{' '}
+                {SOURCE_LABELS[source.kind] ?? 'Текст'} · {when(source.createdAt)} ·{' '}
                 {source.itemCount} {notesWord(source.itemCount)}
               </div>
               {source.error && (

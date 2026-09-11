@@ -16,6 +16,7 @@ import type {
   ConversationThread,
   Customer,
   EmbeddedSignupSetup,
+  InstagramSetup,
   KbGraph,
   KbImport,
   KbNote,
@@ -332,6 +333,16 @@ export const importKbText = (
 /** Owner only. The fetch happens inside the request, so it can take seconds. */
 export const importKbPage = (agentId: string, url: string) =>
   request<KbImport>(`${knowledge(agentId)}/import/page`, { method: 'POST', body: { url } });
+
+export const getInstagramSetup = (agentId: string, signal?: AbortSignal) =>
+  request<InstagramSetup>(`${knowledge(agentId)}/instagram`, { signal });
+
+/**
+ * Owner only, and slow on purpose: the server spends the code, reads the account and writes
+ * every note before it answers, so the screen shows a finished import rather than a promise.
+ */
+export const importKbInstagram = (agentId: string, code: string) =>
+  request<KbImport>(`${knowledge(agentId)}/import/instagram`, { method: 'POST', body: { code } });
 
 /** Owner only, and only for a page source: it refetches and replaces what it made. */
 export const reimportKbSource = (agentId: string, sourceId: string) =>

@@ -8,6 +8,7 @@ import { createCapiClient, type CapiClient } from '../lib/capi/client.js';
 import { ApiError } from '../lib/errors.js';
 import { createPageFetcher, type PageFetcher } from '../lib/knowledge/fetch-page.js';
 import { credentialsKey } from '../lib/secret-box.js';
+import { createInstagramClient, type InstagramClient } from '../lib/instagram/graph.js';
 import { createGraphClient, type GraphClient } from '../lib/whatsapp/graph.js';
 import { registerAgentRoutes } from './agents.js';
 import { registerAiRoutes } from './ai.js';
@@ -38,6 +39,8 @@ export interface ServerDeps {
   graph?: GraphClient;
   /** The same arrangement for the knowledge base's one outbound fetch. */
   pageFetcher?: PageFetcher;
+  /** And for Instagram: no test asks Meta for somebody's posts. */
+  instagram?: InstagramClient;
   /** And for the model: no test spends a token or depends on a live OpenRouter key. */
   model?: ModelClient;
   /** And for Meta's Conversions API: no test reports a conversion to a real dataset. */
@@ -56,6 +59,7 @@ export function buildServer(env: Env, db: Db, deps: ServerDeps = {}): FastifyIns
   const app = Fastify({ logger: env.NODE_ENV !== 'test' });
   const graph = deps.graph ?? createGraphClient();
   const pageFetcher = deps.pageFetcher ?? createPageFetcher();
+  const instagram = deps.instagram ?? createInstagramClient();
   // Taken the same way every other outbound client is: the AI routes and the inbound queue
   // both answer with it, and a test replaces it once for both.
   const model = deps.model ?? createModelClient();
@@ -122,7 +126,7 @@ export function buildServer(env: Env, db: Db, deps: ServerDeps = {}): FastifyIns
     registerOrderRoutes(app, db, guard);
     registerBoardRoutes(app, db, guard);
     registerStatsRoutes(app, db, guard);
-    registerKnowledgeRoutes(app, db, guard, pageFetcher);
+    registerKnowledgeRoutes(app, db, env, guard, { pageFetcher, graph, instagram });
     registerRuleRoutes(app, db, guard);
     registerAiRoutes(app, db, env, guard, { model, graph, linked });
     // The coach writes only `coach_messages` — see the file's own comment for why a

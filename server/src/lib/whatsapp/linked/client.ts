@@ -7,6 +7,8 @@
  * into `RawLinkedMessage`, which is structurally what those messages are.
  */
 
+import { createSendQueue, type SendQueue } from './queue.js';
+
 /** A `Long` from protobuf, or the plain number Baileys sometimes hands over instead. */
 export type Timestamp = number | { toNumber(): number } | null | undefined;
 
@@ -99,6 +101,11 @@ export type LinkedSessionFactory = (
 export interface LinkedClientDeps {
   /** Builds one live socket. `socket.ts` in production, a stub in tests. */
   session: LinkedSessionFactory;
+  /**
+   * Paces the sends. Defaults to the real one; a test hands over a queue with no waiting,
+   * because a suite that actually slept a second per message would take an hour.
+   */
+  queue?: SendQueue;
 }
 
 /** The registry, plus the one thing only it can do: inject an event from outside. */
@@ -106,8 +113,8 @@ export interface LinkedRegistry extends LinkedClient {
   /**
    * Publishes an event as if a socket had emitted it.
    *
-   * The lifecycle code (Task 8) needs this to fold reconnects into the same stream the
-   * sockets feed, and tests need it to say «the phone dropped» without a phone.
+   * The lifecycle code needs this to fold a reconnect into the same stream the sockets
+   * feed, and a test needs it to say «the phone dropped» without a phone.
    */
   report(event: LinkedEvent): void;
 }
@@ -121,6 +128,7 @@ export interface LinkedRegistry extends LinkedClient {
  */
 export function createLinkedClient(deps: LinkedClientDeps): LinkedRegistry {
   const sessions = new Map<string, Promise<LinkedSession>>();
+  const queue = deps.queue ?? createSendQueue();
   const open = new Set<string>();
   const handlers: ((event: LinkedEvent) => void)[] = [];
 
@@ -178,12 +186,15 @@ export function createLinkedClient(deps: LinkedClientDeps): LinkedRegistry {
     disconnect: (numberId) => forget(numberId, 'close'),
     logout: (numberId) => forget(numberId, 'logout'),
 
-    async sendText(numberId, toJid, body) {
-      return (await live(numberId)).sendText(toJid, body);
+    // Queued, not sent: the check that the phone is there happens inside the queue, at the
+    // moment the message actually goes out. Checking before the wait would let a socket
+    // drop during the queue and hand the message to a session that cannot deliver it.
+    sendText(numberId, toJid, body) {
+      return queue(numberId, async () => (await live(numberId)).sendText(toJid, body));
     },
 
-    async sendMedia(numberId, toJid, file) {
-      return (await live(numberId)).sendMedia(toJid, file);
+    sendMedia(numberId, toJid, file) {
+      return queue(numberId, async () => (await live(numberId)).sendMedia(toJid, file));
     },
 
     async downloadMedia(numberId, message) {

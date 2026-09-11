@@ -5,6 +5,12 @@ import { loadEnv } from './env.js';
 import { createCapiClient } from './lib/capi/client.js';
 import { sendPendingCapiEvents } from './lib/capi/queue.js';
 import { credentialsKey } from './lib/secret-box.js';
+import { createLinkedClient } from './lib/whatsapp/linked/client.js';
+import {
+  registerLinkedLifecycle,
+  restoreLinkedSessions,
+} from './lib/whatsapp/linked/lifecycle.js';
+import { createLinkedSocket } from './lib/whatsapp/linked/socket.js';
 
 // Local convenience only. In production Compose supplies the environment and there is
 // no .env in the image, so the absence of the file is the normal case, not an error.
@@ -21,7 +27,15 @@ const db = createDb(env.DATABASE_URL);
 // Built here rather than inside `buildServer`, so the timer below and the webhook's drain
 // are the same client and one deadline governs both.
 const capi = createCapiClient();
-const app = buildServer(env, db, { capi });
+// Built here for the same reason, plus one of its own: the lifecycle below reconnects
+// dropped phones on a timer, and no test may start a timer that outlives it and reaches
+// for WhatsApp.
+const linked = createLinkedClient({ session: createLinkedSocket(db, credentialsKey(env)) });
+const app = buildServer(env, db, { capi, linked });
+
+registerLinkedLifecycle(db, credentialsKey(env), linked, {
+  onError: (message) => app.log.error({ message }, 'linked: lifecycle'),
+});
 
 // Before this process takes a single request — see `api/drafts.ts`'s own comment on why a
 // `running` test run left behind by a dead process needs this, and why it runs here rather
@@ -29,6 +43,12 @@ const app = buildServer(env, db, { capi });
 await reconcileOrphanedRuns(db);
 
 await app.listen({ port: env.PORT, host: '0.0.0.0' });
+
+// After `listen`, deliberately: the cabinet must answer HTTP before it waits on handsets,
+// and a phone that is switched off must not delay every other client's first request.
+void restoreLinkedSessions(db, linked, (message) =>
+  app.log.error({ message }, 'linked: restore'),
+);
 
 /**
  * The Conversions API queue, on a clock as well as on the webhook.

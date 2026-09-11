@@ -2,6 +2,7 @@ import { useMemo, useState, type CSSProperties } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import * as api from '@/api';
 import { Graph } from '@/components/knowledge/Graph';
+import { ChatGenerationPanel } from '@/components/knowledge/ChatGenerationPanel';
 import { ImportPanel } from '@/components/knowledge/ImportPanel';
 import { NoteEditor } from '@/components/knowledge/NoteEditor';
 import { buildTree, NoteTree } from '@/components/knowledge/NoteTree';
@@ -76,6 +77,7 @@ export function KnowledgeScreen() {
 
   const [params, setParams] = useSearchParams();
   const selected = params.get('note');
+  const generationRun = params.get('generation');
 
   // Whether the one `NoteEditor` currently on screen has typed text it has not saved.
   // `NoteEditor` is keyed by `selected`, so moving `selected` at all remounts it — this is
@@ -170,8 +172,20 @@ export function KnowledgeScreen() {
   const tree = useMemo(() => buildTree(list.data ?? []), [list.data]);
 
   return (
-    <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
-      <div style={{ width: 300, flex: '0 0 300px', display: 'flex', flexDirection: 'column', gap: 16 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <ChatGenerationPanel
+          key={agent.id}
+          agentId={agent.id}
+          initialRunId={generationRun}
+          onRunId={(runId) => {
+            const next = new URLSearchParams(params);
+            runId === null ? next.delete('generation') : next.set('generation', runId);
+            setParams(next, { replace: true });
+          }}
+          readOnly={!owner}
+        />
+      <div className="knowledge-layout">
+      <div className="knowledge-sidebar">
         <Card pad={false}>
           <div style={{ padding: '14px 14px 10px', display: 'flex', flexDirection: 'column', gap: 10 }}>
             <input
@@ -182,7 +196,7 @@ export function KnowledgeScreen() {
               onChange={(e) => setQuery(e.target.value)}
               style={control}
             />
-            <Segmented items={FILTERS} value={kind} onChange={setKind} size="sm" />
+            <div className="knowledge-filters"><Segmented items={FILTERS} value={kind} onChange={setKind} size="sm" /></div>
             <button type="button" className="btn-sm" onClick={() => select(NEW)}>
               + Новая заметка
             </button>
@@ -278,7 +292,7 @@ export function KnowledgeScreen() {
             <Async state={detail} skeleton={<Skeleton height={420} />}>
               {(loaded) =>
                 loaded && (
-                  <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
+                  <div className="knowledge-detail">
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <NoteEditor
                         key={selected}
@@ -299,7 +313,7 @@ export function KnowledgeScreen() {
                         onDirtyChange={setEditorDirty}
                       />
                     </div>
-                    <div style={{ width: 300, flex: '0 0 300px' }}>
+                    <div className="knowledge-context">
                       <NotePanel key={selected} agentId={agent.id} detail={loaded} onOpenNote={select} />
                     </div>
                   </div>
@@ -316,6 +330,7 @@ export function KnowledgeScreen() {
             </Async>
           </Card>
         </div>
+      </div>
       </div>
     </div>
   );

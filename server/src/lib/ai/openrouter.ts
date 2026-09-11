@@ -70,15 +70,20 @@ export interface CompletionInput {
   model: string;
   /** A string, because that is how the column stores it; parsed to a number here. */
   temperature: string;
+  /** Optional provider-side output cap; existing callers remain uncapped. */
+  maxTokens?: number;
   messages: ChatMessage[];
 }
 
-export interface Completion {
-  text: string;
+export interface CompletionUsage {
   promptTokens: number;
   completionTokens: number;
   /** US dollars, as a string, for the same reason an order's amount is one. */
   cost: string;
+}
+
+export interface Completion extends CompletionUsage {
+  text: string;
 }
 
 export interface ModelClient {
@@ -97,6 +102,7 @@ export class ModelError extends Error {
     message: string,
     readonly status: number,
     readonly detail?: string,
+    readonly usage?: CompletionUsage,
   ) {
     super(message);
     this.name = 'ModelError';
@@ -192,7 +198,7 @@ interface ChatResponse {
 
 export function createModelClient(): ModelClient {
   return {
-    async complete({ key, model, temperature, messages }) {
+    async complete({ key, model, temperature, maxTokens, messages }) {
       return within(key, async () => {
         const response = await fetch(`${BASE}/chat/completions`, {
           method: 'POST',
@@ -204,6 +210,7 @@ export function createModelClient(): ModelClient {
             model,
             temperature: Number(temperature),
             messages,
+            ...(maxTokens === undefined ? {} : { max_tokens: maxTokens }),
             // The one hint most OpenRouter models honour. The prompt asks for JSON in words
             // as well, because some ignore this field, and a turn retries once when the
             // answer will not parse. All three together are why the JSON approach holds
@@ -229,19 +236,22 @@ export function createModelClient(): ModelClient {
           );
         }
 
+        const usage = parsed.usage ?? {};
+        const completionUsage: CompletionUsage = {
+          promptTokens: usage.prompt_tokens ?? 0,
+          completionTokens: usage.completion_tokens ?? 0,
+          cost: asCost(usage.cost),
+        };
         const content = parsed.choices?.[0]?.message?.content;
         if (typeof content !== 'string' || content === '') {
-          throw new ModelError('Модель вернула пустой ответ.', 502);
+          throw new ModelError('Модель вернула пустой ответ.', 502, undefined, completionUsage);
         }
 
         // Not every model reports every number, and a turn that produced a good answer must
         // not fail over a missing token count.
-        const usage = parsed.usage ?? {};
         return {
           text: content,
-          promptTokens: usage.prompt_tokens ?? 0,
-          completionTokens: usage.completion_tokens ?? 0,
-          cost: asCost(usage.cost),
+          ...completionUsage,
         };
       });
     },

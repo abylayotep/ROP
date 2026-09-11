@@ -233,6 +233,7 @@ import {
   agents,
   coachMessages,
   kbDrafts,
+  kbGenerationProposals,
   testCases,
   testResults,
   testRuns,
@@ -1144,7 +1145,14 @@ export function registerDraftRoutes(
         // violation instead — caught here and turned into the same Russian 409 shape every
         // other refusal in this route already is, rather than an uncaught throw answering 500.
         try {
-          await applyOps(tx as unknown as Db, agentId, draft.ops);
+          await applyOps(tx as unknown as Db, agentId, draft.ops, async (opIndex, noteId) => {
+            await tx.update(kbGenerationProposals).set({
+              status: 'applied', noteId, updatedAt: new Date(),
+            }).where(and(
+              eq(kbGenerationProposals.draftId, draft.id),
+              eq(kbGenerationProposals.draftOpIndex, opIndex),
+            ));
+          });
         } catch (error) {
           if (isDuplicate(error)) throw new ApiError(409, DUPLICATE_NOTE_PATH_MESSAGE);
           throw error;
@@ -1171,18 +1179,25 @@ export function registerDraftRoutes(
     async (req) => {
       const agentId = req.agent!.id;
       const { draftId } = req.params as { draftId: string };
-      const draft = await loadDraft(agentId, draftId);
-      if (draft.status !== 'open') {
-        throw new ApiError(409, 'Черновик уже применён или отклонён');
-      }
+      await loadDraft(agentId, draftId);
+      const row = await db.transaction(async (tx) => {
+        const [draft] = await tx.select().from(kbDrafts).where(and(
+          eq(kbDrafts.id, draftId), eq(kbDrafts.agentId, agentId),
+        )).for('update');
+        if (!draft) throw new ApiError(404, 'Черновик не найден');
+        if (draft.status !== 'open') throw new ApiError(409, 'Черновик уже применён или отклонён');
+        await tx.update(kbGenerationProposals).set({
+          status: 'pending',
+          draftId: null,
+          draftOpIndex: null,
+          revision: sql`${kbGenerationProposals.revision} + 1`,
+          updatedAt: new Date(),
+        }).where(and(eq(kbGenerationProposals.draftId, draft.id), eq(kbGenerationProposals.status, 'drafted')));
+        const [discarded] = await tx.update(kbDrafts).set({ status: 'discarded' }).where(eq(kbDrafts.id, draft.id)).returning();
+        return discarded!;
+      });
 
-      const [row] = await db
-        .update(kbDrafts)
-        .set({ status: 'discarded' })
-        .where(eq(kbDrafts.id, draft.id))
-        .returning();
-
-      return toDraft(row!);
+      return toDraft(row);
     },
   );
 

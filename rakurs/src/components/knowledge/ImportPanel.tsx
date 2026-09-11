@@ -183,12 +183,12 @@ function PasteForm({
   return (
     <form
       onSubmit={submit}
-      style={{ flex: '1 1 320px', minWidth: 280, display: 'flex', flexDirection: 'column', gap: 10 }}
+      style={{ flex: '1 1 320px', minWidth: 0, width: '100%', display: 'flex', flexDirection: 'column', gap: 10 }}
     >
       <div style={{ fontSize: 12, fontWeight: 650 }}>Вставить текст</div>
 
-      <div style={{ display: 'flex', gap: 8 }}>
-        <div style={{ flex: 1 }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+        <div style={{ flex: '1 1 140px', minWidth: 0 }}>
           <div style={label}>Название</div>
           <input
             style={control}
@@ -255,17 +255,30 @@ function InstagramForm({
 }) {
   const toast = useToast();
   const [busy, setBusy] = useState(false);
+  const [waiting, setWaiting] = useState(false);
+  const login = useRef<AbortController | null>(null);
+  useEffect(() => () => login.current?.abort(), []);
 
   async function connect() {
     if (busy) return;
     setBusy(true);
+    setWaiting(true);
+    const controller = new AbortController();
+    login.current = controller;
+    let authorizing = true;
     try {
-      const setup = await api.getInstagramSetup(agentId);
-      const code = await runInstagramLogin(setup);
+      const setup = await api.getInstagramSetup(agentId, controller.signal);
+      const code = await runInstagramLogin(setup, controller.signal);
+      authorizing = false;
+      setWaiting(false);
       onImported(await api.importKbInstagram(agentId, code));
     } catch (error) {
-      toast.fail(error);
+      if (!controller.signal.aborted) {
+        toast.fail(error, authorizing && error instanceof Error && !(error instanceof ApiError) ? error.message : undefined);
+      }
     } finally {
+      login.current = null;
+      setWaiting(false);
       setBusy(false);
     }
   }
@@ -287,8 +300,14 @@ function InstagramForm({
         {/* Meta's window, then the import, in one press: both take seconds, and a button
             that looks idle gets pressed twice. */}
         <button type="button" className="btn-sm" disabled={busy} onClick={connect}>
-          {busy ? 'Читаем Instagram…' : 'Подключить Instagram'}
+          {waiting ? 'Ждём входа в Meta…' : busy ? 'Читаем Instagram…' : 'Подключить Instagram'}
         </button>
+        {waiting && <button type="button" className="btn-link" style={{ marginLeft: 10 }} onClick={() => login.current?.abort()}>Отмена</button>}
+      </div>
+      <div style={hint}>
+        Если Meta пишет Invalid Scopes, проверьте доступ приложения к instagram_basic,
+        pages_show_list и pages_read_engagement в{' '}
+        <a href="https://developers.facebook.com/apps/" target="_blank" rel="noreferrer">настройках Meta</a>.
       </div>
     </div>
   );

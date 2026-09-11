@@ -137,6 +137,22 @@ describe('a completion', () => {
     });
   });
 
+  it('sends max_tokens only when the caller supplies a limit', async () => {
+    answerWith(completion('{}'));
+
+    await client.complete({ ...input, maxTokens: 2_000 });
+
+    expect(body().max_tokens).toBe(2_000);
+  });
+
+  it('keeps max_tokens absent for existing callers', async () => {
+    answerWith(completion('{}'));
+
+    await client.complete(input);
+
+    expect(body()).not.toHaveProperty('max_tokens');
+  });
+
   it('carries the sixty-second deadline on the request', async () => {
     answerWith(completion('{}'));
     const deadline = vi.spyOn(AbortSignal, 'timeout');
@@ -158,6 +174,22 @@ describe('a failure', () => {
 
     expect(error).toBeInstanceOf(ModelError);
     expect((error as ModelError).message).toMatch(/[а-яё]/i);
+  });
+
+  it('retains reported usage when a successful response has no content', async () => {
+    answerWith({
+      choices: [],
+      usage: { prompt_tokens: 80, completion_tokens: 4, cost: '0.00020000' },
+    });
+
+    const error = await failure();
+
+    expect(error).toBeInstanceOf(ModelError);
+    expect((error as ModelError).usage).toEqual({
+      promptTokens: 80,
+      completionTokens: 4,
+      cost: '0.00020000',
+    });
   });
 
   it('raises a Russian ModelError when the one choice carries no content', async () => {

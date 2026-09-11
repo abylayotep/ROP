@@ -72,7 +72,9 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
   // Свой таймаут поверх внешней отмены: экран не должен висеть, если сервер молчит.
   const timeout = new AbortController();
   const timer = setTimeout(() => timeout.abort(), timeoutMs ?? TIMEOUT_MS);
-  signal?.addEventListener('abort', () => timeout.abort(), { once: true });
+  const abort = () => timeout.abort();
+  signal?.addEventListener('abort', abort, { once: true });
+  if (signal?.aborted) abort();
 
   let res: Response;
   try {
@@ -89,27 +91,28 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
       },
       body: form ?? (body !== undefined ? JSON.stringify(body) : undefined),
     });
-  } catch (e) {
-    clearTimeout(timer);
-    if (signal?.aborted) throw e;
-    throw new ApiError(`${rest.method ?? 'GET'} ${path}: сеть недоступна`, 0);
-  }
-  clearTimeout(timer);
-
   if (!res.ok) {
     // Просроченная сессия: пусть приложение покажет вход, а не каждая панель
     // по отдельности — «нет доступа».
     if (res.status === 401) window.dispatchEvent(new Event('rakurs:unauthorized'));
 
-    let payload: unknown;
+    const text = await res.text();
+    let payload: unknown = text;
     try {
-      payload = await res.json();
+      payload = JSON.parse(text);
     } catch {
-      payload = await res.text().catch(() => undefined);
+      // Preserve a non-JSON error body without consuming the response twice.
     }
     throw new ApiError(`${rest.method ?? 'GET'} ${path} → ${res.status}`, res.status, payload);
   }
 
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
+  } catch (e) {
+    if (signal?.aborted || e instanceof ApiError) throw e;
+    throw new ApiError(`${rest.method ?? 'GET'} ${path}: сеть недоступна`, 0);
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', abort);
+  }
 }

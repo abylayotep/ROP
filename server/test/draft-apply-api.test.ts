@@ -13,15 +13,20 @@ import {
   agentRules,
   agents,
   kbDrafts,
+  kbGenerationBatches,
+  kbGenerationProposals,
+  kbGenerationRuns,
   kbNotes,
   testCases,
   testResults,
   testRuns,
+  users,
   whatsappNumbers,
 } from '../src/db/schema.js';
 import type { CompletionInput, ModelClient } from '../src/lib/ai/openrouter.js';
 import { keyAad } from '../src/lib/ai/turn.js';
 import { baseOf, type DraftOp } from '../src/lib/drafts/ops.js';
+import { createGenerationDraft } from '../src/lib/knowledge/generation-review.js';
 import { addMember, createAccountWithOwner } from '../src/lib/provision.js';
 import { encryptSecret } from '../src/lib/secret-box.js';
 import { withDb } from './helpers/db.js';
@@ -314,6 +319,24 @@ describe('applying a draft', () => {
     expect(res.statusCode).toBe(200);
     expect(await db.select().from(agentRules)).toEqual([]);
     expect(await configVersion()).toBe(before);
+  });
+
+  it('increments released generation proposals so a stale draft request cannot recreate a discarded draft', async () => {
+    const [owner] = await db.select().from(users).where(eq(users.email, 'owner@example.com'));
+    const selection = { conversationIds: [], from: '2026-09-01T00:00:00Z', to: '2026-09-02T00:00:00Z' };
+    const counts = { selectedConversations: 0, selectedMessages: 0, eligibleMessages: 0, eligibleCharacters: 0, skippedAiOrSystem: 0, skippedUnsupported: 0, skippedEmpty: 0, skippedSensitive: 0, skippedOversize: 0, skippedNoSeller: 0 };
+    const [run] = await db.insert(kbGenerationRuns).values({ agentId, userId: owner!.id, requestedPreviewId: randomUUID(), requestKey: 'discard-stale', selection, manifest: { messages: [], batches: [] }, counts, modelId: 'model', temperature: '0.30', status: 'completed' }).returning();
+    const [batch] = await db.insert(kbGenerationBatches).values({ runId: run!.id, ordinal: 0, manifest: { ordinal: 0, conversationId: randomUUID(), messages: [], characterCount: 0 }, status: 'done' }).returning();
+    const [proposal] = await db.insert(kbGenerationProposals).values({ runId: run!.id, batchId: batch!.id, fingerprint: 'discard-stale', path: 'Delivery', body: 'Two days', sources: [] }).returning();
+    const input = { proposalIds: [proposal!.id], revisions: { [proposal!.id]: 1 } };
+    const draft = await createGenerationDraft(db, agentId, owner!.id, run!.id, input);
+
+    const discarded = await app.inject({ method: 'POST', url: `${drafts()}/${draft.draftId}/discard`, cookies: jar });
+
+    expect(discarded.statusCode).toBe(200);
+    await expect(createGenerationDraft(db, agentId, owner!.id, run!.id, input)).rejects.toMatchObject({ statusCode: 409 });
+    const [released] = await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.id, proposal!.id));
+    expect(released).toMatchObject({ status: 'pending', revision: 2, draftId: null, draftOpIndex: null });
   });
 
   it('applies over a red verdict, because the owner decides', async () => {

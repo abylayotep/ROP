@@ -207,6 +207,26 @@ describe('reading conversations', () => {
     ]);
   });
 
+  it('uses message id as the stable order when timestamps are equal', async () => {
+    const sentAt = new Date('2026-09-11T12:00:00.000Z');
+    await seedMessage({
+      id: '00000000-0000-4000-8000-000000000002',
+      body: 'second by id',
+      sentAt,
+    });
+    await seedMessage({
+      id: '00000000-0000-4000-8000-000000000001',
+      body: 'first by id',
+      sentAt,
+    });
+
+    expect((await thread()).json().messages.map((m: { body: string }) => m.body)).toEqual([
+      'first by id',
+      'second by id',
+    ]);
+    expect((await list()).json()[0].preview).toBe('second by id');
+  });
+
   it('carries whether the agent still answers here, so the switch can sit above the messages', async () => {
     expect((await thread()).json().aiEnabled).toBe(true);
 

@@ -1,4 +1,5 @@
 import type { RawLinkedContent, RawLinkedMessage, Timestamp } from './client.js';
+import { phoneForLid, rememberLid } from './lid-directory.js';
 
 /**
  * One Baileys message, reduced to the line the store writes.
@@ -35,6 +36,34 @@ export function jidToPhone(jid: string | null | undefined): string | null {
   if (domain !== 's.whatsapp.net') return null;
   const digits = (user ?? '').split(':')[0]?.replace(/\D/g, '') ?? '';
   return digits.length > 0 ? digits : null;
+}
+
+/** Reads the opaque account id from `<lid>[:device]@lid`, never treating it as a phone. */
+export function jidToLid(jid: string | null | undefined): string | null {
+  if (!jid) return null;
+  const [user, domain] = jid.split('@');
+  if (domain !== 'lid') return null;
+  const digits = (user ?? '').split(':')[0]?.replace(/\D/g, '') ?? '';
+  return digits || null;
+}
+
+/** Learn an inbound mapping without normalizing or storing the message. */
+export function learnLid(numberId: string, raw: RawLinkedMessage): void {
+  if (raw.key?.fromMe === true) return;
+  const lid = jidToLid(raw.key?.remoteJid);
+  const phone = jidToPhone(raw.key?.senderPn);
+  if (lid && phone) rememberLid(numberId, lid, phone);
+}
+
+function chatPhone(numberId: string | undefined, raw: RawLinkedMessage): string | null {
+  const direct = jidToPhone(raw.key?.remoteJid);
+  if (direct) return direct;
+  const lid = jidToLid(raw.key?.remoteJid);
+  if (!lid || !numberId) return null;
+  if (raw.key?.fromMe === true) return phoneForLid(numberId, lid);
+  const phone = jidToPhone(raw.key?.senderPn);
+  if (phone) rememberLid(numberId, lid, phone);
+  return phone;
 }
 
 /** Seconds, as a number or as protobuf's Long. */
@@ -95,9 +124,9 @@ function contentOf(message: RawLinkedContent): Content {
  *   else's line, neither of which is a message in a thread;
  * - no id, or no content at all: nothing to deduplicate on and nothing to show.
  */
-export function normalize(raw: RawLinkedMessage): NormalizedLine | null {
+export function normalize(raw: RawLinkedMessage, numberId?: string): NormalizedLine | null {
   const waMessageId = raw.key?.id ?? null;
-  const from = jidToPhone(raw.key?.remoteJid);
+  const from = chatPhone(numberId, raw);
   if (!waMessageId || !from) return null;
 
   const message = raw.message;

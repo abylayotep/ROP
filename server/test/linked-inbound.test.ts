@@ -16,7 +16,8 @@ import {
   applyMessage,
   type LinkedInboundDeps,
 } from '../src/lib/whatsapp/linked/inbound.js';
-import { jidToPhone, normalize } from '../src/lib/whatsapp/linked/normalize.js';
+import { forgetLids } from '../src/lib/whatsapp/linked/lid-directory.js';
+import { jidToLid, jidToPhone, normalize } from '../src/lib/whatsapp/linked/normalize.js';
 import type { RawLinkedMessage } from '../src/lib/whatsapp/linked/client.js';
 import { fakeGraph } from './helpers/fake-graph.js';
 import { fakeLinked } from './helpers/fake-linked.js';
@@ -38,6 +39,7 @@ let deps: LinkedInboundDeps;
 let errors: string[];
 
 const JID = '77085807932@s.whatsapp.net';
+const LID = '47536731594988@lid';
 
 function raw(over: Partial<RawLinkedMessage> = {}): RawLinkedMessage {
   return {
@@ -50,6 +52,7 @@ function raw(over: Partial<RawLinkedMessage> = {}): RawLinkedMessage {
 }
 
 beforeEach(async () => {
+  forgetLids();
   db = await withDb();
   errors = [];
   const { accountId } = await createAccountWithOwner(db, {
@@ -93,6 +96,11 @@ describe('jidToPhone', () => {
     expect(jidToPhone('120363@g.us')).toBeNull();
     expect(jidToPhone('status@broadcast')).toBeNull();
     expect(jidToPhone(null)).toBeNull();
+  });
+
+  it('reads a LID without treating it as a phone number', () => {
+    expect(jidToPhone(LID)).toBeNull();
+    expect(jidToLid('47536731594988:3@lid')).toBe('47536731594988');
   });
 });
 
@@ -140,6 +148,16 @@ describe('normalize', () => {
     const line = normalize(raw({ messageTimestamp: { toNumber: () => 1_789_000_000 } }));
     expect(line!.sentAt.toISOString()).toBe(new Date(1_789_000_000_000).toISOString());
   });
+
+  it('resolves an outgoing LID only after that number learned its customer', () => {
+    const inbound = raw({ key: { id: 'wa.lid.in', remoteJid: LID, fromMe: false, senderPn: JID } });
+    const outbound = raw({ key: { id: 'wa.lid.out', remoteJid: LID, fromMe: true } });
+
+    expect(normalize(outbound, 'number-a')).toBeNull();
+    expect(normalize(inbound, 'number-a')).toMatchObject({ from: '77085807932' });
+    expect(normalize(outbound, 'number-a')).toMatchObject({ from: '77085807932' });
+    expect(normalize(outbound, 'number-b')).toBeNull();
+  });
 });
 
 describe('linked inbound', () => {
@@ -152,6 +170,27 @@ describe('linked inbound', () => {
     expect(stored).toMatchObject({ direction: 'in', author: 'client', kind: 'text' });
     const [contact] = await db.select().from(contacts);
     expect(contact).toMatchObject({ phone: '77085807932', name: 'Айгерим' });
+  });
+
+  it('stores a live message from a LID-addressed chat', async () => {
+    const client = fakeLinked();
+
+    await applyMessage(db, deps, client, numberId, raw({
+      key: { id: 'wa.lid', remoteJid: LID, fromMe: false, senderPn: JID },
+    }));
+
+    expect((await db.select().from(messages))[0]).toMatchObject({ direction: 'in', author: 'client' });
+    expect((await db.select().from(contacts))[0]).toMatchObject({ phone: '77085807932' });
+    expect(errors).toEqual([]);
+  });
+
+  it('reports an unresolved live LID message', async () => {
+    await applyMessage(db, deps, fakeLinked(), numberId, raw({
+      key: { id: 'wa.unknown', remoteJid: LID, fromMe: true },
+    }));
+
+    expect(await db.select().from(messages)).toHaveLength(0);
+    expect(errors.join(' ')).toContain('the contact phone number is unknown');
   });
 
   it('mirrors what the owner sent from the phone as an outgoing line', async () => {
@@ -276,5 +315,16 @@ describe('linked inbound', () => {
 
     await expect(applyMessage(db, deps, client, numberId, raw())).resolves.toBeUndefined();
     expect(await db.select().from(messages)).toHaveLength(0);
+  });
+
+  it('does not learn a LID mapping after its linked number was deleted', async () => {
+    const client = fakeLinked();
+    await db.delete(whatsappNumbers).where(eq(whatsappNumbers.id, numberId));
+
+    await applyMessage(db, deps, client, numberId, raw({
+      key: { id: 'wa.deleted', remoteJid: LID, fromMe: false, senderPn: JID },
+    }));
+
+    expect(normalize(raw({ key: { id: 'wa.out', remoteJid: LID, fromMe: true } }), numberId)).toBeNull();
   });
 });

@@ -164,8 +164,10 @@ function ConnectedNumbers({
                   {number.historyDeclined
                     ? 'Владелец выключил передачу истории на телефоне.'
                     : number.historyProgress >= 100
-                      ? 'История импортирована.'
-                      : `Импорт истории: ${number.historyProgress} %`}
+                      ? 'Meta завершила передачу доступной истории. Это не полная резервная копия телефона.'
+                      : number.historyProgress > 0
+                        ? `Meta передаёт историю: ${number.historyProgress} %`
+                        : 'Ждём, когда Meta начнёт передавать историю.'}
                 </div>
               )}
               {number.connectionKind === 'coexistence' && number.offboarded && (
@@ -188,7 +190,7 @@ function ConnectedNumbers({
               {number.connectionKind === 'linked' && number.linkedState === 'open' && (
                 <div style={hint}>
                   {number.historyProgress >= 100
-                    ? 'История с телефона импортирована.'
+                    ? 'WhatsApp завершил передачу доступной истории. Это не полная резервная копия телефона.'
                     : number.historyProgress > 0
                       ? `Импорт истории: ${number.historyProgress} %`
                       : 'История с телефона ещё не пришла. Телефон присылает её в первые минуты после сканирования.'}
@@ -364,7 +366,7 @@ function WebhookCard({ setup }: { setup: WebhookSetup }) {
     <Card>
       <div style={{ fontSize: 13.5, fontWeight: 650, marginBottom: 8 }}>Вебхук в Meta</div>
       <div style={hint}>
-        Вставьте это в настройках приложения Meta: WhatsApp → Configuration → Webhook. Затем
+        Вставьте это в <a href="https://developers.facebook.com/apps/" target="_blank" rel="noreferrer">настройках приложения Meta</a>: WhatsApp → Configuration → Webhook. Затем
         подпишитесь на поля messages, smb_message_echoes, smb_app_state_sync, history и
         account_update. Весь путь по шагам — в разделе{' '}
         <Link to="../setup">«Запуск»</Link>.
@@ -372,7 +374,7 @@ function WebhookCard({ setup }: { setup: WebhookSetup }) {
       <div style={{ marginTop: 10 }}>
         <div style={label}>Callback URL</div>
         <div className="mono" style={{ ...field, marginTop: 6 }}>
-          {setup.url}
+          <a href={setup.url} target="_blank" rel="noreferrer" style={{ overflowWrap: 'anywhere' }}>{setup.url}</a>
         </div>
       </div>
       <div style={{ marginTop: 10 }}>
@@ -813,6 +815,13 @@ function CapiIntro() {
         Click-to-WhatsApp. Диалог, в котором клиент написал сам, отправить нельзя: Meta
         не с чем сопоставить покупку.
       </div>
+      <div style={{ ...hint, marginTop: 6 }}>
+        Нужны ID набора данных и токен системного пользователя из{' '}
+        <a href={EVENTS_MANAGER_URL} target="_blank" rel="noreferrer">Events Manager</a>.
+        При первом подключении или замене этих данных кабинет отправляет отдельное тестовое
+        событие. Сохранённые настройки ещё не означают, что реальные покупки видны в отчётах:
+        проверьте ответ ниже и вкладку Test Events в Meta.
+      </div>
     </>
   );
 }
@@ -1008,7 +1017,8 @@ function CapiForm({
           />
           <div style={hint}>
             Пока он указан, события видны во вкладке Test Events и не идут в оптимизацию
-            рекламы. Уберите его, когда проверите, что события доходят.
+            рекламы. Скопируйте код из Events Manager → Test Events, сохраните настройки,
+            дождитесь тестового события там и затем уберите код перед рабочей отправкой.
           </div>
         </div>
 
@@ -1027,7 +1037,8 @@ function CapiForm({
             в этот момент была принята Meta, а не «когда-то что-то сохранили». */}
         {settings.verifiedAt && (
           <div style={{ ...hint, marginTop: 10 }}>
-            Проверено в Meta {when(settings.verifiedAt)}.
+            Meta приняла тестовый запрос {when(settings.verifiedAt)}. Отдельно проверьте, что
+            событие появилось в Events Manager → Test Events.
           </div>
         )}
         {settings.error && (

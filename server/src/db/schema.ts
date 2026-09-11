@@ -25,6 +25,13 @@ import type { CoachProposal } from '../lib/ai/coach.js';
 // what a draft would write and what it was tested against, and the brand is what stops anything
 // but the drafts module filling them.
 import type { DraftBase, DraftOp } from '../lib/drafts/ops.js';
+import type {
+  GenerationBatchManifest,
+  GenerationManifest,
+  GenerationStoredCounts,
+  GenerationStoredSource,
+} from '../lib/knowledge/generation-types.js';
+import type { KbGenerationSelection, KbGenerationWarning } from '@rakurs/contract';
 
 /**
  * Tenancy plus authentication, plus WhatsApp: connected numbers, contacts,
@@ -895,6 +902,108 @@ export const kbDrafts = pgTable(
     appliedAt: timestamp('applied_at', { withTimezone: true }),
   },
   (t) => [index('kb_drafts_agent_status_idx').on(t.agentId, t.status, t.createdAt)],
+);
+
+/** A no-cost, short-lived snapshot of the exact messages an owner selected. */
+export const kbGenerationPreviews = pgTable(
+  'kb_generation_previews',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    agentId: uuid('agent_id').notNull().references(() => agents.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id').references(() => users.id, { onDelete: 'set null' }),
+    selection: jsonb('selection').$type<KbGenerationSelection>().notNull(),
+    manifest: jsonb('manifest').$type<GenerationManifest>().notNull(),
+    counts: jsonb('counts').$type<GenerationStoredCounts>().notNull(),
+    modelId: text('model_id').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  },
+  (t) => [index('kb_generation_previews_agent_expires_idx').on(t.agentId, t.expiresAt)],
+);
+
+/** One durable extraction request, including its immutable source manifest but no chat text. */
+export const kbGenerationRuns = pgTable(
+  'kb_generation_runs',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    agentId: uuid('agent_id').notNull().references(() => agents.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id').references(() => users.id, { onDelete: 'set null' }),
+    // Immutable request identity. Deliberately no FK: expired-preview cleanup must not erase
+    // which preview an idempotency key originally started from.
+    requestedPreviewId: uuid('requested_preview_id').notNull(),
+    requestKey: text('request_key').notNull(),
+    selection: jsonb('selection').$type<KbGenerationSelection>().notNull(),
+    manifest: jsonb('manifest').$type<GenerationManifest>().notNull(),
+    counts: jsonb('counts').$type<GenerationStoredCounts>().notNull(),
+    modelId: text('model_id').notNull(),
+    temperature: numeric('temperature', { precision: 3, scale: 2 }).notNull(),
+    // 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
+    status: text('status').notNull().default('queued'),
+    cancelRequestedAt: timestamp('cancel_requested_at', { withTimezone: true }),
+    promptTokens: integer('prompt_tokens').notNull().default(0),
+    completionTokens: integer('completion_tokens').notNull().default(0),
+    cost: numeric('cost', { precision: 12, scale: 8 }).notNull().default('0'),
+    errorCode: text('error_code'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique('kb_generation_runs_agent_request_key').on(t.agentId, t.requestKey),
+    uniqueIndex('kb_generation_runs_one_active_per_agent')
+      .on(t.agentId)
+      .where(sql`${t.status} in ('queued', 'running')`),
+    index('kb_generation_runs_agent_created_idx').on(t.agentId, t.createdAt),
+  ],
+);
+
+/** One sequential provider call inside a run. */
+export const kbGenerationBatches = pgTable(
+  'kb_generation_batches',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    runId: uuid('run_id').notNull().references(() => kbGenerationRuns.id, { onDelete: 'cascade' }),
+    ordinal: integer('ordinal').notNull(),
+    manifest: jsonb('manifest').$type<GenerationBatchManifest>().notNull(),
+    // 'pending' | 'running' | 'done' | 'failed' | 'cancelled'
+    status: text('status').notNull().default('pending'),
+    attempts: integer('attempts').notNull().default(0),
+    promptTokens: integer('prompt_tokens').notNull().default(0),
+    completionTokens: integer('completion_tokens').notNull().default(0),
+    cost: numeric('cost', { precision: 12, scale: 8 }).notNull().default('0'),
+    errorCode: text('error_code'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [unique('kb_generation_batches_run_ordinal').on(t.runId, t.ordinal)],
+);
+
+/** A source-backed suggestion waiting for explicit review and draft conversion. */
+export const kbGenerationProposals = pgTable(
+  'kb_generation_proposals',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    runId: uuid('run_id').notNull().references(() => kbGenerationRuns.id, { onDelete: 'cascade' }),
+    batchId: uuid('batch_id').notNull().references(() => kbGenerationBatches.id, { onDelete: 'cascade' }),
+    fingerprint: text('fingerprint').notNull(),
+    revision: integer('revision').notNull().default(1),
+    path: text('path').notNull(),
+    body: text('body').notNull(),
+    warnings: text('warnings').array().$type<KbGenerationWarning[]>().notNull().default(sql`'{}'::text[]`),
+    sources: jsonb('sources').$type<GenerationStoredSource[]>().notNull(),
+    // 'pending' | 'rejected' | 'drafted' | 'applied'
+    status: text('status').notNull().default('pending'),
+    draftId: uuid('draft_id').references(() => kbDrafts.id, { onDelete: 'set null' }),
+    draftOpIndex: integer('draft_op_index'),
+    noteId: uuid('note_id').references(() => kbNotes.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique('kb_generation_proposals_run_fingerprint').on(t.runId, t.fingerprint),
+    index('kb_generation_proposals_run_status_idx').on(t.runId, t.status, t.createdAt),
+    index('kb_generation_proposals_draft_idx').on(t.draftId),
+    index('kb_generation_proposals_note_idx').on(t.noteId),
+  ],
 );
 
 /**

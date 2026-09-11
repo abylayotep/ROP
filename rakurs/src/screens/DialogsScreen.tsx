@@ -63,6 +63,7 @@ export function DialogsScreen() {
   // The selected conversation lives in the URL, so a card on the board opens its thread.
   const [params, setParams] = useSearchParams();
   const selected = params.get('conversation');
+  const targetMessageId = params.get('message');
   const select = (conversationId: string) =>
     setParams({ conversation: conversationId }, { replace: true });
 
@@ -77,8 +78,8 @@ export function DialogsScreen() {
   const [aiNonce, setAiNonce] = useState(0);
 
   return (
-    <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
-      <div style={{ width: 320, flex: '0 0 320px' }}>
+    <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+      <div style={{ width: 320, maxWidth: '100%', flex: '1 1 280px', minWidth: 0 }}>
         <Async state={list} skeleton={<Skeleton height={220} />}>
           {(conversations) =>
             conversations.length === 0 ? (
@@ -138,14 +139,14 @@ export function DialogsScreen() {
         </Async>
       </div>
 
-      <div style={{ flex: 1, minWidth: 0 }}>
+      <div style={{ flex: '999 1 420px', minWidth: 0, maxWidth: '100%' }}>
         {selected === null ? (
           <Card>
             <EmptyState>Выберите переписку слева.</EmptyState>
           </Card>
         ) : (
-          <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
-            <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+            <div style={{ flex: '999 1 360px', minWidth: 0, maxWidth: '100%' }}>
               {/* `key={selected}` forces a remount on every conversation switch: a new
                   conversation is a new subject, and neither the loaded thread nor the
                   composer's draft belongs to the previous one. Without it `Thread` would
@@ -153,14 +154,15 @@ export function DialogsScreen() {
                   text left in the composer would still be sitting there, ready to be sent
                   to the wrong person. */}
               <Thread
-                key={selected}
+                key={`${selected}:${targetMessageId ?? ''}`}
                 agentId={agent.id}
                 conversationId={selected}
+                targetMessageId={targetMessageId}
                 onSent={list.reload}
                 onAiChanged={() => setAiNonce((n) => n + 1)}
               />
             </div>
-            <div style={{ width: 300, flex: '0 0 300px' }}>
+            <div style={{ width: 300, maxWidth: '100%', flex: '1 1 280px', minWidth: 0 }}>
               {/* The same key for the same reason: another client's card must not flash
                   on screen under the wrong name. */}
               <LeadPanel
@@ -180,11 +182,13 @@ export function DialogsScreen() {
 function Thread({
   agentId,
   conversationId,
+  targetMessageId,
   onSent,
   onAiChanged,
 }: {
   agentId: string;
   conversationId: string;
+  targetMessageId: string | null;
   onSent: () => void;
   onAiChanged: () => void;
 }) {
@@ -201,10 +205,16 @@ function Thread({
     [agentId, conversationId],
   );
 
-  // A conversation is read from the bottom: the newest message is the one being answered.
+  // A source link names an exact stored message; ordinary dialog opens still start at the end.
   useEffect(() => {
-    bottom.current?.scrollIntoView();
-  }, [thread.data]);
+    const target = targetMessageId ? document.getElementById(`message-${targetMessageId}`) : null;
+    if (target) {
+      target.scrollIntoView({ block: 'center' });
+      target.focus({ preventScroll: true });
+    } else {
+      bottom.current?.scrollIntoView();
+    }
+  }, [thread.data, targetMessageId]);
 
   async function attach(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
@@ -296,13 +306,14 @@ function Thread({
           </div>
 
           {data.windowOpen ? (
-            <form onSubmit={submit} style={{ display: 'flex', gap: 8 }}>
+            <form onSubmit={submit} style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
               <input
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
                 placeholder="Ответить"
                 style={{
                   flex: 1,
+                  minWidth: 140,
                   padding: '10px 12px',
                   background: 'var(--sunken)',
                   color: 'var(--text)',
@@ -381,7 +392,7 @@ function Bubble({
   }
 
   return (
-    <div style={bubble(mine)}>
+    <div id={`message-${message.id}`} tabIndex={-1} style={bubble(mine)}>
       {/* A file from imported history is downloaded by the server on this very request, so
           the first open of an old photo takes a moment longer than the rest. */}
       {message.hasMedia && message.mediaMime?.startsWith('image/') && (

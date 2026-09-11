@@ -266,3 +266,34 @@ a:hover {
     animation: none;
   }
 }
+
+/* Knowledge panes fit their available space, including the import controls. */
+.knowledge-layout, .knowledge-detail {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+.knowledge-sidebar {
+  width: 300px;
+  max-width: 100%;
+  flex: 0 0 300px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.knowledge-layout > :last-child { flex-basis: 460px !important; }
+.knowledge-context { width: 300px; max-width: 100%; }
+.knowledge-detail > :first-child { flex-basis: 360px !important; }
+.knowledge-filters .seg { flex-wrap: wrap; }
+
+@media (max-width: 760px) {
+  .app-layout { flex-direction: column; }
+  .app-layout > aside { width: 100% !important; flex-basis: auto !important; padding: 12px 0 !important; }
+  .app-layout > aside > nav { flex-direction: row !important; overflow-x: auto; }
+  .app-layout > aside > nav a { white-space: nowrap; }
+  .app-layout > main > header { flex-wrap: wrap; gap: 10px !important; padding: 14px 16px !important; }
+  .app-layout > main > section { padding: 16px !important; }
+  .knowledge-sidebar, .knowledge-context { width: 100%; flex-basis: 100%; }
+  .knowledge-layout > :last-child { width: 100%; }
+}

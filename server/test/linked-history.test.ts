@@ -6,6 +6,7 @@ import { createAccountWithOwner } from '../src/lib/provision.js';
 import type { RawLinkedHistory, RawLinkedMessage } from '../src/lib/whatsapp/linked/client.js';
 import { applyHistoryChunk } from '../src/lib/whatsapp/linked/history.js';
 import { registerLinkedHistory } from '../src/lib/whatsapp/linked/history.js';
+import { forgetLids } from '../src/lib/whatsapp/linked/lid-directory.js';
 import { fakeLinked } from './helpers/fake-linked.js';
 import { withDb } from './helpers/db.js';
 
@@ -22,6 +23,7 @@ let agentId: string;
 let numberId: string;
 
 const JID = '77085807932@s.whatsapp.net';
+const LID = '47536731594988@lid';
 
 function raw(over: Partial<RawLinkedMessage> = {}): RawLinkedMessage {
   return {
@@ -39,7 +41,13 @@ const chunk = (over: Partial<RawLinkedHistory> = {}): RawLinkedHistory => ({
   ...over,
 });
 
+async function until(done: () => boolean): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (!done() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+}
+
 beforeEach(async () => {
+  forgetLids();
   db = await withDb();
   const { accountId } = await createAccountWithOwner(db, {
     company: 'Sealhouse',
@@ -73,6 +81,43 @@ describe('history import', () => {
     expect(stored).toMatchObject({ direction: 'in', author: 'client', body: 'Сколько стоит?' });
   });
 
+  it('orders the thread without opening a live reply window', async () => {
+    const sentAt = new Date(1_770_000_000 * 1_000);
+
+    await applyHistoryChunk(db, numberId, chunk());
+
+    const [conversation] = await db.select().from(conversations);
+    expect(conversation!.lastMessageAt).toEqual(sentAt);
+    expect(conversation!.lastInboundAt).toBeNull();
+  });
+
+  it('preserves an existing live reply window when newer history arrives', async () => {
+    await applyHistoryChunk(db, numberId, chunk());
+    const [conversation] = await db.select().from(conversations);
+    const liveInboundAt = new Date('2026-02-10T12:00:00.000Z');
+    await db
+      .update(conversations)
+      .set({ lastInboundAt: liveInboundAt })
+      .where(eq(conversations.id, conversation!.id));
+
+    await applyHistoryChunk(
+      db,
+      numberId,
+      chunk({
+        messages: [
+          raw({
+            key: { id: 'old.newer', remoteJid: JID, fromMe: false },
+            messageTimestamp: 1_771_000_000,
+          }),
+        ],
+      }),
+    );
+
+    const [updated] = await db.select().from(conversations);
+    expect(updated!.lastInboundAt).toEqual(liveInboundAt);
+    expect(updated!.lastMessageAt).toEqual(new Date(1_771_000_000 * 1_000));
+  });
+
   it('never runs a turn for an imported message', async () => {
     // `applyHistoryChunk` takes no model at all: the type is the guarantee, and this test
     // is what stops someone adding one later "for symmetry".
@@ -81,7 +126,7 @@ describe('history import', () => {
     registerLinkedHistory(db, { onError: (m) => errors.push(m) }, client);
 
     client.emit({ type: 'history', numberId, chunk: chunk() });
-    await new Promise((r) => setTimeout(r, 30));
+    await new Promise((resolve) => setTimeout(resolve, 30));
 
     expect(await db.select().from(messages)).toHaveLength(1);
     expect(errors).toEqual([]);
@@ -89,17 +134,56 @@ describe('history import', () => {
 
   it('reports what each chunk carried, so a phone that sent nothing is visible', async () => {
     const client = fakeLinked();
-    const reports: { messages: number; contacts: number; progress: number | null }[] = [];
+    const reports: { messages: number; contacts: number; progress: number | null; skippedUnresolved: number }[] = [];
     registerLinkedHistory(db, { onImported: (report) => reports.push(report) }, client);
 
     client.emit({ type: 'history', numberId, chunk: { ...chunk(), progress: 40 } });
     client.emit({ type: 'history', numberId, chunk: { messages: [], contacts: [] } });
-    await new Promise((r) => setTimeout(r, 30));
+    await until(() => reports.length === 2);
 
     expect(reports).toEqual([
-      { messages: 1, contacts: 0, progress: 40 },
-      { messages: 0, contacts: 0, progress: null },
+      { messages: 1, contacts: 0, progress: 40, skippedUnresolved: 0 },
+      { messages: 0, contacts: 0, progress: null, skippedUnresolved: 0 },
     ]);
+  });
+
+  it('learns LID mappings before importing an earlier outgoing line', async () => {
+    await applyHistoryChunk(
+      db,
+      numberId,
+      chunk({
+        messages: [
+          raw({
+            key: { id: 'old.out', remoteJid: LID, fromMe: true, senderPn: '77010000000@s.whatsapp.net' },
+            message: { conversation: 'Ответ с телефона' },
+          }),
+          raw({ key: { id: 'old.in', remoteJid: LID, fromMe: false, senderPn: JID } }),
+        ],
+      }),
+    );
+
+    expect((await db.select().from(messages)).map((message) => message.waMessageId).sort()).toEqual([
+      'old.in',
+      'old.out',
+    ]);
+    expect(await db.select().from(conversations)).toHaveLength(1);
+  });
+
+  it('reports how many unresolved LID history messages were skipped', async () => {
+    const client = fakeLinked();
+    const errors: string[] = [];
+    const reports: { skippedUnresolved: number }[] = [];
+    registerLinkedHistory(db, { onError: (message) => errors.push(message), onImported: (report) => reports.push(report) }, client);
+
+    client.emit({
+      type: 'history',
+      numberId,
+      chunk: chunk({ messages: [raw({ key: { id: 'old.unknown', remoteJid: LID, fromMe: true } })] }),
+    });
+    await until(() => reports.length === 1);
+
+    expect(reports[0]!.skippedUnresolved).toBe(1);
+    expect(errors.join(' ')).toContain('1 history messages were not stored');
   });
 
   it('does not download a file during the import', async () => {

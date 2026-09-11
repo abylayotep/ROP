@@ -13,7 +13,7 @@ import {
   type StoredMedia,
 } from '../store.js';
 import type { LinkedClient, LinkedEvent, RawLinkedMessage } from './client.js';
-import { mimeOf, normalize } from './normalize.js';
+import { jidToLid, mimeOf, normalize } from './normalize.js';
 
 /**
  * What arrives on a linked device's socket, written down.
@@ -52,15 +52,23 @@ export async function applyMessage(
   numberId: string,
   raw: RawLinkedMessage,
 ): Promise<void> {
-  const line = normalize(raw);
-  if (!line) return;
-
   const [number] = await db
     .select()
     .from(whatsappNumbers)
     .where(eq(whatsappNumbers.id, numberId));
   // The socket outlived its row: the number was deleted while the phone was still connected.
   if (!number) return;
+
+  const line = normalize(raw, number.id);
+  if (!line) {
+    const lid = raw.message ? jidToLid(raw.key?.remoteJid) : null;
+    if (lid) {
+      deps.onError?.(
+        `Message ${raw.key?.id ?? '?'} from chat ${lid}@lid was not stored: the contact phone number is unknown`,
+      );
+    }
+    return;
+  }
 
   const contactId = await upsertContact(
     db,

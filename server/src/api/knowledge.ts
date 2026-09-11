@@ -1,6 +1,7 @@
 import type {
   InstagramSetup,
   KbGraph,
+  KbGenerationSource,
   KbImport,
   KbNote,
   KbNoteDetail,
@@ -12,7 +13,7 @@ import { and, asc, desc, eq, inArray, isNotNull } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
-import { kbChunks, kbLinks, kbNotes, kbSources } from '../db/schema.js';
+import { conversations, kbChunks, kbGenerationProposals, kbLinks, kbNotes, kbSources, messages } from '../db/schema.js';
 import type { Env } from '../env.js';
 import {
   InstagramError,
@@ -331,6 +332,23 @@ export function registerKnowledgeRoutes(
   async function loadNoteDetail(agentId: string, noteId: string): Promise<KbNoteDetail> {
     const note = await loadNote(agentId, noteId);
 
+    const generated = await db.select({ sources: kbGenerationProposals.sources })
+      .from(kbGenerationProposals)
+      .where(and(eq(kbGenerationProposals.noteId, noteId), eq(kbGenerationProposals.status, 'applied')));
+    const storedSources = generated.flatMap((row) => row.sources);
+    const sourceIds = [...new Set(storedSources.map((source) => source.messageId))];
+    const currentSources = sourceIds.length === 0 ? [] : await db.select({
+      id: messages.id, conversationId: messages.conversationId, body: messages.body,
+    }).from(messages).innerJoin(conversations, and(
+      eq(conversations.id, messages.conversationId), eq(conversations.agentId, agentId),
+    )).where(inArray(messages.id, sourceIds));
+    const sourceById = new Map(currentSources.map((row) => [row.id, row]));
+    const generationSources: KbGenerationSource[] = storedSources.map((source) => ({
+      ...source,
+      excerpt: sourceById.get(source.messageId)?.body?.slice(0, 240) ?? null,
+      available: sourceById.get(source.messageId)?.conversationId === source.conversationId,
+    }));
+
     const [sourceTitle, chunkRows, backlinkRows, linkRows] = await Promise.all([
       sourceTitleOf(note.sourceId),
       db.select(kbChunkColumns).from(kbChunks).where(eq(kbChunks.noteId, note.id)).orderBy(asc(kbChunks.ordinal)),
@@ -354,6 +372,7 @@ export function registerKnowledgeRoutes(
       sections: chunkRows.map(toKbSection),
       backlinks: backlinkRows,
       links: linkRows,
+      generationSources,
     };
   }
 

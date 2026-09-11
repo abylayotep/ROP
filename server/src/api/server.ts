@@ -19,6 +19,7 @@ import { registerCoachRoutes } from './coach.js';
 import { registerConversationRoutes } from './conversations.js';
 import { registerDraftRoutes } from './drafts.js';
 import { registerKnowledgeRoutes } from './knowledge.js';
+import { registerKnowledgeGenerationRoutes } from './knowledge-generation.js';
 import { registerLeadRoutes } from './leads.js';
 import { registerOrderRoutes } from './orders.js';
 import { requireSession } from './require-session.js';
@@ -127,6 +128,7 @@ export function buildServer(env: Env, db: Db, deps: ServerDeps = {}): FastifyIns
     registerBoardRoutes(app, db, guard);
     registerStatsRoutes(app, db, guard);
     registerKnowledgeRoutes(app, db, env, guard, { pageFetcher, graph, instagram });
+    registerKnowledgeGenerationRoutes(app, db, env, guard, { model });
     registerRuleRoutes(app, db, guard);
     registerAiRoutes(app, db, env, guard, { model, graph, linked });
     // The coach writes only `coach_messages` — see the file's own comment for why a

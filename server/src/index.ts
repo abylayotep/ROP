@@ -16,6 +16,7 @@ import {
 import { createLinkedSocket } from './lib/whatsapp/linked/socket.js';
 import { createModelClient } from './lib/ai/openrouter.js';
 import { createGraphClient } from './lib/whatsapp/graph.js';
+import { reconcileGenerationRuns } from './lib/knowledge/generation-run.js';
 
 // Local convenience only. In production Compose supplies the environment and there is
 // no .env in the image, so the absence of the file is the normal case, not an error.
@@ -70,6 +71,7 @@ registerLinkedHistory(
 // `running` test run left behind by a dead process needs this, and why it runs here rather
 // than on a hook every test's own `buildServer` would trip too.
 await reconcileOrphanedRuns(db);
+await reconcileGenerationRuns(db);
 
 // A pairing is a QR code on somebody's screen, and that screen did not survive the
 // restart either. Left in place, one of them refuses every later attempt by that account.

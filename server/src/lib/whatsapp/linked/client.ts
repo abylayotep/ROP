@@ -26,7 +26,13 @@ export interface RawLinkedContent {
 }
 
 export interface RawLinkedMessage {
-  key: { id?: string | null; remoteJid?: string | null; fromMe?: boolean | null };
+  key: {
+    id?: string | null;
+    remoteJid?: string | null;
+    fromMe?: boolean | null;
+    /** The sender phone JID accompanying a LID-addressed chat. */
+    senderPn?: string | null;
+  };
   messageTimestamp?: Timestamp;
   /** The sender's name as their phone reports it. */
   pushName?: string | null;

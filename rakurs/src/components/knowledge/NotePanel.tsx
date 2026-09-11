@@ -1,4 +1,5 @@
 import { useState, type CSSProperties } from 'react';
+import { Link } from 'react-router-dom';
 import * as api from '@/api';
 import { Card, CardHead } from '@/components/ui/primitives';
 import { Async, EmptyState, Skeleton } from '@/components/ui/states';
@@ -82,8 +83,23 @@ export function NotePanel({
           </div>
         )}
         <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 10 }}>
-          {detail.sourceTitle ? `Источник: ${detail.sourceTitle}` : 'Добавлено вручную'}
+          {(detail.generationSources?.length ?? 0) > 0
+            ? 'Из диалогов WhatsApp'
+            : detail.sourceTitle ? `Источник: ${detail.sourceTitle}` : 'Добавлено вручную'}
         </div>
+        {(detail.generationSources?.length ?? 0) > 0 && (
+          <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {detail.generationSources!.map((source) => source.available ? (
+              <Link key={source.messageId} className="btn-link" to={`../dialogs?conversation=${encodeURIComponent(source.conversationId)}&message=${encodeURIComponent(source.messageId)}`}>
+                Диалог · {new Date(source.sentAt).toLocaleDateString('ru-RU')}{source.excerpt ? ` · ${preview(source.excerpt)}` : ''}
+              </Link>
+            ) : (
+              <span key={source.messageId} style={{ fontSize: 11.5, color: 'var(--text-dim)' }}>
+                Источник недоступен
+              </span>
+            ))}
+          </div>
+        )}
       </Card>
 
       <Card>

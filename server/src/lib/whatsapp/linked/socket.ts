@@ -1,4 +1,5 @@
 import makeWASocket, {
+  Browsers,
   DisconnectReason,
   downloadMediaMessage,
   type WASocket,
@@ -55,7 +56,7 @@ const silent = (): SilentLogger => {
 };
 
 /** What the phone shows in «Связанные устройства». */
-const BROWSER: [string, string, string] = ['Ракурс', 'Chrome', '1.0.0'];
+const BROWSER = Browsers.macOS('Ракурс');
 
 /** `77085807932:12@s.whatsapp.net` → `+77085807932`. */
 function displayPhoneOf(jid: string): string {

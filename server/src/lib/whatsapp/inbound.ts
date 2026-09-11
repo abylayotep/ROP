@@ -11,6 +11,16 @@ import type { ModelClient } from '../ai/openrouter.js';
 import { runTurn } from '../ai/turn.js';
 import { decryptSecret } from '../secret-box.js';
 import { asCloudNumber } from './cloud-number.js';
+import {
+  advanceConversation,
+  runTurns,
+  silenceAgent,
+  storeLine,
+  upsertContact,
+  upsertConversation,
+  type StoredMedia,
+  type Touched,
+} from './store.js';
 import { withoutSecret, type GraphClient } from './graph.js';
 import { applyHistory, type HistoryValue } from './history.js';
 import { downloadInboundMedia } from './media.js';
@@ -254,8 +264,6 @@ export async function processPendingEvents(
  * A map rather than a list, because one turn per conversation is the whole point: a customer
  * who sends three lines in one delivery is asking one question and gets one answer.
  */
-type Touched = Map<string, string>;
-
 /**
  * What one delivery left behind: what went wrong storing it, and who now owes an answer.
  *
@@ -295,34 +303,6 @@ async function applyPayload(db: Db, deps: InboundDeps, payload: unknown): Promis
   return { errors, touched };
 }
 
-/**
- * The agent's answer to what this delivery brought, one turn per conversation.
- *
- * Nothing here may throw. This runs after the event is stamped processed, so an exception
- * escaping it would not lose the customer's message — but it would abandon the turns of
- * every conversation after this one in the batch. A retry is the one thing a turn cannot
- * survive: `unrecorded` means Meta accepted the reply and only our own row failed, so
- * running the turn again would send the customer the same sentence twice. Hence a turn runs
- * exactly once per stored message, a redelivered message is not a stored message, and an
- * outcome is never a reason to fail the event. Only a raised error is worth writing down,
- * and it goes where the media download's does: onto the event, which is already processed.
- */
-async function runTurns(db: Db, deps: InboundDeps, touched: Touched): Promise<string[]> {
-  const errors: string[] = [];
-  for (const [conversationId, agentId] of touched) {
-    try {
-      const turnDeps = { model: deps.model, graph: deps.graph, key: deps.key };
-      await runTurn(db, turnDeps, { agentId, conversationId });
-    } catch (error) {
-      // One conversation's failure must not cost the others theirs: the next entry in the
-      // map is somebody else's live thread.
-      errors.push(
-        `ответ агента не удался: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-  }
-  return errors;
-}
 
 /**
  * Records the ad a conversation came from, once.
@@ -534,28 +514,21 @@ async function applyMessages(
     // `TurnResult`), and answering twice is worse for the customer than answering once late.
     // The customer's next message runs a turn on the whole thread, which is how the missed
     // line is picked up; a customer who never writes again was leaving anyway.
-    if (!known && (await storeMessage(db, conversationId, incoming, media))) {
+    const line = {
+      waMessageId: incoming.id,
+      direction: 'in' as const,
+      author: 'client' as const,
+      kind: incoming.type,
+      body: bodyOf(incoming),
+      sentAt: at(incoming.timestamp),
+      media,
+    };
+    if (!known && (await storeLine(db, conversationId, line))) {
       touched.set(conversationId, number.agentId);
     }
     if (incoming.referral) await recordReferral(db, conversationId, incoming.referral);
 
-    const sentAt = at(incoming.timestamp);
-    // Bound as an ISO string with an explicit cast, not as a Date: a Date inlined into a
-    // `sql` fragment reaches Postgres as an untyped parameter and `greatest` cannot be
-    // resolved against it, which fails the whole delivery.
-    const sentAtParam = sql`${sentAt.toISOString()}::timestamptz`;
-    await db
-      .update(conversations)
-      .set({
-        // Both columns only ever move forward. Meta redelivers, sometimes out of order:
-        // lastInboundAt going backwards would refuse an operator a reply they are
-        // entitled to send, and lastMessageAt going backwards would reorder the list
-        // under someone who is reading it. Guarded per column rather than in a where
-        // clause, because an operator's reply moves lastMessageAt on its own.
-        lastInboundAt: sql`greatest(coalesce(${conversations.lastInboundAt}, to_timestamp(0)), ${sentAtParam})`,
-        lastMessageAt: sql`greatest(coalesce(${conversations.lastMessageAt}, to_timestamp(0)), ${sentAtParam})`,
-      })
-      .where(eq(conversations.id, conversationId));
+    await advanceConversation(db, conversationId, at(incoming.timestamp), true);
   }
   return errors;
 }
@@ -615,42 +588,23 @@ async function applyEchoes(
       }
     }
 
-    const stored = await db
-      .insert(messages)
-      .values({
-        conversationId,
-        waMessageId: echo.id,
-        direction: 'out',
-        author: 'phone',
-        kind: echo.type,
-        body: bodyOf(echo),
-        status: 'sent',
-        sentAt: at(echo.timestamp),
-        mediaPath: media?.path ?? null,
-        mediaMime: media?.mime ?? null,
-      })
-      .onConflictDoNothing({ target: messages.waMessageId })
-      // Empty when the conflict fired, which is what tells a first delivery from a redelivery.
-      .returning({ id: messages.id });
+    const stored = await storeLine(db, conversationId, {
+      waMessageId: echo.id,
+      direction: 'out',
+      author: 'phone',
+      kind: echo.type,
+      body: bodyOf(echo),
+      status: 'sent',
+      sentAt: at(echo.timestamp),
+      media,
+    });
 
-    const sentAtParam = sql`${at(echo.timestamp).toISOString()}::timestamptz`;
-    await db
-      .update(conversations)
-      .set({
-        // Only ever forward, and a `greatest`, so a redelivery costs nothing.
-        lastMessageAt: sql`greatest(coalesce(${conversations.lastMessageAt}, to_timestamp(0)), ${sentAtParam})`,
-      })
-      .where(eq(conversations.id, conversationId));
+    await advanceConversation(db, conversationId, at(echo.timestamp), false);
 
     // Switching the agent off is the operator taking the thread, and that happens once — on
     // the delivery that actually stored this echo. Meta redelivers by design, and doing it
     // again would silence a thread the operator has since re-enabled in the cabinet.
-    if (stored.length > 0) {
-      await db
-        .update(conversations)
-        .set({ aiEnabled: false })
-        .where(eq(conversations.id, conversationId));
-    }
+    if (stored) await silenceAgent(db, conversationId);
   }
   return errors;
 }
@@ -678,66 +632,3 @@ async function applyContactSync(db: Db, agentId: string, items: ContactSync[]): 
   }
 }
 
-async function upsertContact(
-  db: Db,
-  agentId: string,
-  phone: string,
-  name: string | undefined,
-): Promise<string> {
-  const [created] = await db
-    .insert(contacts)
-    .values({ agentId, phone, name: name ?? null })
-    .onConflictDoUpdate({
-      target: [contacts.agentId, contacts.phone],
-      // A person who edits their WhatsApp profile should be renamed here too, but a
-      // delivery without a name must not erase the one we have.
-      set: name ? { name } : { phone },
-    })
-    .returning({ id: contacts.id });
-  return created!.id;
-}
-
-async function upsertConversation(
-  db: Db,
-  agentId: string,
-  whatsappNumberId: string,
-  contactId: string,
-): Promise<string> {
-  const [created] = await db
-    .insert(conversations)
-    .values({ agentId, contactId, whatsappNumberId })
-    .onConflictDoUpdate({
-      target: [conversations.whatsappNumberId, conversations.contactId],
-      set: { contactId },
-    })
-    .returning({ id: conversations.id });
-  return created!.id;
-}
-
-/** True when this call is the one that stored the message, false when it was already there. */
-async function storeMessage(
-  db: Db,
-  conversationId: string,
-  incoming: InboundMessage,
-  media: { path: string; mime: string } | null,
-): Promise<boolean> {
-  const stored = await db
-    .insert(messages)
-    .values({
-      conversationId,
-      waMessageId: incoming.id,
-      direction: 'in',
-      author: 'client',
-      kind: incoming.type,
-      body: bodyOf(incoming),
-      sentAt: at(incoming.timestamp),
-      mediaPath: media?.path ?? null,
-      mediaMime: media?.mime ?? null,
-    })
-    // Meta delivers the same message more than once by design. The unique index on
-    // wa_message_id is the defence; this clause is how we accept the duplicate quietly.
-    .onConflictDoNothing({ target: messages.waMessageId })
-    // Empty when the conflict fired, which is what makes the answer above trustworthy.
-    .returning({ id: messages.id });
-  return stored.length > 0;
-}

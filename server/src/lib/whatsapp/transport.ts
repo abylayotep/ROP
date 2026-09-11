@@ -2,6 +2,7 @@ import { ApiError } from '../errors.js';
 import { decryptSecret } from '../secret-box.js';
 import { asCloudNumber, type WhatsappNumberRow } from './cloud-number.js';
 import { GraphError, withoutSecret, type GraphClient } from './graph.js';
+import { isTokenRejection, TOKEN_EXPIRED_MESSAGE } from './token-expiry.js';
 import { LinkedOffline, type LinkedClient, type OutgoingFile } from './linked/client.js';
 
 /**
@@ -45,6 +46,15 @@ export interface TransportDeps {
   linked: LinkedClient;
   /** The credentials key, for a Cloud API number's stored token. */
   key: Buffer;
+  /**
+   * Called when Meta refuses the number's token as no longer valid, so the row can say so.
+   *
+   * Required rather than optional: a call site that forgot it would leave the cabinet
+   * showing a working number while every message failed, which is the whole failure this
+   * exists to end. It is handed in rather than done here because a transport has no
+   * database and no business acquiring one — `markTokenRejected` is the other half.
+   */
+  onTokenRejected: () => Promise<void>;
 }
 
 /** WhatsApp addresses one person by jid; the cabinet stores digits. */
@@ -70,6 +80,17 @@ function cloudTransport(number: WhatsappNumberRow, deps: TransportDeps): Message
     try {
       return await attempt();
     } catch (error) {
+      if (isTokenRejection(error)) {
+        // Written down before the refusal leaves, but never at its expense: the operator
+        // is waiting, and a database that will not take the note is our problem. 409, not
+        // 502 — nothing is wrong with Meta, the number needs re-connecting.
+        try {
+          await deps.onTokenRejected();
+        } catch {
+          // Left unsaid on purpose. The sentence below is the one that helps.
+        }
+        throw new TransportRefusal(409, TOKEN_EXPIRED_MESSAGE);
+      }
       if (error instanceof GraphError) {
         throw new TransportRefusal(
           502,

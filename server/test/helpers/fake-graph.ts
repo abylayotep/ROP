@@ -38,7 +38,12 @@ export function fakeGraph(overrides: Partial<GraphClient> = {}): FakeGraph {
       fileSize: 3,
     })),
     downloadMedia: record('downloadMedia', async () => Buffer.from([1, 2, 3])),
-    exchangeCode: record('exchangeCode', async () => 'EAAB-business-token'),
+    exchangeCode: record('exchangeCode', async () => ({
+      token: 'EAAB-business-token',
+      // The production configuration is built from Meta's «60-day token» template, so a
+      // fake that answered «no deadline» would be testing a setup nobody runs.
+      expiresAt: new Date('2026-11-10T09:00:00.000Z'),
+    })),
     listPhoneNumbers: record('listPhoneNumbers', async () => [
       {
         id: '136',

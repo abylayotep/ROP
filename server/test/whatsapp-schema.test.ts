@@ -166,6 +166,31 @@ describe('coexistence columns', () => {
     });
   });
 
+  it('leaves the token deadline empty for a number connected before Meta named one', async () => {
+    const number = await seedNumber();
+
+    // Null is «no deadline known», not «expired». A pasted system-user token may well be
+    // permanent, and rows written before this column existed have nothing to report.
+    expect(number.tokenExpiresAt).toBeNull();
+  });
+
+  it('stores the moment Meta said the token stops working', async () => {
+    const [row] = await db
+      .insert(whatsappNumbers)
+      .values({
+        agentId,
+        phoneNumberId: '556',
+        wabaId: '932647766535299',
+        displayPhone: '+7 771 523 03 43',
+        accessToken: 'encrypted',
+        connectionKind: 'coexistence',
+        tokenExpiresAt: new Date('2026-11-10T09:00:00.000Z'),
+      })
+      .returning();
+
+    expect(row!.tokenExpiresAt).toEqual(new Date('2026-11-10T09:00:00.000Z'));
+  });
+
   it('stores a coexistence number with its portfolio', async () => {
     const [row] = await db
       .insert(whatsappNumbers)

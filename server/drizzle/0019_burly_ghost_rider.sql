@@ -1,0 +1,1 @@
+ALTER TABLE "whatsapp_numbers" ADD COLUMN "token_expires_at" timestamp with time zone;

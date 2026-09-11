@@ -13,6 +13,7 @@
  * `todo` is «ничего из этого ещё нет».
  */
 import type { AiSettings, CapiSettings, WhatsappNumber } from '@/types';
+import { tokenDeadline } from './whatsapp-token';
 
 export type SetupStepId =
   | 'whatsapp'
@@ -72,6 +73,20 @@ export function whatsappStatus(numbers: WhatsappNumber[]): SetupStatus {
     return {
       state: 'partial',
       note: `Один из номеров не подписан на WABA: ${unsubscribed[0]!.displayPhone}`,
+    };
+  }
+
+  // Написано в комментарии к этому файлу как пример вранья — и вот оно вслух: номер
+  // подписан, включён, и с позавчера не ходит ни одно сообщение, потому что Meta
+  // закончила шестидесятидневный токен.
+  const dead = numbers.filter((number) => tokenDeadline(number).state === 'expired');
+  if (dead.length > 0) {
+    return {
+      state: 'partial',
+      note:
+        dead.length === numbers.length
+          ? 'Доступ Meta истёк — подключите номер заново через Meta'
+          : `Доступ Meta истёк у номера ${dead[0]!.displayPhone} — подключите его заново`,
     };
   }
 

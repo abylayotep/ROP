@@ -788,7 +788,7 @@ describe('a send that fails', () => {
   it('records the failure and keeps the token out of it', async () => {
     graph = fakeGraph({
       sendText: async () => {
-        throw new GraphError(`Malformed access token ${WHATSAPP_TOKEN}`, 401, 190);
+        throw new GraphError(`Malformed access token ${WHATSAPP_TOKEN}`, 401);
       },
     });
     const model = fakeModel(answer());
@@ -805,6 +805,21 @@ describe('a send that fails', () => {
     expect(log?.messageId).toBeNull();
     // Nothing is stored for a message that never left.
     expect((await thread()).filter((message) => message.direction === 'out')).toHaveLength(0);
+  });
+
+  it('tells the owner to re-connect when Meta refuses the token as expired', async () => {
+    // Quoting «Error validating access token» into a reply log leaves whoever reads it
+    // with nothing to do. The one cure is Embedded Signup again, so say that.
+    graph = fakeGraph({
+      sendText: async () => {
+        throw new GraphError('Error validating access token: Session has expired', 401, 190);
+      },
+    });
+
+    const result = await turn(fakeModel(answer()));
+
+    expect(result.outcome).toBe('failed');
+    expect(result.detail).toContain('Подключите номер заново в интеграциях.');
   });
 
   it('keeps the handoff when the reply could not be delivered', async () => {

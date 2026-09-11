@@ -86,6 +86,9 @@ describe('connecting the phone number', () => {
     const [row] = await db.select().from(whatsappNumbers);
     expect(row!.businessId).toBe('877');
     expect(row!.syncRequestedAt).not.toBeNull();
+    // The deadline Meta stated at issue. Without it nothing in the product knows this
+    // number has sixty days to live, and the first sign would be every send failing.
+    expect(row!.tokenExpiresAt).toEqual(new Date('2026-11-10T09:00:00.000Z'));
     expect(decryptSecret(asCloudNumber(row!).accessToken, Buffer.from(env.CREDENTIALS_KEY, 'base64'), '136')).toBe('EAAB-business-token');
   });
 
@@ -192,8 +195,62 @@ describe('connecting the phone number', () => {
     expect(row!.syncRequestedAt).toBeNull();
   });
 
-  it('says the number is already connected on a repeat', async () => {
+  it('re-connecting the same number renews the token and its deadline', async () => {
+    // This is the only cure for a token that is about to expire: Meta issues a new one
+    // through the same window, and the button in the cabinet is the same button. A 409
+    // here would tell the owner to delete the number, which takes every conversation and
+    // every `ctwa_clid` with it — and Meta hands a click identifier over exactly once.
+    await boot({
+      exchangeCode: async (code) => ({
+        token: code === 'two' ? 'EAAB-renewed' : 'EAAB-business-token',
+        expiresAt: new Date(code === 'two' ? '2027-01-09T09:00:00.000Z' : '2026-11-10T09:00:00.000Z'),
+      }),
+    });
     await connect({ code: 'one', wabaId: '932', phoneNumberId: '136' });
+    const [before] = await db.select().from(whatsappNumbers);
+
+    const res = await connect({ code: 'two', wabaId: '932', phoneNumberId: '136' });
+
+    expect(res.statusCode).toBe(200);
+    const rows = await db.select().from(whatsappNumbers);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.id).toBe(before!.id);
+    expect(rows[0]!.tokenExpiresAt).toEqual(new Date('2027-01-09T09:00:00.000Z'));
+    expect(
+      decryptSecret(asCloudNumber(rows[0]!).accessToken, Buffer.from(env.CREDENTIALS_KEY, 'base64'), '136'),
+    ).toBe('EAAB-renewed');
+  });
+
+  it('does not ask Meta for the one-shot syncs again when renewing', async () => {
+    // Both are once per number on Meta's side; asking again replaces a working number's
+    // clean row with «already requested» in red.
+    await connect({ code: 'one', wabaId: '932', phoneNumberId: '136' });
+    const calls = graph.calls.length;
+
+    await connect({ code: 'two', wabaId: '932', phoneNumberId: '136' });
+
+    expect(graph.calls.slice(calls).map((c) => c.method)).not.toContain('requestSmbAppData');
+  });
+
+  it('still refuses a number another agent already connected', async () => {
+    await connect({ code: 'one', wabaId: '932', phoneNumberId: '136' });
+    const [other] = await db
+      .insert(agents)
+      .values({ accountId: (await db.select().from(agents))[0]!.accountId, name: 'Второй' })
+      .returning();
+    await db.update(whatsappNumbers).set({ agentId: other!.id });
+
+    const res = await connect({ code: 'two', wabaId: '932', phoneNumberId: '136' });
+
+    expect(res.statusCode).toBe(409);
+    expect(res.json().message).toBe('Этот номер уже подключён к другому агенту');
+  });
+
+  it('refuses to take over a number that was connected with a pasted token', async () => {
+    // A manual number is somebody's deliberate setup with a system-user token. Quietly
+    // turning it into a coexistence number would change how it is renewed for good.
+    await connect({ code: 'one', wabaId: '932', phoneNumberId: '136' });
+    await db.update(whatsappNumbers).set({ connectionKind: 'manual' });
 
     const res = await connect({ code: 'two', wabaId: '932', phoneNumberId: '136' });
 

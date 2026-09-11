@@ -41,6 +41,7 @@ import { searchKnowledge } from '../knowledge/search.js';
 import { decryptSecret } from '../secret-box.js';
 import { GraphError, withoutSecret, type GraphClient } from '../whatsapp/graph.js';
 import type { LinkedClient } from '../whatsapp/linked/client.js';
+import { markTokenRejected } from '../whatsapp/token-expiry.js';
 import { transportFor, type MessageTransport } from '../whatsapp/transport.js';
 import { ModelError, type ChatMessage, type ModelClient } from './openrouter.js';
 import {
@@ -856,7 +857,7 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
     // Checked in both modes: a sandbox that reported «отправлено» where a real turn would
     // fail on a disabled number or an unreadable token would be answering a different
     // question than the one the owner asked. Only the Graph call itself is skipped.
-    const ready = readySend(deps, number);
+    const ready = readySend(db, deps, number);
     if (!ready.ok) {
       details.push(ready.detail);
     } else if (dryRun) {
@@ -951,13 +952,22 @@ type Ready = { ok: true; transport: MessageTransport } | { ok: false; detail: st
  * credentials key no longer opens are the two failures an owner will actually meet, and a
  * sandbox that reported success on either would be lying about the only thing it is for.
  */
-function readySend(deps: TurnDeps, number: typeof whatsappNumbers.$inferSelect): Ready {
+function readySend(
+  db: Db,
+  deps: TurnDeps,
+  number: typeof whatsappNumbers.$inferSelect,
+): Ready {
   if (!number.enabled) return { ok: false, detail: 'Ответ не отправлен: номер отключён.' };
 
   try {
     return {
       ok: true,
-      transport: transportFor(number, { graph: deps.graph, linked: deps.linked, key: deps.key }),
+      transport: transportFor(number, {
+        graph: deps.graph,
+        linked: deps.linked,
+        key: deps.key,
+        onTokenRejected: () => markTokenRejected(db, number.id),
+      }),
     };
   } catch {
     // The only way building a transport fails today is a credentials key that no longer

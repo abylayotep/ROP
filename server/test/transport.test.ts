@@ -5,7 +5,7 @@ import { ApiError } from '../src/lib/errors.js';
 import { encryptSecret } from '../src/lib/secret-box.js';
 import { GraphError } from '../src/lib/whatsapp/graph.js';
 import { LinkedOffline } from '../src/lib/whatsapp/linked/client.js';
-import { transportFor, TransportRefusal } from '../src/lib/whatsapp/transport.js';
+import { transportFor, TransportRefusal, type TransportDeps } from '../src/lib/whatsapp/transport.js';
 import { fakeGraph } from './helpers/fake-graph.js';
 import { fakeLinked } from './helpers/fake-linked.js';
 
@@ -37,12 +37,28 @@ function number(over: Partial<Row> = {}): Row {
     historyProgress: 0,
     historyDeclinedAt: null,
     offboardedAt: null,
+    tokenExpiresAt: null,
     linkedJid: null,
     linkedState: null,
     createdAt: new Date(),
     ...over,
   } as Row;
 }
+
+/**
+ * Everything a transport is given, with the pieces a test does not care about filled in.
+ *
+ * `onTokenRejected` is required rather than optional on purpose: forgetting it at a call
+ * site would mean a dead token is never written down, and the cabinet would keep showing
+ * the number as working while every send failed.
+ */
+const deps = (over: Partial<TransportDeps> = {}): TransportDeps => ({
+  graph: fakeGraph(),
+  linked: fakeLinked(),
+  key,
+  onTokenRejected: async () => {},
+  ...over,
+});
 
 const linkedRow = (over: Partial<Row> = {}): Row =>
   number({
@@ -60,7 +76,7 @@ describe('transportFor', () => {
     const graph = fakeGraph();
     const linked = fakeLinked();
 
-    await transportFor(number(), { graph, linked, key }).sendText('77001234567', 'привет');
+    await transportFor(number(), deps({ graph, linked })).sendText('77001234567', 'привет');
 
     expect(graph.calls.at(-1)).toMatchObject({
       method: 'sendText',
@@ -72,11 +88,10 @@ describe('transportFor', () => {
   it('sends a coexistence number through Meta too', async () => {
     const graph = fakeGraph();
 
-    await transportFor(number({ connectionKind: 'coexistence' }), {
-      graph,
-      linked: fakeLinked(),
-      key,
-    }).sendText('77001234567', 'привет');
+    await transportFor(number({ connectionKind: 'coexistence' }), deps({ graph })).sendText(
+      '77001234567',
+      'привет',
+    );
 
     expect(graph.calls.at(-1)?.method).toBe('sendText');
   });
@@ -86,7 +101,7 @@ describe('transportFor', () => {
     const linked = fakeLinked();
     linked.setOpen('n1', true);
 
-    await transportFor(linkedRow(), { graph, linked, key }).sendText('77001234567', 'привет');
+    await transportFor(linkedRow(), deps({ graph, linked })).sendText('77001234567', 'привет');
 
     expect(linked.calls.at(-1)).toMatchObject({
       method: 'sendText',
@@ -96,22 +111,21 @@ describe('transportFor', () => {
   });
 
   it('requires an open window for Meta and not for a linked device', () => {
-    const deps = { graph: fakeGraph(), linked: fakeLinked(), key };
+    const shared = deps();
 
-    expect(transportFor(number(), deps).requiresOpenWindow).toBe(true);
-    expect(transportFor(number({ connectionKind: 'coexistence' }), deps).requiresOpenWindow).toBe(
+    expect(transportFor(number(), shared).requiresOpenWindow).toBe(true);
+    expect(transportFor(number({ connectionKind: 'coexistence' }), shared).requiresOpenWindow).toBe(
       true,
     );
-    expect(transportFor(linkedRow(), deps).requiresOpenWindow).toBe(false);
+    expect(transportFor(linkedRow(), shared).requiresOpenWindow).toBe(false);
   });
 
   it('refuses a token the credentials key no longer opens', () => {
     expect(() =>
-      transportFor(number({ accessToken: encryptSecret('EAAB-token', randomBytes(32), '136') }), {
-        graph: fakeGraph(),
-        linked: fakeLinked(),
-        key,
-      }),
+      transportFor(
+        number({ accessToken: encryptSecret('EAAB-token', randomBytes(32), '136') }),
+        deps(),
+      ),
     ).toThrow(TransportRefusal);
   });
 
@@ -122,7 +136,7 @@ describe('transportFor', () => {
       },
     });
 
-    const send = transportFor(number(), { graph, linked: fakeLinked(), key }).sendText(
+    const send = transportFor(number(), deps({ graph })).sendText(
       '77001234567',
       'привет',
     );
@@ -140,7 +154,7 @@ describe('transportFor', () => {
       },
     });
 
-    const failure = await transportFor(number(), { graph, linked: fakeLinked(), key })
+    const failure = await transportFor(number(), deps({ graph }))
       .sendText('77001234567', 'привет')
       .catch((error: Error) => error);
 
@@ -149,15 +163,15 @@ describe('transportFor', () => {
   });
 
   it('tells an offline phone apart from an unlinked one', async () => {
-    const deps = { graph: fakeGraph(), linked: fakeLinked(), key };
+    const shared = deps();
 
-    const offline = transportFor(linkedRow(), deps).sendText('77001234567', 'привет');
+    const offline = transportFor(linkedRow(), shared).sendText('77001234567', 'привет');
     await expect(offline).rejects.toMatchObject({
       statusCode: 409,
       message: 'Телефон не на связи. Откройте WhatsApp на телефоне или подключите заново.',
     });
 
-    const unlinked = transportFor(linkedRow({ linkedState: 'logged_out' }), deps).sendText(
+    const unlinked = transportFor(linkedRow({ linkedState: 'logged_out' }), shared).sendText(
       '77001234567',
       'привет',
     );
@@ -168,17 +182,13 @@ describe('transportFor', () => {
   });
 
   it('reports a refusal as an ApiError, so a route needs no translation', async () => {
-    const send = transportFor(linkedRow(), {
-      graph: fakeGraph(),
-      linked: fakeLinked(),
-      key,
-    }).sendText('77001234567', 'привет');
+    const send = transportFor(linkedRow(), deps()).sendText('77001234567', 'привет');
 
     await expect(send).rejects.toBeInstanceOf(ApiError);
   });
 
   it('says plainly that Meta cannot take a file yet', () => {
-    const transport = transportFor(number(), { graph: fakeGraph(), linked: fakeLinked(), key });
+    const transport = transportFor(number(), deps());
 
     expect(() => transport.sendMedia('77001234567', { path: '/tmp/a.jpg', mime: 'image/jpeg' })).toThrow(
       'Отправка файлов пока работает только для номера, подключённого по QR.',
@@ -189,13 +199,87 @@ describe('transportFor', () => {
     const linked = fakeLinked();
     linked.setOpen('n1', true);
 
-    await transportFor(linkedRow(), { graph: fakeGraph(), linked, key }).sendMedia('77001234567', {
+    await transportFor(linkedRow(), deps({ linked })).sendMedia('77001234567', {
       path: '/tmp/a.jpg',
       mime: 'image/jpeg',
       caption: 'вот макет',
     });
 
     expect(linked.calls.at(-1)?.method).toBe('sendMedia');
+  });
+
+  it('says the token has to be renewed when Meta refuses it as expired', async () => {
+    // Code 190 is Meta's «this token is no longer valid». Quoting it verbatim leaves an
+    // owner reading «Error validating access token» with nothing to do about it.
+    const graph = fakeGraph({
+      sendText: async () => {
+        throw new GraphError('Error validating access token: Session has expired', 401, 190);
+      },
+    });
+
+    const send = transportFor(number(), deps({ graph })).sendText('77001234567', 'привет');
+
+    await expect(send).rejects.toMatchObject({
+      statusCode: 409,
+      message: 'Доступ Meta к номеру истёк. Подключите номер заново в интеграциях.',
+    });
+  });
+
+  it('writes down that the token is dead when Meta refuses it', async () => {
+    let marked = 0;
+    const graph = fakeGraph({
+      sendText: async () => {
+        throw new GraphError('Error validating access token', 401, 190);
+      },
+    });
+
+    await transportFor(number(), deps({ graph, onTokenRejected: async () => { marked += 1; } }))
+      .sendText('77001234567', 'привет')
+      .catch(() => undefined);
+
+    expect(marked).toBe(1);
+  });
+
+  it('does not call a number dead because Meta refused for another reason', async () => {
+    // The stated deadline is the cabinet's only promise about this number. Moving it on
+    // any Graph failure would tell an owner to re-connect a number that works.
+    let marked = 0;
+    const graph = fakeGraph({
+      sendText: async () => {
+        throw new GraphError('Recipient phone number not in allowed list', 400, 131030);
+      },
+    });
+
+    await transportFor(number(), deps({ graph, onTokenRejected: async () => { marked += 1; } }))
+      .sendText('77001234567', 'привет')
+      .catch(() => undefined);
+
+    expect(marked).toBe(0);
+  });
+
+  it('still reports Meta\'s refusal when writing the dead token down fails', async () => {
+    // The operator is waiting on an answer. A database that will not take the note is our
+    // problem, not theirs, and it must not turn a clear refusal into a 500.
+    const graph = fakeGraph({
+      sendText: async () => {
+        throw new GraphError('Error validating access token', 401, 190);
+      },
+    });
+
+    const send = transportFor(
+      number(),
+      deps({
+        graph,
+        onTokenRejected: async () => {
+          throw new Error('database is down');
+        },
+      }),
+    ).sendText('77001234567', 'привет');
+
+    await expect(send).rejects.toMatchObject({
+      statusCode: 409,
+      message: 'Доступ Meta к номеру истёк. Подключите номер заново в интеграциях.',
+    });
   });
 
   it('lets an unexpected failure through untouched', async () => {
@@ -208,7 +292,7 @@ describe('transportFor', () => {
     });
     linked.setOpen('n1', true);
 
-    const send = transportFor(linkedRow(), { graph: fakeGraph(), linked, key }).sendText(
+    const send = transportFor(linkedRow(), deps({ linked })).sendText(
       '77001234567',
       'привет',
     );

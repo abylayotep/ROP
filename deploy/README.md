@@ -79,6 +79,17 @@ docker compose -f deploy/compose.yml --env-file deploy/.env ps
 The `postgres` row must show `5432/tcp` with no host address. `0.0.0.0:5432` means the
 database is on the internet.
 
+## Where the host's other secrets live
+
+The same VPS runs Tasbaqa, whose production values are in `/opt/tasbaqa/.env.prod`
+(`POSTGRES_PASSWORD`, `SMTP_PASSWORD`, `OPENROUTER_API_KEY`, the Kaspi keys and the rest).
+Written down here because it is the file to open when a deploy needs one of them — not
+because Rakurs reads it. Rakurs takes nothing from it automatically: the two products have
+separate databases, separate Compose projects and separate `.env` files, and a value copied
+from one into the other makes a single leak cost both.
+
+Never run `docker compose` inside `/opt/tasbaqa` while deploying Rakurs.
+
 ## Backups
 
 ```bash

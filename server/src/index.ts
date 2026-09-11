@@ -6,11 +6,15 @@ import { createCapiClient } from './lib/capi/client.js';
 import { sendPendingCapiEvents } from './lib/capi/queue.js';
 import { credentialsKey } from './lib/secret-box.js';
 import { createLinkedClient } from './lib/whatsapp/linked/client.js';
+import { registerLinkedHistory } from './lib/whatsapp/linked/history.js';
+import { registerLinkedInbound } from './lib/whatsapp/linked/inbound.js';
 import {
   registerLinkedLifecycle,
   restoreLinkedSessions,
 } from './lib/whatsapp/linked/lifecycle.js';
 import { createLinkedSocket } from './lib/whatsapp/linked/socket.js';
+import { createModelClient } from './lib/ai/openrouter.js';
+import { createGraphClient } from './lib/whatsapp/graph.js';
 
 // Local convenience only. In production Compose supplies the environment and there is
 // no .env in the image, so the absence of the file is the normal case, not an error.
@@ -36,6 +40,27 @@ const app = buildServer(env, db, { capi, linked });
 registerLinkedLifecycle(db, credentialsKey(env), linked, {
   onError: (message) => app.log.error({ message }, 'linked: lifecycle'),
 });
+
+// The two halves of what a phone's socket produces: live messages, and the chats it
+// already had. Registered here rather than in `buildServer` for the same reason the
+// lifecycle is — a test that builds a server must not acquire a pipeline that writes.
+registerLinkedInbound(
+  db,
+  {
+    model: createModelClient(),
+    graph: createGraphClient(),
+    linked,
+    key: credentialsKey(env),
+    mediaDir: env.MEDIA_DIR,
+    onError: (message) => app.log.error({ message }, 'linked: inbound'),
+  },
+  linked,
+);
+registerLinkedHistory(
+  db,
+  { onError: (message) => app.log.error({ message }, 'linked: history') },
+  linked,
+);
 
 // Before this process takes a single request — see `api/drafts.ts`'s own comment on why a
 // `running` test run left behind by a dead process needs this, and why it runs here rather

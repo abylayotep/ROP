@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ConversationSummary, ConversationThread, Message } from '@rakurs/contract';
@@ -13,6 +14,7 @@ import { isUuid } from '../lib/uuid.js';
 import type { GraphClient } from '../lib/whatsapp/graph.js';
 import type { LinkedClient } from '../lib/whatsapp/linked/client.js';
 import { transportFor } from '../lib/whatsapp/transport.js';
+import { storeInboundMedia } from '../lib/whatsapp/media.js';
 import { requireAgent } from './require-agent.js';
 
 /** WhatsApp allows a free-form reply for 24 hours after the customer's last message. */
@@ -41,6 +43,17 @@ const toMessage = (row: typeof messages.$inferSelect, aiReplyId: string | null):
   sentAt: row.sentAt.toISOString(),
   aiReplyId,
 });
+
+/** WhatsApp's own document limit: a file the cabinet takes is a file WhatsApp will take. */
+const MAX_UPLOAD_BYTES = 16 * 1024 * 1024;
+
+/** What the cabinet calls a file of this type, in the same words an incoming one gets. */
+function kindForMime(mime: string): string {
+  if (mime.startsWith('image/')) return 'image';
+  if (mime.startsWith('video/')) return 'video';
+  if (mime.startsWith('audio/')) return 'audio';
+  return 'document';
+}
 
 export function registerConversationRoutes(
   app: FastifyInstance,
@@ -177,6 +190,91 @@ export function registerConversationRoutes(
       // An operator's own line, sent by a person through this very route — never an ai
       // reply, so there is nothing to look up.
       return toMessage(stored!, null);
+    },
+  );
+
+  /**
+   * A file the operator is sending, plus an optional caption.
+   *
+   * A separate route rather than a content-type branch on the one above: the two share the
+   * window rule and nothing else — one validates a string, the other a stream to disk —
+   * and folding them together would put two request shapes behind one handler.
+   */
+  app.post(
+    '/api/agents/:agentId/conversations/:conversationId/files',
+    { preHandler: [guard, agentGuard] },
+    async (req): Promise<Message> => {
+      const { conversationId } = req.params as { conversationId: string };
+
+      const file = await req.file({ limits: { fileSize: MAX_UPLOAD_BYTES } });
+      if (!file) throw new ApiError(400, 'Файл не выбран');
+      const caption = (file.fields?.caption as { value?: string } | undefined)?.value?.trim() ?? '';
+
+      const { conversation, contact, number } = await loadConversation(
+        db,
+        req.agent!.id,
+        conversationId,
+      );
+
+      if (!number.enabled) {
+        throw new ApiError(409, 'Номер отключён. Включите его в интеграциях.');
+      }
+
+      const transport = transportFor(number, { graph, linked, key: credentialsKey(env) });
+      if (transport.requiresOpenWindow && !windowOpen(conversation.lastInboundAt)) {
+        throw new ApiError(
+          409,
+          'Окно ответа закрыто. Клиент должен написать первым, либо нужен шаблон.',
+        );
+      }
+
+      const bytes = await file.toBuffer().catch(() => {
+        throw new ApiError(413, `Файл больше ${Math.round(MAX_UPLOAD_BYTES / 1024 / 1024)} МБ.`);
+      });
+      if (file.file.truncated) {
+        throw new ApiError(413, `Файл больше ${Math.round(MAX_UPLOAD_BYTES / 1024 / 1024)} МБ.`);
+      }
+
+      // Written before the send, and under a name of our own: the cabinet has to be able
+      // to show what it sent, and the media route already serves files by message id. The
+      // placeholder id is replaced below by the one WhatsApp answers with.
+      const mime = file.mimetype || 'application/octet-stream';
+      const placeholder = `out.${randomUUID()}`;
+      const stored = await storeInboundMedia(
+        { mediaDir: env.MEDIA_DIR },
+        { bytes, mime, agentId: req.agent!.id, waMessageId: placeholder },
+      );
+
+      const { messageId } = await transport.sendMedia(contact.phone, {
+        path: join(env.MEDIA_DIR, stored.path),
+        mime,
+        filename: file.filename,
+        caption: caption || undefined,
+      });
+
+      const sentAt = new Date();
+      const [row] = await db
+        .insert(messages)
+        .values({
+          conversationId: conversation.id,
+          waMessageId: messageId,
+          direction: 'out',
+          author: 'operator',
+          kind: kindForMime(mime),
+          body: caption || null,
+          status: 'sent',
+          sentAt,
+          mediaPath: stored.path,
+          mediaMime: mime,
+        })
+        .returning();
+
+      await db
+        .update(conversations)
+        .set({ lastMessageAt: sentAt })
+        .where(eq(conversations.id, conversation.id));
+
+      return toMessage(row!, null);
     },
   );
 

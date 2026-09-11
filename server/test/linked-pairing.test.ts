@@ -2,8 +2,17 @@ import { eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildServer } from '../src/api/server.js';
-import { accountMembers, agents, linkedSessionKeys, whatsappNumbers } from '../src/db/schema.js';
+import {
+  accountMembers,
+  agents,
+  contacts,
+  conversations,
+  linkedSessionKeys,
+  messages,
+  whatsappNumbers,
+} from '../src/db/schema.js';
 import { createAccountWithOwner } from '../src/lib/provision.js';
+import { encryptSecret } from '../src/lib/secret-box.js';
 import { linkedAuthState } from '../src/lib/whatsapp/linked/auth-state.js';
 import { withDb } from './helpers/db.js';
 import { testEnv } from './helpers/env.js';
@@ -269,5 +278,120 @@ describe('unlinking', () => {
 
     expect(res.statusCode).toBe(400);
     expect(res.json().message).toBe('Этот номер подключён не по QR.');
+  });
+});
+
+describe('sending a file', () => {
+  /** A tiny multipart body, written by hand: no helper in the suite builds one. */
+  function multipart(fields: { caption?: string }, file: { name: string; type: string; bytes: Buffer }) {
+    const boundary = '----rakurstest';
+    const head = Buffer.from(
+      `--${boundary}\r\n` +
+        (fields.caption === undefined
+          ? ''
+          : `Content-Disposition: form-data; name="caption"\r\n\r\n${fields.caption}\r\n--${boundary}\r\n`) +
+        `Content-Disposition: form-data; name="file"; filename="${file.name}"\r\n` +
+        `Content-Type: ${file.type}\r\n\r\n`,
+    );
+    const tail = Buffer.from(`\r\n--${boundary}--\r\n`);
+    return {
+      payload: Buffer.concat([head, file.bytes, tail]),
+      headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+    };
+  }
+
+  it('sends an image through the phone and stores it as an operator line', async () => {
+    const [number] = await db
+      .insert(whatsappNumbers)
+      .values({
+        agentId,
+        displayPhone: '+7 708 580 79 32',
+        connectionKind: 'linked',
+        linkedJid: '77085807932@s.whatsapp.net',
+        linkedState: 'open',
+      })
+      .returning();
+    linked.setOpen(number!.id, true);
+    const [contact] = await db
+      .insert(contacts)
+      .values({ agentId, phone: '77001234567', name: 'Айгерим' })
+      .returning();
+    const [conversation] = await db
+      .insert(conversations)
+      .values({
+        agentId,
+        contactId: contact!.id,
+        whatsappNumberId: number!.id,
+        lastInboundAt: new Date(),
+      })
+      .returning();
+
+    const body = multipart(
+      { caption: 'вот макет' },
+      { name: 'stamp.png', type: 'image/png', bytes: Buffer.from([1, 2, 3, 4]) },
+    );
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/agents/${agentId}/conversations/${conversation!.id}/files`,
+      cookies: jar,
+      headers: body.headers,
+      payload: body.payload,
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(linked.calls.at(-1)?.method).toBe('sendMedia');
+    const [stored] = await db.select().from(messages);
+    expect(stored).toMatchObject({
+      direction: 'out',
+      author: 'operator',
+      kind: 'image',
+      body: 'вот макет',
+      mediaMime: 'image/png',
+    });
+  });
+
+  it('says plainly that a Cloud API number cannot take a file yet', async () => {
+    const [number] = await db
+      .insert(whatsappNumbers)
+      .values({
+        agentId,
+        displayPhone: '+7 708 580 79 32',
+        connectionKind: 'manual',
+        phoneNumberId: '136',
+        wabaId: '932',
+        accessToken: encryptSecret('EAAB', Buffer.from(env.CREDENTIALS_KEY, 'base64'), '136'),
+      })
+      .returning();
+    const [contact] = await db
+      .insert(contacts)
+      .values({ agentId, phone: '77001234567', name: 'Айгерим' })
+      .returning();
+    const [conversation] = await db
+      .insert(conversations)
+      .values({
+        agentId,
+        contactId: contact!.id,
+        whatsappNumberId: number!.id,
+        lastInboundAt: new Date(),
+      })
+      .returning();
+
+    const body = multipart(
+      {},
+      { name: 'stamp.png', type: 'image/png', bytes: Buffer.from([1, 2, 3, 4]) },
+    );
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/agents/${agentId}/conversations/${conversation!.id}/files`,
+      cookies: jar,
+      headers: body.headers,
+      payload: body.payload,
+    });
+
+    expect(res.statusCode).toBe(501);
+    expect(res.json().message).toBe(
+      'Отправка файлов пока работает только для номера, подключённого по QR.',
+    );
+    expect(await db.select().from(messages)).toEqual([]);
   });
 });

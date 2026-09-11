@@ -227,6 +227,25 @@ function ConnectedNumbers({
               )}
             </div>
           </div>
+          {owner && number.connectionKind === 'linked' && number.linkedState !== 'logged_out' && (
+            <div style={{ marginTop: 8 }}>
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={async () => {
+                  try {
+                    await api.unlinkPhone(agentId, number.id);
+                    toast.ok('Телефон отключён. Переписка осталась в кабинете.');
+                    onChanged();
+                  } catch (error) {
+                    toast.fail(error);
+                  }
+                }}
+              >
+                Отключить телефон
+              </button>
+            </div>
+          )}
           {owner && number.connectionKind === 'manual' && (
             <ReplaceToken agentId={agentId} number={number} onReplaced={onChanged} />
           )}

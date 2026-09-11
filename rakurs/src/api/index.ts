@@ -141,6 +141,28 @@ export const sendMessage = (agentId: string, conversationId: string, body: strin
     body: { body },
   });
 
+/**
+ * A file the operator is sending, with an optional caption.
+ *
+ * Its own route because its own request shape: a stream to disk, not a JSON string. The
+ * timeout is the long one — a photo over a phone tether is not a database query.
+ */
+export const sendFile = (
+  agentId: string,
+  conversationId: string,
+  file: File,
+  caption: string,
+) => {
+  const form = new FormData();
+  if (caption.trim()) form.append('caption', caption.trim());
+  form.append('file', file);
+  return request<Message>(`/agents/${agentId}/conversations/${conversationId}/files`, {
+    method: 'POST',
+    form,
+    timeoutMs: LONG_TIMEOUT_MS,
+  });
+};
+
 /** The address of a file inside a message. Access is checked by the session cookie. */
 export const mediaUrl = (agentId: string, messageId: string) =>
   `${API_URL}/agents/${agentId}/messages/${messageId}/media`;

@@ -1,4 +1,11 @@
-import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from 'react';
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type CSSProperties,
+  type FormEvent,
+} from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import * as api from '@/api';
 import { LeadPanel } from '@/components/lead/LeadPanel';
@@ -187,6 +194,26 @@ function Thread({
     bottom.current?.scrollIntoView();
   }, [thread.data]);
 
+  async function attach(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    // Cleared immediately: choosing the same file twice in a row must fire the change
+    // event both times, and it only does if the input does not still hold it.
+    event.target.value = '';
+    if (!file) return;
+
+    setSending(true);
+    try {
+      await api.sendFile(agentId, conversationId, file, draft);
+      setDraft('');
+      thread.reload();
+      onSent();
+    } catch (error) {
+      toast.fail(error);
+    } finally {
+      setSending(false);
+    }
+  }
+
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (!draft.trim()) return;
@@ -256,6 +283,20 @@ function Thread({
                   outline: 'none',
                 }}
               />
+              {/* A caption if the box has text, a bare file if it does not. */}
+              <label
+                className="btn"
+                style={{ cursor: sending ? 'default' : 'pointer', opacity: sending ? 0.6 : 1 }}
+                title="Отправить файл"
+              >
+                Файл
+                <input
+                  type="file"
+                  hidden
+                  disabled={sending}
+                  onChange={(event) => void attach(event)}
+                />
+              </label>
               <button type="submit" className="btn" disabled={sending || !draft.trim()}>
                 {sending ? 'Отправляем…' : 'Отправить'}
               </button>

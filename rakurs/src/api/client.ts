@@ -51,6 +51,8 @@ export function humanError(error: unknown): string {
 
 interface RequestOptions extends Omit<RequestInit, 'body'> {
   body?: unknown;
+  /** A multipart body. Mutually exclusive with `body`, and sent without a Content-Type. */
+  form?: FormData;
   query?: Record<string, string | number | undefined>;
   signal?: AbortSignal;
   /** Overrides `TIMEOUT_MS` for a call the server itself is allowed to take longer over. */
@@ -58,7 +60,7 @@ interface RequestOptions extends Omit<RequestInit, 'body'> {
 }
 
 export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const { body, query, signal, headers, timeoutMs, ...rest } = options;
+  const { body, form, query, signal, headers, timeoutMs, ...rest } = options;
 
   const url = new URL(`${API_URL}${path}`, window.location.origin);
   if (query) {
@@ -80,10 +82,12 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
       credentials: 'include',
       headers: {
         Accept: 'application/json',
+        // Never set for a FormData body: the browser has to add the multipart boundary
+        // itself, and a Content-Type we wrote would have none.
         ...(body !== undefined ? { 'Content-Type': 'application/json' } : null),
         ...headers,
       },
-      body: body !== undefined ? JSON.stringify(body) : undefined,
+      body: form ?? (body !== undefined ? JSON.stringify(body) : undefined),
     });
   } catch (e) {
     clearTimeout(timer);

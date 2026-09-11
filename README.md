@@ -75,6 +75,10 @@ npm --prefix rakurs run dev
 
 Подробности и подключение номера — в [`docs/whatsapp-setup.md`](docs/whatsapp-setup.md).
 
+Есть и третий путь — **подключить телефон по QR** как связанное устройство. Он работает
+сегодня, без приложения Meta и без проверки, но нарушает условия WhatsApp и оставляет
+рекламу без атрибуции: [`docs/whatsapp-linked.md`](docs/whatsapp-linked.md).
+
 ## Проверки
 
 ```bash

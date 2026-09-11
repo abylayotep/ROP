@@ -31,6 +31,7 @@ import { registerWhatsappWebhook } from './whatsapp-webhook.js';
 import { createLinkedClient, type LinkedRegistry } from '../lib/whatsapp/linked/client.js';
 import { createLinkedSocket } from '../lib/whatsapp/linked/socket.js';
 import { registerWhatsappLinkedRoutes } from './whatsapp-linked.js';
+import multipart from '@fastify/multipart';
 
 export interface ServerDeps {
   /** Injected by tests so a suite never reaches the network. Defaults to the real client. */
@@ -67,6 +68,9 @@ export function buildServer(env: Env, db: Db, deps: ServerDeps = {}): FastifyIns
     deps.linked ?? createLinkedClient({ session: createLinkedSocket(db, credentialsKey(env)) });
 
   app.register(cookie, { secret: env.SESSION_SECRET });
+  // Only the one route reads a file part; registered here because a content-type parser
+  // has to exist before any route that needs it is added.
+  app.register(multipart, { limits: { files: 1, fileSize: 16 * 1024 * 1024 } });
   app.register(rateLimit, { global: false });
 
   // Fastify's built-in 404 body is English developer text ("Route GET:/api/… not

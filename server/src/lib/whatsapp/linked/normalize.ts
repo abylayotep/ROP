@@ -1,4 +1,5 @@
 import type { RawLinkedContent, RawLinkedMessage, Timestamp } from './client.js';
+import { phoneForLid, rememberLid } from './lid-directory.js';
 
 /**
  * One Baileys message, reduced to the line the store writes.
@@ -35,6 +36,46 @@ export function jidToPhone(jid: string | null | undefined): string | null {
   if (domain !== 's.whatsapp.net') return null;
   const digits = (user ?? '').split(':')[0]?.replace(/\D/g, '') ?? '';
   return digits.length > 0 ? digits : null;
+}
+
+/**
+ * `4304144453830:3@lid` → `4304144453830`. Anything that is not a LID answers null.
+ *
+ * A LID is WhatsApp's account id, not a phone number, and is never stored as one: it is
+ * only ever the question this file asks [[lid-directory]].
+ */
+export function jidToLid(jid: string | null | undefined): string | null {
+  if (!jid) return null;
+  const [user, domain] = jid.split('@');
+  if (domain !== 'lid') return null;
+  const digits = (user ?? '').split(':')[0]?.replace(/\D/g, '') ?? '';
+  return digits.length > 0 ? digits : null;
+}
+
+/**
+ * Whose thread this line belongs to, in digits.
+ *
+ * WhatsApp addresses a growing share of one-to-one chats by LID rather than by number:
+ * `remoteJid` arrives as `<lid>@lid`, and the number the cabinet keys contacts on sits in
+ * `senderPn` instead. Reading `remoteJid` alone — which is what this did — drops every one
+ * of those messages silently, and that is exactly how it looked in production: the socket
+ * decrypting message after message, and not one row in `messages`.
+ *
+ * An outgoing line carries the owner's own number in `senderPn`, never the customer's, so
+ * a LID chat of the owner's own making is answered from the directory the customer's
+ * messages fill — and left unanswered when they have filled nothing yet.
+ */
+function chatPhone(raw: RawLinkedMessage): string | null {
+  const direct = jidToPhone(raw.key?.remoteJid);
+  if (direct) return direct;
+
+  const lid = jidToLid(raw.key?.remoteJid);
+  if (!lid) return null;
+  if (raw.key?.fromMe === true) return phoneForLid(lid);
+
+  const phone = jidToPhone(raw.key?.senderPn);
+  if (phone) rememberLid(lid, phone);
+  return phone;
 }
 
 /** Seconds, as a number or as protobuf's Long. */
@@ -93,11 +134,13 @@ function contentOf(message: RawLinkedContent): Content {
  * - a group (`@g.us`) or a status broadcast: not a customer conversation;
  * - a protocol or reaction message: WhatsApp talking to itself, or an emoji on someone
  *   else's line, neither of which is a message in a thread;
- * - no id, or no content at all: nothing to deduplicate on and nothing to show.
+ * - no id, or no content at all: nothing to deduplicate on and nothing to show;
+ * - a LID chat no message has yet named a number for. `inbound.ts` says so in the log:
+ *   unlike the others this one is a line we meant to keep.
  */
 export function normalize(raw: RawLinkedMessage): NormalizedLine | null {
   const waMessageId = raw.key?.id ?? null;
-  const from = jidToPhone(raw.key?.remoteJid);
+  const from = chatPhone(raw);
   if (!waMessageId || !from) return null;
 
   const message = raw.message;

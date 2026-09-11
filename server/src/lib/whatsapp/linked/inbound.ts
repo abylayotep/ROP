@@ -13,7 +13,7 @@ import {
   type StoredMedia,
 } from '../store.js';
 import type { LinkedClient, LinkedEvent, RawLinkedMessage } from './client.js';
-import { mimeOf, normalize } from './normalize.js';
+import { jidToLid, mimeOf, normalize } from './normalize.js';
 
 /**
  * What arrives on a linked device's socket, written down.
@@ -45,6 +45,24 @@ export function registerLinkedInbound(
   });
 }
 
+/**
+ * The one dropped message worth a line in the log.
+ *
+ * `normalize` refuses groups, status broadcasts and protocol traffic by the hundred, and
+ * saying so would bury the log in things working as intended. A one-to-one chat WhatsApp
+ * addressed by LID is the opposite: a customer wrote, the socket decrypted it, and the
+ * cabinet has no number to file it under. That silence is what made this class of bug
+ * invisible for a whole day, so it ends here.
+ */
+function reportDropped(deps: LinkedInboundDeps, raw: RawLinkedMessage): void {
+  if (!raw.message) return;
+  const lid = jidToLid(raw.key?.remoteJid);
+  if (!lid) return;
+  deps.onError?.(
+    `сообщение ${raw.key?.id ?? '?'} из чата ${lid}@lid не записано: номер собеседника неизвестен`,
+  );
+}
+
 export async function applyMessage(
   db: Db,
   deps: LinkedInboundDeps,
@@ -53,7 +71,10 @@ export async function applyMessage(
   raw: RawLinkedMessage,
 ): Promise<void> {
   const line = normalize(raw);
-  if (!line) return;
+  if (!line) {
+    reportDropped(deps, raw);
+    return;
+  }
 
   const [number] = await db
     .select()

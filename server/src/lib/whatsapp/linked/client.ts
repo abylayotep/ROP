@@ -26,7 +26,20 @@ export interface RawLinkedContent {
 }
 
 export interface RawLinkedMessage {
-  key: { id?: string | null; remoteJid?: string | null; fromMe?: boolean | null };
+  key: {
+    id?: string | null;
+    /** `<number>@s.whatsapp.net`, or `<lid>@lid` for a chat WhatsApp addresses by account. */
+    remoteJid?: string | null;
+    fromMe?: boolean | null;
+    /**
+     * The sender's phone number, as `<number>@s.whatsapp.net`.
+     *
+     * Present on a LID-addressed chat, where `remoteJid` names nobody the cabinet knows.
+     * It is the *sender's* number, so on the owner's own line it is the owner's — see
+     * `normalize.ts`, which is the only place allowed to decide what to do about that.
+     */
+    senderPn?: string | null;
+  };
   messageTimestamp?: Timestamp;
   /** The sender's name as their phone reports it. */
   pushName?: string | null;

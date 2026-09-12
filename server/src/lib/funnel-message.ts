@@ -9,6 +9,7 @@ import { GraphError, withoutSecret, type GraphClient } from './whatsapp/graph.js
 export interface StageMessageDeps {
   graph: GraphClient;
   key: Buffer;
+  canSend?: () => Promise<boolean>;
 }
 
 /**
@@ -92,6 +93,7 @@ export async function sendStageMessage(
     // thing that can tell a failed send apart from a send we failed to record.
     let sent = false;
     try {
+      if (deps.canSend && !await deps.canSend()) return;
       const { messageId } = await deps.graph.sendText(
         asCloudNumber(row.number).phoneNumberId,
         token,

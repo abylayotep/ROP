@@ -1,6 +1,6 @@
 {
-  "id": "258fac17-d08a-4568-8ad5-a39e7e11ec2b",
-  "prevId": "4ac0ccf6-40c7-4ca3-9256-d121ea657f7e",
+  "id": "4ac0ccf6-40c7-4ca3-9256-d121ea657f7e",
+  "prevId": "932555b4-5cd2-4f80-aef1-eb745e9a6b93",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -298,6 +298,19 @@
           "notNull": true,
           "default": false
         },
+        "response_mode": {
+          "name": "response_mode",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'off'"
+        },
+        "test_contact_id": {
+          "name": "test_contact_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
         "model": {
           "name": "model",
           "type": "text",
@@ -318,13 +331,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": "'auto'"
-        },
-        "communication_style": {
-          "name": "communication_style",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'warm'"
         },
         "openrouter_key": {
           "name": "openrouter_key",
@@ -352,6 +358,13 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
+        },
+        "communication_style": {
+          "name": "communication_style",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'warm'"
         }
       },
       "indexes": {
@@ -384,12 +397,30 @@
           ],
           "onDelete": "cascade",
           "onUpdate": "no action"
+        },
+        "agents_test_contact_id_contacts_id_fk": {
+          "name": "agents_test_contact_id_contacts_id_fk",
+          "tableFrom": "agents",
+          "tableTo": "contacts",
+          "columnsFrom": [
+            "test_contact_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "agents_response_mode_check": {
+          "name": "agents_response_mode_check",
+          "value": "\"agents\".\"response_mode\" in ('off', 'test', 'live')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.ai_replies": {
@@ -2031,18 +2062,6 @@
           "primaryKey": false,
           "notNull": true
         },
-        "classification": {
-          "name": "classification",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "classification_reason": {
-          "name": "classification_reason",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
         "status": {
           "name": "status",
           "type": "text",
@@ -2097,6 +2116,18 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
+        },
+        "classification": {
+          "name": "classification",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "classification_reason": {
+          "name": "classification_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {},
@@ -2123,90 +2154,6 @@
           "columns": [
             "run_id",
             "ordinal"
-          ]
-        }
-      },
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.kb_generation_drafts": {
-      "name": "kb_generation_drafts",
-      "schema": "",
-      "columns": {
-        "run_id": {
-          "name": "run_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "draft_id": {
-          "name": "draft_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "kb_generation_drafts_draft_idx": {
-          "name": "kb_generation_drafts_draft_idx",
-          "columns": [
-            {
-              "expression": "draft_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "kb_generation_drafts_run_id_kb_generation_runs_id_fk": {
-          "name": "kb_generation_drafts_run_id_kb_generation_runs_id_fk",
-          "tableFrom": "kb_generation_drafts",
-          "tableTo": "kb_generation_runs",
-          "columnsFrom": [
-            "run_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "kb_generation_drafts_draft_id_kb_drafts_id_fk": {
-          "name": "kb_generation_drafts_draft_id_kb_drafts_id_fk",
-          "tableFrom": "kb_generation_drafts",
-          "tableTo": "kb_drafts",
-          "columnsFrom": [
-            "draft_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {
-        "kb_generation_drafts_run_draft": {
-          "name": "kb_generation_drafts_run_draft",
-          "nullsNotDistinct": false,
-          "columns": [
-            "run_id",
-            "draft_id"
           ]
         }
       },
@@ -2368,13 +2315,6 @@
           "notNull": true,
           "default": 1
         },
-        "kind": {
-          "name": "kind",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'knowledge'"
-        },
         "path": {
           "name": "path",
           "type": "text",
@@ -2386,20 +2326,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
-        },
-        "confidence": {
-          "name": "confidence",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'review'"
-        },
-        "selected": {
-          "name": "selected",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
         },
         "warnings": {
           "name": "warnings",
@@ -2452,6 +2378,27 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'knowledge'"
+        },
+        "confidence": {
+          "name": "confidence",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'review'"
+        },
+        "selected": {
+          "name": "selected",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
         }
       },
       "indexes": {
@@ -2578,146 +2525,6 @@
           ]
         }
       },
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.kb_generation_raw_findings": {
-      "name": "kb_generation_raw_findings",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "run_id": {
-          "name": "run_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "batch_id": {
-          "name": "batch_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "fingerprint": {
-          "name": "fingerprint",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "path": {
-          "name": "path",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "body": {
-          "name": "body",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "warnings": {
-          "name": "warnings",
-          "type": "text[]",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'{}'::text[]"
-        },
-        "sources": {
-          "name": "sources",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "kb_generation_raw_findings_run_created_idx": {
-          "name": "kb_generation_raw_findings_run_created_idx",
-          "columns": [
-            {
-              "expression": "run_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "created_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "kb_generation_raw_findings_run_fingerprint_idx": {
-          "name": "kb_generation_raw_findings_run_fingerprint_idx",
-          "columns": [
-            {
-              "expression": "run_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "fingerprint",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "kb_generation_raw_findings_run_id_kb_generation_runs_id_fk": {
-          "name": "kb_generation_raw_findings_run_id_kb_generation_runs_id_fk",
-          "tableFrom": "kb_generation_raw_findings",
-          "tableTo": "kb_generation_runs",
-          "columnsFrom": [
-            "run_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "kb_generation_raw_findings_batch_id_kb_generation_batches_id_fk": {
-          "name": "kb_generation_raw_findings_batch_id_kb_generation_batches_id_fk",
-          "tableFrom": "kb_generation_raw_findings",
-          "tableTo": "kb_generation_batches",
-          "columnsFrom": [
-            "batch_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false
@@ -5165,6 +4972,90 @@
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.kb_generation_drafts": {
+      "name": "kb_generation_drafts",
+      "schema": "",
+      "columns": {
+        "run_id": {
+          "name": "run_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "draft_id": {
+          "name": "draft_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "kb_generation_drafts_draft_idx": {
+          "name": "kb_generation_drafts_draft_idx",
+          "columns": [
+            {
+              "expression": "draft_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "kb_generation_drafts_run_id_kb_generation_runs_id_fk": {
+          "name": "kb_generation_drafts_run_id_kb_generation_runs_id_fk",
+          "tableFrom": "kb_generation_drafts",
+          "tableTo": "kb_generation_runs",
+          "columnsFrom": [
+            "run_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "kb_generation_drafts_draft_id_kb_drafts_id_fk": {
+          "name": "kb_generation_drafts_draft_id_kb_drafts_id_fk",
+          "tableFrom": "kb_generation_drafts",
+          "tableTo": "kb_drafts",
+          "columnsFrom": [
+            "draft_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "kb_generation_drafts_run_draft": {
+          "name": "kb_generation_drafts_run_draft",
+          "nullsNotDistinct": false,
+          "columns": [
+            "run_id",
+            "draft_id"
+          ]
+        }
+      },
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false

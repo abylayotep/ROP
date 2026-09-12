@@ -3,9 +3,9 @@ import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ADMIN_URL, runMigration, tagsBefore, withDatabase } from './helpers/migration-db.js';
 
-const TARGET_TAG = '0030_backfill_generation_draft_links';
+const TARGET_TAG = '0031_backfill_generation_draft_links';
 
-describe('migration 0030: generation draft links', () => {
+describe('migration 0031: generation draft links', () => {
   const dbName = `rakurs_draft_links_${randomUUID().replace(/-/g, '')}`;
   let adminSql: postgres.Sql;
   let scratchSql: postgres.Sql;

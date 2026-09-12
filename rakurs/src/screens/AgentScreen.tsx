@@ -1,13 +1,27 @@
 import { useState, type CSSProperties, type FormEvent, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import * as api from '@/api';
-import { Card, CardHead, Segmented, Toggle } from '@/components/ui/primitives';
+import { Card, CardHead, Segmented } from '@/components/ui/primitives';
 import { Async, EmptyState, Skeleton } from '@/components/ui/states';
 import { useToast } from '@/components/ui/Toast';
 import { useApi } from '@/hooks/useApi';
 import { PERIODS } from '@/lib/periods';
 import { useAgent } from '@/store/agent';
-import type { AiModel, AiSettings, AiTurn, AiUsage, AiUsagePeriod } from '@/types';
+import type {
+  AgentResponseMode,
+  AiModel,
+  AiSettings,
+  AiTestContact,
+  AiTurn,
+  AiUsage,
+  AiUsagePeriod,
+} from '@/types';
+import {
+  changeResponseMode,
+  initialResponseModeDraft,
+  responseModeSaveDecision,
+  testContactLabel,
+} from './agent-response-mode';
 
 /**
  * Модель, которой отвечает агент, чем это оплачивается и что бы он ответил.
@@ -89,6 +103,7 @@ const outcomeColor = (outcome: string) =>
 interface Loaded {
   settings: AiSettings;
   models: AiModel[];
+  testContacts: AiTestContact[];
 }
 
 export function AgentScreen() {
@@ -96,11 +111,15 @@ export function AgentScreen() {
   const owner = role === 'owner';
 
   const query = useApi<Loaded>(
-    async (signal) => ({
-      settings: await api.getAiSettings(agent.id, signal),
-      models: await api.listAiModels(signal),
-    }),
-    [agent.id],
+    async (signal) => {
+      const [settings, models, testContacts] = await Promise.all([
+        api.getAiSettings(agent.id, signal),
+        api.listAiModels(signal),
+        owner ? api.listAiTestContacts(agent.id, signal) : Promise.resolve([]),
+      ]);
+      return { settings, models, testContacts };
+    },
+    [agent.id, owner],
   );
 
   return (
@@ -143,10 +162,11 @@ function AgentSettings({
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <EnableCard
+      <ResponseModeCard
         agentId={agentId}
         owner={owner}
         settings={settings}
+        contacts={loaded.testContacts}
         onSaved={setSettings}
       />
       <RulesPointerCard agentId={agentId} />
@@ -174,37 +194,61 @@ function AgentSettings({
 }
 
 /**
- * «Агент отвечает клиентам».
- *
- * Включение запрещено без ключа, и запрещено здесь, а не только на сервере: агент без
- * ключа молча пропускает каждое сообщение, и владелец должен узнать об этом до того, как
- * включит тумблер, а не после первого потерянного клиента.
+ * Explicit response scope. Test mode carries one retained contact; live mode has a second
+ * confirmation step because its effects reach every eligible conversation immediately.
  */
-function EnableCard({
+function ResponseModeCard({
   agentId,
   owner,
   settings,
+  contacts,
   onSaved,
 }: {
   agentId: string;
   owner: boolean;
   settings: AiSettings;
+  contacts: AiTestContact[];
   onSaved: (settings: AiSettings) => void;
 }) {
   const toast = useToast();
+  const [draft, setDraft] = useState(() => initialResponseModeDraft(settings));
   const [saving, setSaving] = useState(false);
+  const [confirmingLive, setConfirmingLive] = useState(false);
+  const [validation, setValidation] = useState<string | null>(null);
 
-  // What is missing, named — the same gate `PATCH /ai` runs server-side (see api/ai.ts):
-  // an agent left on with no key skips every message in silence.
-  const missing = !settings.keySet ? 'Сначала добавьте ключ OpenRouter — ниже на этом экране.' : null;
+  const selected = contacts.find((contact) => contact.id === draft.testContactId)
+    ?? (settings.testContact?.id === draft.testContactId ? settings.testContact : null);
+  const dirty =
+    draft.responseMode !== settings.responseMode
+    || draft.testContactId !== settings.testContact?.id;
+  const missingKey = draft.responseMode !== 'off' && !settings.keySet;
 
-  const blocked = !settings.aiEnabled && missing !== null;
+  function chooseMode(responseMode: AgentResponseMode) {
+    setDraft((current) => changeResponseMode(current, responseMode));
+    setConfirmingLive(false);
+    setValidation(null);
+  }
 
-  async function toggle() {
-    if (blocked || saving) return;
+  async function persist(liveConfirmed: boolean) {
+    const decision = responseModeSaveDecision(draft, liveConfirmed);
+    if (decision.kind === 'blocked') {
+      setValidation('Выберите одного клиента для тестового режима.');
+      return;
+    }
+    if (decision.kind === 'confirm_live') {
+      setConfirmingLive(true);
+      return;
+    }
+    if (missingKey || saving) return;
+
     setSaving(true);
     try {
-      onSaved(await api.updateAiSettings(agentId, { aiEnabled: !settings.aiEnabled }));
+      const saved = await api.updateAiSettings(agentId, decision.body);
+      onSaved(saved);
+      setDraft(initialResponseModeDraft(saved));
+      setConfirmingLive(false);
+      setValidation(null);
+      toast.ok('Режим сохранён');
     } catch (error) {
       toast.fail(error);
     } finally {
@@ -214,36 +258,120 @@ function EnableCard({
 
   return (
     <Card>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-        <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: 13.5, fontWeight: 650 }}>Агент отвечает клиентам</div>
-          <div style={{ ...hint, marginTop: 4 }}>
-            {settings.aiEnabled
-              ? 'Агент отвечает на входящие сам. В любом диалоге его можно выключить отдельно.'
-              : 'Пока выключен: все сообщения ждут человека.'}
-          </div>
-        </div>
-        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10 }}>
-          <span style={{ fontSize: 11.5, color: 'var(--text-dim)' }}>
-            {settings.aiEnabled ? 'Включён' : 'Выключен'}
-          </span>
-          {owner && (
-            <button
-              type="button"
-              className="btn-quiet"
-              aria-pressed={settings.aiEnabled}
-              disabled={blocked || saving}
-              style={{ opacity: blocked || saving ? 0.5 : 1 }}
-              onClick={toggle}
-            >
-              <Toggle on={settings.aiEnabled} large />
-            </button>
-          )}
-        </div>
+      <CardHead title="Ответы в WhatsApp" gap={10} />
+      <div style={{ ...hint, marginTop: 0 }}>
+        Выберите, кому агент может отвечать и для кого применять автоматические изменения в CRM.
+        В отдельном диалоге его по-прежнему можно выключить отдельно.
       </div>
 
-      {owner && blocked && (
-        <div style={{ ...hint, color: 'var(--warn)' }}>{missing}</div>
+      {owner ? (
+        <div style={{ marginTop: 12 }}>
+          <Segmented
+            items={[
+              { id: 'off', label: 'Выключен' },
+              { id: 'test', label: 'Тест' },
+              { id: 'live', label: 'Для всех' },
+            ]}
+            value={draft.responseMode}
+            onChange={chooseMode}
+            size="lg"
+          />
+        </div>
+      ) : (
+        <div style={{ marginTop: 10, fontSize: 13, fontWeight: 650 }}>
+          {draft.responseMode === 'off'
+            ? 'Выключен'
+            : draft.responseMode === 'test'
+              ? 'Тест'
+              : 'Для всех'}
+        </div>
+      )}
+
+      {draft.responseMode === 'test' && (
+        <div style={{ marginTop: 14, maxWidth: 520 }}>
+          <div style={label}>Тестовый клиент</div>
+          {owner ? (
+            <select
+              style={control}
+              value={draft.testContactId ?? ''}
+              disabled={saving || contacts.length === 0}
+              onChange={(event) => {
+                setDraft((current) => ({
+                  ...current,
+                  testContactId: event.target.value || null,
+                }));
+                setValidation(null);
+              }}
+            >
+              <option value="">Выберите клиента</option>
+              {contacts.map((contact) => (
+                <option key={contact.id} value={contact.id}>
+                  {testContactLabel(contact)}
+                </option>
+              ))}
+            </select>
+          ) : selected ? (
+            <div style={{ fontSize: 13 }}>{testContactLabel(selected)}</div>
+          ) : null}
+          {selected && owner && (
+            <div style={{ ...hint, color: 'var(--accent-2)' }}>
+              Активный тестовый клиент: {testContactLabel(selected)}
+            </div>
+          )}
+          {contacts.length === 0 && owner && (
+            <div style={{ ...hint, color: 'var(--warn)' }}>
+              Сначала дождитесь сообщения хотя бы от одного клиента — после этого его можно
+              выбрать здесь.
+            </div>
+          )}
+        </div>
+      )}
+
+      {owner && missingKey && (
+        <div style={{ ...hint, color: 'var(--warn)' }}>
+          Сначала добавьте ключ OpenRouter — ниже на этом экране.
+        </div>
+      )}
+      {owner && validation && (
+        <div role="alert" style={{ ...hint, color: 'var(--danger)' }}>{validation}</div>
+      )}
+
+      {owner && confirmingLive && (
+        <div
+          style={{
+            marginTop: 12,
+            padding: '11px 12px',
+            border: '1px solid var(--warn)',
+            borderRadius: 8,
+            background: 'var(--sunken)',
+          }}
+        >
+          <div style={{ fontSize: 12.5, lineHeight: 1.5 }}>
+            Агент начнёт отвечать и применять изменения CRM во всех подходящих диалогах.
+            Подтвердите включение для всех клиентов.
+          </div>
+          <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+            <button type="button" className="btn" disabled={saving} onClick={() => void persist(true)}>
+              {saving ? 'Сохраняем…' : 'Подтвердить и включить'}
+            </button>
+            <button type="button" className="btn" disabled={saving} onClick={() => setConfirmingLive(false)}>
+              Отмена
+            </button>
+          </div>
+        </div>
+      )}
+
+      {owner && !confirmingLive && (
+        <div style={{ marginTop: 12 }}>
+          <button
+            type="button"
+            className="btn"
+            disabled={!dirty || saving || missingKey}
+            onClick={() => void persist(false)}
+          >
+            {saving ? 'Сохраняем…' : 'Сохранить режим'}
+          </button>
+        </div>
       )}
     </Card>
   );

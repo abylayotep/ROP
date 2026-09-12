@@ -6,12 +6,15 @@ import { eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   agents,
+  aiReplies,
   contacts,
   conversations,
   messages,
+  notes,
   whatsappNumbers,
 } from '../src/db/schema.js';
 import { createAccountWithOwner } from '../src/lib/provision.js';
+import { encryptSecret } from '../src/lib/secret-box.js';
 import {
   applyMessage,
   type LinkedInboundDeps,
@@ -63,7 +66,10 @@ beforeEach(async () => {
     initials: 'ВЛ',
     password: 'correct-horse-battery',
   });
-  const [agent] = await db.insert(agents).values({ accountId, name: 'Sealhouse' }).returning();
+  const [agent] = await db
+    .insert(agents)
+    .values({ accountId, name: 'Sealhouse', responseMode: 'live' })
+    .returning();
   agentId = agent!.id;
   const [number] = await db
     .insert(whatsappNumbers)
@@ -215,6 +221,49 @@ describe('linked inbound', () => {
     expect(stored).toMatchObject({ direction: 'in', author: 'client', kind: 'text' });
     const [contact] = await db.select().from(contacts);
     expect(contact).toMatchObject({ phone: '77085807932', name: 'Айгерим' });
+  });
+
+  it('stores a denied Linked message without starting automation', async () => {
+    const [selected] = await db
+      .insert(contacts)
+      .values({ agentId, phone: '77770000000', name: 'Тестовый клиент' })
+      .returning();
+    await db
+      .update(agents)
+      .set({
+        aiEnabled: true,
+        responseMode: 'test',
+        testContactId: selected!.id,
+        openrouterKey: encryptSecret('model-key', deps.key, agentId),
+      })
+      .where(eq(agents.id, agentId));
+    const deniedModel = fakeModel(
+      JSON.stringify({
+        reply: 'Позову коллегу.',
+        stageId: null,
+        fields: {},
+        handoff: { reason: 'клиент просит человека' },
+        usedItemIds: [],
+      }),
+    );
+    const outboundLinked = deps.linked as ReturnType<typeof fakeLinked>;
+    deps.model = deniedModel;
+    outboundLinked.setOpen(numberId, true);
+    let crmCalls = 0;
+    deps.crm = async () => {
+      crmCalls += 1;
+      return false;
+    };
+
+    await applyMessage(db, deps, fakeLinked(), numberId, raw());
+
+    expect(await db.select().from(messages)).toHaveLength(1);
+    expect(deniedModel.calls).toHaveLength(0);
+    expect(crmCalls).toBe(0);
+    expect(outboundLinked.calls.filter((call) => call.method === 'sendText')).toHaveLength(0);
+    expect((await db.select().from(conversations))[0]?.aiEnabled).toBe(true);
+    expect(await db.select().from(notes)).toHaveLength(0);
+    expect(await db.select().from(aiReplies)).toHaveLength(0);
   });
 
   it('stores a live message from a LID-addressed chat', async () => {

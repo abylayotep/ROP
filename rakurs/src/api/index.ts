@@ -3,6 +3,7 @@ import type {
   AgentRule,
   AiModel,
   AiSettings,
+  AiTestContact,
   AiTurn,
   AiUsage,
   AiUsagePeriod,
@@ -184,9 +185,8 @@ export const connectCoexistenceNumber = (agentId: string, body: CoexistenceConne
 // ── Диалоги ──────────────────────────────────────────────────────────────────
 
 export const listConversations = (
-  agentId: string, signal?: AbortSignal, page?: { limit: number; offset: number },
-) => request<ConversationSummary[]>(`/agents/${agentId}/conversations${page
-  ? `?limit=${page.limit}&offset=${page.offset}` : ''}`, { signal });
+  agentId: string, signal?: AbortSignal, page?: { limit: number; offset: number; q?: string },
+) => request<ConversationSummary[]>(`/agents/${agentId}/conversations`, { signal, query: page });
 
 export const getConversation = (
   agentId: string, conversationId: string, signal?: AbortSignal,
@@ -485,6 +485,10 @@ export const deleteKbSource = (agentId: string, sourceId: string) =>
 export const getAiSettings = (agentId: string, signal?: AbortSignal) =>
   request<AiSettings>(`/agents/${agentId}/ai`, { signal });
 
+/** Owner-only list of contacts eligible for the single test-mode slot. */
+export const listAiTestContacts = (agentId: string, signal?: AbortSignal) =>
+  request<AiTestContact[]>(`/agents/${agentId}/ai/test-contacts`, { signal });
+
 /**
  * What may be changed about the agent. Owner only on the server.
  *
@@ -497,6 +501,8 @@ export const updateAiSettings = (
   agentId: string,
   body: {
     aiEnabled?: boolean;
+    responseMode?: AiSettings['responseMode'];
+    testContactId?: string | null;
     model?: string;
     temperature?: number;
     replyLanguage?: string;

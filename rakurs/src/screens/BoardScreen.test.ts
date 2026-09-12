@@ -21,12 +21,18 @@ describe('funnel cards', () => {
     expect(matchesBoardSearch(card, 'ДОСТАВКА')).toBe(true);
     expect(matchesBoardSearch(card, 'другой')).toBe(false);
   });
+  it('matches the same phone in formatted and unformatted forms', () => {
+    expect(matchesBoardSearch(card, '+7 701 234 56 78')).toBe(true);
+    expect(matchesBoardSearch({ ...card, contactPhone: '+7 (701) 234-56-78' }, '77012345678')).toBe(true);
+  });
   it('keeps a keyboard-accessible conversation link and stage selector', () => {
     fixture.data = { currency: 'KZT', unsorted: [card], columns: [] };
     const html = render();
     expect(html).toContain('Требуют разбора');
     expect(html).toContain('href="/a/agent/dialogs?conversation=lead-1"');
-    expect(html).toContain('aria-label="Этап сделки Анна"');
+    expect(html).toContain('+7 701 234 56 78');
+    expect(html).not.toContain('Анна');
+    expect(html).toContain('aria-label="Этап сделки +7 701 234 56 78"');
     expect(html).not.toContain('0 ₸');
     expect(html).not.toContain('Добавить заказ');
   });

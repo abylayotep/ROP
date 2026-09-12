@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ConversationSummary, ConversationThread, Message } from '@rakurs/contract';
-import { and, asc, desc, eq, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, or, sql } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
@@ -31,6 +31,7 @@ export const windowOpen = (lastInboundAt: Date | null, now = new Date()): boolea
 const listPage = z.object({
   limit: z.coerce.number().int().min(1).max(200).optional(),
   offset: z.coerce.number().int().min(0).max(1_000_000).default(0),
+  q: z.string().trim().max(100).optional(),
 });
 const threadPage = z.object({
   limit: z.coerce.number().int().min(1).max(200).optional(),
@@ -86,6 +87,10 @@ export function registerConversationRoutes(
     async (req): Promise<ConversationSummary[]> => {
       const parsed = listPage.safeParse(req.query);
       if (!parsed.success) throw new ApiError(400, 'Некорректные параметры страницы');
+      const phoneQuery = parsed.data.q?.replace(/\D/g, '') ?? '';
+      const normalizedPhoneQuery = phoneQuery.length === 11 && phoneQuery.startsWith('8')
+        ? `7${phoneQuery.slice(1)}`
+        : phoneQuery.length === 10 ? `7${phoneQuery}` : phoneQuery;
       const rows = await db
         .select({
           conversation: conversations,
@@ -99,7 +104,17 @@ export function registerConversationRoutes(
         })
         .from(conversations)
         .innerJoin(contacts, eq(contacts.id, conversations.contactId))
-        .where(eq(conversations.agentId, req.agent!.id))
+        .where(and(
+          eq(conversations.agentId, req.agent!.id),
+          parsed.data.q
+            ? or(
+              sql`lower(coalesce(${contacts.name}, '')) like ${`%${parsed.data.q.toLocaleLowerCase('ru')}%`}`,
+              normalizedPhoneQuery
+                ? sql`regexp_replace(${contacts.phone}, '[^0-9]', '', 'g') like ${`%${normalizedPhoneQuery}%`}`
+                : undefined,
+            )
+            : undefined,
+        ))
         .orderBy(sql`${conversations.lastMessageAt} desc nulls last`, desc(conversations.id))
         .limit(parsed.data.limit ?? 2_147_483_647)
         .offset(parsed.data.offset);

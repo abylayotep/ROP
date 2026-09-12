@@ -11,12 +11,12 @@ import { fakeGraph } from './helpers/fake-graph.js';
 import { fakeModel } from './helpers/fake-model.js';
 import { ADMIN_URL, runMigration, tagsBefore, withDatabase } from './helpers/migration-db.js';
 
-const ORIGINAL_TABLE_TAG = '0029_knowledge_generation_raw_findings';
-const DRAFT_LINK_TAG = '0030_backfill_generation_draft_links';
-const TARGET_TAG = '0031_migrate_remaining_legacy_raw_proposals';
+const ORIGINAL_TABLE_TAG = '0030_knowledge_generation_raw_findings';
+const DRAFT_LINK_TAG = '0031_backfill_generation_draft_links';
+const TARGET_TAG = '0032_migrate_remaining_legacy_raw_proposals';
 const PASSWORD = 'correct-horse-battery';
 
-describe('migration 0031: remaining legacy raw proposals become immutable findings', () => {
+describe('migration 0032: remaining legacy raw proposals become immutable findings', () => {
   const dbName = `rakurs_migrate_${randomUUID().replace(/-/g, '')}`;
   let adminSql: postgres.Sql;
   let scratchSql: postgres.Sql;

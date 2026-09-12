@@ -263,6 +263,7 @@ beforeEach(async () => {
     accountId,
     name: 'Сафина',
     aiEnabled: true,
+    responseMode: 'live',
     openrouterKey: encryptSecret(OPENROUTER_KEY, key, keyAad(agentId)),
   });
   // Replaces the old `instructions: 'Продавай двери. Будь краток.'` column value: one rule
@@ -369,6 +370,44 @@ describe('answering an inbound message', () => {
     // The inbound message is stored all the same: the switch is about answering, not about
     // whether the business hears its customers.
     expect(await db.select().from(messages)).toHaveLength(1);
+  });
+
+  it('stores a Cloud message for a denied test contact without starting automation', async () => {
+    const [selected] = await db
+      .insert(contacts)
+      .values({ agentId, phone: '77770000000', name: 'Тестовый клиент' })
+      .returning();
+    await db
+      .update(agents)
+      .set({ responseMode: 'test', testContactId: selected!.id })
+      .where(eq(agents.id, agentId));
+    const [stage] = await db.select().from(stages).where(eq(stages.agentId, agentId)).limit(1);
+    model = fakeModel(
+      answer({
+        stageId: stage!.id,
+        fields: { [cityFieldId]: 'Алматы' },
+        handoff: { reason: 'клиент просит человека' },
+      }),
+    );
+    let crmCalls = 0;
+    const deniedDeps: InboundDeps = {
+      ...deps(),
+      crm: async () => {
+        crmCalls += 1;
+        return false;
+      },
+    };
+    await store(asks());
+
+    expect(await processPendingEvents(db, deniedDeps)).toEqual({ processed: 1, failed: 0 });
+
+    expect(await db.select().from(messages)).toHaveLength(1);
+    expect(model.calls).toHaveLength(0);
+    expect(crmCalls).toBe(0);
+    expect(await db.select().from(leadValues)).toHaveLength(0);
+    expect(await db.select().from(notes)).toHaveLength(0);
+    expect(await db.select().from(aiReplies)).toHaveLength(0);
+    expect(sends()).toHaveLength(0);
   });
 
   it('says nothing on a conversation an operator has taken over', async () => {
@@ -529,6 +568,8 @@ describe('the settings routes', () => {
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({
       aiEnabled: true,
+      responseMode: 'live',
+      testContact: null,
       model: 'openai/gpt-4o-mini',
       temperature: 0.3,
       replyLanguage: 'auto',

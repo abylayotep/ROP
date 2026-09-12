@@ -648,9 +648,21 @@ export interface CommunicationStyleSettings {
  * What the owner may set about the model, what they may pick, and what one
  * sandbox turn answers back. The key is not here: it goes in and never out. */
 
+export type AgentResponseMode = 'off' | 'test' | 'live';
+
+export interface AiTestContact {
+  id: string;
+  name: string | null;
+  phone: string;
+}
+
 export interface AiSettings {
   /** The agent answers customers only when this is on. A new agent starts off. */
   aiEnabled: boolean;
+  /** Explicit automation scope. */
+  responseMode: AgentResponseMode;
+  /** Contact selected for test mode, or null when no contact is selected. */
+  testContact: AiTestContact | null;
   /** An OpenRouter model id, one of `AiModel.id`. */
   model: string;
   /**

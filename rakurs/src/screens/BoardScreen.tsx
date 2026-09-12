@@ -5,6 +5,7 @@ import { Async, Skeleton } from '@/components/ui/states';
 import { useToast } from '@/components/ui/Toast';
 import { useApi, type ApiState } from '@/hooks/useApi';
 import { formatMoney } from '@/lib/money';
+import { formatPhone, phoneDigits } from '@/lib/phone';
 import { useAgent } from '@/store/agent';
 import type { Board, BoardCard } from '@/types';
 import './board.css';
@@ -30,7 +31,8 @@ export function useVisibleRefresh<T>(state: ApiState<T>, paused = false) {
 
 export function matchesBoardSearch(card: EnrichedCard, search: string) {
   const query = search.trim().toLocaleLowerCase('ru');
-  return !query || [card.contactName, card.contactPhone, card.preview, card.crmSummary, card.sourceLabel, card.adHeadline, card.assigneeName]
+  const digits = phoneDigits(query);
+  return !query || (digits.length >= 4 && phoneDigits(card.contactPhone).includes(digits)) || [card.contactName, card.preview, card.crmSummary, card.sourceLabel, card.adHeadline, card.assigneeName]
     .some((value) => value?.toLocaleLowerCase('ru').includes(query));
 }
 
@@ -92,12 +94,12 @@ export function BoardScreen() {
                 {cards.length === 0 ? <div className="funnel-column-empty">{search ? 'Нет совпадений' : 'Пока нет сделок'}</div> : cards.map((card: EnrichedCard) => <article className="funnel-card" key={card.conversationId} draggable={!moving}
                   onDragStart={(event) => { event.dataTransfer.setData('text/plain', card.conversationId); event.dataTransfer.effectAllowed = 'move'; setDragging({ conversationId: card.conversationId, stageId }); }} onDragEnd={endDrag}>
                   <Link className="funnel-card-link" to={`../dialogs?conversation=${encodeURIComponent(card.conversationId)}`}>
-                    <div className="funnel-card-top"><span className="funnel-avatar">{(card.contactName ?? card.contactPhone).slice(0, 1).toUpperCase()}</span><div><h4>{card.contactName || card.contactPhone}</h4>{card.contactName && <span className="funnel-phone">{card.contactPhone}</span>}</div>{!card.windowOpen && <span className="funnel-window" title="Окно ответа закрыто">◷</span>}</div>
+                    <div className="funnel-card-top"><span className="funnel-avatar" aria-hidden="true">☎</span><div><h4>{formatPhone(card.contactPhone)}</h4></div>{!card.windowOpen && <span className="funnel-window" title="Окно ответа закрыто">◷</span>}</div>
                     <p className="funnel-preview">{card.crmSummary || card.preview || (card.lastMessageAt ? 'Вложение' : 'Сообщений нет')}</p>
                     {(card.sourceLabel || card.adHeadline) && <span className="funnel-source">{card.sourceLabel || `Реклама · ${card.adHeadline}`}</span>}
                     <div className="funnel-card-meta">{Number(card.paidTotal) > 0 && <strong>{formatMoney(card.paidTotal, data.currency)}</strong>}{card.assigneeName && <span>{card.assigneeName}</span>}<time dateTime={card.lastMessageAt ?? undefined}>{card.lastMessageAt ? new Date(card.lastMessageAt).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''}</time></div>
                   </Link>
-                  <div className="funnel-card-footer"><span title="Кто установил текущий этап">{card.stageSetBy === 'ai' || card.stageSetBy === 'crm' ? '✦ ИИ' : card.stageSetBy === 'manual' || card.stageSetBy === 'user' ? 'Вручную' : 'Этап'}</span><select aria-label={`Этап сделки ${card.contactName || card.contactPhone}`} value={stageId ?? UNSORTED} disabled={moving} onChange={(event) => void move({ conversationId: card.conversationId, stageId }, event.target.value === UNSORTED ? null : event.target.value)}><option value={UNSORTED}>Требуют разбора</option>{data.columns.map(({ stage }) => <option key={stage.id} value={stage.id}>{stage.name}</option>)}</select></div>
+                  <div className="funnel-card-footer"><span title="Кто установил текущий этап">{card.stageSetBy === 'ai' || card.stageSetBy === 'crm' ? '✦ ИИ' : card.stageSetBy === 'manual' || card.stageSetBy === 'user' ? 'Вручную' : 'Этап'}</span><select aria-label={`Этап сделки ${formatPhone(card.contactPhone)}`} value={stageId ?? UNSORTED} disabled={moving} onChange={(event) => void move({ conversationId: card.conversationId, stageId }, event.target.value === UNSORTED ? null : event.target.value)}><option value={UNSORTED}>Требуют разбора</option>{data.columns.map(({ stage }) => <option key={stage.id} value={stage.id}>{stage.name}</option>)}</select></div>
                 </article>)}
               </div>
             </section>;

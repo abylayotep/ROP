@@ -5,6 +5,7 @@ import type { Db } from '../../db/client.js';
 import { agents, contacts, conversations, crmAnalyses, kaspiPayments, messages, notes, whatsappNumbers } from '../../db/schema.js';
 import type { Env } from '../../env.js';
 import { runTurn, type TurnDeps } from '../ai/turn.js';
+import { decideAutomation, loadAutomationSnapshot, type AutomationPurpose } from '../automation/policy.js';
 import { ApiError } from '../errors.js';
 import { createKaspiCheckout } from '../kaspi/service.js';
 import { storeInboundMedia } from '../whatsapp/media.js';
@@ -13,9 +14,15 @@ import { markTokenRejected } from '../whatsapp/token-expiry.js';
 import { windowOpen } from '../../api/conversations.js';
 import { analyzeConversation, type CrmDeps } from './worker.js';
 
+async function automationAllowed(db: Db, agentId: string, conversationId: string, purpose: AutomationPurpose) {
+  const snapshot = await loadAutomationSnapshot(db,{agentId,conversationId});
+  return snapshot !== null && decideAutomation(snapshot,purpose).allowed;
+}
+
 /** Called only by the live inbound path, never by history import or the background backfill. */
 export function createCrmDeps(db: Db, env: Env, deps: TurnDeps): CrmDeps {
   const checkout: NonNullable<CrmDeps['checkout']> = async (input) => {
+    if (!await automationAllowed(db,input.agentId,input.conversationId,'checkout')) return;
     const [row] = await db.select({ conversation: conversations, contact: contacts, number: whatsappNumbers, agent: agents })
       .from(conversations).innerJoin(contacts,eq(contacts.id,conversations.contactId))
       .innerJoin(whatsappNumbers,eq(whatsappNumbers.id,conversations.whatsappNumberId))
@@ -28,6 +35,7 @@ export function createCrmDeps(db: Db, env: Env, deps: TurnDeps): CrmDeps {
     const transport = transportFor(row.number,{...deps,onTokenRejected:()=>markTokenRejected(db,row.number.id)});
     if (transport.requiresOpenWindow && !windowOpen(row.conversation.lastInboundAt)) return;
     if (row.number.connectionKind === 'linked' && !deps.linked.isOpen(row.number.id)) return;
+    if (!await automationAllowed(db,input.agentId,input.conversationId,'checkout')) return;
     const payment = await createKaspiCheckout(db,env,{agentId:input.agentId,conversationId:input.conversationId,
       amount:input.intent.amount,phone:row.contact.phone,method:input.intent.method,requestKey:`crm:${input.intent.messageId}`,
       comment:input.summary});
@@ -41,6 +49,7 @@ export function createCrmDeps(db: Db, env: Env, deps: TurnDeps): CrmDeps {
       media = await storeInboundMedia({mediaDir:env.MEDIA_DIR},{agentId:input.agentId,waMessageId:`kaspi-${payment.id}`,
         mime:'image/png',bytes:await QRCode.toBuffer(payment.qrToken,{width:512,margin:3})});
     }
+    if (!await automationAllowed(db,input.agentId,input.conversationId,'checkout')) return;
     // Commit before the external effect. A crash or lost acknowledgement leaves unknown,
     // which is intentionally never eligible for an automatic retry.
     const [claimed] = await db.update(kaspiPayments)
@@ -49,6 +58,11 @@ export function createCrmDeps(db: Db, env: Env, deps: TurnDeps): CrmDeps {
         eq(kaspiPayments.conversationId, input.conversationId), eq(kaspiPayments.notificationStatus, 'pending')))
       .returning({ id: kaspiPayments.id });
     if (!claimed) return;
+    if (!await automationAllowed(db,input.agentId,input.conversationId,'reply')) {
+      await db.update(kaspiPayments).set({notificationStatus:'pending',notificationClaimedAt:null})
+        .where(and(eq(kaspiPayments.id,payment.id),eq(kaspiPayments.notificationStatus,'unknown')));
+      return;
+    }
     let accepted = false;
     try {
       const sent = media
@@ -76,6 +90,7 @@ export function createCrmDeps(db: Db, env: Env, deps: TurnDeps): CrmDeps {
 export function createLiveCrmHandler(db: Db, env: Env, deps: TurnDeps) {
   const crmDeps = createCrmDeps(db,env,deps);
   return async (agentId:string,conversationId:string):Promise<boolean> => {
+    if (!await automationAllowed(db,agentId,conversationId,'crm')) return false;
     const [agent] = await db.select({key:agents.openrouterKey}).from(agents).where(eq(agents.id,agentId));
     if (!agent?.key) return false;
     const [latest] = await db.select().from(messages).where(eq(messages.conversationId,conversationId))

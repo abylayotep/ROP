@@ -7,6 +7,7 @@
 import type {
   AiModel,
   AiSettings,
+  AiTestContact,
   AiTurn,
   AiUsage,
   AiUsageModel,
@@ -19,6 +20,7 @@ import type { Db } from '../db/client.js';
 import {
   agents,
   aiReplies,
+  contacts,
   conversations,
   kbChunks,
   leadFields,
@@ -54,6 +56,8 @@ export { SANDBOX_TURNS, sandboxTurns };
 const settings = z
   .object({
     aiEnabled: z.boolean().optional(),
+    responseMode: z.enum(['off', 'test', 'live']).optional(),
+    testContactId: z.uuid().nullable().optional(),
     model: z.string().trim().optional(),
     temperature: z.number().min(0).max(2).optional(),
     replyLanguage: z.string().trim().min(1).max(40).optional(),
@@ -113,8 +117,19 @@ const toTotals = (row: UsageRow): AiUsageTotals => ({
 });
 
 /** The key is never part of this. Only whether there is one. */
-const toApi = (row: typeof agents.$inferSelect): AiSettings => ({
+const toContact = (row: typeof contacts.$inferSelect): AiTestContact => ({
+  id: row.id,
+  name: row.name,
+  phone: row.phone,
+});
+
+const toApi = (
+  row: typeof agents.$inferSelect,
+  testContact: typeof contacts.$inferSelect | undefined,
+): AiSettings => ({
   aiEnabled: row.aiEnabled,
+  responseMode: row.responseMode,
+  testContact: testContact ? toContact(testContact) : null,
   model: row.model,
   temperature: Number(row.temperature),
   replyLanguage: row.replyLanguage,
@@ -134,7 +149,33 @@ export function registerAiRoutes(
   app.get(
     '/api/agents/:agentId/ai',
     { preHandler: [guard, anyMember] },
-    async (req): Promise<AiSettings> => toApi(req.agent!),
+    async (req): Promise<AiSettings> => {
+      const [selected] = req.agent!.testContactId
+        ? await db
+            .select()
+            .from(contacts)
+            .where(
+              and(
+                eq(contacts.id, req.agent!.testContactId),
+                eq(contacts.agentId, req.agent!.id),
+              ),
+            )
+        : [];
+      return toApi(req.agent!, selected);
+    },
+  );
+
+  app.get(
+    '/api/agents/:agentId/ai/test-contacts',
+    { preHandler: [guard, ownerOnly] },
+    async (req): Promise<AiTestContact[]> => {
+      const rows = await db
+        .select()
+        .from(contacts)
+        .where(eq(contacts.agentId, req.agent!.id))
+        .orderBy(asc(contacts.name), asc(contacts.phone));
+      return rows.map(toContact);
+    },
   );
 
   app.patch(
@@ -146,7 +187,15 @@ export function registerAiRoutes(
     async (req): Promise<AiSettings> => {
       const parsed = settings.safeParse(req.body);
       if (!parsed.success) throw new ApiError(400, 'Не удалось разобрать настройки агента');
-      const { aiEnabled, model, temperature, replyLanguage, openrouterKey } = parsed.data;
+      const {
+        aiEnabled,
+        responseMode,
+        testContactId,
+        model,
+        temperature,
+        replyLanguage,
+        openrouterKey,
+      } = parsed.data;
 
       // A list, not free text: an id OpenRouter does not know would be learned about from a
       // customer's silence.
@@ -155,7 +204,16 @@ export function registerAiRoutes(
       }
 
       const changes: Partial<typeof agents.$inferInsert> = {};
-      if (aiEnabled !== undefined) changes.aiEnabled = aiEnabled;
+      const requestedMode =
+        responseMode ?? (aiEnabled === undefined ? undefined : aiEnabled ? 'live' : 'off');
+      if (requestedMode !== undefined) {
+        changes.responseMode = requestedMode;
+        // Kept in sync while the legacy boolean remains in the turn pipeline. The explicit
+        // mode wins when both fields arrive; an older client that sends only the boolean is
+        // mapped back into the same source of truth instead of creating contradictory state.
+        changes.aiEnabled = requestedMode !== 'off';
+      }
+      if (testContactId !== undefined) changes.testContactId = testContactId;
       if (model !== undefined) changes.model = model;
       // The column is numeric(3,2) and hands back a string; two decimals is all it keeps.
       if (temperature !== undefined) changes.temperature = temperature.toFixed(2);
@@ -169,22 +227,6 @@ export function registerAiRoutes(
               encryptSecret(openrouterKey, credentialsKey(env), keyAad(req.agent!.id));
       }
 
-      // An agent left on with no key skips every message in silence, and the only place that
-      // silence shows is the reply log. Refused here — in the words of what the owner just
-      // asked for, because «добавьте ключ» in answer to «удалите ключ» tells them to do the
-      // opposite of what they wanted.
-      const keyAfter =
-        openrouterKey !== undefined ? changes.openrouterKey : req.agent!.openrouterKey;
-      const enabledAfter = aiEnabled ?? req.agent!.aiEnabled;
-      if (enabledAfter && !keyAfter) {
-        throw new ApiError(
-          400,
-          openrouterKey === null
-            ? 'Сначала выключите агента: без ключа он не сможет отвечать'
-            : 'Сначала добавьте ключ OpenRouter',
-        );
-      }
-
       // `temperature` and `replyLanguage` change what the agent would say for the same
       // input — the former through sampling, the latter through `rulesSection` in
       // `prompt.ts` — so either one has to bump `configVersion` the same way a knowledge
@@ -194,16 +236,64 @@ export function registerAiRoutes(
       // would say. Bumped inside the same transaction as the write it describes, so a
       // version can never land ahead of — or behind — the row it is meant to describe.
       const bumps = temperature !== undefined || replyLanguage !== undefined;
-      const row = await db.transaction(async (tx) => {
+      const result = await db.transaction(async (tx) => {
+        // Every partial PATCH derives its omitted fields from the same locked row it updates.
+        // Without this lock, two valid requests can both validate stale state and commit the
+        // invalid combination `responseMode = 'test', testContactId = null`.
+        const [current] = await tx
+          .select()
+          .from(agents)
+          .where(eq(agents.id, req.agent!.id))
+          .for('update');
+        if (!current) throw new ApiError(404, 'Агент не найден');
+
+        // An agent left on with no key skips every message in silence, and the only place that
+        // silence shows is the reply log. This validation also uses the locked current row, so
+        // a concurrent key update cannot make it approve a stale combination.
+        const keyAfter =
+          openrouterKey !== undefined ? changes.openrouterKey : current.openrouterKey;
+        const enabledAfter = changes.aiEnabled ?? current.aiEnabled;
+        if (enabledAfter && !keyAfter) {
+          throw new ApiError(
+            400,
+            openrouterKey === null
+              ? 'Сначала выключите агента: без ключа он не сможет отвечать'
+              : 'Сначала добавьте ключ OpenRouter',
+          );
+        }
+
+        const effectiveMode = requestedMode ?? current.responseMode;
+        const effectiveContactId =
+          testContactId !== undefined ? testContactId : current.testContactId;
+        const [selected] = effectiveContactId
+          ? await tx
+              .select()
+              .from(contacts)
+              .where(
+                and(
+                  eq(contacts.id, effectiveContactId),
+                  eq(contacts.agentId, current.id),
+                ),
+              )
+              .for('share')
+          : [];
+
+        if (testContactId !== undefined && effectiveContactId && !selected) {
+          throw new ApiError(400, 'Выберите клиента этого агента');
+        }
+        if (effectiveMode === 'test' && !selected) {
+          throw new ApiError(400, 'Выберите клиента для тестового режима');
+        }
+
         const [updated] = await tx
           .update(agents)
           .set(changes)
-          .where(eq(agents.id, req.agent!.id))
+          .where(eq(agents.id, current.id))
           .returning();
-        if (bumps) await bumpConfigVersion(tx as unknown as Db, req.agent!.id);
-        return updated!;
+        if (bumps) await bumpConfigVersion(tx as unknown as Db, current.id);
+        return { updated: updated!, selected };
       });
-      return toApi(row);
+      return toApi(result.updated, result.selected);
     },
   );
 

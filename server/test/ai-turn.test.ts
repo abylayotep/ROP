@@ -5,6 +5,7 @@ import {
   agentRules,
   agents,
   aiReplies,
+  capiEvents,
   contacts,
   conversations,
   kbChunks,
@@ -736,7 +737,40 @@ describe('applying what the model asked for', () => {
     expect(atSendTime).toHaveLength(1);
   });
 
-+  it('rechecks policy inside a stage message immediately before transport send', async () => {
+  it('does not queue a lead when response mode changes inside the queue helper', async () => {
+    const target = (await db.select().from(stages).where(eq(stages.agentId, agentId))).find(
+      (stage) => stage.kind === 'qualified',
+    )!;
+    const model = fakeModel(answer({ stageId: target.id }));
+    const originalLoad = automationPolicy.loadAutomationSnapshot;
+    let modeChanged = false;
+    const load = vi
+      .spyOn(automationPolicy, 'loadAutomationSnapshot')
+      .mockImplementation(async (...args) => {
+        const snapshot = await originalLoad(...args);
+        const [current] = await db
+          .select({ stageId: conversations.stageId })
+          .from(conversations)
+          .where(eq(conversations.id, conversationId));
+        if (!modeChanged && snapshot?.responseMode === 'live' && current?.stageId === target.id) {
+          modeChanged = true;
+          await db.update(agents).set({ responseMode: 'off' }).where(eq(agents.id, agentId));
+        }
+        return snapshot;
+      });
+
+    try {
+      await turn(model);
+    } finally {
+      load.mockRestore();
+    }
+
+    expect(modeChanged).toBe(true);
+    expect((await conversationRow()).stageId).toBe(target.id);
+    expect(await db.select().from(capiEvents)).toHaveLength(0);
+  });
+
+  it('rechecks policy inside a stage message immediately before transport send', async () => {
     const first = await stageNamed('Новый лид');
     const second = await stageNamed('В диалоге');
     await db.update(stages).set({ autoMessage: 'Мы на связи!' }).where(eq(stages.id, second.id));
@@ -796,6 +830,37 @@ describe('handing off', () => {
     expect((await thread()).filter((message) => message.author === 'operator')).toHaveLength(1);
   });
 
+  it('does not answer after an operator takes over an already claimed handoff', async () => {
+    const model = fakeModel(
+      answer({
+        reply: 'Позову коллегу.',
+        handoff: { reason: 'клиент просит человека' },
+      }),
+    );
+    const originalLoad = automationPolicy.loadAutomationSnapshot;
+    let checksAfterModel = 0;
+    const load = vi
+      .spyOn(automationPolicy, 'loadAutomationSnapshot')
+      .mockImplementation(async (...args) => {
+        const snapshot = await originalLoad(...args);
+        if (model.calls.length === 1 && ++checksAfterModel === 3) {
+          await say('operator', 'Я уже подключился после передачи.');
+        }
+        return snapshot;
+      });
+
+    try {
+      await turn(model);
+    } finally {
+      load.mockRestore();
+    }
+
+    expect((await conversationRow()).aiEnabled).toBe(false);
+    expect(await noteRows()).toHaveLength(1);
+    expect((await thread()).filter((message) => message.author === 'operator')).toHaveLength(1);
+    expect(graph.calls.filter((call) => call.method === 'sendText')).toHaveLength(0);
+  });
+
   it('turns the conversation off, leaves a note and still sends the reply', async () => {
     const model = fakeModel(
       answer({
@@ -820,6 +885,29 @@ describe('handing off', () => {
 
     const [log] = await replyLog();
     expect(log?.outcome).toBe('handoff');
+  });
+
+  it('still explains its handoff after sending its own stage message', async () => {
+    const first = await stageNamed('Новый лид');
+    const second = await stageNamed('В диалоге');
+    await db.update(stages).set({ autoMessage: 'Мы на связи!' }).where(eq(stages.id, second.id));
+    await db
+      .update(conversations)
+      .set({ stageId: first.id })
+      .where(eq(conversations.id, conversationId));
+    const model = fakeModel(
+      answer({
+        reply: 'Передаю вопрос коллеге.',
+        stageId: second.id,
+        handoff: { reason: 'клиент просит человека' },
+      }),
+    );
+
+    const result = await turn(model);
+
+    expect(result.outcome).toBe('handoff');
+    expect(graph.calls.filter((call) => call.method === 'sendText')).toHaveLength(2);
+    expect((await thread()).filter((message) => message.author === 'system')).toHaveLength(1);
   });
 
   it('leaves the agent on, and every other conversation with it', async () => {

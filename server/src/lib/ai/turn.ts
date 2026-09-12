@@ -19,7 +19,7 @@
  * would be unusable on exactly the agent that needs it. Every other refusal stands in both
  * modes, including the closed window and the last word not being the customer's.
  */
-import { and, asc, desc, eq, isNull } from 'drizzle-orm';
+import { and, asc, desc, eq, isNull, ne } from 'drizzle-orm';
 import { windowOpen } from '../../api/conversations.js';
 import type { Db } from '../../db/client.js';
 import {
@@ -261,13 +261,33 @@ async function handoffReplyAllowed(
   db: Db,
   input: Pick<TurnInput, 'agentId' | 'conversationId'>,
   ownsHandoff: boolean,
+  lastMessageId: string,
 ) {
   if (!ownsHandoff) return false;
   const snapshot = await loadAutomationSnapshot(db, input);
   if (!snapshot) return false;
   // This turn has just disabled the conversation as its handoff effect. Reload every other
   // policy input, but do not let that effect suppress the final sentence that explains it.
-  return decideAutomation({ ...snapshot, conversationAiEnabled: true }, 'reply').allowed;
+  if (!decideAutomation({ ...snapshot, conversationAiEnabled: true }, 'reply').allowed) {
+    return false;
+  }
+
+  // Ownership of the false switch only covers this turn's CAS. A person can answer after
+  // that transition while the handoff note is being written, and their newer message takes
+  // ownership of the thread back before the transport call below gets a chance to speak.
+  // Ignore only `system`: a stage auto-message sent by this same turn is not a takeover.
+  const [newest] = await db
+    .select({ id: messages.id })
+    .from(messages)
+    .where(
+      and(
+        eq(messages.conversationId, input.conversationId),
+        ne(messages.author, 'system'),
+      ),
+    )
+    .orderBy(desc(messages.sentAt), desc(messages.createdAt))
+    .limit(1);
+  return newest?.id === lastMessageId;
 }
 
 /**
@@ -866,7 +886,11 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
           // the operator's route called, so the hook in `leads.ts` does not reach here and
           // the agent's move would otherwise go unreported — see the comment above.
           if (await automationAllowed(db, input, 'crm')) {
-            await queueLead(db, { agentId: agent.id, conversationId: conversation.id });
+            await queueLead(db, {
+              agentId: agent.id,
+              conversationId: conversation.id,
+              canQueue: () => automationAllowed(db, input, 'crm'),
+            });
           }
           // Never on the first stage a lead is given, the same rule the operator's move
           // follows: a customer who has just written already has an answer coming.
@@ -936,7 +960,7 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
     } else {
       const allowed = handoffReason === null
         ? await automationAllowed(db, input, 'reply')
-        : await handoffReplyAllowed(db, input, ownsHandoff);
+        : await handoffReplyAllowed(db, input, ownsHandoff, before.lastMessageId);
       if (!allowed) {
         return empty('skipped', AUTOMATION_DISABLED);
       }

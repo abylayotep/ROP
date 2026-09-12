@@ -6,13 +6,15 @@ import { and, asc, desc, eq, or, sql } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
-import { aiReplies, contacts, conversations, messages, whatsappNumbers } from '../db/schema.js';
+import { aiReplies, contacts, conversations, instagramAccounts, instagramContacts, messages, whatsappNumbers } from '../db/schema.js';
 import type { Env } from '../env.js';
 import { ApiError } from '../lib/errors.js';
 import { credentialsKey } from '../lib/secret-box.js';
 import { isUuid } from '../lib/uuid.js';
 import type { GraphClient } from '../lib/whatsapp/graph.js';
 import type { LinkedClient } from '../lib/whatsapp/linked/client.js';
+import type { InstagramMessagingClient } from '../lib/instagram/messaging-graph.js';
+import { deliveryForConversation } from '../lib/messaging/transport.js';
 import { markTokenRejected } from '../lib/whatsapp/token-expiry.js';
 import { transportFor } from '../lib/whatsapp/transport.js';
 import { storeInboundMedia } from '../lib/whatsapp/media.js';
@@ -26,7 +28,8 @@ export const WINDOW_MS = 24 * 60 * 60 * 1000;
  * whether an operator may still write, and three copies of this would eventually disagree.
  */
 export const windowOpen = (lastInboundAt: Date | null, now = new Date()): boolean =>
-  lastInboundAt !== null && now.getTime() - lastInboundAt.getTime() < WINDOW_MS;
+  lastInboundAt !== null && now.getTime() >= lastInboundAt.getTime()
+  && now.getTime() - lastInboundAt.getTime() < WINDOW_MS;
 
 const listPage = z.object({
   limit: z.coerce.number().int().min(1).max(200).optional(),
@@ -78,6 +81,7 @@ export function registerConversationRoutes(
   guard: preHandlerHookHandler,
   graph: GraphClient,
   linked: LinkedClient,
+  instagramMessaging: InstagramMessagingClient,
 ): void {
   const agentGuard = requireAgent(db);
 
@@ -95,6 +99,7 @@ export function registerConversationRoutes(
         .select({
           conversation: conversations,
           contact: contacts,
+          instagramContact: instagramContacts,
           preview: sql<string | null>`(
             select m.body from messages m
             where m.conversation_id = ${conversations.id}
@@ -104,6 +109,7 @@ export function registerConversationRoutes(
         })
         .from(conversations)
         .innerJoin(contacts, eq(contacts.id, conversations.contactId))
+        .leftJoin(instagramContacts, eq(instagramContacts.contactId, contacts.id))
         .where(and(
           eq(conversations.agentId, req.agent!.id),
           parsed.data.q
@@ -112,6 +118,8 @@ export function registerConversationRoutes(
               normalizedPhoneQuery
                 ? sql`regexp_replace(${contacts.phone}, '[^0-9]', '', 'g') like ${`%${normalizedPhoneQuery}%`}`
                 : undefined,
+              sql`lower(coalesce(${instagramContacts.username}, '')) like ${`%${parsed.data.q.toLocaleLowerCase('ru').replace(/^@/, '')}%`}`,
+              sql`coalesce(${instagramContacts.instagramUserId}, '') like ${`%${parsed.data.q}%`}`,
             )
             : undefined,
         ))
@@ -119,8 +127,10 @@ export function registerConversationRoutes(
         .limit(parsed.data.limit ?? 2_147_483_647)
         .offset(parsed.data.offset);
 
-      return rows.map(({ conversation, contact, preview }) => ({
+      return rows.map(({ conversation, contact, instagramContact, preview }) => ({
         id: conversation.id,
+        channel: conversation.instagramAccountId ? 'instagram' as const : 'whatsapp' as const,
+        contactAddress: instagramContact?.username ?? (contact.phone ?? instagramContact?.instagramUserId ?? 'Instagram'),
         contactName: contact.name,
         contactPhone: contact.phone,
         lastMessageAt: conversation.lastMessageAt?.toISOString() ?? null,
@@ -136,7 +146,7 @@ export function registerConversationRoutes(
     { preHandler: [guard, agentGuard] },
     async (req): Promise<ConversationThread> => {
       const { conversationId } = req.params as { conversationId: string };
-      const { conversation, contact } = await loadConversation(db, req.agent!.id, conversationId);
+      const { conversation, contact, instagramContact } = await loadConversation(db, req.agent!.id, conversationId);
 
       const parsed = threadPage.safeParse(req.query);
       if (!parsed.success) throw new ApiError(400, 'Некорректные параметры страницы');
@@ -180,6 +190,8 @@ export function registerConversationRoutes(
 
       return {
         id: conversation.id,
+        channel: conversation.instagramAccountId ? 'instagram' : 'whatsapp',
+        contactAddress: instagramContact?.username ?? (contact.phone ?? instagramContact?.instagramUserId ?? 'Instagram'),
         contactName: contact.name,
         contactPhone: contact.phone,
         lastMessageAt: conversation.lastMessageAt?.toISOString() ?? null,
@@ -204,24 +216,16 @@ export function registerConversationRoutes(
       const body = parsed.success ? parsed.data.body.trim() : '';
       if (!body) throw new ApiError(400, 'Сообщение не может быть пустым');
 
-      const { conversation, contact, number } = await loadConversation(
-        db,
-        req.agent!.id,
-        conversationId,
-      );
-
-      if (!number.enabled) {
-        throw new ApiError(409, 'Номер отключён. Включите его в интеграциях.');
+      const delivery = await deliveryForConversation(db, env, { graph, linked, instagramMessaging }, req.agent!.id, conversationId);
+      const { conversation, transport } = delivery;
+      if (!delivery.enabled) {
+        throw new ApiError(
+          409,
+          delivery.channel === 'whatsapp'
+            ? 'Номер отключён. Включите его в интеграциях.'
+            : 'Instagram отключён. Включите его в интеграциях.',
+        );
       }
-
-      // TransportRefusal is an ApiError: its status and Russian sentence reach the
-      // operator unchanged, which is the whole reason it carries them.
-      const transport = transportFor(number, {
-        graph,
-        linked,
-        key: credentialsKey(env),
-        onTokenRejected: () => markTokenRejected(db, number.id),
-      });
 
       // Asked of the transport rather than assumed: the 24-hour window is a Cloud API
       // rule, and a linked device has none. Refused here rather than by Meta so the
@@ -233,7 +237,7 @@ export function registerConversationRoutes(
         );
       }
 
-      const { messageId } = await transport.sendText(contact.phone, body);
+      const { messageId } = await transport.sendText(delivery.address, body);
 
       // Stored only after Meta accepted it. A row for a message that never left is a lie
       // the operator would act on.
@@ -242,7 +246,8 @@ export function registerConversationRoutes(
         .insert(messages)
         .values({
           conversationId: conversation.id,
-          waMessageId: messageId,
+          waMessageId: delivery.channel === 'whatsapp' ? messageId : null,
+          instagramMessageId: delivery.channel === 'instagram' ? messageId : null,
           direction: 'out',
           author: 'operator',
           kind: 'text',
@@ -280,22 +285,10 @@ export function registerConversationRoutes(
       if (!file) throw new ApiError(400, 'Файл не выбран');
       const caption = (file.fields?.caption as { value?: string } | undefined)?.value?.trim() ?? '';
 
-      const { conversation, contact, number } = await loadConversation(
-        db,
-        req.agent!.id,
-        conversationId,
-      );
-
-      if (!number.enabled) {
-        throw new ApiError(409, 'Номер отключён. Включите его в интеграциях.');
-      }
-
-      const transport = transportFor(number, {
-        graph,
-        linked,
-        key: credentialsKey(env),
-        onTokenRejected: () => markTokenRejected(db, number.id),
-      });
+      const delivery = await deliveryForConversation(db, env, { graph, linked, instagramMessaging }, req.agent!.id, conversationId);
+      if (delivery.channel === 'instagram') throw new ApiError(501, 'Отправка файлов в Instagram пока недоступна.');
+      const { conversation, transport } = delivery;
+      if (!delivery.enabled) throw new ApiError(409, 'Номер отключён. Включите его в интеграциях.');
       if (transport.requiresOpenWindow && !windowOpen(conversation.lastInboundAt)) {
         throw new ApiError(
           409,
@@ -320,7 +313,7 @@ export function registerConversationRoutes(
         { bytes, mime, agentId: req.agent!.id, waMessageId: placeholder },
       );
 
-      const { messageId } = await transport.sendMedia(contact.phone, {
+      const { messageId } = await transport.sendMedia(delivery.address, {
         path: join(env.MEDIA_DIR, stored.path),
         mime,
         filename: file.filename,
@@ -447,10 +440,13 @@ async function loadConversation(db: Db, agentId: string, conversationId: string)
   if (!isUuid(conversationId)) throw new ApiError(404, 'Диалог не найден');
 
   const [row] = await db
-    .select({ conversation: conversations, contact: contacts, number: whatsappNumbers })
+    .select({ conversation: conversations, contact: contacts, number: whatsappNumbers,
+      instagram: instagramAccounts, instagramContact: instagramContacts })
     .from(conversations)
     .innerJoin(contacts, eq(contacts.id, conversations.contactId))
-    .innerJoin(whatsappNumbers, eq(whatsappNumbers.id, conversations.whatsappNumberId))
+    .leftJoin(whatsappNumbers, eq(whatsappNumbers.id, conversations.whatsappNumberId))
+    .leftJoin(instagramAccounts, eq(instagramAccounts.id, conversations.instagramAccountId))
+    .leftJoin(instagramContacts, eq(instagramContacts.contactId, conversations.contactId))
     .where(and(eq(conversations.id, conversationId), eq(conversations.agentId, agentId)));
 
   if (!row) throw new ApiError(404, 'Диалог не найден');

@@ -20,6 +20,9 @@ import type {
   Customer,
   EmbeddedSignupSetup,
   InstagramSetup,
+  InstagramAccountChoice,
+  InstagramDirectAccount,
+  InstagramDirectConnectResult,
   KbGraph,
   KbImport,
   KbGenerationDraftRequest,
@@ -143,6 +146,24 @@ export const setWhatsappNumberEnabled = (agentId: string, numberId: string, enab
   request<WhatsappNumber>(`/agents/${agentId}/whatsapp/numbers/${numberId}`, {
     method: 'PATCH',
     body: { enabled },
+  });
+
+// ── Instagram Direct ────────────────────────────────────────────────────────
+
+export const listInstagramAccounts = (agentId: string, signal?: AbortSignal) =>
+  request<InstagramDirectAccount[]>(`/agents/${agentId}/instagram`, { signal });
+
+export const connectInstagramAccount = (
+  agentId: string,
+  code: string,
+  instagramAccountId?: InstagramAccountChoice['instagramUserId'],
+) => request<InstagramDirectConnectResult>(`/agents/${agentId}/instagram/connect`, {
+  method: 'POST', body: { code, ...(instagramAccountId ? { instagramAccountId } : {}) },
+});
+
+export const setInstagramAccountEnabled = (agentId: string, accountId: string, enabled: boolean) =>
+  request<InstagramDirectAccount>(`/agents/${agentId}/instagram/${accountId}`, {
+    method: 'PATCH', body: { enabled },
   });
 
 /**

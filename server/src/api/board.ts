@@ -2,7 +2,7 @@ import type { Board, BoardCard, Customer, Stage } from '@rakurs/contract';
 import { asc, eq, sql } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import type { Db } from '../db/client.js';
-import { contacts, conversations, crmAnalyses, stages, users } from '../db/schema.js';
+import { contacts, conversations, crmAnalyses, instagramContacts, stages, users } from '../db/schema.js';
 import { windowOpen } from './conversations.js';
 import { requireAgent } from './require-agent.js';
 
@@ -56,6 +56,8 @@ function selectCards(db: Db, agentId: string, currency: string) {
       adHeadline: conversations.adHeadline,
       contactName: contacts.name,
       contactPhone: contacts.phone,
+      instagramUserId: instagramContacts.instagramUserId,
+      instagramUsername: instagramContacts.username,
       assigneeName: users.name,
       preview: sql<string | null>`(
         select m.body from messages m
@@ -91,6 +93,7 @@ function selectCards(db: Db, agentId: string, currency: string) {
     .from(conversations)
     .leftJoin(crmAnalyses, eq(crmAnalyses.conversationId, conversations.id))
     .innerJoin(contacts, eq(contacts.id, conversations.contactId))
+    .leftJoin(instagramContacts, eq(instagramContacts.contactId, contacts.id))
     .leftJoin(users, eq(users.id, conversations.assignedTo))
     .where(eq(conversations.agentId, agentId))
     .orderBy(sql`${conversations.lastMessageAt} desc nulls last`);
@@ -102,6 +105,8 @@ type CardRow = Awaited<ReturnType<typeof selectCards>>[number];
 
 const toCard = (row: CardRow): BoardCard => ({
   conversationId: row.id,
+  channel: row.instagramUserId ? 'instagram' : 'whatsapp',
+  contactAddress: row.instagramUsername ?? (row.contactPhone ?? row.instagramUserId ?? 'Instagram'),
   crmSummary: row.crmSummary,
   stageSetBy: row.stageSetBy,
   sourceLabel: row.adHeadline ?? (row.adSourceId ? `Реклама · ${row.adSourceId}` : 'WhatsApp · источник не передан'),
@@ -177,6 +182,8 @@ export function registerBoardRoutes(
       const stage = row.stageId ? byId.get(row.stageId) : undefined;
       return {
         conversationId: row.id,
+        channel: row.instagramUserId ? 'instagram' : 'whatsapp',
+        contactAddress: row.instagramUsername ?? (row.contactPhone ?? row.instagramUserId ?? 'Instagram'),
         contactName: row.contactName,
         contactPhone: row.contactPhone,
         stageName: stage?.name ?? null,
@@ -216,7 +223,7 @@ export function registerBoardRoutes(
         ['Имя', 'Телефон', 'Стадия', 'Оплачено', 'Валюта', 'Заказов', 'Первое обращение', 'Последняя активность', 'Ответственный'],
         ...rows.map((row) => [
           row.contactName ?? '',
-          row.contactPhone,
+          row.contactPhone ?? '',
           row.stageName ?? '',
           money(row.paidTotal),
           req.agent!.currency,

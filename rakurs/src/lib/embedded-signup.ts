@@ -188,6 +188,8 @@ export function runCoexistenceSignup(setup: EmbeddedSignupSetup): Promise<Coexis
  * an Instagram Business account is addressable at all.
  */
 const INSTAGRAM_SCOPE = 'instagram_basic,pages_show_list,pages_read_engagement';
+const INSTAGRAM_MESSAGING_SCOPE =
+  'instagram_basic,pages_show_list,instagram_manage_messages,pages_manage_metadata';
 
 /**
  * Вход через Meta ради постов Instagram: возвращает код, который живёт секунды.
@@ -197,7 +199,11 @@ const INSTAGRAM_SCOPE = 'instagram_basic,pages_show_list,pages_read_engagement';
  * removes the application in Meta has actually removed our access, with nothing of theirs
  * left behind here.
  */
-export function runInstagramLogin(setup: InstagramSetup, signal?: AbortSignal): Promise<string> {
+function runScopedInstagramLogin(
+  setup: InstagramSetup,
+  scope: string,
+  signal?: AbortSignal,
+): Promise<string> {
   return loadSdkForLogin(setup.appId, signal).then(
     (fb) =>
       new Promise<string>((resolve, reject) => {
@@ -223,7 +229,7 @@ export function runInstagramLogin(setup: InstagramSetup, signal?: AbortSignal): 
             finish(response.authResponse?.code);
           },
           {
-            scope: INSTAGRAM_SCOPE,
+            scope,
             response_type: 'code',
             override_default_response_type: true,
           },
@@ -233,4 +239,16 @@ export function runInstagramLogin(setup: InstagramSetup, signal?: AbortSignal): 
         }
       }),
   );
+}
+
+export function runInstagramLogin(setup: InstagramSetup, signal?: AbortSignal): Promise<string> {
+  return runScopedInstagramLogin(setup, INSTAGRAM_SCOPE, signal);
+}
+
+/** Starts a separate login that grants only the permissions needed for Direct messaging. */
+export function runInstagramMessagingLogin(
+  setup: InstagramSetup,
+  signal?: AbortSignal,
+): Promise<string> {
+  return runScopedInstagramLogin(setup, INSTAGRAM_MESSAGING_SCOPE, signal);
 }

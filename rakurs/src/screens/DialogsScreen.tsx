@@ -27,6 +27,20 @@ const dateFormatter = new Intl.DateTimeFormat('ru-RU', {
 });
 const time = (iso: string) => dateFormatter.format(new Date(iso));
 
+function contactIdentity(contact: Pick<ConversationSummary, 'channel' | 'contactAddress' | 'contactName' | 'contactPhone'>) {
+  if (contact.channel === 'instagram') {
+    const value = contact.contactAddress;
+    return value.startsWith('@') ? value : `@${value}`;
+  }
+  return formatPhone(contact.contactPhone);
+}
+
+export const supportsFileSending = (channel: ConversationSummary['channel']) => channel === 'whatsapp';
+
+export const closedReplyMessage = (channel: ConversationSummary['channel']) => channel === 'instagram'
+  ? 'Окно ответа Instagram закрыто: прошло больше суток с последнего сообщения клиента.'
+  : 'Прошло больше суток с последнего сообщения клиента. Написать первым можно только шаблоном — они появятся позже.';
+
 const bubble = (mine: boolean): CSSProperties => ({
   alignSelf: mine ? 'flex-end' : 'flex-start',
   maxWidth: '70%',
@@ -97,7 +111,7 @@ export function DialogsScreen() {
         <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
           <label className="funnel-search" style={{ flex: 1, width: 'auto' }}>
             <span aria-hidden="true">⌕</span>
-            <input type="search" inputMode="tel" aria-label="Поиск диалогов по номеру" placeholder="+7 777 777 77 77" value={query} onChange={(event) => setQuery(event.target.value)} />
+            <input type="search" aria-label="Поиск диалогов" placeholder="Имя, телефон или Instagram" value={query} onChange={(event) => setQuery(event.target.value)} />
             {query && <button type="button" aria-label="Очистить поиск" onClick={() => setQuery('')}>×</button>}
           </label>
           <button type="button" className="btn-sm" onClick={list.reload} disabled={list.refreshing}>
@@ -138,7 +152,10 @@ export function DialogsScreen() {
                   >
                     <div style={{ display: 'flex', gap: 8, alignItems: 'baseline' }}>
                       <span className="ellipsis" style={{ fontSize: 13.5, fontWeight: 600 }}>
-                        {formatPhone(conversation.contactPhone)}
+                        {contactIdentity(conversation)}
+                      </span>
+                      <span style={{ fontSize: 10.5, color: 'var(--text-dim)' }}>
+                        {conversation.channel === 'instagram' ? 'Instagram' : 'WhatsApp'}
                       </span>
                       <span
                         style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text-dim)' }}
@@ -146,6 +163,9 @@ export function DialogsScreen() {
                         {conversation.lastMessageAt ? time(conversation.lastMessageAt) : ''}
                       </span>
                     </div>
+                    {conversation.channel === 'instagram' && conversation.contactName && conversation.contactName !== conversation.contactAddress && (
+                      <div className="ellipsis" style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 2 }}>{conversation.contactName}</div>
+                    )}
                     <div
                       className="ellipsis"
                       style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 3 }}
@@ -330,7 +350,10 @@ function Thread({
           <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
             <div style={{ minWidth: 0 }}>
               <div style={{ fontSize: 13.5, fontWeight: 650 }}>
-                {formatPhone(data.contactPhone)}
+                {contactIdentity(data)}
+              </div>
+              <div style={{ fontSize: 11.5, color: 'var(--text-dim)', marginTop: 2 }}>
+                {data.channel === 'instagram' ? 'Instagram Direct' : 'WhatsApp'}
               </div>
               <div style={{ fontSize: 11.5, color: 'var(--text-dim)', marginTop: 2 }}>
                 {data.adHeadline ? `Из рекламы «${data.adHeadline}»` : ''}
@@ -425,19 +448,16 @@ function Thread({
                 }}
               />
               {/* A caption if the box has text, a bare file if it does not. */}
-              <label
-                className="btn"
-                style={{ cursor: sending ? 'default' : 'pointer', opacity: sending ? 0.6 : 1 }}
-                title="Отправить файл"
-              >
-                Файл
-                <input
-                  type="file"
-                  hidden
-                  disabled={sending}
-                  onChange={(event) => void attach(event)}
-                />
-              </label>
+              {!supportsFileSending(data.channel) ? (
+                <button className="btn" type="button" disabled title="Instagram Direct пока поддерживает только текст">
+                  Только текст
+                </button>
+              ) : (
+                <label className="btn" style={{ cursor: sending ? 'default' : 'pointer', opacity: sending ? 0.6 : 1 }} title="Отправить файл">
+                  Файл
+                  <input type="file" hidden disabled={sending} onChange={(event) => void attach(event)} />
+                </label>
+              )}
               <button type="submit" className="btn" disabled={sending || !draft.trim()}>
                 {sending ? 'Отправляем…' : 'Отправить'}
               </button>
@@ -446,8 +466,7 @@ function Thread({
             /* Said plainly rather than shown as a dead button: WhatsApp closes the window
                24 hours after the client's last message, and nothing we do reopens it. */
             <div style={{ fontSize: 12.5, color: 'var(--text-dim)' }}>
-              Прошло больше суток с последнего сообщения клиента. Написать первым можно только
-              шаблоном — они появятся позже.
+              {closedReplyMessage(data.channel)}
             </div>
           )}
         </Card>

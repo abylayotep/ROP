@@ -49,6 +49,8 @@ export const DISABLED = 'Не отправлено: отправка в Meta о�
 export const NO_CLID =
   'Не отправлено: диалог начался не с рекламы, у него нет ctwa_clid, ' +
   'и Meta не с чем его сопоставить.';
+export const NON_WHATSAPP =
+  'Не отправлено: Meta Conversions API поддерживается только для диалогов WhatsApp.';
 
 /**
  * Why this event cannot go, or null when it can.
@@ -145,7 +147,9 @@ export async function queuePurchase(
     if (await alreadyQueued(db, eventId)) return;
 
     const ctwaClid = row.conversation.ctwaClid;
-    const reason = await skipReason(db, input.agentId, ctwaClid);
+    const reason = row.conversation.whatsappNumberId === null
+      ? NON_WHATSAPP
+      : await skipReason(db, input.agentId, ctwaClid);
 
     await insertEvent(db, {
       agentId: input.agentId,
@@ -154,7 +158,7 @@ export async function queuePurchase(
       kind: 'purchase',
       eventId,
       payload:
-        ctwaClid === null
+        ctwaClid === null || row.contact.phone === null
           ? UNREPORTABLE_BODY
           : serialiseEvent(
               buildPurchase({
@@ -188,48 +192,60 @@ export async function queueLead(
   input: { agentId: string; conversationId: string; canQueue?: () => Promise<boolean> },
 ): Promise<void> {
   try {
-    const [row] = await db
-      .select({ conversation: conversations, contact: contacts, stage: stages })
-      .from(conversations)
-      .innerJoin(contacts, eq(contacts.id, conversations.contactId))
-      .innerJoin(stages, eq(stages.id, conversations.stageId))
-      .where(
-        and(
-          eq(conversations.id, input.conversationId),
-          eq(conversations.agentId, input.agentId),
-        ),
-      );
-    if (!row || row.stage.kind !== 'qualified') return;
+    const queue = async (effectDb: Db) => {
+      const [row] = await effectDb
+        .select({ conversation: conversations, contact: contacts, stage: stages })
+        .from(conversations)
+        .innerJoin(contacts, eq(contacts.id, conversations.contactId))
+        .innerJoin(stages, eq(stages.id, conversations.stageId))
+        .where(
+          and(
+            eq(conversations.id, input.conversationId),
+            eq(conversations.agentId, input.agentId),
+          ),
+        );
+      if (!row || row.stage.kind !== 'qualified') return;
 
-    const eventId = leadEventId(row.conversation.id);
-    if (await alreadyQueued(db, eventId)) return;
+      const eventId = leadEventId(row.conversation.id);
+      if (await alreadyQueued(effectDb, eventId)) return;
 
-    const ctwaClid = row.conversation.ctwaClid;
-    const reason = await skipReason(db, input.agentId, ctwaClid);
-    if (input.canQueue && !await input.canQueue()) return;
+      const ctwaClid = row.conversation.ctwaClid;
+      const reason = row.conversation.whatsappNumberId === null
+        ? NON_WHATSAPP
+        : await skipReason(effectDb, input.agentId, ctwaClid);
+      await insertEvent(effectDb, {
+        agentId: input.agentId,
+        conversationId: row.conversation.id,
+        orderId: null,
+        kind: 'lead',
+        eventId,
+        payload:
+          ctwaClid === null || row.contact.phone === null
+            ? UNREPORTABLE_BODY
+            : serialiseEvent(
+                buildLead({
+                  conversationId: row.conversation.id,
+                  ctwaClid,
+                  phone: row.contact.phone,
+                  // When the lead got there, not when we got round to reporting it. The column
+                  // is written in the same statement that moved the stage; the `??` covers a
+                  // row from before that column existed.
+                  occurredAt: row.conversation.stageSetAt ?? new Date(),
+                }),
+              ),
+        reason,
+      });
+    };
 
-    await insertEvent(db, {
-      agentId: input.agentId,
-      conversationId: row.conversation.id,
-      orderId: null,
-      kind: 'lead',
-      eventId,
-      payload:
-        ctwaClid === null
-          ? UNREPORTABLE_BODY
-          : serialiseEvent(
-              buildLead({
-                conversationId: row.conversation.id,
-                ctwaClid,
-                phone: row.contact.phone,
-                // When the lead got there, not when we got round to reporting it. The column
-                // is written in the same statement that moved the stage; the `??` covers a
-                // row from before that column existed.
-                occurredAt: row.conversation.stageSetAt ?? new Date(),
-              }),
-            ),
-      reason,
-    });
+    if (input.canQueue) {
+      await withAgentAutomationLock(db, input.agentId, async (tx) => {
+        const effectDb = tx as unknown as Db;
+        if (!await input.canQueue!(effectDb)) return;
+        await queue(effectDb);
+      });
+    } else {
+      await queue(db);
+    }
   } catch {
     // The stage move is what the operator — or the agent — asked for, and it has already
     // happened. See `queuePurchase`.

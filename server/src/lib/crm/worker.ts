@@ -35,7 +35,6 @@ async function lockAutomationPolicy(
   const [locked] = await tx.select({id:conversations.id}).from(conversations)
     .innerJoin(agents,and(eq(agents.id,conversations.agentId),eq(agents.id,input.agentId)))
     .innerJoin(contacts,and(eq(contacts.id,conversations.contactId),eq(contacts.agentId,agents.id)))
-    .innerJoin(whatsappNumbers,and(eq(whatsappNumbers.id,conversations.whatsappNumberId),eq(whatsappNumbers.agentId,agents.id)))
     .where(eq(conversations.id,input.conversationId)).for('update');
   return locked !== undefined && await automationAllowed(tx as unknown as Db,input,'crm');
 }
@@ -227,7 +226,6 @@ export async function drainCrmAnalyses(db: Db, deps: CrmDeps): Promise<void> {
   const pending = await db.select({conversationId:conversations.id,agentId:conversations.agentId}).from(conversations)
     .innerJoin(agents,eq(agents.id,conversations.agentId))
     .innerJoin(contacts,and(eq(contacts.id,conversations.contactId),eq(contacts.agentId,agents.id)))
-    .innerJoin(whatsappNumbers,and(eq(whatsappNumbers.id,conversations.whatsappNumberId),eq(whatsappNumbers.agentId,agents.id)))
     .leftJoin(crmAnalyses,eq(crmAnalyses.conversationId,conversations.id))
     .where(and(isNotNull(agents.openrouterKey),eq(conversations.aiEnabled,true),
       or(eq(agents.responseMode,'live'),and(eq(agents.responseMode,'test'),eq(agents.testContactId,contacts.id))),

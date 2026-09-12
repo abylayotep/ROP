@@ -21,7 +21,7 @@ export function OrderDialog({ agentId, conversationId, currency, order, onClose,
   const [qr, setQr] = useState('');
   useEffect(() => {
     let live = true;
-    void api.getLead(agentId, conversationId).then((lead) => { if (live) setPhone((current) => current || lead.contactPhone); }).catch(toast.fail);
+    void api.getLead(agentId, conversationId).then((lead) => { if (live) setPhone((current) => current || lead.contactPhone || ''); }).catch(toast.fail);
     void kaspi.getKaspiPayments(agentId, conversationId).then(({ payments }) => {
       if (live) setPayment((order ? payments.find((p) => p.orderId === order.id) : payments.find((p) => ['creating', 'unknown', 'pending'].includes(p.status))) ?? null);
     }).catch(toast.fail).finally(() => { if (live) setLoading(false); });

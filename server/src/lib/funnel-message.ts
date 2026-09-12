@@ -2,14 +2,21 @@ import { and, eq } from 'drizzle-orm';
 import { windowOpen } from '../api/conversations.js';
 import type { Db } from '../db/client.js';
 import { contacts, conversations, messages, notes, stages, whatsappNumbers } from '../db/schema.js';
+import type { Env } from '../env.js';
+import type { InstagramMessagingClient } from './instagram/messaging-graph.js';
+import { deliveryForConversation } from './messaging/transport.js';
 import { decryptSecret } from './secret-box.js';
 import { asCloudNumber } from './whatsapp/cloud-number.js';
 import { GraphError, withoutSecret, type GraphClient } from './whatsapp/graph.js';
+import type { LinkedClient } from './whatsapp/linked/client.js';
 
 export interface StageMessageDeps {
   graph: GraphClient;
   key: Buffer;
-  canSend?: () => Promise<boolean>;
+  env?: Env;
+  linked?: LinkedClient;
+  instagramMessaging?: InstagramMessagingClient;
+  canSend?: (db: Db) => Promise<boolean>;
 }
 
 /**
@@ -36,6 +43,22 @@ export async function sendStageMessage(
   deps: StageMessageDeps,
   input: { agentId: string; conversationId: string; stageId: string },
 ): Promise<void> {
+  if (deps.canSend) {
+    try {
+      await withAgentAutomationLock(db, input.agentId, async (tx) => {
+        const effectDb = tx as unknown as Db;
+        if (!await deps.canSend!(effectDb)) return;
+        // The callback is removed deliberately: the recursive core must not acquire the
+        // same lock again while this transaction holds it.
+        await sendStageMessage(effectDb, { graph: deps.graph, key: deps.key, env: deps.env,
+          linked: deps.linked, instagramMessaging: deps.instagramMessaging }, input);
+      });
+    } catch {
+      // The stage move has already committed; preserve this helper's never-throw contract.
+    }
+    return;
+  }
+
   const note = (body: string) =>
     db.insert(notes).values({ conversationId: input.conversationId, authorId: null, body });
 
@@ -54,11 +77,40 @@ export async function sendStageMessage(
       .select({ conversation: conversations, contact: contacts, number: whatsappNumbers })
       .from(conversations)
       .innerJoin(contacts, eq(contacts.id, conversations.contactId))
-      .innerJoin(whatsappNumbers, eq(whatsappNumbers.id, conversations.whatsappNumberId))
+      .leftJoin(whatsappNumbers, eq(whatsappNumbers.id, conversations.whatsappNumberId))
       .where(
         and(eq(conversations.id, input.conversationId), eq(conversations.agentId, input.agentId)),
       );
     if (!row) return;
+    if (row.conversation.instagramAccountId && deps.env && deps.linked && deps.instagramMessaging) {
+      const delivery = await deliveryForConversation(db, deps.env,
+        { graph: deps.graph, linked: deps.linked, instagramMessaging: deps.instagramMessaging },
+        input.agentId, input.conversationId);
+      if (!delivery.enabled) {
+        await note(`Автосообщение стадии «${stage!.name}» не отправлено: Instagram отключён или не подписан на сообщения.`);
+        return;
+      }
+      if (!windowOpen(delivery.conversation.lastInboundAt)) {
+        await note(`Автосообщение стадии «${stage!.name}» не отправлено: окно ответа закрыто, клиент не писал больше суток.`);
+        return;
+      }
+      const body = renderTemplate(text, delivery.contact.name);
+      try {
+        const { messageId } = await delivery.transport.sendText(delivery.address, body);
+        const sentAt = new Date();
+        await db.insert(messages).values({ conversationId: input.conversationId,
+          instagramMessageId: messageId, direction: 'out', author: 'system', kind: 'text', body,
+          status: 'sent', sentAt });
+        await db.update(conversations).set({ lastMessageAt: sentAt }).where(eq(conversations.id, input.conversationId));
+      } catch (error) {
+        await note(`Автосообщение стадии «${stage!.name}» не отправлено: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      return;
+    }
+    if (!row.number || !row.contact.phone) {
+      await note(`Автосообщение стадии «${stage!.name}» не отправлено: у клиента нет номера телефона.`);
+      return;
+    }
 
     if (!row.number.enabled) {
       await note(`Автосообщение стадии «${stage!.name}» не отправлено: номер отключён.`);

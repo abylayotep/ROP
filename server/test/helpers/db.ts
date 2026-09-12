@@ -19,7 +19,7 @@ export async function withDb(): Promise<Db> {
     await migrate(db, { migrationsFolder: 'drizzle' });
   }
   await db.execute(
-    sql`truncate table sessions, account_members, whatsapp_events, ai_replies, messages, notes, lead_values, lead_fields, orders, stage_transitions, conversations, stages, contacts, whatsapp_numbers, kb_links, kb_chunks, kb_generation_proposals, kb_generation_batches, kb_generation_runs, kb_generation_previews, kb_notes, kb_sources, capi_events, capi_settings, coach_messages, agent_rules, test_results, test_runs, test_cases, kb_drafts, agents, accounts, users restart identity cascade`,
+    sql`truncate table sessions, account_members, agent_response_mode_changes, instagram_events, whatsapp_events, ai_replies, messages, notes, lead_values, lead_fields, orders, stage_transitions, conversations, stages, instagram_contacts, contacts, instagram_accounts, whatsapp_numbers, kb_links, kb_chunks, kb_generation_proposals, kb_generation_batches, kb_generation_runs, kb_generation_previews, kb_notes, kb_sources, capi_events, capi_settings, coach_messages, agent_rules, test_results, test_runs, test_cases, kb_drafts, agents, accounts, users restart identity cascade`,
   );
   return db;
 }

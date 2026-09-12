@@ -1,10 +1,11 @@
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import type { Db } from '../../db/client.js';
 import {
   agents,
   contacts,
   conversations,
+  instagramAccounts,
   type AgentResponseMode,
   whatsappNumbers,
 } from '../../db/schema.js';
@@ -60,7 +61,8 @@ export async function loadAutomationSnapshot(
       testContactId: selectedContact.id,
       contactId: contacts.id,
       conversationAiEnabled: conversations.aiEnabled,
-      numberEnabled: whatsappNumbers.enabled,
+      numberEnabled: sql<boolean>`coalesce(${whatsappNumbers.enabled},
+        (${instagramAccounts.enabled} and ${instagramAccounts.subscribedAt} is not null), false)`,
     })
     .from(agents)
     .innerJoin(
@@ -71,7 +73,7 @@ export async function loadAutomationSnapshot(
       contacts,
       and(eq(contacts.id, conversations.contactId), eq(contacts.agentId, agents.id)),
     )
-    .innerJoin(
+    .leftJoin(
       whatsappNumbers,
       and(
         eq(whatsappNumbers.id, conversations.whatsappNumberId),
@@ -79,10 +81,21 @@ export async function loadAutomationSnapshot(
       ),
     )
     .leftJoin(
+      instagramAccounts,
+      and(
+        eq(instagramAccounts.id, conversations.instagramAccountId),
+        eq(instagramAccounts.agentId, agents.id),
+      ),
+    )
+    .leftJoin(
       selectedContact,
       and(eq(selectedContact.id, agents.testContactId), eq(selectedContact.agentId, agents.id)),
     )
-    .where(eq(agents.id, input.agentId))
+    .where(and(
+      eq(agents.id, input.agentId),
+      sql`((${conversations.whatsappNumberId} is not null and ${whatsappNumbers.id} is not null)
+        or (${conversations.instagramAccountId} is not null and ${instagramAccounts.id} is not null))`,
+    ))
     .limit(1);
 
   return snapshot ?? null;

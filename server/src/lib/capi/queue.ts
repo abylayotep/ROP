@@ -4,7 +4,7 @@ import { capiEvents, capiSettings, contacts, conversations, orders } from '../..
 import { decryptSecret } from '../secret-box.js';
 import { withoutSecret } from '../whatsapp/graph.js';
 import { CapiError, type CapiClient } from './client.js';
-import { DISABLED, NO_CLID, NO_SETTINGS } from './enqueue.js';
+import { DISABLED, NON_WHATSAPP, NO_CLID, NO_SETTINGS } from './enqueue.js';
 import { buildPurchase, serialiseEvent, type CapiEventBody } from './events.js';
 
 /**
@@ -298,9 +298,10 @@ async function rebuildPurchase(
 
   if (!row) return { reason: ORDER_GONE };
   if (row.order.status !== 'paid' || row.order.paidAt === null) return { reason: NOT_PAID };
+  if (row.conversation.whatsappNumberId === null) return { reason: NON_WHATSAPP };
 
   const ctwaClid = row.conversation.ctwaClid;
-  if (ctwaClid === null) return { reason: NO_CLID };
+  if (ctwaClid === null || row.contact.phone === null) return { reason: NO_CLID };
 
   try {
     return {

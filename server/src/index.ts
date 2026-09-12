@@ -21,6 +21,8 @@ import { createHistoryArchive } from './lib/whatsapp/linked/history-archive.js';
 import { decodeHistoryPayload, downloadHistoryPayload } from './lib/whatsapp/linked/history-codec.js';
 import { createModelClient } from './lib/ai/openrouter.js';
 import { createGraphClient } from './lib/whatsapp/graph.js';
+import { createInstagramMessagingClient } from './lib/instagram/messaging-graph.js';
+import { processPendingInstagramEvents } from './lib/instagram/inbound.js';
 import { reconcileGenerationRuns } from './lib/knowledge/generation-run.js';
 
 // Local convenience only. In production Compose supplies the environment and there is
@@ -50,7 +52,10 @@ const linked = createLinkedClient({ session: createLinkedSocket(db, credentialsK
   capture: (numberId, notification) => historyArchive.capture(numberId, notification),
   onError: () => app.log.error('linked: history archive capture failed'),
 }) });
-const app = buildServer(env, db, { capi, linked });
+const graph = createGraphClient();
+const model = createModelClient();
+const instagramMessaging = createInstagramMessagingClient();
+const app = buildServer(env, db, { capi, linked, graph, model, instagramMessaging });
 
 // Only connection metadata crosses into logs; never log frames, credentials or messages.
 linked.on((event) => {
@@ -69,7 +74,7 @@ registerLinkedLifecycle(db, credentialsKey(env), linked, {
 // The two halves of what a phone's socket produces: live messages, and the chats it
 // already had. Registered here rather than in `buildServer` for the same reason the
 // lifecycle is — a test that builds a server must not acquire a pipeline that writes.
-const liveDeps = {model:createModelClient(),graph:createGraphClient(),linked,key:credentialsKey(env)};
+const liveDeps = { model, graph, linked, key: credentialsKey(env), env, instagramMessaging };
 registerLinkedInbound(
   db,
   {
@@ -94,6 +99,8 @@ registerLinkedHistory(
 // than on a hook every test's own `buildServer` would trip too.
 await reconcileOrphanedRuns(db);
 await reconcileGenerationRuns(db);
+void processPendingInstagramEvents(db, liveDeps)
+  .catch((error) => app.log.error({ error }, 'instagram: startup event recovery failed'));
 
 // A pairing is a QR code on somebody's screen, and that screen did not survive the
 // restart either. Left in place, one of them refuses every later attempt by that account.

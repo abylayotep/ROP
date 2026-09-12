@@ -8,6 +8,7 @@ import { runTurn, type TurnDeps } from '../ai/turn.js';
 import { decideAutomation, loadAutomationSnapshot, type AutomationPurpose } from '../automation/policy.js';
 import { ApiError } from '../errors.js';
 import { createKaspiCheckout } from '../kaspi/service.js';
+import { deliveryForConversation } from '../messaging/transport.js';
 import { storeInboundMedia } from '../whatsapp/media.js';
 import { transportFor } from '../whatsapp/transport.js';
 import { markTokenRejected } from '../whatsapp/token-expiry.js';
@@ -25,20 +26,40 @@ export function createCrmDeps(db: Db, env: Env, deps: TurnDeps): CrmDeps {
     if (!await automationAllowed(db,input.agentId,input.conversationId,'checkout')) return;
     const [row] = await db.select({ conversation: conversations, contact: contacts, number: whatsappNumbers, agent: agents })
       .from(conversations).innerJoin(contacts,eq(contacts.id,conversations.contactId))
-      .innerJoin(whatsappNumbers,eq(whatsappNumbers.id,conversations.whatsappNumberId))
+      .leftJoin(whatsappNumbers,eq(whatsappNumbers.id,conversations.whatsappNumberId))
       .innerJoin(agents,eq(agents.id,conversations.agentId))
       .where(and(eq(conversations.id,input.conversationId),eq(conversations.agentId,input.agentId)));
-    if (!row || !row.agent.aiEnabled || !row.conversation.aiEnabled || !row.number.enabled) return;
+    if (!row || !row.agent.aiEnabled || !row.conversation.aiEnabled) return;
+    const phone = row.contact.phone;
+    if (!phone) {
+      await db.insert(notes).values({ conversationId: input.conversationId,
+        body: 'Счёт Kaspi не создан: у клиента нет номера телефона. Добавьте номер в карточку клиента и повторите действие.' });
+      return;
+    }
     const [latest] = await db.select({id:messages.id}).from(messages).where(eq(messages.conversationId,input.conversationId))
       .orderBy(desc(messages.sentAt),desc(messages.id)).limit(1);
     if (latest?.id !== input.intent.messageId) return;
-    const transport = transportFor(row.number,{...deps,onTokenRejected:()=>markTokenRejected(db,row.number.id)});
+    const delivery = row.number
+      ? { channel: 'whatsapp' as const, enabled: row.number.enabled,
+          transport: transportFor(row.number,{...deps,onTokenRejected:()=>markTokenRejected(db,row.number!.id)}), address: phone }
+      : deps.instagramMessaging
+        ? await deliveryForConversation(db, env, { graph: deps.graph, linked: deps.linked,
+            instagramMessaging: deps.instagramMessaging }, input.agentId, input.conversationId)
+        : null;
+    if (!delivery?.enabled) return;
+    const transport = delivery.transport;
     if (transport.requiresOpenWindow && !windowOpen(row.conversation.lastInboundAt)) return;
-    if (row.number.connectionKind === 'linked' && !deps.linked.isOpen(row.number.id)) return;
-    if (!await automationAllowed(db,input.agentId,input.conversationId,'checkout')) return;
-    const payment = await createKaspiCheckout(db,env,{agentId:input.agentId,conversationId:input.conversationId,
-      amount:input.intent.amount,phone:row.contact.phone,method:input.intent.method,requestKey:`crm:${input.intent.messageId}`,
-      comment:input.summary});
+    if (row.number?.connectionKind === 'linked' && !deps.linked.isOpen(row.number.id)) return;
+    const created = await withAutomationEffect(
+      db,
+      { agentId: input.agentId, conversationId: input.conversationId },
+      'checkout',
+      async () => createKaspiCheckout(db,env,{agentId:input.agentId,conversationId:input.conversationId,
+        amount:input.intent.amount,phone,method:input.intent.method,requestKey:`crm:${input.intent.messageId}`,
+        comment:input.summary}),
+    );
+    if (!created.allowed) return;
+    const payment = created.value;
     if (payment.status !== 'pending') throw new ApiError(409,'Счёт Kaspi требует проверки в карточке клиента');
     let media: {path:string;mime:string}|null = null;
     const body = input.intent.method === 'invoice'
@@ -65,16 +86,27 @@ export function createCrmDeps(db: Db, env: Env, deps: TurnDeps): CrmDeps {
     }
     let accepted = false;
     try {
-      const sent = media
-        ? await transport.sendMedia(row.contact.phone,{path:join(env.MEDIA_DIR,media.path),mime:media.mime,caption:body})
-        : await transport.sendText(row.contact.phone,body);
-      accepted = true;
-      await db.transaction(async (tx) => {
-      await tx.insert(messages).values({conversationId:input.conversationId,waMessageId:sent.messageId,direction:'out',author:'ai',
-        kind:media?'image':'text',body,mediaPath:media?.path??null,mediaMime:media?.mime??null,status:'sent',sentAt:new Date()}).onConflictDoNothing();
-      await tx.update(conversations).set({lastMessageAt:new Date()}).where(eq(conversations.id,input.conversationId));
-      await tx.update(kaspiPayments).set({ notificationStatus: 'sent', notificationMessageId: sent.messageId }).where(eq(kaspiPayments.id, payment.id));
-      });
+      const notified = await withAutomationEffect(
+        db,
+        { agentId: input.agentId, conversationId: input.conversationId },
+        'reply',
+        async (tx) => {
+          const sent = media
+            ? await transport.sendMedia(delivery.address,{path:join(env.MEDIA_DIR,media.path),mime:media.mime,caption:body})
+            : await transport.sendText(delivery.address,body);
+          accepted = true;
+          await tx.insert(messages).values({conversationId:input.conversationId,
+            waMessageId:delivery.channel==='whatsapp'?sent.messageId:null,
+            instagramMessageId:delivery.channel==='instagram'?sent.messageId:null,direction:'out',author:'ai',
+            kind:media?'image':'text',body,mediaPath:media?.path??null,mediaMime:media?.mime??null,status:'sent',sentAt:new Date()}).onConflictDoNothing();
+          await tx.update(conversations).set({lastMessageAt:new Date()}).where(eq(conversations.id,input.conversationId));
+          await tx.update(kaspiPayments).set({ notificationStatus: 'sent', notificationMessageId: sent.messageId }).where(eq(kaspiPayments.id, payment.id));
+        },
+      );
+      if (!notified.allowed) {
+        await db.update(kaspiPayments).set({notificationStatus:'pending',notificationClaimedAt:null})
+          .where(and(eq(kaspiPayments.id,payment.id),eq(kaspiPayments.notificationStatus,'unknown')));
+      }
     } catch {
       await db.insert(notes).values({conversationId:input.conversationId,body:accepted
         ? 'Счёт создан; сообщение об оплате могло уйти, но не сохранилось. Проверьте переписку перед повторной отправкой.'

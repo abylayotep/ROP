@@ -166,6 +166,28 @@ describe('ProposalWorkspace', () => {
     expect(order).toEqual(['select:start', 'select:end', 'edit', 'reject']);
   });
 
+  it('rebases each queued proposal mutation onto the latest committed revision', async () => {
+    const queue = new ProposalMutationQueue();
+    const sent: Array<{ revision: number; selected: boolean }> = [];
+    const seed = proposal({ revision: 4, selected: false });
+    let releaseFirst!: () => void;
+    const first = queue.runProposal(seed, async (current) => {
+      sent.push({ revision: current.revision, selected: true });
+      await new Promise<void>((resolve) => { releaseFirst = resolve; });
+      return { ...current, revision: 5, selected: true };
+    });
+    const second = queue.runProposal(seed, async (current) => {
+      sent.push({ revision: current.revision, selected: false });
+      return { ...current, revision: 6, selected: false };
+    });
+
+    await Promise.resolve();
+    releaseFirst();
+    await Promise.all([first, second]);
+    expect(sent).toEqual([{ revision: 4, selected: true }, { revision: 5, selected: false }]);
+    expect(queue.latest('proposal-1')).toEqual(expect.objectContaining({ revision: 6, selected: false }));
+  });
+
   it('keeps dirty fields across a checkbox revision and accepts untouched server edits', () => {
     expect(reconcileDraftField('Моя правка', 'Старый текст', 'Старый текст')).toBe('Моя правка');
     expect(reconcileDraftField('Старый текст', 'Старый текст', 'Новый текст')).toBe('Новый текст');

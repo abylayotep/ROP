@@ -83,3 +83,34 @@ Completed. The Task 6 implementation is contained in the `feat: redesign the kno
 ### Remaining Concern
 
 - Authenticated visual smoke testing remains unavailable in this worktree; responsive behavior is verified through component markup, compiled CSS breakpoints, and the production build.
+
+## Fix Round 2
+
+### Diagnosis
+
+- A deep-linked detail could populate `loadedRuns` before the first history response. The later first page was then ignored, leaving only the active run in the rail.
+- The polling scheduler checked activity before a tick but still delivered an in-flight error after a run switch. The polling effect also remained mounted on the old detail ID while a replacement detail load was pending or failed.
+- Serializing mutations prevented overlap but did not rebase a queued request onto the preceding response revision.
+- Every detail refresh error used active-run automatic-retry copy, including terminal runs where no poll loop remained.
+- The mobile rule covered primary actions but omitted editor controls, style actions, inline retries, evidence links, and disclosure summaries.
+
+### Corrections
+
+- Delayed run history now merges into local rail state by ID, chooses the newest summary, restores the complete first page, and sorts the combined history by creation time.
+- Poll success, error delivery, and rescheduling each re-check active-run identity. Changing the route run ID tears down the old effect immediately even when loading the next run fails.
+- The per-proposal queue now tracks its latest optimistic, server, and rollback state. Every queued mutation reads the latest revision at execution time, so an `N + 1` response becomes the next request revision and commits as `N + 2`.
+- Terminal detail errors expose a scoped retry button and busy label. Only queued/running errors promise automatic retry, and successful reloads clear the scoped error.
+- At widths up to 720px, workspace buttons, text inputs, selects, editor controls, radio/check labels, source/draft links, and disclosure summaries provide a practical 44px target. Supporting labels and metrics use at least 11px text.
+
+### TDD and Verification
+
+- The four new behavior tests first failed against the missing delayed merge, unguarded in-flight error, captured queue revision, and absent terminal retry presentation.
+- Focused workspace suite: 4 files, 39 tests passed.
+- Full Rakurs frontend suite: 26 files, 154 tests passed.
+- `npm --prefix rakurs run typecheck` passed.
+- `npm --prefix rakurs run build` passed.
+- `git diff --check` passed.
+
+### Remaining Concern
+
+- Authenticated visual smoke testing remains unavailable; mobile acceptance is covered by scoped responsive CSS, component behavior tests, and the production build.

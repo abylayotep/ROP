@@ -2,7 +2,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import type { KbGenerationRunSummary } from '@/types';
-import { GenerationRunRail, mergeRunPages } from './GenerationRunRail';
+import { GenerationRunRail, mergeDelayedRunFirstPage, mergeRunPages } from './GenerationRunRail';
 import { KnowledgeWorkspace, knowledgeTabFromSearch, tabAfterKey } from './KnowledgeWorkspace';
 
 describe('KnowledgeWorkspace', () => {
@@ -80,6 +80,19 @@ describe('KnowledgeWorkspace', () => {
     const refreshed = { ...previous, proposalCount: 9 };
     expect(mergeRunPages([previous, other], [refreshed]).map((run) => [run.id, run.proposalCount])).toEqual([
       ['run-1', 9], ['run-2', 2],
+    ]);
+  });
+
+  it('merges a delayed first run page without replacing its newer deep-linked detail', () => {
+    const deepLinked = { id: 'run-2', createdAt: '2026-09-11T10:00:00Z', proposalCount: 9, updatedAt: '2026-09-11T10:05:00Z' } as KbGenerationRunSummary;
+    const delayedFirstPage = [
+      { id: 'run-3', createdAt: '2026-09-12T10:00:00Z', proposalCount: 2, updatedAt: '2026-09-12T10:01:00Z' },
+      { id: 'run-2', createdAt: '2026-09-11T10:00:00Z', proposalCount: 1, updatedAt: '2026-09-11T10:01:00Z' },
+      { id: 'run-1', createdAt: '2026-09-10T10:00:00Z', proposalCount: 4, updatedAt: '2026-09-10T10:01:00Z' },
+    ] as KbGenerationRunSummary[];
+
+    expect(mergeDelayedRunFirstPage([deepLinked], delayedFirstPage).map((run) => [run.id, run.proposalCount])).toEqual([
+      ['run-3', 2], ['run-2', 9], ['run-1', 4],
     ]);
   });
 });

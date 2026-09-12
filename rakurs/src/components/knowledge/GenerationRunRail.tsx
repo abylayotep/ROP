@@ -17,6 +17,22 @@ export function mergeRunPages(
   return [...byId.values()];
 }
 
+export function mergeDelayedRunFirstPage(
+  current: readonly KbGenerationRunSummary[],
+  firstPage: readonly KbGenerationRunSummary[],
+): KbGenerationRunSummary[] {
+  const currentById = new Map(current.map((run) => [run.id, run]));
+  const firstPageIds = new Set(firstPage.map((run) => run.id));
+  const merged = [
+    ...firstPage.map((run) => {
+      const existing = currentById.get(run.id);
+      return existing && existing.updatedAt >= run.updatedAt ? existing : run;
+    }),
+    ...current.filter((run) => !firstPageIds.has(run.id)),
+  ];
+  return merged.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+}
+
 export function GenerationRunRail({
   runs,
   activeRunId,

@@ -2,7 +2,7 @@ import { useEffect, useReducer, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import * as api from '@/api';
 import { CommunicationStyleCard } from '@/components/knowledge/CommunicationStyleCard';
-import { GenerationRunRail, mergeRunPages } from '@/components/knowledge/GenerationRunRail';
+import { GenerationRunRail, mergeDelayedRunFirstPage, mergeRunPages } from '@/components/knowledge/GenerationRunRail';
 import { ProposalWorkspace } from '@/components/knowledge/ProposalWorkspace';
 import { useApi } from '@/hooks/useApi';
 import { RecentHistoryPreparation } from './RecentHistoryPreparation';
@@ -41,8 +41,12 @@ export function scheduleGenerationPolling({
     timer = setTimeout(() => {
       if (stopped || !isActive()) return;
       void poll()
-        .catch(onError)
-        .finally(schedule);
+        .catch((error) => {
+          if (!stopped && isActive()) onError(error);
+        })
+        .finally(() => {
+          if (!stopped && isActive()) schedule();
+        });
     }, delayMs);
   };
   schedule();
@@ -51,6 +55,13 @@ export function scheduleGenerationPolling({
     if (timer !== undefined) clearTimeout(timer);
   };
 }
+
+export const generationDetailErrorPresentation = (
+  status: KbGenerationRunDetail['run']['status'],
+): { automatic: boolean; retryLabel: string | null } => {
+  const automatic = status === 'queued' || status === 'running';
+  return { automatic, retryLabel: automatic ? null : 'Повторить загрузку' };
+};
 
 export function ChatGenerationPanel({
   agentId,
@@ -94,6 +105,14 @@ export function ChatGenerationPanel({
     setRunsCursor(undefined);
   }, [agentId]);
 
+  useEffect(() => {
+    if (!runs.data) return;
+    const firstPage = runs.data.items;
+    setLoadedRuns((current) => current === null
+      ? firstPage
+      : mergeDelayedRunFirstPage(current, firstPage));
+  }, [runs.data]);
+
   async function loadRun(runId: string, signal?: AbortSignal, polling = false, preserveLoadedPages = false) {
     const startedAt = epoch.current;
     if (!polling) setDetailLoading(true);
@@ -132,7 +151,7 @@ export function ChatGenerationPanel({
 
   useEffect(() => {
     const run = state.detail?.run;
-    if (!run || (run.status !== 'queued' && run.status !== 'running')) return;
+    if (!run || run.id !== initialRunId || (run.status !== 'queued' && run.status !== 'running')) return;
     const controller = new AbortController();
     const stop = scheduleGenerationPolling({
       poll: async () => { await loadRun(run.id, controller.signal, true, true); },
@@ -148,7 +167,7 @@ export function ChatGenerationPanel({
       stop();
       controller.abort();
     };
-  }, [agentId, state.detail?.run.id]);
+  }, [agentId, initialRunId, state.detail?.run.id]);
 
   async function start(preview: KbGenerationPreview) {
     if (busy || readOnly) return;
@@ -183,7 +202,7 @@ export function ChatGenerationPanel({
 
   function selectRun(runId: string) {
     if (runId === activeRunId.current) {
-      void loadRun(runId).catch((caught) => setDetailError(api.humanError(caught)));
+      void reloadSelectedRun();
       return;
     }
     epoch.current += 1;
@@ -191,6 +210,16 @@ export function ChatGenerationPanel({
     setDetailError(null);
     setActionError(null);
     onRunId(runId);
+  }
+
+  async function reloadSelectedRun() {
+    const runId = activeRunId.current;
+    if (!runId || detailLoading) return;
+    try {
+      await loadRun(runId, undefined, false, true);
+    } catch (caught) {
+      if (runId === activeRunId.current) setDetailError(api.humanError(caught));
+    }
   }
 
   async function loadMoreRuns() {
@@ -302,7 +331,7 @@ export function ChatGenerationPanel({
           <div className="knowledge-inline-state knowledge-inline-state--error" role="alert">
             <p>Не удалось загрузить запуск.</p>
             <span>{detailError}</span>
-            <button type="button" className="btn-sm" onClick={() => initialRunId && void loadRun(initialRunId).catch((caught) => setDetailError(api.humanError(caught)))}>Повторить загрузку</button>
+            <button type="button" className="btn-sm" disabled={detailLoading} onClick={() => void reloadSelectedRun()}>{detailLoading ? 'Обновляем…' : 'Повторить загрузку'}</button>
           </div>
         )}
         {!detailLoading && !state.detail && !detailError && (
@@ -342,7 +371,18 @@ export function ChatGenerationPanel({
             {view === 'cancelled' && state.detail.run.proposalCount === 0 && <div className="knowledge-inline-state"><p>Обработка отменена.</p><span>Ничего не опубликовано.</span></div>}
           </>
         )}
-        {state.detail && detailError && <div role="alert" className="generation-review__error">{detailError} · Повторяем автоматически.</div>}
+        {state.detail && detailError && (
+          <div role="alert" className="generation-review__error">
+            <span>{detailError}</span>
+            {generationDetailErrorPresentation(state.detail.run.status).automatic ? (
+              <span>Повторяем автоматически, пока запуск активен.</span>
+            ) : (
+              <button type="button" className="btn-sm" disabled={detailLoading} onClick={() => void reloadSelectedRun()}>
+                {detailLoading ? 'Обновляем…' : generationDetailErrorPresentation(state.detail.run.status).retryLabel}
+              </button>
+            )}
+          </div>
+        )}
         {actionError && <div role="alert" className="generation-review__error">{actionError}</div>}
       </section>
 

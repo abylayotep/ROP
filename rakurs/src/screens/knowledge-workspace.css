@@ -162,7 +162,7 @@
 .generation-review__notice { margin: 10px 0 0; color: var(--text-dim); font-size: 10.5px; }
 .generation-review__notice--error { color: var(--danger); }
 .generation-review__actions { display: flex; gap: 8px; padding: 12px 18px 0; }
-.generation-review__error { margin: 12px 18px; padding: 10px 12px; border: 1px solid var(--danger-a26); border-radius: 8px; background: var(--danger-a06); color: var(--danger); font-size: 11.5px; }
+.generation-review__error { display: flex; align-items: center; flex-wrap: wrap; justify-content: space-between; gap: 8px 12px; margin: 12px 18px; padding: 10px 12px; border: 1px solid var(--danger-a26); border-radius: 8px; background: var(--danger-a06); color: var(--danger); font-size: 11.5px; }
 .generation-review__prepare { padding: 4px 18px 20px; }
 .generation-review__skeleton { display: grid; gap: 10px; padding: 18px; }
 .generation-review__skeleton span { height: 116px; border-radius: 10px; background: var(--raise); animation: skeleton 1.4s ease-in-out infinite; }
@@ -315,20 +315,47 @@
   .proposal-workspace { padding: 15px; }
   .proposal-workspace__footer { align-items: stretch; flex-direction: column; }
   .proposal-workspace__footer .btn-accent { width: 100%; }
-  .knowledge-tabs button,
-  .proposal-kind-tabs button,
-  .generation-rail__more,
-  .generation-rail__retry,
-  .knowledge-load-more,
-  .proposal-card__actions button,
-  .proposal-workspace__bulk button,
+  .knowledge-page button,
+  .knowledge-page input:not([type='checkbox']):not([type='radio']),
+  .knowledge-page select,
   .proposal-card__check { min-height: 44px; }
+  .proposal-field textarea { min-height: 104px; }
+  .communication-style__option,
+  .proposal-excerpts summary,
+  .raw-findings summary,
+  .proposal-sources a,
+  .proposal-card__state a,
+  .generation-drafts__list a { display: flex; align-items: center; min-height: 44px; }
   .proposal-card__check input { width: 20px; height: 20px; }
+  .knowledge-page__eyebrow,
+  .knowledge-kicker,
+  .generation-run__time,
+  .generation-run__metrics,
   .generation-run__foot,
   .generation-status,
+  .generation-review__head small,
+  .generation-review__metrics dt,
+  .generation-review__notice,
+  .proposal-kind-tabs b,
+  .proposal-workspace__bulk span,
+  .proposal-confidence,
+  .proposal-card__rejected,
+  .proposal-card__source-count,
+  .proposal-field > span,
   .proposal-warnings span,
+  .proposal-sources,
+  .proposal-excerpts,
   .proposal-workspace__footer span,
-  .communication-style__option small { font-size: 11px; }
+  .generation-exclusions .mono,
+  .generation-exclusions b,
+  .generation-exclusions p,
+  .communication-style__option small,
+  .communication-style__preview span,
+  .communication-style__note,
+  .communication-style__message,
+  .generation-drafts__list b,
+  .generation-drafts__list span,
+  .generation-drafts__empty { font-size: 11px; }
   .knowledge-notes-layout { grid-template-columns: 1fr; }
 }
 

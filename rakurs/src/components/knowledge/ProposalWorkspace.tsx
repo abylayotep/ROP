@@ -60,6 +60,18 @@ export const canAddSelection = (
 
 export class ProposalMutationQueue {
   private readonly pending = new Map<string, Promise<unknown>>();
+  private readonly latestById = new Map<string, KbGenerationProposal>();
+
+  remember(proposal: KbGenerationProposal, replaceEqual = false): void {
+    const current = this.latestById.get(proposal.id);
+    if (!current || proposal.revision > current.revision || (replaceEqual && proposal.revision === current.revision)) {
+      this.latestById.set(proposal.id, proposal);
+    }
+  }
+
+  latest(proposalId: string): KbGenerationProposal | undefined {
+    return this.latestById.get(proposalId);
+  }
 
   run<T>(proposalId: string, mutation: () => Promise<T>): Promise<T> {
     const previous = this.pending.get(proposalId);
@@ -67,6 +79,18 @@ export class ProposalMutationQueue {
     this.pending.set(proposalId, current);
     return current.finally(() => {
       if (this.pending.get(proposalId) === current) this.pending.delete(proposalId);
+    });
+  }
+
+  runProposal(
+    proposal: KbGenerationProposal,
+    mutation: (latest: KbGenerationProposal) => Promise<KbGenerationProposal>,
+  ): Promise<KbGenerationProposal> {
+    this.remember(proposal);
+    return this.run(proposal.id, async () => {
+      const committed = await mutation(this.latestById.get(proposal.id) ?? proposal);
+      this.remember(committed, true);
+      return committed;
     });
   }
 }
@@ -171,6 +195,10 @@ export function ProposalWorkspace({
   const selectedCount = proposals.filter((proposal) => proposal.status === 'pending' && proposal.selected).length;
   const visibleEligible = visible.filter((proposal) => proposal.status === 'pending');
 
+  useEffect(() => {
+    for (const proposal of detail.proposals.items) mutationQueue.current.remember(proposal);
+  }, [detail.proposals.items]);
+
   const setProposalBlocked = useCallback((proposalId: string, isBlocked: boolean) => {
     setBlocked((current) => isBlocked
       ? current.includes(proposalId) ? current : [...current, proposalId]
@@ -186,13 +214,16 @@ export function ProposalWorkspace({
   async function persistSelection(proposal: KbGenerationProposal, selected: boolean) {
     setProposalUpdating(proposal.id, true);
     setOptimisticSelections((current) => ({ ...current, [proposal.id]: selected }));
+    const optimistic = { ...(mutationQueue.current.latest(proposal.id) ?? proposal), selected };
+    mutationQueue.current.remember(optimistic, true);
     try {
-      const committed = await mutationQueue.current.run(proposal.id, () => (
-        api.updateKnowledgeGenerationProposal(agentId, proposal.id, { revision: proposal.revision, selected })
+      const committed = await mutationQueue.current.runProposal(optimistic, (latest) => (
+        api.updateKnowledgeGenerationProposal(agentId, proposal.id, { revision: latest.revision, selected })
       ));
       onChanged(committed);
       return committed;
     } catch (error) {
+      mutationQueue.current.remember(proposal, true);
       toast.fail(error, 'Не удалось сохранить выбор. Предыдущее состояние восстановлено.');
       return null;
     } finally {
@@ -248,7 +279,7 @@ export function ProposalWorkspace({
   async function updateProposal(proposal: KbGenerationProposal, values: ProposalPatch): Promise<boolean> {
     setProposalUpdating(proposal.id, true);
     try {
-      const current = await mutationQueue.current.run(proposal.id, () => patchGenerationProposal(agentId, proposal, values));
+      const current = await mutationQueue.current.runProposal(proposal, (latest) => patchGenerationProposal(agentId, latest, values));
       onChanged(current);
       return true;
     } catch (error) {

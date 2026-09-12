@@ -1,6 +1,9 @@
 import { createHash } from 'node:crypto';
+import { drizzle } from 'drizzle-orm/postgres-js';
 import { eq, sql } from 'drizzle-orm';
+import postgres from 'postgres';
 import { beforeEach, describe, expect, it } from 'vitest';
+import * as schema from '../src/db/schema.js';
 import {
   accounts,
   agentRules,
@@ -15,6 +18,8 @@ import {
 } from '../src/db/schema.js';
 import { createGenerationDraft, updateGenerationProposal } from '../src/lib/knowledge/generation-review.js';
 import { withDb } from './helpers/db.js';
+
+const DATABASE_URL = process.env.TEST_DATABASE_URL ?? 'postgres://rakurs:rakurs@localhost:55432/rakurs_test';
 
 let db: Awaited<ReturnType<typeof withDb>>;
 let agentId: string;
@@ -101,27 +106,48 @@ describe('generation review', () => {
     }).then((value) => ({ value }), (error: unknown) => ({ error }));
     expect(await waitUntilBlocked('kb_generation_proposals')).toBe(true);
 
+    const patchApplication = `generation-proposal-patch-${crypto.randomUUID()}`;
+    const patchSql = postgres(DATABASE_URL, { max: 1, connection: { application_name: patchApplication } });
+    const patchDb = drizzle(patchSql, { schema });
+    const patchIsBlocked = async (): Promise<boolean> => {
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const rows = await db.execute(sql<{ blocked: boolean }>`
+          select exists (
+            select 1
+            from pg_stat_activity
+            where datname = current_database()
+              and application_name = ${patchApplication}
+              and cardinality(pg_blocking_pids(pid)) > 0
+          ) as blocked
+        `);
+        if (rows[0]?.blocked === true) return true;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      return false;
+    };
     let updateSettled = false;
-    const updatePromise = updateGenerationProposal(db, agentId, other!.id, { revision: 1, selected: true })
+    const updatePromise = updateGenerationProposal(patchDb, agentId, other!.id, { revision: 1, selected: true })
       .finally(() => { updateSettled = true; });
     const updateWaitsForRun = await Promise.race([
       updatePromise.then(() => false),
-      waitUntilBlocked('kb_generation_runs'),
+      patchIsBlocked(),
     ]);
 
+    let outcome: Awaited<typeof draftOutcome> | undefined;
     try {
       expect(updateWaitsForRun).toBe(true);
       expect(updateSettled).toBe(false);
     } finally {
       releaseBlocker();
       await blocker;
+      outcome = await draftOutcome;
+      await updatePromise;
+      await patchSql.end();
     }
 
-    const outcome = await draftOutcome;
     expect(outcome).toHaveProperty('value');
-    if (!('value' in outcome)) throw outcome.error;
+    if (!outcome || !('value' in outcome)) throw outcome?.error;
     const draft = outcome.value;
-    await updatePromise;
     expect((await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.id, proposalId)))[0])
       .toMatchObject({ status: 'drafted', draftId: draft.draftId, selected: false });
     expect((await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.id, other!.id)))[0])

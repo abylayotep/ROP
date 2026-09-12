@@ -13,25 +13,4 @@ CREATE TABLE "kb_generation_raw_findings" (
 ALTER TABLE "kb_generation_raw_findings" ADD CONSTRAINT "kb_generation_raw_findings_run_id_kb_generation_runs_id_fk" FOREIGN KEY ("run_id") REFERENCES "public"."kb_generation_runs"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "kb_generation_raw_findings" ADD CONSTRAINT "kb_generation_raw_findings_batch_id_kb_generation_batches_id_fk" FOREIGN KEY ("batch_id") REFERENCES "public"."kb_generation_batches"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "kb_generation_raw_findings_run_created_idx" ON "kb_generation_raw_findings" USING btree ("run_id","created_at");--> statement-breakpoint
-CREATE INDEX "kb_generation_raw_findings_run_fingerprint_idx" ON "kb_generation_raw_findings" USING btree ("run_id","fingerprint");--> statement-breakpoint
-INSERT INTO "kb_generation_drafts" ("run_id", "draft_id")
-SELECT DISTINCT "run_id", "draft_id"
-FROM "kb_generation_proposals"
-WHERE "fingerprint" LIKE 'raw:%' AND "draft_id" IS NOT NULL
-ON CONFLICT ("run_id", "draft_id") DO NOTHING;--> statement-breakpoint
-UPDATE "kb_drafts"
-SET "status" = 'discarded'
-WHERE "status" = 'open'
-	AND "id" IN (
-		SELECT DISTINCT "draft_id"
-		FROM "kb_generation_proposals"
-		WHERE "fingerprint" LIKE 'raw:%' AND "draft_id" IS NOT NULL
-	);--> statement-breakpoint
-INSERT INTO "kb_generation_raw_findings" (
-	"id", "run_id", "batch_id", "fingerprint", "path", "body", "warnings", "sources", "created_at"
-)
-SELECT
-	"id", "run_id", "batch_id", "fingerprint", "path", "body", "warnings", "sources", "created_at"
-FROM "kb_generation_proposals"
-WHERE "fingerprint" LIKE 'raw:%';--> statement-breakpoint
-DELETE FROM "kb_generation_proposals" WHERE "fingerprint" LIKE 'raw:%';
+CREATE INDEX "kb_generation_raw_findings_run_fingerprint_idx" ON "kb_generation_raw_findings" USING btree ("run_id","fingerprint");

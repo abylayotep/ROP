@@ -11,10 +11,12 @@ import { fakeGraph } from './helpers/fake-graph.js';
 import { fakeModel } from './helpers/fake-model.js';
 import { ADMIN_URL, runMigration, tagsBefore, withDatabase } from './helpers/migration-db.js';
 
-const TARGET_TAG = '0029_knowledge_generation_raw_findings';
+const ORIGINAL_TABLE_TAG = '0029_knowledge_generation_raw_findings';
+const DRAFT_LINK_TAG = '0030_backfill_generation_draft_links';
+const TARGET_TAG = '0031_migrate_remaining_legacy_raw_proposals';
 const PASSWORD = 'correct-horse-battery';
 
-describe('migration 0029: legacy raw proposals become immutable findings', () => {
+describe('migration 0031: remaining legacy raw proposals become immutable findings', () => {
   const dbName = `rakurs_migrate_${randomUUID().replace(/-/g, '')}`;
   let adminSql: postgres.Sql;
   let scratchSql: postgres.Sql;
@@ -36,7 +38,7 @@ describe('migration 0029: legacy raw proposals become immutable findings', () =>
     adminSql = postgres(ADMIN_URL, { max: 1 });
     await adminSql.unsafe(`CREATE DATABASE "${dbName}"`);
     scratchSql = postgres(withDatabase(ADMIN_URL, dbName), { max: 1 });
-    for (const tag of tagsBefore(TARGET_TAG)) await runMigration(scratchSql, tag);
+    for (const tag of tagsBefore(ORIGINAL_TABLE_TAG)) await runMigration(scratchSql, tag);
 
     const [account] = await scratchSql`INSERT INTO accounts (name) VALUES ('Migration') RETURNING id`;
     const [user] = await scratchSql`
@@ -98,6 +100,17 @@ describe('migration 0029: legacy raw proposals become immutable findings', () =>
       )
     `;
 
+    await runMigration(scratchSql, ORIGINAL_TABLE_TAG);
+    await scratchSql`
+      INSERT INTO kb_generation_raw_findings (
+        id, run_id, batch_id, fingerprint, path, body, warnings, sources, created_at
+      ) VALUES (
+        ${appliedRawId}, ${run!.id}, ${batch!.id}, 'raw:batch:1:hash', 'База знаний/Опубликовано',
+        'Уже опубликовано.', ARRAY[]::text[], ${scratchSql.json([])}, ${createdAt}
+      )
+    `;
+    await runMigration(scratchSql, DRAFT_LINK_TAG);
+    await runMigration(scratchSql, TARGET_TAG);
     await runMigration(scratchSql, TARGET_TAG);
 
     const db = drizzle(scratchSql, { schema });

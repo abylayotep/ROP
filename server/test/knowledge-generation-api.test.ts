@@ -483,7 +483,7 @@ describe('knowledge generation API', () => {
       temperature: '0.30',
       status: 'completed',
     }).returning();
-    const batches = await db.insert(kbGenerationBatches).values(Array.from({ length: 21 }, (_, ordinal) => ({
+    const batches = await db.insert(kbGenerationBatches).values(Array.from({ length: 24 }, (_, ordinal) => ({
       runId: run!.id,
       ordinal,
       manifest: { ordinal, conversationId, messages: [], characterCount: 0 },
@@ -491,7 +491,7 @@ describe('knowledge generation API', () => {
       classificationReason: `Причина ${ordinal}`,
       status: 'done',
     }))).returning();
-    await db.insert(kbGenerationProposals).values(batches.map((batch, index) => ({
+    await db.insert(kbGenerationProposals).values(batches.slice(0, 22).map((batch, index) => ({
       runId: run!.id,
       batchId: batch.id,
       fingerprint: `bounded-proposal-${index}`,
@@ -533,17 +533,44 @@ describe('knowledge generation API', () => {
     expect(first.json().rawFindings).toHaveLength(20);
     expect(first.json().rawFindingsNextCursor).toBe('20');
 
-    const second = await app.inject({
+    const proposalOnly = await app.inject({
       method: 'GET',
-      url: `${base}?proposalCursor=20&draftCursor=20&exclusionCursor=20&rawFindingCursor=20&includeRawFindings=true`,
+      url: `${base}?proposalCursor=20&includeRawFindings=true`,
       cookies: jar,
     });
-    expect(second.statusCode).toBe(200);
-    expect(second.json().proposals).toMatchObject({ items: [expect.any(Object)], nextCursor: null });
-    expect(second.json()).toMatchObject({
-      drafts: [expect.any(Object)], draftsNextCursor: null,
-      exclusions: [expect.any(Object)], exclusionsNextCursor: null,
-      rawFindings: [expect.any(Object)], rawFindingsNextCursor: null,
+    expect(proposalOnly.statusCode).toBe(200);
+    expect(proposalOnly.json().proposals).toMatchObject({
+      items: [{ body: 'Предложение 1' }, { body: 'Предложение 0' }],
+      nextCursor: null,
     });
+    expect(proposalOnly.json().drafts[0]).toMatchObject({ title: 'Черновик 20' });
+    expect(proposalOnly.json().draftsNextCursor).toBe('20');
+    expect(proposalOnly.json().exclusions[0]).toMatchObject({ ordinal: 0 });
+    expect(proposalOnly.json().exclusionsNextCursor).toBe('20');
+    expect(proposalOnly.json().rawFindings[0]).toMatchObject({ body: 'Находка 0' });
+    expect(proposalOnly.json().rawFindingsNextCursor).toBe('20');
+    expect(proposalOnly.json().drafts).toHaveLength(20);
+    expect(proposalOnly.json().exclusions).toHaveLength(20);
+    expect(proposalOnly.json().rawFindings).toHaveLength(20);
+
+    const mixed = await app.inject({
+      method: 'GET',
+      url: `${base}?proposalCursor=20&draftCursor=10&exclusionCursor=3&rawFindingCursor=20&includeRawFindings=true`,
+      cookies: jar,
+    });
+    expect(mixed.statusCode).toBe(200);
+    expect(mixed.json().proposals).toMatchObject({
+      items: [{ body: 'Предложение 1' }, { body: 'Предложение 0' }],
+      nextCursor: null,
+    });
+    expect(mixed.json().drafts[0]).toMatchObject({ title: 'Черновик 10' });
+    expect(mixed.json().draftsNextCursor).toBeNull();
+    expect(mixed.json().exclusions[0]).toMatchObject({ ordinal: 3 });
+    expect(mixed.json().exclusionsNextCursor).toBe('23');
+    expect(mixed.json().rawFindings[0]).toMatchObject({ body: 'Находка 20' });
+    expect(mixed.json().rawFindingsNextCursor).toBeNull();
+    expect(mixed.json().drafts).toHaveLength(11);
+    expect(mixed.json().exclusions).toHaveLength(20);
+    expect(mixed.json().rawFindings).toHaveLength(4);
   });
 });

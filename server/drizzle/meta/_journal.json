@@ -218,6 +218,13 @@
       "when": 1789197923624,
       "tag": "0030_backfill_generation_draft_links",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1789202334162,
+      "tag": "0031_migrate_remaining_legacy_raw_proposals",
+      "breakpoints": true
     }
   ]
 }

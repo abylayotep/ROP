@@ -55,3 +55,19 @@ Completed in commit `91f1bd0` (`feat: add knowledge review workspace APIs`).
 ### Fix Concerns
 
 - The detail response keeps the existing collection arrays for Task 6 compatibility and adds an independent `nextCursor` field beside each collection; the typed client accepts all four cursors without requiring UI changes in this task.
+
+## Fix Round 2
+
+- Restored migration `0029_knowledge_generation_raw_findings` byte-for-byte to commit `ffd8c1f`; its only responsibility is creating the raw-findings table, constraints, and indexes.
+- Kept `0030_backfill_generation_draft_links` additive and added `0031_migrate_remaining_legacy_raw_proposals`. The new migration preserves raw proposal draft relations, discards linked open drafts, copies immutable findings with conflict-safe inserts, and only then deletes legacy raw proposals.
+- Reworked the migration regression to exercise the exact upgrade path: migrations through `0028`, original `0029`, current `0030`, then retry-safe `0031`. It verifies preserved links, discarded unsafe drafts, migrated/deleted raw proposals, and refusal to apply the discarded draft without writing a note.
+- Replaced the concurrency test's broad query-text match with a dedicated PostgreSQL connection tagged by `application_name`; `pg_blocking_pids` now proves that the actual proposal PATCH backend is waiting.
+- Strengthened pagination coverage with distinct collection sizes and contents. A proposal-only cursor proves the other three collections stay on page one, and a mixed `20/10/3/20` request proves each collection advances independently.
+
+### Fix Round 2 Verification
+
+- Migration RED: with original `0029` and blank `0031`, four proposals remained and the unsafe draft stayed open.
+- Migration GREEN: focused migration, concurrency, and pagination suite passed, 3 files and 18 tests.
+- Concurrency mutation check: removing the owning-run lock made the dedicated-backend assertion fail with `updateWaitsForRun=false`; restoring the lock made the test pass.
+- Full API, review, run, migration, schema, draft, and style regression suite passed: 10 files and 90 tests.
+- `npm --prefix server run typecheck`, `npm --prefix rakurs run typecheck`, and `git diff --check` passed.

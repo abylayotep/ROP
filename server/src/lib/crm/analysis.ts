@@ -4,9 +4,17 @@ export interface EvidenceMessage { id: string; author: string; body: string | nu
 export interface CrmStage { id: string; name: string; kind: string; position: number }
 export const PROFILE_KEYS = ['name', 'phone', 'city', 'address', 'product', 'quantity', 'amount', 'delivery', 'sourceDeclared'] as const;
 const evidence = z.object({ value: z.string().trim().min(1).max(500), messageId: z.string(), quote: z.string().trim().min(1).max(1000) });
+const evidenceMap = z.record(z.string(), z.unknown()).nullish().transform((items) => {
+  const accepted: Record<string, z.infer<typeof evidence>> = {};
+  for (const [key, value] of Object.entries(items ?? {})) {
+    const parsed = evidence.safeParse(value);
+    if (parsed.success) accepted[key] = parsed.data;
+  }
+  return accepted;
+});
 const schema = z.object({
   stageId: z.string().nullable(), summary: z.string().max(500), confidence: z.number().int().min(0).max(100),
-  profile: z.record(z.string(), evidence).default({}), fields: z.record(z.string(), evidence).default({}),
+  profile: evidenceMap, fields: evidenceMap,
   checkout: z.object({ method: z.enum(['invoice', 'qr']), messageId: z.string(), quote: z.string().min(1),
     amount: z.string().regex(/^\d{1,9}$/), amountMessageId: z.string() }).nullable().default(null),
 });
@@ -75,6 +83,8 @@ export function crmPrompt(stages: CrmStage[], fields: { id: string; name: string
     'Classify by actual conversion progress using the provided stage descriptions. Ordering/requesting an invoice means awaiting_payment, never success.',
     'Only the server verifies payments. A receipt photo, promise or customer claim is not proof of received money.',
     'Extract all known customer details, retaining existing known values. Never invent missing data, advertising IDs or campaign names.',
+    'Never use a bare string or null as a profile/custom field value. Omit unknown fields entirely.',
+    'Example for message m1 containing Я из Алматы: profile:{"city":{"value":"Алматы","messageId":"m1","quote":"Я из Алматы"}}. Use actual message IDs and text, never copy this example.',
     'Each profile/custom field requires {value,messageId,quote}; quote is verbatim from that message and must contain value. Keep amounts as plain digits where possible.',
     `Allowed profile keys: ${PROFILE_KEYS.join(', ')}. sourceDeclared is what the customer said, NOT verified ad attribution.`,
     'Return concise Russian summary; confidence 0..100. Use null stageId only if no stage can be supported.',

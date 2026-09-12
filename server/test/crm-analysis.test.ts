@@ -60,3 +60,11 @@ it('does not interpret a question about QR as authorization to create a payment'
     [{id:'seller',author:'operator',body:'Итого 5000 ₸'},{id:messageId,author:'client',body:'А что такое QR?'}],[]);
   expect(result.checkout).toBeNull();
 });
+
+it('preserves classification and grounded fields when the model returns malformed optional evidence', () => {
+  const result=parseCrmAnalysis(output({profile:{name:null,phone:'77010000000',city:proof('Алматы')},
+    fields:{known:proof('Алматы'),broken:'Алматы'}}),history,[{id:'known',kind:'text'},{id:'broken',kind:'text'}]);
+  expect(result.stageId).toBe('ordered');
+  expect(result.profile).toEqual({city:'Алматы'});
+  expect(result.fields).toEqual({known:'Алматы'});
+});

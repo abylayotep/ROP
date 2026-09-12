@@ -31,6 +31,7 @@ import { releaseTurnSlot, sandboxTurns, SANDBOX_TURNS, tryTakeTurnSlot } from '.
 import type { Env } from '../env.js';
 import { MODELS } from '../lib/ai/openrouter.js';
 import { keyAad } from '../lib/ai/turn.js';
+import { withAgentAutomationLock } from '../lib/automation/execution.js';
 import { replayCase, type AiDeps } from '../lib/drafts/replay.js';
 import { bumpConfigVersion } from '../lib/drafts/version.js';
 import { ApiError } from '../lib/errors.js';
@@ -236,7 +237,7 @@ export function registerAiRoutes(
       // would say. Bumped inside the same transaction as the write it describes, so a
       // version can never land ahead of — or behind — the row it is meant to describe.
       const bumps = temperature !== undefined || replyLanguage !== undefined;
-      const result = await db.transaction(async (tx) => {
+      const result = await withAgentAutomationLock(db, req.agent!.id, async (tx) => {
         // Every partial PATCH derives its omitted fields from the same locked row it updates.
         // Without this lock, two valid requests can both validate stale state and commit the
         // invalid combination `responseMode = 'test', testContactId = null`.
@@ -462,9 +463,8 @@ export function registerAiRoutes(
       const parsed = z.object({ aiEnabled: z.boolean() }).safeParse(req.body);
       if (!parsed.success) throw new ApiError(400, 'Укажите, отвечает ли агент в этом диалоге');
 
-      const [row] = await db
-        .update(conversations)
-        .set({ aiEnabled: parsed.data.aiEnabled })
+      const row = await withAgentAutomationLock(db, req.agent!.id, async (tx) => {
+        const [updated] = await tx.update(conversations).set({ aiEnabled: parsed.data.aiEnabled })
         // The agent condition is what stops one account switching another's conversation
         // even when the identifier is guessed.
         .where(
@@ -473,7 +473,9 @@ export function registerAiRoutes(
             eq(conversations.agentId, req.agent!.id),
           ),
         )
-        .returning({ aiEnabled: conversations.aiEnabled });
+          .returning({ aiEnabled: conversations.aiEnabled });
+        return updated;
+      });
 
       if (!row) throw new ApiError(404, 'Диалог не найден');
       return row;

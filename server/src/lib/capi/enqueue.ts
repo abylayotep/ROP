@@ -8,6 +8,7 @@ import {
   orders,
   stages,
 } from '../../db/schema.js';
+import { withAgentAutomationLock } from '../automation/execution.js';
 import {
   UNREPORTABLE_BODY,
   buildLead,
@@ -189,7 +190,11 @@ export async function queuePurchase(
  */
 export async function queueLead(
   db: Db,
-  input: { agentId: string; conversationId: string; canQueue?: () => Promise<boolean> },
+  input: {
+    agentId: string;
+    conversationId: string;
+    canQueue?: (db: Db) => Promise<boolean>;
+  },
 ): Promise<void> {
   try {
     const queue = async (effectDb: Db) => {

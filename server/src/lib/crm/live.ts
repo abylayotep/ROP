@@ -6,6 +6,7 @@ import { agents, contacts, conversations, crmAnalyses, kaspiPayments, messages, 
 import type { Env } from '../../env.js';
 import { runTurn, type TurnDeps } from '../ai/turn.js';
 import { decideAutomation, loadAutomationSnapshot, type AutomationPurpose } from '../automation/policy.js';
+import { withAutomationEffect } from '../automation/execution.js';
 import { ApiError } from '../errors.js';
 import { createKaspiCheckout } from '../kaspi/service.js';
 import { deliveryForConversation } from '../messaging/transport.js';
@@ -79,11 +80,6 @@ export function createCrmDeps(db: Db, env: Env, deps: TurnDeps): CrmDeps {
         eq(kaspiPayments.conversationId, input.conversationId), eq(kaspiPayments.notificationStatus, 'pending')))
       .returning({ id: kaspiPayments.id });
     if (!claimed) return;
-    if (!await automationAllowed(db,input.agentId,input.conversationId,'reply')) {
-      await db.update(kaspiPayments).set({notificationStatus:'pending',notificationClaimedAt:null})
-        .where(and(eq(kaspiPayments.id,payment.id),eq(kaspiPayments.notificationStatus,'unknown')));
-      return;
-    }
     let accepted = false;
     try {
       const notified = await withAutomationEffect(

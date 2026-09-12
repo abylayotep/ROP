@@ -6,6 +6,7 @@ import type { Env } from '../env.js';
 import type { InstagramMessagingClient } from './instagram/messaging-graph.js';
 import { deliveryForConversation } from './messaging/transport.js';
 import { decryptSecret } from './secret-box.js';
+import { withAgentAutomationLock } from './automation/execution.js';
 import { asCloudNumber } from './whatsapp/cloud-number.js';
 import { GraphError, withoutSecret, type GraphClient } from './whatsapp/graph.js';
 import type { LinkedClient } from './whatsapp/linked/client.js';
@@ -145,7 +146,6 @@ export async function sendStageMessage(
     // thing that can tell a failed send apart from a send we failed to record.
     let sent = false;
     try {
-      if (deps.canSend && !await deps.canSend()) return;
       const { messageId } = await deps.graph.sendText(
         asCloudNumber(row.number).phoneNumberId,
         token,

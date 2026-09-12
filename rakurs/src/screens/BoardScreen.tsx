@@ -35,7 +35,7 @@ export function useVisibleRefresh<T>(state: ApiState<T>, paused = false) {
 export function matchesBoardSearch(card: EnrichedCard, search: string) {
   const query = search.trim().toLocaleLowerCase('ru');
   const digits = phoneDigits(query);
-  return !query || (digits.length >= 4 && phoneDigits(card.contactPhone ?? '').includes(digits)) || [card.contactName, card.contactAddress, card.preview, card.crmSummary, card.sourceLabel, card.adHeadline, card.assigneeName]
+  return !query || (digits.length >= 4 && phoneDigits(card.contactPhone ?? '').includes(digits)) || [card.contactName, card.channel === 'instagram' ? instagramIdentity(card.contactAddress) : card.contactAddress, card.preview, card.crmSummary, card.sourceLabel, card.adHeadline, card.assigneeName]
     .some((value) => value?.toLocaleLowerCase('ru').includes(query));
 }
 

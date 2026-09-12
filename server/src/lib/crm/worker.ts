@@ -196,7 +196,7 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
       const [latest] = await db.select({id:messages.id}).from(messages).where(eq(messages.conversationId,conversation.id))
         .orderBy(desc(messages.sentAt),desc(messages.id)).limit(1);
       if (current?.agentEnabled && current.conversationEnabled && latest?.id === liveId) {
-        if (deps.checkout && analysis.checkout?.messageId === liveId && analysis.confidence >= 85
+        if (deps.checkout && contact.phone && analysis.checkout?.messageId === liveId && analysis.confidence >= 85
           && !await hasConfirmedKaspiPayment(db,agent.id,conversation.id)
           && await automationAllowed(db,input,'checkout')) {
           await deps.checkout({agentId:agent.id,conversationId:conversation.id,phone:contact.phone,

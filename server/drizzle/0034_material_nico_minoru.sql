@@ -40,6 +40,7 @@ ALTER TABLE "contacts" ALTER COLUMN "phone" DROP NOT NULL;--> statement-breakpoi
 ALTER TABLE "conversations" ALTER COLUMN "whatsapp_number_id" DROP NOT NULL;--> statement-breakpoint
 ALTER TABLE "conversations" ADD COLUMN "instagram_account_id" uuid;--> statement-breakpoint
 ALTER TABLE "messages" ADD COLUMN "instagram_message_id" text;--> statement-breakpoint
+ALTER TABLE "contacts" ADD CONSTRAINT "contacts_id_agent_key" UNIQUE("id","agent_id");--> statement-breakpoint
 ALTER TABLE "instagram_accounts" ADD CONSTRAINT "instagram_accounts_agent_id_agents_id_fk" FOREIGN KEY ("agent_id") REFERENCES "public"."agents"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "instagram_contacts" ADD CONSTRAINT "instagram_contacts_contact_id_contacts_id_fk" FOREIGN KEY ("contact_id") REFERENCES "public"."contacts"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "instagram_contacts" ADD CONSTRAINT "instagram_contacts_agent_id_agents_id_fk" FOREIGN KEY ("agent_id") REFERENCES "public"."agents"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
@@ -53,6 +54,5 @@ ALTER TABLE "conversations" ADD CONSTRAINT "conversations_instagram_account_agen
 CREATE UNIQUE INDEX "contacts_agent_phone_key" ON "contacts" USING btree ("agent_id","phone");--> statement-breakpoint
 CREATE UNIQUE INDEX "conversations_number_contact_key" ON "conversations" USING btree ("whatsapp_number_id","contact_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "conversations_instagram_contact_key" ON "conversations" USING btree ("instagram_account_id","contact_id") WHERE "conversations"."instagram_account_id" is not null;--> statement-breakpoint
-ALTER TABLE "contacts" ADD CONSTRAINT "contacts_id_agent_key" UNIQUE("id","agent_id");--> statement-breakpoint
 ALTER TABLE "messages" ADD CONSTRAINT "messages_instagram_message_id_unique" UNIQUE("instagram_message_id");--> statement-breakpoint
 ALTER TABLE "conversations" ADD CONSTRAINT "conversations_one_provider_check" CHECK (num_nonnulls("conversations"."whatsapp_number_id", "conversations"."instagram_account_id") = 1);

@@ -43,6 +43,11 @@ import {
   loadAutomationSnapshot,
   type AutomationPurpose,
 } from '../automation/policy.js';
+import {
+  withAgentAutomationLock,
+  withAutomationEffect,
+  type AutomationTransaction,
+} from '../automation/execution.js';
 import { queueLead } from '../capi/enqueue.js';
 import { recordStageMove } from '../funnel-history.js';
 import { sendStageMessage } from '../funnel-message.js';
@@ -734,9 +739,6 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
     // conversation that a person has to look at, and the customer is left to that person
     // rather than to a third attempt.
     const detail = safe(`модель дважды вернула негодный ответ (${broken.detail})`, key);
-    if (!dryRun && !await automationAllowed(db, input, 'crm')) {
-      return empty('skipped', AUTOMATION_DISABLED);
-    }
     const ownsHandoff = await handOff(db, { conversation, reason: detail, dryRun });
     if (!ownsHandoff) return empty('skipped', 'Оператор взял диалог на себя.');
     if (!dryRun) {
@@ -791,19 +793,19 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
     applied = Object.fromEntries(
       Object.entries(reply.fields).filter(([fieldId]) => (!deps.crm || dryRun) && known.has(fieldId)),
     );
-    if (!dryRun) {
-      for (const [fieldId, value] of Object.entries(applied)) {
-        if (!await automationAllowed(db, input, 'crm')) {
-          return empty('skipped', AUTOMATION_DISABLED);
+    if (!dryRun && Object.keys(applied).length > 0) {
+      const result = await withAutomationEffect(db, input, 'crm', async (tx) => {
+        for (const [fieldId, value] of Object.entries(applied)) {
+          await tx
+            .insert(leadValues)
+            .values({ conversationId: conversation.id, fieldId, value })
+            .onConflictDoUpdate({
+              target: [leadValues.conversationId, leadValues.fieldId],
+              set: { value, updatedAt: new Date() },
+            });
         }
-        await db
-          .insert(leadValues)
-          .values({ conversationId: conversation.id, fieldId, value })
-          .onConflictDoUpdate({
-            target: [leadValues.conversationId, leadValues.fieldId],
-            set: { value, updatedAt: new Date() },
-          });
-      }
+      });
+      if (!result.allowed) return empty('skipped', AUTOMATION_DISABLED);
     }
 
     if (reply.stageId !== null && (!deps.crm || dryRun)) {
@@ -832,17 +834,13 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
          */
         let moved = false;
 
-        if (!await automationAllowed(db, input, 'crm')) {
-          return empty('skipped', AUTOMATION_DISABLED);
-        }
-
         // One transaction, not two autocommitted statements. The move and the record of
         // the move land together or neither does — a connection lost between them would
         // otherwise leave the lead in the new stage with no row behind it, and the funnel
         // would under-count this move forever with nothing on the screen saying so. The
         // guarantee is written down in `README.md` and in `docs/statistics.md`; this is
         // where the agent's half of it is kept.
-        await db.transaction(async (tx) => {
+        const move = await withAutomationEffect(db, input, 'crm', async (tx) => {
           // The operator's own road, guarded on the stage this turn read: of two writers
           // who saw the same old stage exactly one updates a row, and the customer reads
           // the stage's template once rather than twice.
@@ -883,6 +881,7 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
             });
           }
         });
+        if (!move.allowed) return empty('skipped', AUTOMATION_DISABLED);
 
         if (!moved) {
           details.push('Перевод на этап не выполнен: сделку уже перевели.');
@@ -891,36 +890,29 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
           // Reported whoever moved the lead. This road is the operator's road copied, not
           // the operator's route called, so the hook in `leads.ts` does not reach here and
           // the agent's move would otherwise go unreported — see the comment above.
-          if (await automationAllowed(db, input, 'crm')) {
-            await queueLead(db, {
-              agentId: agent.id,
-              conversationId: conversation.id,
-              canQueue: () => automationAllowed(db, input, 'crm'),
-            });
-          }
+          await queueLead(db, {
+            agentId: agent.id,
+            conversationId: conversation.id,
+            canQueue: (effectDb) => automationAllowed(effectDb, input, 'crm'),
+          });
           // Never on the first stage a lead is given, the same rule the operator's move
           // follows: a customer who has just written already has an answer coming.
           if (conversation.stageId !== null) {
-            if (await automationAllowed(db, input, 'reply')) {
-              await sendStageMessage(
-                db,
-                {
-                  graph: deps.graph,
-                  key: deps.key,
-                  canSend: () => automationAllowed(db, input, 'reply'),
-                },
-                { agentId: agent.id, conversationId: conversation.id, stageId: target.id },
-              );
-            }
+            await sendStageMessage(
+              db,
+              {
+                graph: deps.graph,
+                key: deps.key,
+                canSend: (effectDb) => automationAllowed(effectDb, input, 'reply'),
+              },
+              { agentId: agent.id, conversationId: conversation.id, stageId: target.id },
+            );
           }
         }
       }
     }
 
     if (handoffReason !== null) {
-      if (!dryRun && !await automationAllowed(db, input, 'crm')) {
-        return empty('skipped', AUTOMATION_DISABLED);
-      }
       ownsHandoff = await handOff(db, { conversation, reason: handoffReason, dryRun });
       if (!ownsHandoff) return empty('skipped', 'Оператор взял диалог на себя.');
     }
@@ -986,13 +978,7 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
       if (sent === null) {
         return empty('skipped', AUTOMATION_DISABLED);
       }
-      delivery = await deliver(db, deps, {
-        conversation,
-        contact,
-        number,
-        transport: ready.transport,
-        body,
-      });
+      delivery = sent;
       if (delivery.state !== 'sent') details.push(delivery.detail);
     }
   }
@@ -1053,20 +1039,30 @@ async function handOff(
 ): Promise<boolean> {
   if (input.dryRun) return true;
 
-  const [owned] = await db
-    .update(conversations)
-    .set({ aiEnabled: false })
-    .where(and(eq(conversations.id, input.conversation.id), eq(conversations.aiEnabled, true)))
-    .returning({ id: conversations.id });
-  if (!owned) return false;
-  await db.insert(notes).values({
-    conversationId: input.conversation.id,
-    authorId: null,
-    body:
-      `Агент передал диалог человеку: ${input.reason}. ` +
-      'Ответы агента в этом диалоге выключены.',
-  });
-  return true;
+  const result = await withAutomationEffect(
+    db,
+    { agentId: input.conversation.agentId, conversationId: input.conversation.id },
+    'crm',
+    async (tx) => {
+      const [owned] = await tx
+        .update(conversations)
+        .set({ aiEnabled: false })
+        .where(
+          and(eq(conversations.id, input.conversation.id), eq(conversations.aiEnabled, true)),
+        )
+        .returning({ id: conversations.id });
+      if (!owned) return false;
+      await tx.insert(notes).values({
+        conversationId: input.conversation.id,
+        authorId: null,
+        body:
+          `Агент передал диалог человеку: ${input.reason}. ` +
+          'Ответы агента в этом диалоге выключены.',
+      });
+      return true;
+    },
+  );
+  return result.allowed && result.value;
 }
 
 type Ready = { ok: true; transport: MessageTransport; delivery: ConversationDelivery } | { ok: false; detail: string };
@@ -1138,7 +1134,7 @@ type Delivery =
  * answer, and a queue that retried the event on a `failed` would send it to them twice.
  */
 async function deliver(
-  db: Db,
+  db: AutomationTransaction,
   deps: TurnDeps,
   input: {
     conversation: typeof conversations.$inferSelect;
@@ -1185,7 +1181,7 @@ async function deliver(
       return stored!.id;
     });
 
-    return { state: 'sent', messageId: stored!.id };
+    return { state: 'sent', messageId: storedId };
   } catch (error) {
     // The transport has already redacted whatever Meta echoed back: a rejected token
     // appears inside Meta's own error text, and `withoutSecret` runs where the token is

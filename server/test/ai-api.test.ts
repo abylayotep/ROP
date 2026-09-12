@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
-import { eq, sql } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildServer } from '../src/api/server.js';
 import type { Db } from '../src/db/client.js';
 import { agents, contacts } from '../src/db/schema.js';
+import { withAgentAutomationLock } from '../src/lib/automation/execution.js';
 import { addMember, createAccountWithOwner } from '../src/lib/provision.js';
 import { withDb } from './helpers/db.js';
 import { testEnv } from './helpers/env.js';
@@ -32,30 +33,6 @@ const settingsUrl = () => `/api/agents/${agentId}/ai`;
 
 const patchSettings = (payload: Record<string, unknown>, cookies = ownerJar) =>
   app.inject({ method: 'PATCH', url: settingsUrl(), cookies, payload });
-
-async function waitForDatabaseState(check: () => Promise<boolean>): Promise<void> {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    if (await check()) return;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error('Timed out while forcing the settings update race');
-}
-
-async function queryWaitsOn(
-  table: 'agents' | 'contacts',
-  lock: 'share' | 'update',
-): Promise<boolean> {
-  const rows = await db.execute(sql`
-    select exists (
-      select 1 from pg_stat_activity
-      where datname = current_database()
-        and state = 'active'
-        and wait_event_type = 'Lock'
-        and query like ${`%from "${table}"%for ${lock}%`}
-    ) as waiting
-  `);
-  return Boolean([...rows][0]?.waiting);
-}
 
 beforeEach(async () => {
   db = await withDb();
@@ -169,44 +146,30 @@ describe('AI response mode settings', () => {
       .set({ responseMode: 'off', testContactId: contact!.id })
       .where(eq(agents.id, agentId));
 
-    let releaseContact!: () => void;
-    let contactLocked!: () => void;
+    let releaseLock!: () => void;
+    let lockHeld!: () => void;
     const release = new Promise<void>((resolve) => {
-      releaseContact = resolve;
+      releaseLock = resolve;
     });
     const locked = new Promise<void>((resolve) => {
-      contactLocked = resolve;
+      lockHeld = resolve;
     });
-    const holder = db.transaction(async (tx) => {
-      await tx
-        .select({ id: contacts.id })
-        .from(contacts)
-        .where(eq(contacts.id, contact!.id))
-        .for('update');
-      contactLocked();
+    const holder = withAgentAutomationLock(db, agentId, async () => {
+      lockHeld();
       await release;
     });
 
     await locked;
-    let enableTest: ReturnType<typeof patchSettings> | undefined;
-    let clearContact: ReturnType<typeof patchSettings> | undefined;
-    try {
-      enableTest = patchSettings({ responseMode: 'test' });
-      await waitForDatabaseState(() => queryWaitsOn('contacts', 'share'));
-      clearContact = patchSettings({ testContactId: null });
-      await waitForDatabaseState(async () => {
-        const [stored] = await db
-          .select({ testContactId: agents.testContactId })
-          .from(agents)
-          .where(eq(agents.id, agentId));
-        return stored!.testContactId === null || queryWaitsOn('agents', 'update');
-      });
-    } finally {
-      releaseContact();
-    }
+    let enabledSettled = false;
+    const enableTest = patchSettings({ responseMode: 'test' }).finally(() => { enabledSettled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    const clearContact = patchSettings({ testContactId: null });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(enabledSettled).toBe(false);
+    releaseLock();
 
     await holder;
-    const [enabled, cleared] = await Promise.all([enableTest!, clearContact!]);
+    const [enabled, cleared] = await Promise.all([enableTest, clearContact]);
     expect(enabled.statusCode).toBe(200);
     expect(cleared.statusCode).toBe(400);
     const [stored] = await db.select().from(agents).where(eq(agents.id, agentId));

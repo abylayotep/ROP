@@ -1,14 +1,21 @@
 import { useEffect, useReducer, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import * as api from '@/api';
-import { GenerationReview } from '@/components/knowledge/GenerationReview';
-import { Card } from '@/components/ui/primitives';
-import { EmptyState } from '@/components/ui/states';
+import { CommunicationStyleCard } from '@/components/knowledge/CommunicationStyleCard';
+import { GenerationRunRail, mergeRunPages } from '@/components/knowledge/GenerationRunRail';
+import { ProposalWorkspace } from '@/components/knowledge/ProposalWorkspace';
 import { useApi } from '@/hooks/useApi';
 import { RecentHistoryPreparation } from './RecentHistoryPreparation';
-import { GenerationDraftLinks } from './GenerationDraftLinks';
-import type { KbGenerationPreview, KbGenerationRunDetail } from '@/types';
-import { generationView, initialGenerationState, isCurrentGenerationResponse, mergeRefreshedGenerationDetail, reduceGenerationState } from './generation-state';
+import type { KbGenerationPreview, KbGenerationProposal, KbGenerationRunDetail, KbGenerationRunSummary } from '@/types';
+import {
+  appendGenerationDetailPage,
+  generationView,
+  initialGenerationState,
+  isCurrentGenerationResponse,
+  mergeRefreshedGenerationDetail,
+  reduceGenerationState,
+  type GenerationDetailCollection,
+} from './generation-state';
 
 export const localMidnight = (value: string): string | null => {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
@@ -21,43 +28,65 @@ export function ChatGenerationPanel({
   initialRunId,
   onRunId,
   readOnly = false,
+  mode = 'drafts',
 }: {
   agentId: string;
   initialRunId: string | null;
   onRunId: (runId: string | null) => void;
   readOnly?: boolean;
+  mode?: 'drafts' | 'runs';
 }) {
-  const [state, dispatch] = useReducer(
-    reduceGenerationState,
-    initialGenerationState({ conversationIds: [], from: '', to: '' }),
-  );
+  const [state, dispatch] = useReducer(reduceGenerationState, initialGenerationState({ conversationIds: [], from: '', to: '' }));
   const requestKey = useRef<{ previewId: string; key: string } | null>(null);
   const epoch = useRef(0);
   const actionAbort = useRef<AbortController | null>(null);
   const activeRunId = useRef<string | null>(initialRunId);
-  const loadingMore = useRef(false);
+  const detailSnapshot = useRef<KbGenerationRunDetail | null>(null);
+  const loadingCollections = useRef(new Set<GenerationDetailCollection>());
   const [busy, setBusy] = useState(false);
+  const [detailLoading, setDetailLoading] = useState(initialRunId !== null);
   const [error, setError] = useState<string | null>(null);
+  const [loadedRuns, setLoadedRuns] = useState<KbGenerationRunSummary[] | null>(null);
+  const [runsCursor, setRunsCursor] = useState<string | null | undefined>(undefined);
+  const [loadingRuns, setLoadingRuns] = useState(false);
   const runs = useApi((signal) => api.listKnowledgeGenerationRuns(agentId, undefined, signal), [agentId]);
   const view = generationView(state);
+  const visibleRuns = loadedRuns ?? runs.data?.items ?? [];
+  const nextRunsCursor = runsCursor === undefined ? runs.data?.nextCursor ?? null : runsCursor;
+  detailSnapshot.current = state.detail;
 
   useEffect(() => () => actionAbort.current?.abort(), []);
+  useEffect(() => {
+    setLoadedRuns(null);
+    setRunsCursor(undefined);
+  }, [agentId]);
 
   async function loadRun(runId: string, signal?: AbortSignal, polling = false, preserveLoadedPages = false) {
     const startedAt = epoch.current;
-    const detail = await api.getKnowledgeGenerationRun(agentId, runId, signal);
-    if (!isCurrentGenerationResponse(startedAt, runId, epoch.current, activeRunId.current)) return detail;
-    const nextDetail = preserveLoadedPages && state.detail?.run.id === runId
-      ? mergeRefreshedGenerationDetail(state.detail, detail)
-      : detail;
-    dispatch({ type: polling ? 'poll' : 'run', detail: nextDetail });
-    return detail;
+    if (!polling) setDetailLoading(true);
+    try {
+      const detail = await api.getKnowledgeGenerationRun(agentId, runId, signal);
+      if (!isCurrentGenerationResponse(startedAt, runId, epoch.current, activeRunId.current)) return detail;
+      const currentDetail = detailSnapshot.current;
+      const nextDetail = preserveLoadedPages && currentDetail?.run.id === runId
+        ? mergeRefreshedGenerationDetail(currentDetail, detail)
+        : detail;
+      dispatch({ type: polling ? 'poll' : 'run', detail: nextDetail });
+      setError(null);
+      return detail;
+    } finally {
+      if (!polling && startedAt === epoch.current) setDetailLoading(false);
+    }
   }
 
   useEffect(() => {
     epoch.current += 1;
     activeRunId.current = initialRunId;
-    if (!initialRunId) return;
+    if (!initialRunId) {
+      dispatch({ type: 'reset' });
+      setDetailLoading(false);
+      return;
+    }
     const controller = new AbortController();
     void loadRun(initialRunId, controller.signal).catch((caught) => {
       if (!controller.signal.aborted) setError(api.humanError(caught));
@@ -72,7 +101,7 @@ export function ChatGenerationPanel({
     let timer = 0;
     const poll = () => {
       timer = window.setTimeout(() => {
-        void loadRun(run.id, controller.signal, true)
+        void loadRun(run.id, controller.signal, true, true)
           .then(() => setError(null))
           .catch((caught) => {
             if (!controller.signal.aborted) {
@@ -87,7 +116,7 @@ export function ChatGenerationPanel({
       controller.abort();
       window.clearTimeout(timer);
     };
-  }, [agentId, state.detail]);
+  }, [agentId, state.detail?.run.id, state.detail?.run.status, state.detail?.run.updatedAt]);
 
   async function start(preview: KbGenerationPreview) {
     if (busy || readOnly) return;
@@ -98,14 +127,18 @@ export function ChatGenerationPanel({
     const controller = new AbortController();
     actionAbort.current = controller;
     try {
-      if (requestKey.current?.previewId !== preview.previewId) {
-        requestKey.current = { previewId: preview.previewId, key: crypto.randomUUID() };
-      }
-      const run = await api.startKnowledgeGeneration(agentId, {
-        previewId: preview.previewId,
-        requestKey: requestKey.current.key,
-      }, controller.signal);
+      if (requestKey.current?.previewId !== preview.previewId) requestKey.current = { previewId: preview.previewId, key: crypto.randomUUID() };
+      const run = await api.startKnowledgeGeneration(agentId, { previewId: preview.previewId, requestKey: requestKey.current.key }, controller.signal);
       if (startedAt !== epoch.current) return;
+      const summary: KbGenerationRunSummary = {
+        ...run,
+        classificationCounts: { customer: 0, irrelevant: 0, uncertain: 0 },
+        excludedBatchCount: 0,
+        errors: [],
+        drafts: [],
+        draftsNextCursor: null,
+      };
+      setLoadedRuns((current) => [summary, ...(current ?? visibleRuns).filter((item) => item.id !== summary.id)]);
       epoch.current += 1;
       activeRunId.current = run.id;
       onRunId(run.id);
@@ -116,14 +149,36 @@ export function ChatGenerationPanel({
     }
   }
 
+  function selectRun(runId: string) {
+    if (runId === activeRunId.current) return;
+    epoch.current += 1;
+    activeRunId.current = runId;
+    setError(null);
+    onRunId(runId);
+  }
+
+  async function loadMoreRuns() {
+    if (!nextRunsCursor || loadingRuns) return;
+    setLoadingRuns(true);
+    try {
+      const page = await api.listKnowledgeGenerationRuns(agentId, nextRunsCursor);
+      setLoadedRuns((current) => mergeRunPages(current ?? visibleRuns, page.items));
+      setRunsCursor(page.nextCursor);
+    } catch (caught) {
+      setError(api.humanError(caught));
+    } finally {
+      setLoadingRuns(false);
+    }
+  }
+
   async function action(kind: 'cancel' | 'retry') {
-    if (!state.detail) return;
+    if (!state.detail || readOnly) return;
     setBusy(true);
     try {
       const run = kind === 'cancel'
         ? await api.cancelKnowledgeGenerationRun(agentId, state.detail.run.id)
         : await api.retryKnowledgeGenerationRun(agentId, state.detail.run.id);
-      await loadRun(run.id);
+      await loadRun(run.id, undefined, false, true);
     } catch (caught) {
       setError(api.humanError(caught));
     } finally {
@@ -131,86 +186,164 @@ export function ChatGenerationPanel({
     }
   }
 
-  async function loadMoreProposals() {
+  async function loadCollection(collection: GenerationDetailCollection) {
     const current = state.detail;
-    const cursor = current?.proposals.nextCursor;
-    if (!current || !cursor || loadingMore.current) return;
-    loadingMore.current = true;
-    const startedAt = epoch.current;
+    if (!current || loadingCollections.current.has(collection)) return current;
+    const cursor = collectionCursor(current, collection);
+    if (cursor === null && !(collection === 'rawFindings' && current.rawFindings === undefined)) return current;
+    loadingCollections.current.add(collection);
     setBusy(true);
+    const startedAt = epoch.current;
     try {
-      const next = await api.getKnowledgeGenerationRun(agentId, current.run.id, undefined, cursor);
-      if (!isCurrentGenerationResponse(startedAt, current.run.id, epoch.current, activeRunId.current)) return;
-      dispatch({ type: 'append_page', detail: next });
+      const next = await api.getKnowledgeGenerationRun(agentId, current.run.id, undefined, collectionOptions(collection, cursor ?? undefined));
+      if (!isCurrentGenerationResponse(startedAt, current.run.id, epoch.current, activeRunId.current)) return current;
+      dispatch({ type: 'append_page', detail: next, collection });
+      return appendGenerationDetailPage(current, next, collection);
     } catch (caught) {
       if (startedAt === epoch.current) setError(api.humanError(caught));
+      return current;
     } finally {
-      loadingMore.current = false;
+      loadingCollections.current.delete(collection);
       if (startedAt === epoch.current) setBusy(false);
     }
   }
 
+  async function loadAllProposals(): Promise<KbGenerationProposal[]> {
+    let detail = state.detail;
+    if (!detail) return [];
+    let cursor = detail.proposals.nextCursor;
+    while (cursor) {
+      const startedAt = epoch.current;
+      const next = await api.getKnowledgeGenerationRun(agentId, detail.run.id, undefined, { proposalCursor: cursor });
+      if (!isCurrentGenerationResponse(startedAt, detail.run.id, epoch.current, activeRunId.current)) return detail.proposals.items;
+      detail = appendGenerationDetailPage(detail, next, 'proposals');
+      dispatch({ type: 'append_page', detail: next, collection: 'proposals' });
+      cursor = detail.proposals.nextCursor;
+    }
+    return detail.proposals.items;
+  }
+
+  const reset = () => {
+    epoch.current += 1;
+    activeRunId.current = null;
+    requestKey.current = null;
+    dispatch({ type: 'reset' });
+    onRunId(null);
+  };
+
   return (
-    <Card>
-      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-        <div>
-          <div style={{ fontWeight: 700 }}>База знаний и скрипт из WhatsApp</div>
-          <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 3 }}>Из реальной переписки — в черновики для вашей проверки.</div>
-        </div>
-        {state.detail && <button type="button" className="btn-sm" onClick={() => { epoch.current += 1; activeRunId.current = null; requestKey.current = null; dispatch({ type: 'reset' }); onRunId(null); }}>Подготовить заново</button>}
-      </div>
+    <div className="knowledge-review-grid">
+      <GenerationRunRail
+        runs={visibleRuns}
+        activeRunId={initialRunId}
+        loading={runs.loading}
+        error={runs.error}
+        hasMore={nextRunsCursor !== null}
+        loadingMore={loadingRuns}
+        onSelect={selectRun}
+        onRetry={runs.reload}
+        onLoadMore={() => void loadMoreRuns()}
+      />
 
-      {!state.detail && (
-        <div style={{ marginTop: 14 }}>
-          {!readOnly && <RecentHistoryPreparation agentId={agentId} busy={busy} onStart={preview => void start(preview)} />}
-          {(runs.data?.items.length ?? 0) > 0 && (
-            <div style={{ marginTop: 12, fontSize: 12 }}>
-              <div style={{ color: 'var(--text-dim)', marginBottom: 5 }}>Предыдущие запуски</div>
-              {runs.data!.items.slice(0, 5).map((run) => (
-                <button key={run.id} type="button" className="btn-link" style={{ display: 'block', marginTop: 4 }} onClick={() => { epoch.current += 1; activeRunId.current = run.id; onRunId(run.id); }}>
-                  {new Date(run.createdAt).toLocaleString('ru-RU')} · {statusLabel(run.status)} · {run.proposalCount}
-                </button>
-              ))}
+      <section className="generation-review" aria-label={mode === 'runs' ? 'Сведения о запуске' : 'Проверка черновика'}>
+        <header className="generation-review__head">
+          <div>
+            <p className="knowledge-kicker">{mode === 'runs' ? 'Сведения и аудит' : 'Новая версия'}</p>
+            <h2>{mode === 'runs' ? 'Выбранный запуск' : 'Черновики из переписки'}</h2>
+          </div>
+          {state.detail && <div><span className="mono">{new Date(state.detail.run.createdAt).toLocaleString('ru-RU')}</span><small>{statusLabel(state.detail.run.status)}</small></div>}
+        </header>
+
+        {detailLoading && !state.detail && <div className="generation-review__skeleton" role="status" aria-label="Загружаем запуск"><span /><span /><span /></div>}
+        {!detailLoading && !state.detail && (
+          <div className="generation-review__prepare">
+            {!readOnly ? <RecentHistoryPreparation agentId={agentId} busy={busy} onStart={(preview) => void start(preview)} />
+              : <div className="knowledge-inline-state"><p>Выберите запуск слева.</p><span>Участники могут просматривать предложения, источники и черновики.</span></div>}
+          </div>
+        )}
+
+        {state.detail && (
+          <>
+            <RunStatus detail={state.detail} />
+            <div className="generation-review__actions">
+              {view === 'active' && !readOnly && <button type="button" className="btn-sm" disabled={busy || state.detail.run.cancelRequestedAt !== null} onClick={() => void action('cancel')}>Отменить после текущего запроса</button>}
+              {state.detail.run.status === 'failed' && !readOnly && <button type="button" className="btn-sm" disabled={busy} onClick={() => void action('retry')}>Повторить незавершённые пакеты</button>}
+              <button type="button" className="btn-quiet" onClick={reset}>Подготовить заново</button>
             </div>
-          )}
-          {readOnly && (runs.data?.items.length ?? 0) === 0 && <EmptyState>Запусков обработки пока нет.</EmptyState>}
-        </div>
-      )}
+            {(view === 'review' || view === 'empty' || view === 'partial_failure' || (view === 'cancelled' && state.detail.run.proposalCount > 0)) && (
+              <ProposalWorkspace
+                agentId={agentId}
+                detail={state.detail}
+                readOnly={readOnly}
+                onChanged={(proposal) => dispatch({ type: 'proposal_updated', proposal })}
+                onLoadAllProposals={loadAllProposals}
+                onLoadMoreProposals={() => void loadCollection('proposals')}
+                onLoadMoreExclusions={() => void loadCollection('exclusions')}
+                onLoadRawFindings={() => void loadCollection('rawFindings')}
+                onLoadMoreRawFindings={() => void loadCollection('rawFindings')}
+              />
+            )}
+            {view === 'active' && <div className="knowledge-inline-state"><p>Обработка продолжается.</p><span>Новые пакеты и стоимость обновляются автоматически.</span></div>}
+            {view === 'cancelled' && state.detail.run.proposalCount === 0 && <div className="knowledge-inline-state"><p>Обработка отменена.</p><span>Ничего не опубликовано.</span></div>}
+          </>
+        )}
+        {error && <div role="alert" className="generation-review__error">{error}{!readOnly && <> · <Link to="../settings">Настроить AI</Link></>}</div>}
+      </section>
 
-      {state.detail && (
-        <div style={{ marginTop: 14 }}>
-          <RunStatus detail={state.detail} />
-          {state.detail.run.status === 'completed' && state.detail.drafts && <GenerationDraftLinks drafts={state.detail.drafts} />}
-          {view === 'active' && !readOnly && <button type="button" className="btn-sm" disabled={busy || state.detail.run.cancelRequestedAt !== null} onClick={() => void action('cancel')}>Отменить после текущего запроса</button>}
-          {(view === 'review' || view === 'empty' || view === 'partial_failure' || (view === 'cancelled' && state.detail.run.proposalCount > 0)) && <details open={state.detail.run.status !== 'completed'} style={{ marginTop: 12 }}>
-            <summary>Предложения и источники из переписки</summary>
-            <GenerationReview agentId={agentId} detail={state.detail} readOnly={readOnly} onChanged={(proposal) => dispatch({ type: 'proposal_updated', proposal })} />
-            {state.detail.proposals.nextCursor && <button type="button" className="btn-sm" disabled={busy} onClick={() => void loadMoreProposals()}>Показать ещё предложения</button>}
-          </details>}
-          {state.detail.run.status === 'failed' && !readOnly && <><div style={{ color: 'var(--warning)', fontSize: 12, marginTop: 8 }}>Предыдущий незавершённый запрос мог быть тарифицирован провайдером.</div><button type="button" className="btn-sm" disabled={busy} onClick={() => void action('retry')}>Повторить незавершённые пакеты</button></>}
-          {view === 'cancelled' && <div style={{ color: 'var(--text-dim)', fontSize: 12 }}>Обработка отменена. Уже завершившийся запрос мог быть тарифицирован, его предложения не добавлены.</div>}
-        </div>
-      )}
-      {error && <div role="alert" style={{ color: 'var(--danger)', marginTop: 10, fontSize: 12 }}>{error}{!readOnly && <> · <Link to="../settings">Настроить AI</Link></>}</div>}
-    </Card>
+      <aside className="knowledge-review-aside" aria-label="Настройки и черновики">
+        <CommunicationStyleCard agentId={agentId} readOnly={readOnly} />
+        <RunDraftShortcuts drafts={state.detail?.drafts ?? []} hasMore={state.detail?.draftsNextCursor !== null && state.detail?.draftsNextCursor !== undefined} onLoadMore={() => void loadCollection('drafts')} />
+      </aside>
+    </div>
   );
 }
 
 function RunStatus({ detail }: { detail: KbGenerationRunDetail }) {
   const { run } = detail;
+  const skipped = run.counts.skippedAiOrSystem + run.counts.skippedUnsupported + run.counts.skippedEmpty
+    + run.counts.skippedSensitive + run.counts.skippedOversize + run.counts.skippedNoSeller;
   return (
-    <div style={{ fontSize: 12, marginBottom: 10 }}>
-      Статус: {statusLabel(run.status)} · пакетов {run.completedBatchCount}/{run.batchCount} · предложений {run.proposalCount} · токенов {run.usage.promptTokens + run.usage.completionTokens} · учтённая стоимость ${run.usage.cost}
-      <div style={{ color: 'var(--text-dim)' }}>Провайдер может не вернуть стоимость отдельных запросов; точный счёт смотрите в его кабинете.</div>
-      {run.status === 'failed' && <div style={{ color: 'var(--danger)' }}>Часть обработки не завершена. Готовые предложения сохранены.</div>}
-    </div>
+    <section className="generation-review__status" aria-label="Статус запуска">
+      <dl className="generation-review__metrics">
+        <div><dt>Пакеты</dt><dd>{run.completedBatchCount}/{run.batchCount}</dd></div>
+        <div><dt>Предложения</dt><dd>{run.proposalCount}</dd></div>
+        <div><dt>Пропущено</dt><dd>{skipped + run.excludedBatchCount}</dd></div>
+        <div><dt>Токены / стоимость</dt><dd>{run.usage.promptTokens + run.usage.completionTokens} / ${run.usage.cost}</dd></div>
+      </dl>
+      <p className="generation-review__notice">Стоимость отдельных запросов может отсутствовать; точный счёт хранит AI-провайдер.</p>
+      {run.errors.length > 0 && <p className="generation-review__notice generation-review__notice--error">Ошибок: {run.errors.length}. Готовые предложения сохранены.</p>}
+    </section>
   );
 }
 
-const statusLabel = (status: KbGenerationRunDetail['run']['status']): string => ({
-  queued: 'в очереди',
-  running: 'обработка',
-  completed: 'завершено',
-  failed: 'ошибка',
-  cancelled: 'отменено',
-})[status];
+function RunDraftShortcuts({ drafts, hasMore, onLoadMore }: { drafts: KbGenerationRunDetail['drafts']; hasMore: boolean; onLoadMore: () => void }) {
+  return (
+    <section className="generation-drafts" aria-labelledby="generation-drafts-title">
+      <p className="knowledge-kicker">Результаты запуска</p>
+      <h2 id="generation-drafts-title">Все черновики</h2>
+      {drafts.length === 0 ? <p className="generation-drafts__empty">У этого запуска пока нет черновиков. Ничего не опубликовано.</p> : (
+        <ol className="generation-drafts__list">
+          {drafts.map((draft) => <li key={draft.id}><Link to={`../drafts/${draft.id}`}><b>{draft.title}</b><span>{new Date(draft.createdAt).toLocaleDateString('ru-RU')} · {draftStatus(draft.status)}</span></Link></li>)}
+        </ol>
+      )}
+      {hasMore && <button type="button" className="knowledge-load-more" onClick={onLoadMore}>Показать ещё черновики</button>}
+    </section>
+  );
+}
+
+function collectionCursor(detail: KbGenerationRunDetail, collection: GenerationDetailCollection): string | null | undefined {
+  if (collection === 'proposals') return detail.proposals.nextCursor;
+  if (collection === 'drafts') return detail.draftsNextCursor;
+  if (collection === 'exclusions') return detail.exclusionsNextCursor;
+  return detail.rawFindingsNextCursor;
+}
+
+function collectionOptions(collection: GenerationDetailCollection, cursor?: string): api.KnowledgeGenerationRunPageOptions {
+  if (collection === 'proposals') return { proposalCursor: cursor };
+  if (collection === 'drafts') return { draftCursor: cursor };
+  if (collection === 'exclusions') return { exclusionCursor: cursor };
+  return { rawFindingCursor: cursor, includeRawFindings: true };
+}
+
+const draftStatus = (status: KbGenerationRunDetail['drafts'][number]['status']) => ({ open: 'на проверке', applied: 'применён', discarded: 'отклонён' })[status];
+const statusLabel = (status: KbGenerationRunDetail['run']['status']): string => ({ queued: 'В очереди', running: 'Обработка', completed: 'Завершён', failed: 'Ошибка', cancelled: 'Отменён' })[status];

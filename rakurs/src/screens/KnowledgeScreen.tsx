@@ -1,8 +1,9 @@
-import { useMemo, useState, type CSSProperties } from 'react';
+import { useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import * as api from '@/api';
 import { Graph } from '@/components/knowledge/Graph';
 import { ChatGenerationPanel } from '@/components/knowledge/ChatGenerationPanel';
+import { KnowledgeWorkspace, knowledgeTabFromSearch, type KnowledgeTab } from '@/components/knowledge/KnowledgeWorkspace';
 import { HistoryImportPanel } from '@/components/knowledge/HistoryImportPanel';
 import { ImportPanel } from '@/components/knowledge/ImportPanel';
 import { NoteEditor } from '@/components/knowledge/NoteEditor';
@@ -13,6 +14,7 @@ import { Async, EmptyState, Skeleton } from '@/components/ui/states';
 import { useApi, useDebounced } from '@/hooks/useApi';
 import { useAgent } from '@/store/agent';
 import type { KbGraph, KbNote, KbNoteDetail, KbNoteKind } from '@/types';
+import './knowledge-workspace.css';
 
 /**
  * The vault: a folder tree, a markdown editor, and a panel of what points where.
@@ -53,18 +55,6 @@ const VIEWS: SegmentItem<View>[] = [
   { id: 'graph', label: 'Граф' },
 ];
 
-const control: CSSProperties = {
-  width: '100%',
-  padding: '8px 10px',
-  background: 'var(--sunken)',
-  color: 'var(--text)',
-  border: '1px solid var(--line)',
-  borderRadius: 8,
-  font: 'inherit',
-  fontSize: 12.5,
-  outline: 'none',
-};
-
 export function KnowledgeScreen() {
   const { agent, role } = useAgent();
   const owner = role === 'owner';
@@ -79,6 +69,7 @@ export function KnowledgeScreen() {
   const [params, setParams] = useSearchParams();
   const selected = params.get('note');
   const generationRun = params.get('generation');
+  const activeTab = knowledgeTabFromSearch(params);
 
   // Whether the one `NoteEditor` currently on screen has typed text it has not saved.
   // `NoteEditor` is keyed by `selected`, so moving `selected` at all remounts it — this is
@@ -92,8 +83,20 @@ export function KnowledgeScreen() {
   /** The actual navigation, with no question asked. For the paths that already answered
    * one — a save, a confirmed delete, an explicit «Отмена» — asking again would be asking
    * about a change that either no longer exists or was just discarded on purpose. */
-  const selectNow = (noteId: string | null) =>
-    noteId === null ? setParams({}, { replace: true }) : setParams({ note: noteId }, { replace: true });
+  const selectNow = (noteId: string | null) => {
+    const next = new URLSearchParams(params);
+    if (noteId === null) next.delete('note');
+    else next.set('note', noteId);
+    next.set('tab', 'knowledge');
+    setParams(next, { replace: true });
+  };
+
+  const changeTab = (tab: KnowledgeTab) => {
+    if (activeTab === 'knowledge' && tab !== 'knowledge' && !confirmDiscard()) return;
+    const next = new URLSearchParams(params);
+    next.set('tab', tab);
+    setParams(next, { replace: true });
+  };
 
   /**
    * The one guard every note-to-note jump goes through: the tree, a backlink, an outgoing
@@ -172,171 +175,110 @@ export function KnowledgeScreen() {
 
   const tree = useMemo(() => buildTree(list.data ?? []), [list.data]);
 
+  const generationPanel = (
+    <ChatGenerationPanel
+      key={`${agent.id}:${activeTab}`}
+      agentId={agent.id}
+      initialRunId={generationRun}
+      mode={activeTab === 'runs' ? 'runs' : 'drafts'}
+      onRunId={(runId) => {
+        const next = new URLSearchParams(params);
+        if (runId === null) next.delete('generation');
+        else next.set('generation', runId);
+        next.set('tab', activeTab === 'runs' ? 'runs' : 'drafts');
+        setParams(next, { replace: true });
+      }}
+      readOnly={!owner}
+    />
+  );
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-      <ChatGenerationPanel
-          key={agent.id}
-          agentId={agent.id}
-          initialRunId={generationRun}
-          onRunId={(runId) => {
-            const next = new URLSearchParams(params);
-            runId === null ? next.delete('generation') : next.set('generation', runId);
-            setParams(next, { replace: true });
-          }}
-          readOnly={!owner}
-        />
-      <details>
-        <summary style={{ cursor: 'pointer', fontSize: 13, color: 'var(--text-dim)' }}>История WhatsApp — загрузка и состояние</summary>
-        <div style={{ marginTop: 10 }}><HistoryImportPanel key={`history-${agent.id}`} agentId={agent.id} readOnly={!owner} /></div>
-      </details>
-      <div className="knowledge-layout">
-      <div className="knowledge-sidebar">
-        <Card pad={false}>
-          <div style={{ padding: '14px 14px 10px', display: 'flex', flexDirection: 'column', gap: 10 }}>
-            <input
-              value={query}
-              type="search"
-              aria-label="Поиск по базе знаний"
-              placeholder="Вопрос клиента"
-              onChange={(e) => setQuery(e.target.value)}
-              style={control}
-            />
-            <div className="knowledge-filters"><Segmented items={FILTERS} value={kind} onChange={setKind} size="sm" /></div>
-            <button type="button" className="btn-sm" onClick={() => select(NEW)}>
-              + Новая заметка
-            </button>
+    <KnowledgeWorkspace activeTab={activeTab} onTabChange={changeTab}>
+      {(activeTab === 'drafts' || activeTab === 'runs') && generationPanel}
+
+      {activeTab === 'sources' && (
+        <section className="knowledge-source-seam" aria-labelledby="knowledge-sources-title">
+          <header className="knowledge-source-seam__intro">
+            <p className="knowledge-kicker">Источники</p>
+            <h2 id="knowledge-sources-title">Источники и загрузка</h2>
+            <p>Здесь собраны существующие загрузки. Компактные карточки источников подключаются на следующем этапе.</p>
+          </header>
+          <div className="knowledge-source-seam__panels">
+            <HistoryImportPanel key={`history-${agent.id}`} agentId={agent.id} readOnly={!owner} />
+            {owner && <ImportPanel agentId={agent.id} onChanged={refreshLists} />}
           </div>
+        </section>
+      )}
 
-          <div
-            style={{
-              borderTop: '1px solid var(--line-soft)',
-              padding: '8px',
-              maxHeight: 520,
-              overflowY: 'auto',
-            }}
-          >
-            <Async state={list} skeleton={<Skeleton height={220} />} compactError>
-              {() =>
-                tree.length === 0 ? (
-                  <EmptyState>
-                    {search !== ''
-                      ? `По запросу «${search}» ничего не нашлось. ИИ ответил бы так же.`
-                      : kind !== 'all'
-                        ? 'Заметок этого типа пока нет.'
-                        : owner
-                          ? 'База знаний пуста. Загрузите текст или страницу ниже — или создайте первую заметку.'
-                          : 'База знаний пуста. Создайте первую заметку — отвечать агенту пока нечем.'}
-                  </EmptyState>
-                ) : (
-                  <>
-                    <NoteTree nodes={tree} selectedId={selected} onSelect={select} />
-                    {/* Said out loud, because a hundred rows and no pager reads as «the vault
-                        ends here» rather than «browsing stops here, search does not». */}
-                    {search === '' && (list.data?.length ?? 0) >= LIST_LIMIT && (
-                      <div style={{ padding: '8px 6px 2px', fontSize: 11, color: 'var(--text-dim)' }}>
-                        Показаны {LIST_LIMIT} последних заметок — в базе их может быть больше.
-                        Остальные находятся поиском.
-                      </div>
-                    )}
-                    {search !== '' && (list.data?.length ?? 0) >= SEARCH_LIMIT && (
-                      <div style={{ padding: '8px 6px 2px', fontSize: 11, color: 'var(--text-dim)' }}>
-                        Показаны {SEARCH_LIMIT} самых подходящих заметок. Уточните запрос, если
-                        нужной среди них нет.
-                      </div>
-                    )}
-                  </>
-                )
-              }
-            </Async>
-          </div>
-        </Card>
-
-        {owner && <ImportPanel agentId={agent.id} onChanged={refreshLists} />}
-      </div>
-
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ marginBottom: 14 }}>
-          <Segmented items={VIEWS} value={view} onChange={setView} size="sm" />
-        </div>
-
-        {/*
-         * Hidden with `display`, never unmounted: the graph tab and the note tab share this
-         * column, and switching tabs must not throw away an editor draft the way removing
-         * `NoteEditor` from the tree would. The dirty guard already covers every path that
-         * actually changes `selected` — a tab flip on its own does not, so it needs none of
-         * its own.
-         */}
-        <div style={{ display: view === 'notes' ? 'block' : 'none' }}>
-          {selected === null && (
-            <Card>
-              <EmptyState>Выберите заметку слева или создайте новую.</EmptyState>
+      {activeTab === 'knowledge' && (
+        <section className="knowledge-notes-layout" aria-label="Опубликованные знания">
+          <div className="knowledge-sidebar">
+            <Card pad={false}>
+              <div className="knowledge-sidebar__controls">
+                <input
+                  value={query}
+                  type="search"
+                  aria-label="Поиск по базе знаний"
+                  placeholder="Вопрос клиента"
+                  onChange={(e) => setQuery(e.target.value)}
+                  className="knowledge-control"
+                />
+                <div className="knowledge-filters"><Segmented items={FILTERS} value={kind} onChange={setKind} size="sm" /></div>
+                {owner && <button type="button" className="btn-sm" onClick={() => select(NEW)}>+ Новая заметка</button>}
+              </div>
+              <div className="knowledge-sidebar__tree">
+                <Async state={list} skeleton={<Skeleton height={220} />} compactError>
+                  {() => tree.length === 0 ? (
+                    <EmptyState>
+                      {search !== '' ? `По запросу «${search}» ничего не нашлось. ИИ ответил бы так же.`
+                        : kind !== 'all' ? 'Заметок этого типа пока нет.'
+                          : owner ? 'База знаний пуста. Создайте первую заметку или откройте «Источники и загрузка».'
+                            : 'База знаний пуста. Отвечать агенту пока нечем.'}
+                    </EmptyState>
+                  ) : (
+                    <>
+                      <NoteTree nodes={tree} selectedId={selected} onSelect={select} />
+                      {search === '' && (list.data?.length ?? 0) >= LIST_LIMIT && <div className="knowledge-list-limit">Показаны {LIST_LIMIT} последних заметок — остальные находятся поиском.</div>}
+                      {search !== '' && (list.data?.length ?? 0) >= SEARCH_LIMIT && <div className="knowledge-list-limit">Показаны {SEARCH_LIMIT} самых подходящих заметок. Уточните запрос, если нужной среди них нет.</div>}
+                    </>
+                  )}
+                </Async>
+              </div>
             </Card>
-          )}
+          </div>
 
-          {selected === NEW && (
-            <NoteEditor
-              key={NEW}
-              agentId={agent.id}
-              detail={null}
-              titles={titles}
-              // «Отмена» already means «throw this away» — asking again would be asking about
-              // a discard the owner just asked for.
-              onCancel={() => selectNow(null)}
-              onSaved={(saved) => {
-                refreshLists();
-                // The save just answered the question the guard exists to ask.
-                selectNow(saved.id);
-              }}
-              onDeleted={() => selectNow(null)}
-              onOpenNote={select}
-              onDirtyChange={setEditorDirty}
-            />
-          )}
-
-          {selected !== null && selected !== NEW && (
-            <Async state={detail} skeleton={<Skeleton height={420} />}>
-              {(loaded) =>
-                loaded && (
-                  <div className="knowledge-detail">
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <NoteEditor
-                        key={selected}
-                        agentId={agent.id}
-                        detail={loaded}
-                        titles={titles}
-                        onSaved={() => {
-                          refreshLists();
-                          detail.reload();
-                        }}
-                        onDeleted={() => {
-                          refreshLists();
-                          // The confirm inside `remove()` already asked; this is not a second
-                          // navigation the owner needs to approve again.
-                          selectNow(null);
-                        }}
-                        onOpenNote={select}
-                        onDirtyChange={setEditorDirty}
-                      />
+          <div className="knowledge-notes-main">
+            <div className="knowledge-view-switcher"><Segmented items={VIEWS} value={view} onChange={setView} size="sm" /></div>
+            <div className={view === 'notes' ? '' : 'knowledge-view-panel--hidden'}>
+              {selected === null && <Card><EmptyState>Выберите заметку слева или создайте новую.</EmptyState></Card>}
+              {selected === NEW && owner && (
+                <NoteEditor key={NEW} agentId={agent.id} detail={null} titles={titles}
+                  onCancel={() => selectNow(null)}
+                  onSaved={(saved) => { refreshLists(); selectNow(saved.id); }}
+                  onDeleted={() => selectNow(null)} onOpenNote={select} onDirtyChange={setEditorDirty} />
+              )}
+              {selected !== null && selected !== NEW && (
+                <Async state={detail} skeleton={<Skeleton height={420} />}>
+                  {(loaded) => loaded && (
+                    <div className="knowledge-detail">
+                      <div className="knowledge-note-main">
+                        <NoteEditor key={selected} agentId={agent.id} detail={loaded} titles={titles}
+                          onSaved={() => { refreshLists(); detail.reload(); }}
+                          onDeleted={() => { refreshLists(); selectNow(null); }}
+                          onOpenNote={select} onDirtyChange={setEditorDirty} />
+                      </div>
+                      <div className="knowledge-context"><NotePanel key={selected} agentId={agent.id} detail={loaded} onOpenNote={select} /></div>
                     </div>
-                    <div className="knowledge-context">
-                      <NotePanel key={selected} agentId={agent.id} detail={loaded} onOpenNote={select} />
-                    </div>
-                  </div>
-                )
-              }
-            </Async>
-          )}
-        </div>
-
-        <div style={{ display: view === 'graph' ? 'block' : 'none' }}>
-          <Card>
-            <Async state={graph} skeleton={<Skeleton height={560} />}>
-              {(loaded) => loaded && <Graph graph={loaded} onOpenNote={openFromGraph} />}
-            </Async>
-          </Card>
-        </div>
-      </div>
-      </div>
-    </div>
+                  )}
+                </Async>
+              )}
+            </div>
+            <div className={view === 'graph' ? '' : 'knowledge-view-panel--hidden'}>
+              <Card><Async state={graph} skeleton={<Skeleton height={560} />}>{(loaded) => loaded && <Graph graph={loaded} onOpenNote={openFromGraph} />}</Async></Card>
+            </div>
+          </div>
+        </section>
+      )}
+    </KnowledgeWorkspace>
   );
 }

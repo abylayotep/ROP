@@ -74,6 +74,41 @@ describe('generation UI state', () => {
     expect(merged.proposals.nextCursor).toBeNull();
   });
 
+  it('does not let an older polling row overwrite a newer persisted proposal revision', () => {
+    const current = {
+      ...detail('running', 1),
+      proposals: { items: [{ id: 'first', revision: 3, selected: true }], nextCursor: null },
+    } as KbGenerationRunDetail;
+    const refreshed = {
+      ...detail('running', 1),
+      proposals: { items: [{ id: 'first', revision: 2, selected: false }], nextCursor: null },
+    } as KbGenerationRunDetail;
+
+    expect(mergeRefreshedGenerationDetail(current, refreshed).proposals.items).toEqual([
+      expect.objectContaining({ id: 'first', revision: 3, selected: true }),
+    ]);
+  });
+
+  it('preserves exhausted independent cursors and loaded audit pages during polling', () => {
+    const current = {
+      ...detail('running', 1),
+      drafts: [{ id: 'draft-later' }], draftsNextCursor: null,
+      exclusions: [{ batchId: 'excluded-later' }], exclusionsNextCursor: null,
+      rawFindings: [{ id: 'raw-later' }], rawFindingsNextCursor: null,
+    } as KbGenerationRunDetail;
+    const refreshed = {
+      ...detail('running', 1),
+      drafts: [{ id: 'draft-first' }], draftsNextCursor: '20',
+      exclusions: [{ batchId: 'excluded-first' }], exclusionsNextCursor: '20',
+    } as KbGenerationRunDetail;
+
+    const merged = mergeRefreshedGenerationDetail(current, refreshed);
+    expect(merged.drafts.map((item) => item.id)).toEqual(['draft-later', 'draft-first']);
+    expect(merged.exclusions.map((item) => item.batchId)).toEqual(['excluded-later', 'excluded-first']);
+    expect(merged.rawFindings?.map((item) => item.id)).toEqual(['raw-later']);
+    expect([merged.draftsNextCursor, merged.exclusionsNextCursor, merged.rawFindingsNextCursor]).toEqual([null, null, null]);
+  });
+
   it('updates an edited proposal from a loaded later page without losing selections', () => {
     const current = {
       ...initialGenerationState(selection),

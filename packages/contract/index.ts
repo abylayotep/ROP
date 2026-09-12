@@ -171,6 +171,8 @@ export interface ConversationSummary {
 
 export interface ConversationThread extends ConversationSummary {
   messages: Message[];
+  hasOlder?: boolean;
+  hasNewer?: boolean;
   /**
    * Whether the agent still answers here. Carried by the thread, not only by the lead
    * card, so the switch can sit above the messages an operator is reading.
@@ -235,6 +237,9 @@ export interface Order {
 }
 
 export interface Lead {
+  crm?: { status: string; summary: string | null; profile: Record<string, string>; error: string | null; analyzedAt: string | null };
+  sourceId?: string | null;
+  sourceType?: string | null;
   conversationId: string;
   contactName: string | null;
   contactPhone: string;
@@ -280,6 +285,10 @@ export interface Member {
  * The funnel seen as columns, and everyone who ever wrote seen as a table. */
 
 export interface BoardCard {
+  crmSummary?: string | null;
+  stageSetBy?: string | null;
+  sourceLabel?: string | null;
+  analysisStatus?: string | null;
   conversationId: string;
   contactName: string | null;
   contactPhone: string;
@@ -299,6 +308,7 @@ export interface BoardColumn {
 }
 
 export interface Board {
+  analysisConfigured?: boolean;
   columns: BoardColumn[];
   /** Conversations nobody has put in a stage yet. Shown first, never hidden. */
   unsorted: BoardCard[];
@@ -539,6 +549,7 @@ export interface KbGenerationProposalPage {
 export interface KbGenerationRunDetail {
   run: KbGenerationRun;
   proposals: KbGenerationProposalPage;
+  drafts?: { id: string; title: string }[];
 }
 
 export interface KbGenerationProposalUpdateRequest {

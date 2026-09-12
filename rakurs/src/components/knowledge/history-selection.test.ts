@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { latestConversationIds, historyRunLabel } from './history-selection';
+import { defaultHistoryDateRange, latestConversationIds, historyRunLabel } from './history-selection';
 
 describe('history selection', () => {
   it('selects the latest available chats without mutating the list', () => {
@@ -25,5 +25,12 @@ describe('history selection', () => {
     expect(historyRunLabel('waiting')).toBe('Ждём историю от WhatsApp');
     expect(historyRunLabel('partial')).toBe('История получена частично');
     expect(historyRunLabel('failed')).toBe('Не удалось получить историю');
+  });
+
+  it('defaults to the last fourteen calendar days including today', () => {
+    expect(defaultHistoryDateRange(new Date(2026, 8, 12, 12))).toEqual({
+      from: '2026-08-30',
+      to: '2026-09-13',
+    });
   });
 });

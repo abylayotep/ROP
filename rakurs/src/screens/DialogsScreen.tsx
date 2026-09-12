@@ -1,14 +1,15 @@
 import {
+  memo,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ChangeEvent,
   type CSSProperties,
   type FormEvent,
 } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import * as api from '@/api';
-import { HistoryImportPanel } from '@/components/knowledge/HistoryImportPanel';
 import { AiSwitch } from '@/components/lead/AiSwitch';
 import { LeadPanel } from '@/components/lead/LeadPanel';
 import { Card } from '@/components/ui/primitives';
@@ -16,15 +17,13 @@ import { Async, EmptyState, Skeleton } from '@/components/ui/states';
 import { useToast } from '@/components/ui/Toast';
 import { usePollingApi } from '@/hooks/usePollingApi';
 import { useAgent } from '@/store/agent';
+import { CONVERSATION_PAGE_SIZE, MESSAGE_PAGE_SIZE, messageWindow } from './dialog-window';
 import type { ConversationSummary, ConversationThread, Message, Role } from '@/types';
 
-const time = (iso: string) =>
-  new Date(iso).toLocaleString('ru-RU', {
-    day: '2-digit',
-    month: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
+const dateFormatter = new Intl.DateTimeFormat('ru-RU', {
+  day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+});
+const time = (iso: string) => dateFormatter.format(new Date(iso));
 
 const bubble = (mine: boolean): CSSProperties => ({
   alignSelf: mine ? 'flex-end' : 'flex-start',
@@ -60,7 +59,7 @@ export function coachLink(conversationId: string, aiReplyId?: string | null): st
 }
 
 export function DialogsScreen() {
-  const { agent, role } = useAgent();
+  const { agent } = useAgent();
   // The selected conversation lives in the URL, so a card on the board opens its thread.
   const [params, setParams] = useSearchParams();
   const selected = params.get('conversation');
@@ -68,20 +67,26 @@ export function DialogsScreen() {
   const select = (conversationId: string) =>
     setParams({ conversation: conversationId }, { replace: true });
 
+  const [conversationStart, setConversationStart] = useState(0);
   const list = usePollingApi<ConversationSummary[]>(
-    (signal) => api.listConversations(agent.id, signal),
-    [agent.id],
+    (signal) => api.listConversations(agent.id, signal, {
+      limit: CONVERSATION_PAGE_SIZE + 1, offset: conversationStart,
+    }),
+    [agent.id, conversationStart],
   );
 
   // The same switch lives above the messages and in the lead card. Bumping this remounts
   // the card, which refetches the lead — otherwise the two would disagree until something
   // else reloaded the panel.
   const [aiNonce, setAiNonce] = useState(0);
+  useEffect(() => setConversationStart(0), [agent.id]);
 
   return (
     <>
-      <div style={{ marginBottom: 16 }}>
-        <HistoryImportPanel agentId={agent.id} readOnly={role !== 'owner'} />
+      <div style={{ marginBottom: 16, fontSize: 12, color: 'var(--text-dim)' }}>
+        Новые сообщения обновляются автоматически каждые 5 секунд, пока вкладка открыта.
+        {' '}Загрузка истории, создание базы и скрипта — в разделе{' '}
+        <Link to={`/a/${agent.id}/knowledge`}>База знаний</Link>.
       </div>
       <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start', flexWrap: 'wrap' }}>
       <div style={{ width: 320, maxWidth: '100%', flex: '1 1 280px', minWidth: 0 }}>
@@ -104,7 +109,7 @@ export function DialogsScreen() {
               </Card>
             ) : (
               <Card pad={false}>
-                {conversations.map((conversation) => (
+                {conversations.slice(0, CONVERSATION_PAGE_SIZE).map((conversation) => (
                   <button
                     key={conversation.id}
                     type="button"
@@ -146,6 +151,17 @@ export function DialogsScreen() {
                     )}
                   </button>
                 ))}
+                <div style={{ display: 'flex', gap: 8, padding: 12, flexWrap: 'wrap' }}>
+                  {conversationStart > 0 && <button type="button" className="btn-sm"
+                    onClick={() => setConversationStart((start) => Math.max(0, start - CONVERSATION_PAGE_SIZE))}>
+                    Предыдущие диалоги
+                  </button>}
+                  {CONVERSATION_PAGE_SIZE < conversations.length && <button
+                    type="button" className="btn-sm"
+                    onClick={() => setConversationStart((start) => start + CONVERSATION_PAGE_SIZE)}>
+                    Следующие диалоги
+                  </button>}
+                </div>
               </Card>
             )
           }
@@ -209,6 +225,11 @@ function Thread({
   const toast = useToast();
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
+  const [pageStart, setPageStart] = useState<number | null>(null);
+  const [followLatest, setFollowLatest] = useState(false);
+  const [cursor, setCursor] = useState<{ before?: string; after?: string; around?: string }>(
+    targetMessageId ? { around: targetMessageId } : {},
+  );
   // What the switch was last told by the server, if it has been flipped since the thread
   // loaded. Null means nobody has touched it and the loaded thread still speaks for it.
   const [ai, setAi] = useState<boolean | null>(null);
@@ -219,14 +240,29 @@ function Thread({
   const scrolledTarget = useRef<string | null>(null);
 
   const thread = usePollingApi<ConversationThread>(
-    (signal) => api.getConversation(agentId, conversationId, signal),
-    [agentId, conversationId],
+    (signal) => api.getConversation(agentId, conversationId, signal, {
+      limit: MESSAGE_PAGE_SIZE, ...cursor,
+    }),
+    [agentId, conversationId, cursor],
   );
+
+  const page = useMemo(() => messageWindow(
+    thread.data?.messages ?? [], pageStart, followLatest ? null : targetMessageId,
+  ), [thread.data?.messages, pageStart, followLatest, targetMessageId]);
+
+  const wasLoading = useRef(true);
+  useEffect(() => {
+    if (wasLoading.current && !thread.loading && pageStart !== null && messageList.current) {
+      messageList.current.scrollTop = 0;
+    }
+    wasLoading.current = thread.loading;
+  }, [thread.loading, pageStart]);
 
   // A source link names an exact stored message; ordinary opens start at the end. Background
   // refreshes only follow new messages when the operator was already near the bottom.
   useEffect(() => {
-    const target = targetMessageId && scrolledTarget.current !== targetMessageId
+    if (pageStart !== null) return;
+    const target = !followLatest && targetMessageId && scrolledTarget.current !== targetMessageId
       ? document.getElementById(`message-${targetMessageId}`)
       : null;
     if (target) {
@@ -238,7 +274,7 @@ function Thread({
       bottom.current?.scrollIntoView();
       initialScrollDone.current = true;
     }
-  }, [thread.data, targetMessageId]);
+  }, [thread.data, targetMessageId, pageStart, followLatest]);
 
   async function attach(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
@@ -325,7 +361,16 @@ function Thread({
               overflowY: 'auto',
             }}
           >
-            {data.messages.map((message) => (
+            {(data.hasOlder ?? page.start > 0) && <button type="button" className="btn-sm"
+              onClick={() => {
+                if (data.hasOlder !== undefined) {
+                  setPageStart(0);
+                  setCursor({ before: data.messages[0]?.id });
+                } else setPageStart(Math.max(0, page.start - MESSAGE_PAGE_SIZE));
+              }}>
+              Предыдущие сообщения
+            </button>}
+            {data.messages.slice(page.start, page.end).map((message) => (
               <Bubble
                 key={message.id}
                 agentId={agentId}
@@ -333,6 +378,24 @@ function Thread({
                 message={message}
               />
             ))}
+            {(data.hasNewer ?? page.end < data.messages.length) && <button type="button" className="btn-sm"
+              onClick={() => {
+                if (data.hasNewer !== undefined) {
+                  setPageStart(0);
+                  setCursor({ after: data.messages[data.messages.length - 1]?.id });
+                } else setPageStart(page.end);
+              }}>
+              Следующие сообщения
+            </button>}
+            {(pageStart !== null || data.hasNewer || page.end < data.messages.length) && <button
+              type="button" className="btn-sm" onClick={() => {
+                stickToBottom.current = true;
+                setFollowLatest(true);
+                setPageStart(null);
+                setCursor({});
+              }}>
+              К последним сообщениям
+            </button>}
             <div ref={bottom} />
           </div>
 
@@ -386,7 +449,7 @@ function Thread({
   );
 }
 
-function Bubble({
+const Bubble = memo(function Bubble({
   agentId,
   conversationId,
   message,
@@ -430,6 +493,8 @@ function Bubble({
         <img
           src={api.mediaUrl(agentId, message.id)}
           alt=""
+          loading="lazy"
+          decoding="async"
           style={{ maxWidth: '100%', borderRadius: 8, display: 'block', marginBottom: 6 }}
         />
       )}
@@ -446,7 +511,7 @@ function Bubble({
       {message.hasMedia && message.mediaMime?.startsWith('video/') && (
         <video
           controls
-          preload="metadata"
+          preload="none"
           src={api.mediaUrl(agentId, message.id)}
           style={{ maxWidth: '100%', borderRadius: 8, display: 'block', marginBottom: 6 }}
         />
@@ -512,4 +577,4 @@ function Bubble({
       </div>
     </div>
   );
-}
+});

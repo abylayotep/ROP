@@ -169,6 +169,18 @@ describe('lifecycle', () => {
     expect((await reload(id)).linkedState).toBe('open');
   });
 
+  it('does not revive a number disabled while its reconnect timer was pending', async () => {
+    const id = await seedNumber();
+    const client = fakeLinked();
+    let retry: (() => void) | undefined;
+    registerLinkedLifecycle(db, key, client, { schedule: run => { retry = run; } });
+    client.report({ type: 'closed', numberId: id, loggedOut: false });
+    await db.update(whatsappNumbers).set({ enabled: false, linkedState: 'logged_out' }).where(eq(whatsappNumbers.id, id));
+    retry?.();
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect(client.calls.filter(call => call.method === 'connect')).toHaveLength(0);
+  });
+
   it('backs off further on every failure in a row', async () => {
     const id = await seedNumber();
     const client = fakeLinked();
@@ -191,10 +203,10 @@ describe('lifecycle', () => {
 
     for (let i = 0; i < 14; i += 1) {
       client.report({ type: 'closed', numberId: id, loggedOut: false });
-      await new Promise((r) => setTimeout(r, 2));
     }
 
-    expect(client.calls.filter((c) => c.method === 'connect')).toHaveLength(12);
+    // Reconnects read the number asynchronously; wait for completion, not a wall-clock guess.
+    await expect.poll(() => client.calls.filter((c) => c.method === 'connect').length).toBe(12);
     expect(errors.join(' ')).toContain('не отвечает');
     // Still `open`: WhatsApp never said the pairing was over, and telling the owner to
     // scan a new code because the phone was off would cost them the session they have.

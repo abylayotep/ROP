@@ -1,5 +1,5 @@
 /**
- * The cabinet's nine sections, in menu order.
+ * The cabinet's sections, in menu order.
  *
  * One list feeds the routes, the sidebar and the header title, so a section cannot exist
  * in the menu without a route or gain a second name in the header.
@@ -20,9 +20,9 @@ export interface SectionDef {
 }
 
 export const SECTIONS: SectionDef[] = [
-  // Первым в меню и не по умолчанию: открывают его в первую неделю и потом, когда
-  // что-то отвалилось, а каждый день работают в «Заказах» — туда и ведёт корень агента.
+  // Setup stays first; daily work starts in the funnel.
   { path: 'setup', label: 'Запуск', pending: '' },
+  { path: 'funnel', label: 'Воронка', pending: '' },
   { path: 'orders', label: 'Заказы', pending: '' },
   {
     path: 'dialogs',

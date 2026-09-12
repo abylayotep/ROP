@@ -122,7 +122,7 @@ describe('stages', () => {
   });
 
   it('moves the sale when another stage is promoted', async () => {
-    const invoice = await stageNamed('Счёт отправлен');
+    const invoice = await stageNamed('Заказано');
 
     const res = await app.inject({
       method: 'PATCH',
@@ -133,7 +133,7 @@ describe('stages', () => {
 
     expect(res.statusCode).toBe(200);
     expect(res.json().kind).toBe('success');
-    expect((await stageNamed('Продажа')).kind).toBe('active');
+    expect((await stageNamed('Оплачено')).kind).toBe('active');
     const all = await db.select().from(stages).where(eq(stages.agentId, agentId));
     expect(all.filter((stage) => stage.kind === 'success')).toHaveLength(1);
   });
@@ -148,13 +148,13 @@ describe('stages', () => {
 
     expect(res.statusCode).toBe(200);
     expect(res.json().kind).toBe('success');
-    expect((await stageNamed('Продажа')).kind).toBe('active');
+    expect((await stageNamed('Оплачено')).kind).toBe('active');
     const all = await db.select().from(stages).where(eq(stages.agentId, agentId));
     expect(all.filter((stage) => stage.kind === 'success')).toHaveLength(1);
   });
 
   it('refuses to leave the funnel without a sale stage', async () => {
-    const sale = await stageNamed('Продажа');
+    const sale = await stageNamed('Оплачено');
 
     const res = await app.inject({
       method: 'PATCH',
@@ -236,7 +236,7 @@ describe('stages', () => {
   });
 
   it('refuses to delete the sale stage', async () => {
-    const sale = await stageNamed('Продажа');
+    const sale = await stageNamed('Оплачено');
 
     const res = await app.inject({
       method: 'DELETE',

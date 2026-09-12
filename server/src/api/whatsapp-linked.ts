@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { WhatsappNumber } from '@rakurs/contract';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, like, notLike } from 'drizzle-orm';
 import type { FastifyInstance, FastifyReply, preHandlerHookHandler } from 'fastify';
 import type { Db } from '../db/client.js';
 import { whatsappNumbers } from '../db/schema.js';
@@ -59,6 +59,13 @@ export function registerWhatsappLinkedRoutes(
    * «Подключение уже идёт» and nothing to click.
    */
   const deadlines = new Map<string, NodeJS.Timeout>();
+  const reconnectStarts = new Map<string, Date>();
+  const reconnecting = new Set<string>();
+  app.addHook('onClose', async () => {
+    for (const timer of deadlines.values()) clearTimeout(timer);
+    deadlines.clear();
+    reconnectStarts.clear();
+  });
 
   const clearDeadline = (numberId: string): void => {
     const timer = deadlines.get(numberId);
@@ -67,18 +74,24 @@ export function registerWhatsappLinkedRoutes(
   };
 
   /** Idempotent: the stream and the deadline may both arrive at the same conclusion. */
-  const cancelPairing = async (numberId: string): Promise<void> => {
+  const cancelPairing = async (numberId: string, expectedStart?: Date): Promise<void> => {
+    if (expectedStart && reconnectStarts.get(numberId) !== expectedStart) return;
     clearDeadline(numberId);
+    await db.update(whatsappNumbers).set({ linkedState: 'logged_out', enabled: false })
+      .where(and(eq(whatsappNumbers.id, numberId), eq(whatsappNumbers.linkedState, 'pairing'),
+        notLike(whatsappNumbers.linkedJid, 'pending:%')));
     await db
       .delete(whatsappNumbers)
-      .where(and(eq(whatsappNumbers.id, numberId), eq(whatsappNumbers.linkedState, 'pairing')))
+      .where(and(eq(whatsappNumbers.id, numberId), eq(whatsappNumbers.linkedState, 'pairing'),
+        like(whatsappNumbers.linkedJid, 'pending:%')))
       .catch(() => undefined);
     await linked.disconnect(numberId).catch(() => undefined);
   };
 
   const armDeadline = (numberId: string): void => {
     clearDeadline(numberId);
-    const timer = setTimeout(() => void cancelPairing(numberId), timeoutMs);
+    const startedAt = reconnectStarts.get(numberId);
+    const timer = setTimeout(() => void cancelPairing(numberId, startedAt), timeoutMs);
     timer.unref?.();
     deadlines.set(numberId, timer);
   };
@@ -159,9 +172,41 @@ export function registerWhatsappLinkedRoutes(
       const number = await loadNumber(req.agent!.id, numberId);
       if (number.connectionKind !== 'linked') throw new ApiError(404, 'Номер не найден');
 
-      return streamPairing(reply, numberId, number.createdAt);
+      return streamPairing(reply, numberId, reconnectStarts.get(numberId) ?? number.createdAt);
     },
   );
+
+  app.post('/api/agents/:agentId/whatsapp/linked/:numberId/reconnect',
+    { preHandler: [guard, ownerOnly] }, async (req): Promise<WhatsappNumber> => {
+      const { numberId } = req.params as { numberId: string };
+      const number = await loadNumber(req.agent!.id, numberId);
+      if (number.connectionKind !== 'linked' || number.linkedJid?.startsWith('pending:')) {
+        throw new ApiError(400, 'Повторное подключение доступно для ранее привязанного телефона.');
+      }
+      if (reconnecting.has(numberId) || number.linkedState === 'pairing') {
+        throw new ApiError(409, 'Подключение уже идёт. Дождитесь завершения.');
+      }
+      reconnecting.add(numberId);
+      try {
+        clearDeadline(numberId);
+        await linked.logout(numberId).catch(() => undefined);
+        await (await linkedAuthState(db, credentialsKey(env), numberId)).clear();
+        const [row] = await db.update(whatsappNumbers)
+          .set({ linkedState: 'pairing', enabled: true })
+          .where(eq(whatsappNumbers.id, numberId)).returning();
+        reconnectStarts.set(numberId, new Date());
+        try {
+          await linked.connect(numberId);
+          armDeadline(numberId);
+        } catch {
+          await cancelPairing(numberId);
+          throw new ApiError(502, 'Не удалось открыть QR. Переписки сохранены. Попробуйте ещё раз.');
+        }
+        return toApi(row!);
+      } finally {
+        reconnecting.delete(numberId);
+      }
+    });
 
   app.delete(
     '/api/agents/:agentId/whatsapp/linked/:numberId',
@@ -246,7 +291,7 @@ export function registerWhatsappLinkedRoutes(
       const timer = setTimeout(() => {
         // Nobody scanned. The row is removed rather than left in `pairing`, where it would
         // block the next attempt and show as a number that does not work.
-        void cancelPairing(numberId).finally(() => {
+        void cancelPairing(numberId, reconnectStarts.has(numberId) ? startedAt : undefined).finally(() => {
           finish({ type: 'failed', reason: 'Код никто не отсканировал. Попробуйте ещё раз.' });
         });
       }, remaining);

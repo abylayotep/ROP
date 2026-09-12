@@ -1,3 +1,6 @@
+import { drainCrmAnalyses } from './lib/crm/worker.js';
+import { createLiveCrmHandler, createCrmDeps } from './lib/crm/live.js';
+import { reconcileKaspiPayments } from './lib/kaspi/service.js';
 import { reconcileOrphanedRuns } from './api/drafts.js';
 import { buildServer } from './api/server.js';
 import { createDb } from './db/client.js';
@@ -14,6 +17,8 @@ import {
   restoreLinkedSessions,
 } from './lib/whatsapp/linked/lifecycle.js';
 import { createLinkedSocket } from './lib/whatsapp/linked/socket.js';
+import { createHistoryArchive } from './lib/whatsapp/linked/history-archive.js';
+import { decodeHistoryPayload, downloadHistoryPayload } from './lib/whatsapp/linked/history-codec.js';
 import { createModelClient } from './lib/ai/openrouter.js';
 import { createGraphClient } from './lib/whatsapp/graph.js';
 import { reconcileGenerationRuns } from './lib/knowledge/generation-run.js';
@@ -36,7 +41,15 @@ const capi = createCapiClient();
 // Built here for the same reason, plus one of its own: the lifecycle below reconnects
 // dropped phones on a timer, and no test may start a timer that outlives it and reaches
 // for WhatsApp.
-const linked = createLinkedClient({ session: createLinkedSocket(db, credentialsKey(env)) });
+const historyArchive = createHistoryArchive(db, credentialsKey(env), {
+  download: downloadHistoryPayload,
+  decode: decodeHistoryPayload,
+  onImported: (numberId, chunk) => linked.report({ type: 'history', numberId, chunk }),
+});
+const linked = createLinkedClient({ session: createLinkedSocket(db, credentialsKey(env), {
+  capture: (numberId, notification) => historyArchive.capture(numberId, notification),
+  onError: () => app.log.error('linked: history archive capture failed'),
+}) });
 const app = buildServer(env, db, { capi, linked });
 
 // Only connection metadata crosses into logs; never log frames, credentials or messages.
@@ -56,13 +69,12 @@ registerLinkedLifecycle(db, credentialsKey(env), linked, {
 // The two halves of what a phone's socket produces: live messages, and the chats it
 // already had. Registered here rather than in `buildServer` for the same reason the
 // lifecycle is — a test that builds a server must not acquire a pipeline that writes.
+const liveDeps = {model:createModelClient(),graph:createGraphClient(),linked,key:credentialsKey(env)};
 registerLinkedInbound(
   db,
   {
-    model: createModelClient(),
-    graph: createGraphClient(),
-    linked,
-    key: credentialsKey(env),
+    ...liveDeps,
+    crm: createLiveCrmHandler(db, env, liveDeps),
     mediaDir: env.MEDIA_DIR,
     onError: (message) => app.log.error({ message }, 'linked: inbound'),
   },
@@ -89,6 +101,12 @@ const stalePairings = await clearStalePairings(db);
 if (stalePairings > 0) app.log.info({ stalePairings }, 'linked: cleared stale pairings');
 
 await app.listen({ port: env.PORT, host: '0.0.0.0' });
+
+const drainHistoryArchive = () => void historyArchive.drain()
+  .catch(() => app.log.error('linked: history archive drain failed'));
+drainHistoryArchive();
+const historyArchiveTimer = setInterval(drainHistoryArchive, 5_000);
+historyArchiveTimer.unref();
 
 // After `listen`, deliberately: the cabinet must answer HTTP before it waits on handsets,
 // and a phone that is switched off must not delay every other client's first request.
@@ -133,3 +151,27 @@ const capiTimer = setInterval(() => {
 // hidden inside this one. `unref` is what makes that safe: the timer never holds the process
 // open by itself, so it dies with everything else and cannot delay an exit by up to a minute.
 capiTimer.unref();
+
+// CRM catches imported history and operator messages without blocking dialog requests.
+let crmRunning = false;
+const drainCrm = async () => {
+  if (crmRunning) return;
+  crmRunning = true;
+  try { await drainCrmAnalyses(db,createCrmDeps(db,env,liveDeps)); }
+  catch { app.log.error('crm: background analysis failed'); }
+  finally { crmRunning = false; }
+};
+void drainCrm();
+const crmTimer = setInterval(() => void drainCrm(),5_000);
+crmTimer.unref();
+let kaspiRunning = false;
+const reconcilePayments = async () => {
+  if (kaspiRunning) return;
+  kaspiRunning = true;
+  try { await reconcileKaspiPayments(db,env); }
+  catch { app.log.error('kaspi: reconciliation failed'); }
+  finally { kaspiRunning = false; }
+};
+void reconcilePayments();
+const kaspiTimer = setInterval(() => void reconcilePayments(),5_000);
+kaspiTimer.unref();

@@ -1,3 +1,5 @@
+import { confirmKaspiOrder } from './helpers/kaspi.js';
+import { queuePurchase } from '../src/lib/capi/enqueue.js';
 import { randomUUID } from 'node:crypto';
 import { asc, eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
@@ -82,9 +84,16 @@ async function record(conversationId: string, payload: Record<string, unknown>) 
     method: 'POST',
     url: `/api/agents/${agentId}/conversations/${conversationId}/orders`,
     cookies: jar,
-    payload,
+    payload: { ...payload, status: 'pending' },
   });
+  const createdId = res.json().orders?.at(-1)?.id as string;
+  if (payload.status === 'paid') await confirm(createdId);
   return { res, id: res.json().orders?.at(-1)?.id as string };
+}
+
+async function confirm(orderId: string, queueDb = db) {
+  await confirmKaspiOrder(db, orderId);
+  await queuePurchase(queueDb, { agentId, orderId });
 }
 
 const patchOrder = (orderId: string, payload: Record<string, unknown>) =>
@@ -210,12 +219,17 @@ afterEach(async () => {
 });
 
 describe('an order becoming paid', () => {
+  it('rejects manual paid creation without queueing a purchase', async () => {
+    const res = await app.inject({ method: 'POST', url: `/api/agents/${agentId}/conversations/${adConversationId}/orders`, cookies: jar, payload: { amount: '1000', status: 'paid' } });
+    expect(res.statusCode).toBe(409);
+    expect(await queued()).toHaveLength(0);
+  });
+
   it('queues one purchase carrying the amount, the currency and the time it was paid', async () => {
     const { id } = await record(adConversationId, { amount: '450000.50' });
     expect(await queued()).toHaveLength(0);
 
-    const res = await patchOrder(id, { status: 'paid' });
-    expect(res.statusCode).toBe(200);
+    await confirm(id);
 
     const rows = await queued();
     expect(rows).toHaveLength(1);
@@ -239,7 +253,7 @@ describe('an order becoming paid', () => {
     expect(event.payload).toContain(`"ctwa_clid":"${CLID}"`);
   });
 
-  it('queues a purchase for an order recorded as paid from the start', async () => {
+  it('queues a purchase for a provider-confirmed order', async () => {
     const { id } = await record(adConversationId, { amount: '1000', status: 'paid' });
 
     const rows = await queued();
@@ -250,17 +264,17 @@ describe('an order becoming paid', () => {
 
   it('queues nothing more when the same order is marked paid again', async () => {
     const { id } = await record(adConversationId, { amount: '1000' });
-    await patchOrder(id, { status: 'paid' });
-    await patchOrder(id, { status: 'paid' });
+    await confirm(id);
+    await confirm(id);
     await patchOrder(id, { comment: 'Оплатили картой' });
 
     expect(await queued()).toHaveLength(1);
   });
 
-  it('queues nothing more when a paid order is unpaid and paid again', async () => {
+  it('rejects unpaying a confirmed order and deduplicates confirmation', async () => {
     const { id } = await record(adConversationId, { amount: '1000', status: 'paid' });
-    await patchOrder(id, { status: 'pending' });
-    await patchOrder(id, { status: 'paid' });
+    expect((await patchOrder(id, { status: 'pending' })).statusCode).toBe(409);
+    await confirm(id);
 
     expect(await queued()).toHaveLength(1);
   });
@@ -307,10 +321,9 @@ describe('an order becoming paid', () => {
     await app.ready();
 
     const { id } = await record(adConversationId, { amount: '1000' });
-    const res = await patchOrder(id, { status: 'paid' });
+    await confirm(id, withoutCapiEvents(db));
 
-    expect(res.statusCode).toBe(200);
-    expect(res.json().orders[0].status).toBe('paid');
+    expect((await orderRow(id)).status).toBe('paid');
     expect((await orderRow(id)).paidAt).not.toBeNull();
     expect(await queued()).toHaveLength(0);
   });

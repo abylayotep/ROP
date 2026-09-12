@@ -4,6 +4,7 @@ import { SECTIONS } from '@/lib/sections';
 import { AgentScreen } from '@/screens/AgentScreen';
 import { AgentSettingsScreen } from '@/screens/AgentSettingsScreen';
 import { AgentsScreen } from '@/screens/AgentsScreen';
+import { OrdersScreen } from '@/screens/OrdersScreen';
 import { BoardScreen } from '@/screens/BoardScreen';
 import { CoachScreen } from '@/screens/CoachScreen';
 import { CustomersScreen } from '@/screens/CustomersScreen';
@@ -47,7 +48,7 @@ function AuthGate() {
           </AgentProvider>
         }
       >
-        <Route index element={<Navigate to="orders" replace />} />
+        <Route index element={<Navigate to="funnel" replace />} />
         {/* Not a section: reached only from `ProposalCard`'s «В черновик» or a draft link,
             never from the sidebar — `Sidebar` reads `SECTIONS`, and this route is not one. */}
         <Route path="drafts/:draftId" element={<DraftScreen />} />
@@ -64,8 +65,10 @@ function AuthGate() {
                 <IntegrationsScreen />
               ) : section.path === 'dialogs' ? (
                 <DialogsScreen />
-              ) : section.path === 'orders' ? (
+              ) : section.path === 'funnel' ? (
                 <BoardScreen />
+              ) : section.path === 'orders' ? (
+                <OrdersScreen />
               ) : section.path === 'customers' ? (
                 <CustomersScreen />
               ) : section.path === 'knowledge' ? (

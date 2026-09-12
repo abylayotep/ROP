@@ -5,12 +5,12 @@ import { accounts, agents, stages } from '../src/db/schema.js';
 import { DEFAULT_STAGES } from '../src/lib/funnel.js';
 import { withDb } from './helpers/db.js';
 
-const MIGRATION = 'drizzle/0005_seed_default_funnel.sql';
+const MIGRATIONS = ['drizzle/0005_seed_default_funnel.sql', 'drizzle/0026_paid_funnel_labels.sql'];
 
 let db: Awaited<ReturnType<typeof withDb>>;
 
 /**
- * Runs the backfill migration's own SQL, exactly as shipped.
+ * Runs the backfill and subsequent default-label migration SQL, exactly as shipped.
  *
  * The harness migrates once and truncates per test, so an agent inserted afterwards can
  * never be caught by `migrate()` itself — by then the migration is recorded as applied.
@@ -18,9 +18,11 @@ let db: Awaited<ReturnType<typeof withDb>>;
  * a copy of it: change the file and this test changes with it.
  */
 async function runBackfill(): Promise<void> {
-  const text = await readFile(MIGRATION, 'utf8');
-  for (const statement of text.split('--> statement-breakpoint')) {
-    if (statement.trim() !== '') await db.execute(sql.raw(statement));
+  for (const migration of MIGRATIONS) {
+    const text = await readFile(migration, 'utf8');
+    for (const statement of text.split('--> statement-breakpoint')) {
+      if (statement.trim() !== '') await db.execute(sql.raw(statement));
+    }
   }
 }
 

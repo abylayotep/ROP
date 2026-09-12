@@ -104,11 +104,10 @@ function cloudTransport(number: WhatsappNumberRow, deps: TransportDeps): Message
   return {
     requiresOpenWindow: true,
     sendText: (to, body) => send(() => deps.graph.sendText(cloud.phoneNumberId, token, to, body)),
-    sendMedia: () => {
-      throw new TransportRefusal(
-        501,
-        'Отправка файлов пока работает только для номера, подключённого по QR.',
-      );
+    sendMedia: (to, file) => {
+      const sendMedia = deps.graph.sendMedia;
+      if (!sendMedia) throw new TransportRefusal(501, 'Отправка файлов через Meta недоступна.');
+      return send(() => sendMedia.call(deps.graph, cloud.phoneNumberId, token, to, file));
     },
   };
 }

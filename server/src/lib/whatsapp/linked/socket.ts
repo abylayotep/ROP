@@ -2,6 +2,7 @@ import makeWASocket, {
   Browsers,
   DisconnectReason,
   downloadMediaMessage,
+  proto,
   type WASocket,
 } from '@whiskeysockets/baileys';
 import type { Db } from '../../../db/client.js';
@@ -86,10 +87,15 @@ function mediaContent(file: OutgoingFile): Record<string, unknown> {
  * neither: it asks for «a session for this number» and the session knows where its own
  * credentials live.
  */
-export function createLinkedSocket(db: Db, key: Buffer): LinkedSessionFactory {
+export function createLinkedSocket(db: Db, key: Buffer, archive?: {
+  capture(numberId: string, notification: string): Promise<void>;
+  onError(): void;
+}): LinkedSessionFactory {
   return async (numberId: string, emit: (event: LinkedEvent) => void): Promise<LinkedSession> => {
     const auth = await linkedAuthState(db, key, numberId);
     const logger = silent();
+    let identityVerified = !auth.expectedPhone;
+    let identityRejected = false;
 
     const sock: WASocket = makeWASocket({
       auth: auth.state as never,
@@ -107,6 +113,15 @@ export function createLinkedSocket(db: Db, key: Buffer): LinkedSessionFactory {
       // and downloads no files, so the cost is a longer first sync, not a disk full of
       // photos.
       syncFullHistory: true,
+      ...(archive ? { shouldSyncHistoryMessage: (notification: proto.Message.IHistorySyncNotification) => {
+        if (identityVerified && !identityRejected && notification.directPath && notification.mediaKey) {
+          const encoded = Buffer.from(proto.Message.HistorySyncNotification.encode(notification).finish()).toString('base64');
+          void archive.capture(numberId, encoded).catch(() => archive.onError());
+        }
+        // Baileys also uses this predicate to advance its initial app-state sync.
+        // Preserve that state machine, but import only from our durable raw copy below.
+        return true;
+      } } : {}),
     } as never);
 
     sock.ev.on('creds.update', () => void auth.saveCreds());
@@ -116,6 +131,12 @@ export function createLinkedSocket(db: Db, key: Buffer): LinkedSessionFactory {
 
       if (update.connection === 'open') {
         const jid = sock.user?.id ?? '';
+        if (auth.expectedPhone && displayPhoneOf(jid) !== `+${auth.expectedPhone}`) {
+          identityRejected = true;
+          void sock.logout().catch(() => sock.end(new Error('Phone identity mismatch')));
+          return;
+        }
+        identityVerified = true;
         emit({ type: 'open', numberId, jid, displayPhone: displayPhoneOf(jid) });
       }
 
@@ -124,15 +145,22 @@ export function createLinkedSocket(db: Db, key: Buffer): LinkedSessionFactory {
         // everything else — a restart, a timeout, a flat battery — is worth reconnecting.
         const status = (update.lastDisconnect?.error as { output?: { statusCode?: number } })
           ?.output?.statusCode;
-        emit({ type: 'closed', numberId, loggedOut: status === DisconnectReason.loggedOut,
+        emit({ type: 'closed', numberId, loggedOut: identityRejected || status === DisconnectReason.loggedOut,
           ...(typeof status === 'number' && Number.isFinite(status) ? { statusCode: status } : {}),
         });
       }
     });
 
     sock.ev.on('messages.upsert', (upsert) => {
-      // `append` is the library filling in history it already had; replaying it as new
-      // would answer lines that were answered months ago.
+      if (!identityVerified || identityRejected) return;
+      // Appended/offline messages still belong in storage. Route them through the history
+      // pipeline, which deduplicates and never sends AI replies or opens a reply window.
+      if (upsert.type === 'append') {
+        emit({ type: 'history', numberId, chunk: {
+          messages: upsert.messages as unknown as RawLinkedMessage[], contacts: [],
+        } });
+        return;
+      }
       if (upsert.type !== 'notify') return;
       for (const message of upsert.messages) {
         emit({ type: 'message', numberId, message: message as unknown as RawLinkedMessage });
@@ -140,9 +168,12 @@ export function createLinkedSocket(db: Db, key: Buffer): LinkedSessionFactory {
     });
 
     sock.ev.on('messaging-history.set', (chunk) => {
+      if (!identityVerified || identityRejected) return;
+      if (archive) return;
       const history: RawLinkedHistory = {
         messages: (chunk.messages ?? []) as unknown as RawLinkedMessage[],
         contacts: (chunk.contacts ?? []) as RawLinkedHistory['contacts'],
+        chats: (chunk.chats ?? []).map(chat => ({ id: chat.id, pnJid: chat.pnJid, lidJid: chat.lidJid })),
         progress: chunk.progress ?? null,
         peerDataRequestSessionId: chunk.peerDataRequestSessionId ?? null,
       };

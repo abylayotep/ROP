@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { whatsappNumbers } from '../src/db/schema.js';
 import { ApiError } from '../src/lib/errors.js';
 import { encryptSecret } from '../src/lib/secret-box.js';
@@ -187,11 +187,11 @@ describe('transportFor', () => {
     await expect(send).rejects.toBeInstanceOf(ApiError);
   });
 
-  it('says plainly that Meta cannot take a file yet', () => {
+  it('refuses media when an injected Graph client lacks media support', () => {
     const transport = transportFor(number(), deps());
 
     expect(() => transport.sendMedia('77001234567', { path: '/tmp/a.jpg', mime: 'image/jpeg' })).toThrow(
-      'Отправка файлов пока работает только для номера, подключённого по QR.',
+      'Отправка файлов через Meta недоступна.',
     );
   });
 
@@ -299,5 +299,29 @@ describe('transportFor', () => {
 
     await expect(send).rejects.toThrow('websocket exploded');
     expect(LinkedOffline.name).toBe('LinkedOffline');
+  });
+});
+
+
+describe('Cloud media transport', () => {
+  it('passes the local file and decrypted credentials to Graph', async () => {
+    const sendMedia = vi.fn(async () => ({ messageId: 'wamid.MEDIA' }));
+    const file = { path: '/tmp/qr.png', mime: 'image/png', caption: 'QR для оплаты' };
+    const result = await transportFor(number(), deps({ graph: { ...fakeGraph(), sendMedia } })).sendMedia('77001234567', file);
+    expect(result).toEqual({ messageId: 'wamid.MEDIA' });
+    expect(sendMedia).toHaveBeenCalledWith('136', 'EAAB-token', '77001234567', file);
+  });
+
+  it('redacts a token echoed by the upload or send failure', async () => {
+    const graph = { ...fakeGraph(), sendMedia: async () => { throw new GraphError('Rejected EAAB-token', 400); } };
+    const result = transportFor(number(), deps({ graph })).sendMedia('77001234567', { path: '/tmp/qr.png', mime: 'image/png' });
+    await expect(result).rejects.toMatchObject({ statusCode: 502, message: 'Meta не отправила сообщение: Rejected <токен скрыт>' });
+  });
+
+  it('records token rejection on media uploads as on text sends', async () => {
+    const onTokenRejected = vi.fn(async () => {});
+    const graph = { ...fakeGraph(), sendMedia: async () => { throw new GraphError('Expired token', 400, 190); } };
+    await expect(transportFor(number(), deps({ graph, onTokenRejected })).sendMedia('77001234567', { path: '/tmp/qr.png', mime: 'image/png' })).rejects.toMatchObject({ statusCode: 409 });
+    expect(onTokenRejected).toHaveBeenCalledOnce();
   });
 });

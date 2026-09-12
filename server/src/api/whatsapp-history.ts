@@ -75,6 +75,7 @@ export function registerWhatsappHistoryRoutes(
   const owner = requireAgent(db, { role: 'owner' });
   const manager = createHistoryRequestManager(linked, {
     loadTargets: (agentId, limit) => loadTargets(db, linked, agentId, limit),
+    onDiagnostic: (report) => app.log.info({ historyRequest: report }, 'WhatsApp history request lifecycle'),
     ...options,
   });
   app.addHook('onClose', async () => manager.close());

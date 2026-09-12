@@ -1,10 +1,9 @@
 import type { Lead } from '@rakurs/contract';
-import { and, eq } from 'drizzle-orm';
+import { and, desc, eq } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
-import { orders } from '../db/schema.js';
-import { queuePurchase } from '../lib/capi/enqueue.js';
+import { contacts, conversations, kaspiPayments, orders } from '../db/schema.js';
 import { ApiError } from '../lib/errors.js';
 import { isUuid } from '../lib/uuid.js';
 import { loadLead } from './leads.js';
@@ -62,7 +61,7 @@ export function registerOrderRoutes(
   db: Db,
   guard: preHandlerHookHandler,
 ): void {
-  // Any member: recording what a customer paid is the job, not an administrative act.
+  // Account members may edit notes; only the provider confirms money received.
   const anyMember = requireAgent(db);
 
   /** The agent's order, or a 404 that tells a stranger nothing. */
@@ -76,6 +75,16 @@ export function registerOrderRoutes(
     return row;
   }
 
+  app.get('/api/agents/:agentId/orders', { preHandler: [guard, anyMember] }, async (req) => {
+    const rows = await db.select({ order: orders, contactName: contacts.name, contactPhone: contacts.phone, operationId: kaspiPayments.operationId })
+      .from(orders).innerJoin(kaspiPayments, eq(kaspiPayments.orderId, orders.id))
+      .innerJoin(conversations, eq(conversations.id, orders.conversationId))
+      .innerJoin(contacts, eq(contacts.id, conversations.contactId))
+      .where(and(eq(orders.agentId, req.agent!.id), eq(orders.status, 'paid'), eq(kaspiPayments.status, 'paid')))
+      .orderBy(desc(orders.paidAt)).limit(500);
+    return { orders: rows.map(({ order, ...rest }) => ({ ...order, ...rest, paidAt: order.paidAt?.toISOString() ?? null, createdAt: order.createdAt.toISOString() })) };
+  });
+
   app.post(
     '/api/agents/:agentId/conversations/:conversationId/orders',
     { preHandler: [guard, anyMember] },
@@ -84,10 +93,12 @@ export function registerOrderRoutes(
       const parsed = createOrder.safeParse(req.body);
       if (!parsed.success) throw orderError(parsed.error.issues[0]);
 
+      if (parsed.data.status === 'paid') throw new ApiError(409, 'Оплата подтверждается только Kaspi');
+
       // Proves the conversation belongs to this agent before anything is written.
       await loadLead(db, req.agent!, conversationId);
 
-      const [created] = await db
+      await db
         .insert(orders)
         .values({
           agentId: req.agent!.id,
@@ -98,16 +109,10 @@ export function registerOrderRoutes(
           currency: req.agent!.currency,
           status: parsed.data.status,
           comment: parsed.data.comment,
-          paidAt: parsed.data.status === 'paid' ? new Date() : null,
+          paidAt: null,
         })
         .returning({ id: orders.id });
 
-      // An order recorded as paid became paid here, and it is the commonest way a sale is
-      // entered: an operator writes it down after the money has arrived, never passing
-      // through `pending` at all. Reporting only the PATCH would leave most sales unreported.
-      if (parsed.data.status === 'paid' && created) {
-        await queuePurchase(db, { agentId: req.agent!.id, orderId: created.id });
-      }
       return loadLead(db, req.agent!, conversationId);
     },
   );
@@ -122,28 +127,19 @@ export function registerOrderRoutes(
       const parsed = patchOrder.safeParse(req.body);
       if (!parsed.success) throw orderError(parsed.error.issues[0]);
 
+      if (parsed.data.status === 'paid') throw new ApiError(409, 'Оплата подтверждается только Kaspi');
+      const [payment] = await db.select().from(kaspiPayments).where(eq(kaspiPayments.orderId, orderId));
+      if ((payment || current.status === 'paid') && (parsed.data.amount !== undefined || parsed.data.status !== undefined)) throw new ApiError(409, 'Сумма и статус платёжного заказа неизменяемы');
+
       if (Object.keys(parsed.data).length > 0) {
         const patch: Partial<typeof orders.$inferInsert> = { ...parsed.data };
-
-        // Only a real change of status touches the stamp: an edit to the comment of a paid
-        // order leaves this branch untaken, which is what keeps the original payment time.
-        if (parsed.data.status !== undefined && parsed.data.status !== current.status) {
-          // Stage 6 reports `paidAt` as the moment of the purchase, so an order that leaves
-          // `paid` for any other status must not keep one. The `??` is defence only — every
-          // exit from `paid` nulls the column, so an order arriving back at it has none.
-          patch.paidAt = parsed.data.status === 'paid' ? (current.paidAt ?? new Date()) : null;
-        }
 
         await db
           .update(orders)
           .set(patch)
           .where(and(eq(orders.id, current.id), eq(orders.agentId, req.agent!.id)));
 
-        // Became paid, rather than was saved while paid: the comparison against the row read
-        // above is the whole difference between one report and one per edit of the comment.
-        if (parsed.data.status === 'paid' && current.status !== 'paid') {
-          await queuePurchase(db, { agentId: req.agent!.id, orderId: current.id });
-        }
+
       }
       return loadLead(db, req.agent!, current.conversationId);
     },
@@ -156,6 +152,8 @@ export function registerOrderRoutes(
       const { orderId } = req.params as { orderId: string };
       const current = await loadOrder(req.agent!.id, orderId);
 
+      const [payment] = await db.select().from(kaspiPayments).where(eq(kaspiPayments.orderId, orderId));
+      if (payment || current.status === 'paid') throw new ApiError(409, 'Платёжный заказ нельзя удалить');
       await db
         .delete(orders)
         .where(and(eq(orders.id, current.id), eq(orders.agentId, req.agent!.id)));

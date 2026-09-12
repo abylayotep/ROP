@@ -34,6 +34,7 @@ import {
   stages,
   whatsappNumbers,
 } from '../../db/schema.js';
+import { hasConfirmedKaspiPayment } from '../kaspi/service.js';
 import { queueLead } from '../capi/enqueue.js';
 import { recordStageMove } from '../funnel-history.js';
 import { sendStageMessage } from '../funnel-message.js';
@@ -55,6 +56,8 @@ import {
 import { assembleRules, loadRules } from './rules.js';
 
 export interface TurnDeps {
+  /** Independent CRM processing; true means payment instructions already answered the client. */
+  crm?: (agentId: string, conversationId: string) => Promise<boolean>;
   model: ModelClient;
   graph: GraphClient;
   /** The other way out. A Cloud API number never touches it, and vice versa. */
@@ -713,7 +716,7 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
     // An id the model invented, or one of a field the owner has since deleted, is dropped
     // in silence: it must not cost the customer their answer.
     applied = Object.fromEntries(
-      Object.entries(reply.fields).filter(([fieldId]) => known.has(fieldId)),
+      Object.entries(reply.fields).filter(([fieldId]) => (!deps.crm || dryRun) && known.has(fieldId)),
     );
     if (!dryRun) {
       for (const [fieldId, value] of Object.entries(applied)) {
@@ -727,7 +730,7 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
       }
     }
 
-    if (reply.stageId !== null) {
+    if (reply.stageId !== null && (!deps.crm || dryRun)) {
       // Matched against the stages already loaded rather than queried: an id that is not a
       // uuid — the prompt's own example is prose a weak model copies — would reach a uuid
       // column and turn a good answer into a raised error.
@@ -736,6 +739,8 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
         details.push(
           `Модель назвала этап, которого у агента нет: ${reply.stageId.slice(0, 80)}.`,
         );
+      } else if (target.kind === 'success' && !(await hasConfirmedKaspiPayment(db, agent.id, conversation.id))) {
+        details.push('Оплата ещё не подтверждена Kaspi. Стадия оплаты не изменена.');
       } else if (target.id === conversation.stageId) {
         // Already there. Writing it again would restamp `stageSetBy` and, worse, fire the
         // stage's auto-message at a customer who is standing still.

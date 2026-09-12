@@ -1,3 +1,4 @@
+import type { Referral } from '../attribution.js';
 import type { RawLinkedContent, RawLinkedMessage, Timestamp } from './client.js';
 import { phoneForLid, rememberLid } from './lid-directory.js';
 
@@ -22,6 +23,7 @@ export interface NormalizedLine {
   pushName: string | null;
   /** True when the message carries a file worth downloading. */
   hasMedia: boolean;
+  referral?: Referral;
 }
 
 /**
@@ -63,7 +65,7 @@ function chatPhone(numberId: string | undefined, raw: RawLinkedMessage): string 
   if (raw.key?.fromMe === true) return phoneForLid(numberId, lid);
   const phone = jidToPhone(raw.key?.senderPn);
   if (phone) rememberLid(numberId, lid, phone);
-  return phone;
+  return phone ?? phoneForLid(numberId, lid);
 }
 
 /** Seconds, as a number or as protobuf's Long. */
@@ -116,6 +118,22 @@ function contentOf(message: RawLinkedContent): Content {
   return { kind: 'unsupported', body: null, hasMedia: false };
 }
 
+/** Read only provider-supplied identifiers; ordinary link previews are not attribution. */
+export function extractLinkedReferral(message: RawLinkedContent): Referral | undefined {
+  const context = message.extendedTextMessage?.contextInfo ?? message.imageMessage?.contextInfo
+    ?? message.videoMessage?.contextInfo ?? message.audioMessage?.contextInfo
+    ?? message.documentMessage?.contextInfo ?? message.stickerMessage?.contextInfo;
+  const ad = context?.externalAdReply;
+  if (!ad || (!ad.sourceId && !ad.ctwaClid && ad.sourceType !== 'ad')) return undefined;
+  return {
+    source_id: ad.sourceId || undefined,
+    source_type: ad.sourceType || undefined,
+    headline: ad.title || undefined,
+    body: ad.body || undefined,
+    ctwa_clid: ad.ctwaClid || undefined,
+  };
+}
+
 /**
  * Null for everything the cabinet does not store.
  *
@@ -143,6 +161,7 @@ export function normalize(raw: RawLinkedMessage, numberId?: string): NormalizedL
     body: content.body,
     pushName: raw.pushName ?? null,
     hasMedia: content.hasMedia,
+    referral: extractLinkedReferral(message),
   };
 }
 

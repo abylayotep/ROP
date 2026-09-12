@@ -15,6 +15,27 @@ import {
   uuid,
   type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
+
+export const linkedHistoryPackets = pgTable('linked_history_packets', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  numberId: uuid('number_id').notNull().references(() => whatsappNumbers.id, { onDelete: 'cascade' }),
+  digest: text('digest').notNull(),
+  notification: text('notification'),
+  payload: text('payload'),
+  status: text('status').notNull().default('queued'),
+  counts: jsonb('counts'),
+  attempts: integer('attempts').notNull().default(0),
+  errorCode: text('error_code'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+}, table => [unique('linked_history_packet_digest').on(table.numberId, table.digest)]);
+
+export const linkedHistoryMappings = pgTable('linked_history_mappings', {
+  numberId: uuid('number_id').notNull().references(() => whatsappNumbers.id, { onDelete: 'cascade' }),
+  lid: text('lid').notNull(),
+  phone: text('phone').notNull(),
+}, table => [primaryKey({ columns: [table.numberId, table.lid] })]);
 // Type-only, so this stays a leaf module at runtime. `capi_events.payload` holds the exact
 // bytes sent to Meta, and the brand is what stops anything but `serialiseEvent` filling it.
 import type { CapiEventBody } from '../lib/capi/events.js';
@@ -346,7 +367,8 @@ export const messages = pgTable(
     sentAt: timestamp('sent_at', { withTimezone: true }).notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index('messages_conversation_sent_at_idx').on(t.conversationId, t.sentAt)],
+  (t) => [index('messages_conversation_sent_at_idx').on(t.conversationId, t.sentAt, t.id),
+    index('messages_conversation_created_at_idx').on(t.conversationId, t.createdAt)],
 );
 
 /**
@@ -684,7 +706,8 @@ export const aiReplies = pgTable(
     usedItemIds: jsonb('used_item_ids').$type<string[]>().notNull().default([]),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index('ai_replies_agent_created_idx').on(t.agentId, t.createdAt)],
+  (t) => [index('ai_replies_agent_created_idx').on(t.agentId, t.createdAt),
+    index('ai_replies_message_idx').on(t.messageId)],
 );
 
 /**
@@ -1077,3 +1100,63 @@ export const testResults = pgTable(
   },
   (t) => [unique('test_results_run_case_key').on(t.runId, t.caseId)],
 );
+
+/** Encrypted cashier credentials and an agent-bound, short-lived SMS challenge. */
+export const kaspiSessions = pgTable('kaspi_sessions', {
+  agentId: uuid('agent_id').primaryKey().references(() => agents.id, { onDelete: 'cascade' }),
+  credentials: text('credentials'),
+  organization: text('organization'),
+  merchantId: text('merchant_id'),
+  phone: text('phone'),
+  processId: text('process_id'),
+  processExpiresAt: timestamp('process_expires_at', { withTimezone: true }),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+/** A create intent is committed before calling Kaspi; ambiguous requests never auto-retry. */
+export const kaspiPayments = pgTable('kaspi_payments', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  agentId: uuid('agent_id').notNull().references(() => agents.id, { onDelete: 'cascade' }),
+  conversationId: uuid('conversation_id').notNull().references(() => conversations.id, { onDelete: 'cascade' }),
+  orderId: uuid('order_id').notNull().unique().references(() => orders.id, { onDelete: 'restrict' }),
+  requestKey: text('request_key').notNull(),
+  method: text('method').notNull(),
+  phone: text('phone').notNull(),
+  amount: numeric('amount', { precision: 14, scale: 2 }).notNull(),
+  operationId: text('operation_id'),
+  qrToken: text('qr_token'),
+  paymentUrl: text('payment_url'),
+  status: text('status').notNull().default('creating'),
+  error: text('error'),
+  confirmedAt: timestamp('confirmed_at', { withTimezone: true }),
+  checkedAt: timestamp('checked_at', { withTimezone: true }),
+  // Claimed as unknown before any external send; an uncertain delivery never auto-retries.
+  notificationStatus: text('notification_status').notNull().default('pending'),
+  notificationMessageId: text('notification_message_id'),
+  notificationClaimedAt: timestamp('notification_claimed_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  unique('kaspi_payments_agent_request_key').on(t.agentId, t.requestKey),
+  unique('kaspi_payments_agent_operation_key').on(t.agentId, t.operationId),
+  uniqueIndex('kaspi_payments_one_open_conversation').on(t.conversationId).where(sql`${t.status} in ('creating', 'unknown', 'pending')`),
+  index('kaspi_payments_status_checked_idx').on(t.status, t.checkedAt),
+]);
+
+/** Incremental CRM analysis; a lease prevents duplicate model work across workers. */
+export const crmAnalyses = pgTable('crm_analyses', {
+  conversationId: uuid('conversation_id').primaryKey().references(() => conversations.id, { onDelete: 'cascade' }),
+  sourceVersion: timestamp('source_version', { withTimezone: true }),
+  analyzedMessageId: uuid('analyzed_message_id'),
+  pendingLiveMessageId: uuid('pending_live_message_id'),
+  handledLiveMessageId: uuid('handled_live_message_id'),
+  fieldEvidence: jsonb('field_evidence').$type<Record<string, { messageId: string; sentAt: string; value?: string }>>().notNull().default({}),
+  status: text('status').notNull().default('pending'),
+  error: text('error'),
+  summary: text('summary'),
+  profile: jsonb('profile').$type<Record<string, string>>().notNull().default({}),
+  confidence: integer('confidence'),
+  leaseToken: uuid('lease_token'),
+  leaseUntil: timestamp('lease_until', { withTimezone: true }),
+  analyzedAt: timestamp('analyzed_at', { withTimezone: true }),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});

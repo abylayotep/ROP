@@ -110,19 +110,19 @@ describe('recording an order', () => {
     expect(res.json().orders[0].comment).toBe('Две двери, монтаж в среду');
   });
 
-  it('can be paid from the start', async () => {
+  it('rejects a manually paid order', async () => {
     const { res } = await record({ amount: '450000.50', status: 'paid' });
 
-    expect(res.json().orders[0].paidAt).not.toBeNull();
-    expect(res.json().paidTotal).toBe('450000.50');
+    expect(res.statusCode).toBe(409);
+    expect(await db.select().from(orders)).toHaveLength(0);
   });
 
   it('keeps a second purchase as a second order', async () => {
-    await record({ amount: '100000', status: 'paid' });
-    const { res } = await record({ amount: '50000', status: 'paid' });
+    await record({ amount: '100000' });
+    const { res } = await record({ amount: '50000' });
 
     expect(res.json().orders).toHaveLength(2);
-    expect(res.json().paidTotal).toBe('150000.00');
+    expect(res.json().paidTotal).toBe('0.00');
   });
 
   it('refuses an amount that is not a plain number', async () => {
@@ -169,14 +169,14 @@ describe('recording an order', () => {
   });
 
   it('accepts zero, which is how a gift is recorded', async () => {
-    const { res } = await record({ amount: '0', status: 'paid' });
+    const { res } = await record({ amount: '0' });
 
     expect(res.json().orders[0].amount).toBe('0.00');
   });
 });
 
 describe('changing an order', () => {
-  it('stamps the payment time when it is marked paid', async () => {
+  it('rejects a manual paid status', async () => {
     const { id } = await record({ amount: '450000' });
 
     const res = await app.inject({
@@ -186,12 +186,13 @@ describe('changing an order', () => {
       payload: { status: 'paid' },
     });
 
-    expect(res.json().orders[0].paidAt).not.toBeNull();
-    expect(res.json().paidTotal).toBe('450000.00');
+    expect(res.statusCode).toBe(409);
+    expect((await db.select().from(orders))[0]?.paidAt).toBeNull();
   });
 
   it('keeps the original payment time when something else changes', async () => {
-    const { id } = await record({ amount: '450000', status: 'paid' });
+    const { id } = await record({ amount: '450000' });
+    await db.update(orders).set({ status: 'paid', paidAt: new Date() }).where(eq(orders.id, id));
     const first = (
       await app.inject({
         url: `/api/agents/${agentId}/conversations/${conversationId}/lead`,
@@ -209,8 +210,9 @@ describe('changing an order', () => {
     expect(res.json().orders[0].paidAt).toBe(first);
   });
 
-  it('clears the payment time when it is cancelled', async () => {
-    const { id } = await record({ amount: '450000', status: 'paid' });
+  it('preserves a paid order when cancellation is attempted', async () => {
+    const { id } = await record({ amount: '450000' });
+    await db.update(orders).set({ status: 'paid', paidAt: new Date() }).where(eq(orders.id, id));
 
     const res = await app.inject({
       method: 'PATCH',
@@ -219,12 +221,13 @@ describe('changing an order', () => {
       payload: { status: 'cancelled' },
     });
 
-    expect(res.json().orders[0].paidAt).toBeNull();
-    expect(res.json().paidTotal).toBe('0.00');
+    expect(res.statusCode).toBe(409);
+    expect((await db.select().from(orders))[0]?.paidAt).not.toBeNull();
   });
 
-  it('clears the payment time when it goes back to pending', async () => {
-    const { id } = await record({ amount: '450000', status: 'paid' });
+  it('preserves a paid order when reverting to pending is attempted', async () => {
+    const { id } = await record({ amount: '450000' });
+    await db.update(orders).set({ status: 'paid', paidAt: new Date() }).where(eq(orders.id, id));
 
     const res = await app.inject({
       method: 'PATCH',
@@ -233,8 +236,8 @@ describe('changing an order', () => {
       payload: { status: 'pending' },
     });
 
-    expect(res.json().orders[0].paidAt).toBeNull();
-    expect(res.json().paidTotal).toBe('0.00');
+    expect(res.statusCode).toBe(409);
+    expect((await db.select().from(orders))[0]?.paidAt).not.toBeNull();
   });
 
   it('refuses a status nobody defined', async () => {
@@ -250,8 +253,9 @@ describe('changing an order', () => {
     expect(res.statusCode).toBe(400);
   });
 
-  it('deletes an order', async () => {
-    const { id } = await record({ amount: '450000', status: 'paid' });
+  it('does not delete a paid order', async () => {
+    const { id } = await record({ amount: '450000' });
+    await db.update(orders).set({ status: 'paid', paidAt: new Date() }).where(eq(orders.id, id));
 
     const res = await app.inject({
       method: 'DELETE',
@@ -259,9 +263,8 @@ describe('changing an order', () => {
       cookies: jar,
     });
 
-    expect(res.statusCode).toBe(200);
-    expect(res.json().orders).toEqual([]);
-    expect(await db.select().from(orders)).toHaveLength(0);
+    expect(res.statusCode).toBe(409);
+    expect(await db.select().from(orders)).toHaveLength(1);
   });
 });
 

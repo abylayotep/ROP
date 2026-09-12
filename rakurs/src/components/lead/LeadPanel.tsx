@@ -76,6 +76,15 @@ export function LeadPanel({
     if (query.data) setLead(query.data);
   }, [query.data]);
 
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      const focused = document.activeElement;
+      if (document.hidden || prompting || editing || focused?.matches('input,textarea,select')) return;
+      query.reload();
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [query.reload, prompting, editing]);
+
   /**
    * The one way to apply a change: the server answers with the whole lead, and we store
    * it whole. Patching fields in place is not allowed — a stage transition can append a
@@ -100,21 +109,9 @@ export function LeadPanel({
 
   async function move(stageId: string) {
     const next = stageId === '' ? null : stageId;
-    const moved = await apply(() => api.setLeadStage(agentId, conversationId, next));
+    await apply(() => api.setLeadStage(agentId, conversationId, next));
 
-    // Only prompt for the money once the server confirms the lead is actually in the
-    // sale stage. Prompting after a failed move would have the operator record a real
-    // order against a lead that never moved: the money counted, the funnel not.
-    if (moved === null || moved.stageId !== next) return;
 
-    const stage = stages.data?.find((item) => item.id === next);
-    // A sale with no order is an honest state: the funnel counts the conversion and the
-    // money stays zero. So the form is offered, never filled in silently. A lead that
-    // already carries orders is not asked again — the button above the list is there for
-    // a second purchase.
-    // A cancelled order does not count as money recorded, so a lead whose only order fell
-    // through is still asked for one.
-    if (stage?.kind === 'success' && countOrders(moved) === 0) setPrompting(true);
   }
 
   return (
@@ -125,7 +122,7 @@ export function LeadPanel({
         ) : (
           <Card style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
             <div>
-              <div style={label}>Стадия</div>
+              <div style={label}>Стадия · {lead.stageSetBy === 'ai' ? 'определена ИИ' : 'воронка'}</div>
               {/* Gated on the stage list rather than rendered around it: an empty select
                   would read «Без стадии» for a lead that has one, which is a confident
                   wrong answer where a skeleton says the truth. */}
@@ -187,6 +184,9 @@ export function LeadPanel({
               </Async>
             </div>
 
+            <Divider />
+
+            <CrmDetails lead={lead} />
             <Divider />
 
             <Orders
@@ -556,4 +556,27 @@ function CapiReport({
       )}
     </div>
   );
+}
+
+
+const CRM_FIELDS: Record<string,string> = {
+  name:'Имя',phone:'Телефон для оплаты',city:'Город',address:'Адрес доставки',product:'Товар',
+  quantity:'Количество',amount:'Сумма',delivery:'Доставка',sourceDeclared:'Источник со слов клиента',
+};
+function CrmDetails({lead}:{lead:Lead}) {
+  const crm = lead.crm;
+  return <section>
+    <div style={{fontWeight:650,marginBottom:8}}>Данные клиента · ИИ</div>
+    <p style={label}>{crm?.status === 'needs_key' ? 'Добавьте ключ ИИ в настройках агента для автоматического разбора.'
+      : crm?.status === 'failed' ? crm.error
+      : crm?.status === 'ready' ? crm.summary : 'ИИ разбирает переписку. Данные появятся автоматически.'}</p>
+    <dl style={{display:'grid',gridTemplateColumns:'minmax(90px,1fr) 1.4fr',gap:'8px 12px',fontSize:12,margin:'12px 0'}}>
+      {Object.entries(CRM_FIELDS).map(([key,title])=><div key={key} style={{display:'contents'}}>
+        <dt style={{color:'var(--text-dim)'}}>{title}</dt>
+        <dd style={{margin:0,overflowWrap:'anywhere'}}>{crm?.profile[key]??'Не указано'}</dd>
+      </div>)}
+      <dt style={{color:'var(--text-dim)'}}>Реклама</dt><dd style={{margin:0,overflowWrap:'anywhere'}}>{lead.adHeadline??'Источник не передан'}</dd>
+      <dt style={{color:'var(--text-dim)'}}>ID объявления</dt><dd style={{margin:0,overflowWrap:'anywhere'}}>{lead.sourceId??'Не передан'}</dd>
+    </dl>
+  </section>;
 }

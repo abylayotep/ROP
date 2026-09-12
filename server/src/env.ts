@@ -9,6 +9,8 @@ import { z } from 'zod';
  */
 const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+  /** Private Kaspi POS sidecar; cashier credentials remain encrypted per agent. */
+  KASPI_POS_URL: z.string().url().optional(),
   PORT: z.coerce.number().int().positive().default(3000),
   DATABASE_URL: z.string().min(1),
   SESSION_SECRET: z.string().min(32, 'must be at least 32 characters'),

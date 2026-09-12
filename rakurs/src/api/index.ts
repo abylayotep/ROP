@@ -55,6 +55,18 @@ import type {
 import { API_URL, LONG_TIMEOUT_MS, request } from './client';
 import type { WhatsappHistoryRun, WhatsappHistoryOverview } from '@rakurs/contract';
 
+export type WhatsappHistoryArchivePacket = {
+  id: string;
+  numberId: string;
+  status: string;
+  counts: { received: number; saved: number; duplicates: number; excluded: number; skippedUnresolved: number };
+  attempts: number;
+  errorCode: string | null;
+  createdAt: string;
+  expiresAt: string;
+  canReplay: boolean;
+};
+
 export { API_URL, ApiError, humanError, request } from './client';
 
 /**
@@ -99,6 +111,14 @@ export const startWhatsappHistory = (agentId: string, limit: 100 | 200, signal?:
     method: 'POST', body: { limit }, signal,
   });
 
+export const getWhatsappHistoryArchive = (agentId: string, signal?: AbortSignal) =>
+  request<WhatsappHistoryArchivePacket[]>(`/agents/${agentId}/whatsapp/history/archive`, { signal });
+
+export const replayWhatsappHistoryArchive = (agentId: string, packetId: string) =>
+  request<WhatsappHistoryArchivePacket>(`/agents/${agentId}/whatsapp/history/archive/${packetId}/replay`, {
+    method: 'POST', body: {},
+  });
+
 export const listWhatsappNumbers = (agentId: string, signal?: AbortSignal) =>
   request<WhatsappNumber[]>(`/agents/${agentId}/whatsapp/numbers`, { signal });
 
@@ -137,6 +157,9 @@ export const getEmbeddedSignupSetup = (agentId: string, signal?: AbortSignal) =>
 export const startLinkedPairing = (agentId: string) =>
   request<WhatsappNumber>(`/agents/${agentId}/whatsapp/linked`, { method: 'POST', body: {} });
 
+export const reconnectLinkedPhone = (agentId: string, numberId: string) =>
+  request<WhatsappNumber>(`/agents/${agentId}/whatsapp/linked/${numberId}/reconnect`, { method: 'POST', body: {} });
+
 export const unlinkPhone = (agentId: string, numberId: string) =>
   request<{ ok: true }>(`/agents/${agentId}/whatsapp/linked/${numberId}`, { method: 'DELETE' });
 
@@ -149,11 +172,24 @@ export const connectCoexistenceNumber = (agentId: string, body: CoexistenceConne
 
 // ── Диалоги ──────────────────────────────────────────────────────────────────
 
-export const listConversations = (agentId: string, signal?: AbortSignal) =>
-  request<ConversationSummary[]>(`/agents/${agentId}/conversations`, { signal });
+export const listConversations = (
+  agentId: string, signal?: AbortSignal, page?: { limit: number; offset: number },
+) => request<ConversationSummary[]>(`/agents/${agentId}/conversations${page
+  ? `?limit=${page.limit}&offset=${page.offset}` : ''}`, { signal });
 
-export const getConversation = (agentId: string, conversationId: string, signal?: AbortSignal) =>
-  request<ConversationThread>(`/agents/${agentId}/conversations/${conversationId}`, { signal });
+export const getConversation = (
+  agentId: string, conversationId: string, signal?: AbortSignal,
+  page?: { limit: number; before?: string; after?: string; around?: string },
+) => {
+  const query = new URLSearchParams();
+  if (page) {
+    query.set('limit', String(page.limit));
+    for (const key of ['before', 'after', 'around'] as const) {
+      if (page[key]) query.set(key, page[key]);
+    }
+  }
+  return request<ConversationThread>(`/agents/${agentId}/conversations/${conversationId}${page ? `?${query}` : ''}`, { signal });
+};
 
 export const sendMessage = (agentId: string, conversationId: string, body: string) =>
   request<Message>(`/agents/${agentId}/conversations/${conversationId}/messages`, {

@@ -1,6 +1,7 @@
 import { eq, sql } from 'drizzle-orm';
+import { recordReferral } from '../attribution.js';
 import type { Db } from '../../../db/client.js';
-import { contacts, messages, whatsappNumbers } from '../../../db/schema.js';
+import { contacts, linkedHistoryMappings, messages, whatsappNumbers } from '../../../db/schema.js';
 import {
   advanceConversation,
   storeLine,
@@ -8,7 +9,7 @@ import {
   upsertConversation,
 } from '../store.js';
 import type { LinkedClient, LinkedEvent, RawLinkedHistory } from './client.js';
-import { phoneForLid } from './lid-directory.js';
+import { phoneForLid, rememberLid } from './lid-directory.js';
 import { jidToLid, jidToPhone, learnLid, mimeOf, normalize } from './normalize.js';
 
 /**
@@ -34,7 +35,15 @@ export interface LinkedHistoryDeps {
    * is watching, and when the phone sends nothing at all the result looks exactly like a
    * bug in this file. A line per chunk is what tells the two apart.
    */
-  onImported?: (report: { messages: number; contacts: number; progress: number | null; skippedUnresolved: number }) => void;
+  onImported?: (report: HistoryImportReport & { messages: number; contacts: number; progress: number | null }) => void;
+}
+
+export interface HistoryImportReport {
+  received: number;
+  saved: number;
+  duplicates: number;
+  excluded: number;
+  skippedUnresolved: number;
 }
 
 export function registerLinkedHistory(
@@ -44,8 +53,10 @@ export function registerLinkedHistory(
 ): void {
   client.on((event: LinkedEvent) => {
     if (event.type !== 'history') return;
+    if (event.chunk.alreadyStored) return;
     void applyHistoryChunkWithReport(db, event.numberId, event.chunk)
-      .then(({ skippedUnresolved }) => {
+      .then((report) => {
+        const { skippedUnresolved } = report;
         if (skippedUnresolved > 0) {
           deps.onError?.(`${skippedUnresolved} history messages were not stored: the contact phone number is unknown`);
         }
@@ -53,7 +64,7 @@ export function registerLinkedHistory(
           messages: event.chunk.messages?.length ?? 0,
           contacts: event.chunk.contacts?.length ?? 0,
           progress: event.chunk.progress ?? null,
-          skippedUnresolved,
+          ...report,
         });
       })
       .catch((error: unknown) => {
@@ -70,16 +81,62 @@ export async function applyHistoryChunk(
   await applyHistoryChunkWithReport(db, numberId, chunk);
 }
 
-async function applyHistoryChunkWithReport(
+export async function applyHistoryChunkWithReport(
   db: Db,
   numberId: string,
   chunk: RawLinkedHistory,
-): Promise<{ skippedUnresolved: number }> {
+): Promise<HistoryImportReport> {
+  const received = chunk.messages?.length ?? 0;
   const [number] = await db
     .select()
     .from(whatsappNumbers)
     .where(eq(whatsappNumbers.id, numberId));
-  if (!number) return { skippedUnresolved: 0 };
+  if (!number) return { received, saved: 0, duplicates: 0, excluded: received, skippedUnresolved: 0 };
+
+  const persistedMappings = await db
+    .select({ lid: linkedHistoryMappings.lid, phone: linkedHistoryMappings.phone })
+    .from(linkedHistoryMappings)
+    .where(eq(linkedHistoryMappings.numberId, number.id));
+  for (const mapping of persistedMappings) rememberLid(number.id, mapping.lid, mapping.phone);
+
+  const mappings = new Map<string, string>();
+  const collectMapping = (phoneJid: string | null | undefined, lidJid: string | null | undefined): void => {
+    const phone = jidToPhone(phoneJid);
+    const lid = jidToLid(lidJid);
+    if (phone && lid) mappings.set(lid, phone);
+  };
+
+  for (const mapping of chunk.phoneNumberToLidMappings ?? []) {
+    collectMapping(mapping.pnJid, mapping.lidJid);
+  }
+
+  // History messages often omit senderPn. Resolve their peer from the accompanying
+  // chat/contact metadata before importing either direction; never guess a phone from a LID.
+  for (const chat of chunk.chats ?? []) {
+    const phone = jidToPhone(chat.pnJid) ?? jidToPhone(chat.id);
+    const lid = jidToLid(chat.lidJid) ?? jidToLid(chat.id);
+    if (phone && lid) mappings.set(lid, phone);
+  }
+  for (const contact of chunk.contacts ?? []) {
+    const phone = jidToPhone(contact.jid) ?? jidToPhone(contact.id);
+    const lid = jidToLid(contact.lid) ?? jidToLid(contact.id);
+    if (phone && lid) mappings.set(lid, phone);
+  }
+
+  for (const raw of chunk.messages ?? []) {
+    if (raw.key?.fromMe === true) continue;
+    collectMapping(raw.key?.senderPn, raw.key?.remoteJid);
+  }
+  for (const [lid, phone] of mappings) {
+    rememberLid(number.id, lid, phone);
+    await db
+      .insert(linkedHistoryMappings)
+      .values({ numberId: number.id, lid, phone })
+      .onConflictDoUpdate({
+        target: [linkedHistoryMappings.numberId, linkedHistoryMappings.lid],
+        set: { phone },
+      });
+  }
 
   for (const entry of chunk.contacts ?? []) {
     const phone = jidToPhone(entry.id);
@@ -104,14 +161,18 @@ async function applyHistoryChunkWithReport(
   for (const raw of rawMessages) learnLid(number.id, raw);
 
   let skippedUnresolved = 0;
+  let saved = 0;
+  let duplicates = 0;
+  let excluded = 0;
   for (const raw of rawMessages) {
     const line = normalize(raw, number.id);
     if (!line) {
       const lid = raw.message ? jidToLid(raw.key?.remoteJid) : null;
       const unresolved = lid && (raw.key?.fromMe === true
         ? phoneForLid(number.id, lid) === null
-        : jidToPhone(raw.key?.senderPn) === null);
+        : jidToPhone(raw.key?.senderPn) === null && phoneForLid(number.id, lid) === null);
       if (unresolved) skippedUnresolved += 1;
+      else excluded += 1;
       continue;
     }
 
@@ -122,8 +183,9 @@ async function applyHistoryChunkWithReport(
       line.fromMe ? undefined : (line.pushName ?? undefined),
     );
     const conversationId = await upsertConversation(db, number.agentId, number.id, contactId);
+    if (!line.fromMe && line.referral) await recordReferral(db, conversationId, line.referral);
 
-    await storeLine(db, conversationId, {
+    const stored = await storeLine(db, conversationId, {
       waMessageId: line.waMessageId,
       direction: line.fromMe ? 'out' : 'in',
       author: line.fromMe ? 'phone' : 'client',
@@ -136,6 +198,8 @@ async function applyHistoryChunkWithReport(
       media: null,
       pending: line.hasMedia ? { ref: { key: raw.key, message: raw.message }, mime: mimeOf(raw) } : null,
     });
+    if (stored) saved += 1;
+    else duplicates += 1;
 
     // History affects ordering only. An old inbound message must not reopen the live reply
     // window; the next real delivery advances `lastInboundAt` through the live pipeline.
@@ -152,5 +216,5 @@ async function applyHistoryChunkWithReport(
       })
       .where(eq(whatsappNumbers.id, numberId));
   }
-  return { skippedUnresolved };
+  return { received, saved, duplicates, excluded, skippedUnresolved };
 }

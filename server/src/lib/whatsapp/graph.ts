@@ -1,3 +1,7 @@
+import { openAsBlob } from 'node:fs';
+import { basename } from 'node:path';
+import type { OutgoingFile } from './linked/client.js';
+
 /**
  * Everything this product says to Meta.
  *
@@ -72,6 +76,13 @@ export interface GraphClient {
     token: string,
     to: string,
     body: string,
+  ): Promise<{ messageId: string }>;
+  /** Uploads a local file before sending it by Meta media ID. */
+  sendMedia?(
+    phoneNumberId: string,
+    token: string,
+    to: string,
+    file: OutgoingFile,
   ): Promise<{ messageId: string }>;
   /** The URL is short-lived, so callers must download immediately. */
   getMediaUrl(mediaId: string, token: string): Promise<MediaDescriptor>;
@@ -167,18 +178,18 @@ async function within<T>(timeoutMs: number, exchange: () => Promise<T>): Promise
   }
 }
 
-async function call<T>(url: string, token: string, init: RequestInit = {}): Promise<T> {
-  return within(TIMEOUT_MS, async () => {
+async function call<T>(url: string, token: string, init: RequestInit = {}, timeoutMs = TIMEOUT_MS): Promise<T> {
+  return within(timeoutMs, async () => {
     const response = await fetch(url, {
       ...init,
       headers: {
         Authorization: `Bearer ${token}`,
-        ...(init.body ? { 'Content-Type': 'application/json' } : {}),
+        ...(init.body && !(init.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}),
         ...(init.headers as Record<string, string> | undefined),
       },
       // After `...init` on purpose: no caller passes a signal today, and if one starts, the
       // deadline is not the thing to lose silently.
-      signal: AbortSignal.timeout(TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     if (!response.ok) throw await failure(response);
     return (await response.json()) as T;
@@ -289,6 +300,38 @@ export function createGraphClient(): GraphClient {
         },
       );
       return { messageId: sent.messages[0]!.id };
+    },
+
+    async sendMedia(phoneNumberId, token, to, file) {
+      const filename = file.filename || basename(file.path);
+      const form = new FormData();
+      form.set('messaging_product', 'whatsapp');
+      form.set('type', file.mime);
+      // A file-backed Blob avoids retaining large documents in process memory.
+      form.set('file', await openAsBlob(file.path, { type: file.mime }), filename);
+      const uploaded = await call<{ id?: string }>(
+        `${GRAPH_ROOT}/${phoneNumberId}/media`, token,
+        { method: 'POST', body: form }, MEDIA_TIMEOUT_MS,
+      );
+      if (!uploaded.id) throw new GraphError('Meta не вернула идентификатор файла.', 502);
+      const kind = file.mime.startsWith('image/') ? 'image'
+        : file.mime.startsWith('video/') ? 'video'
+        : file.mime.startsWith('audio/') ? 'audio' : 'document';
+      const media = {
+        id: uploaded.id,
+        ...(kind !== 'audio' && file.caption ? { caption: file.caption } : {}),
+        ...(kind === 'document' ? { filename } : {}),
+      };
+      const sent = await call<{ messages?: { id?: string }[] }>(
+        `${GRAPH_ROOT}/${phoneNumberId}/messages`, token,
+        { method: 'POST', body: JSON.stringify({
+          messaging_product: 'whatsapp', recipient_type: 'individual', to,
+          type: kind, [kind]: media,
+        }) },
+      );
+      const messageId = sent.messages?.[0]?.id;
+      if (!messageId) throw new GraphError('Meta не вернула идентификатор сообщения.', 502);
+      return { messageId };
     },
 
     async getMediaUrl(mediaId, token) {

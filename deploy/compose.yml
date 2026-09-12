@@ -37,6 +37,7 @@ services:
       CREDENTIALS_KEY: ${CREDENTIALS_KEY:?set CREDENTIALS_KEY}
       MEDIA_DIR: /var/lib/rakurs/media
       PUBLIC_URL: ${PUBLIC_URL}
+      KASPI_POS_URL: ${KASPI_POS_URL:-}
     # Bound to loopback: only nginx on this host can reach it, whatever the
     # firewall happens to say.
     ports: ['127.0.0.1:3000:3000']
@@ -48,6 +49,24 @@ services:
       postgres: { condition: service_healthy }
     restart: unless-stopped
 
+  kaspi-pos:
+    profiles: [kaspi-pos]
+    build:
+      context: ./kaspi-pos
+    restart: unless-stopped
+    environment:
+      PORT: "3000"
+      TOKEN_SECRET_KEY: ${KASPI_POS_TOKEN_SECRET_KEY:-}
+      APP_VERSION: ${KASPI_POS_APP_VERSION:-4.112.1}
+      APP_BUILD: ${KASPI_POS_APP_BUILD:-1107}
+      APP_PLATFORM: ${KASPI_POS_APP_PLATFORM:-iOS}
+      APP_PLATFORM_VER: ${KASPI_POS_APP_PLATFORM_VER:-18.4}
+      KASPI_POS_PROXY_URL: ${KASPI_POS_PROXY_URL:-}
+    volumes:
+      - kaspi-pos-state:/app/state
+    expose: ["3000"]
+
 volumes:
   rakurs-db:
   media:
+  kaspi-pos-state:

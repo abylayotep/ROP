@@ -1,3 +1,4 @@
+import { seedOrders } from './helpers/kaspi.js';
 /**
  * Воронка, источники и деньги за период.
  *
@@ -144,6 +145,10 @@ async function addLead(
 
 /** The operator's own move, through the route the board really calls. */
 async function move(conversationId: string, stageId: string | null, on = fixture, cookies = jar) {
+  const [target] = stageId ? await db.select().from(stages).where(eq(stages.id, stageId)) : [];
+  if (target?.kind === 'success') {
+    await seedOrders(db, { agentId: on.agentId, conversationId, amount: '1', currency: 'KZT', status: 'paid' });
+  }
   const res = await app.inject({
     method: 'PATCH',
     url: `/api/agents/${on.agentId}/conversations/${conversationId}/lead`,
@@ -181,7 +186,7 @@ async function addOrder(
 ) {
   const on = options.on ?? fixture;
   const status = options.status ?? 'paid';
-  await db.insert(orders).values({
+  await seedOrders(db, {
     agentId: on.agentId,
     conversationId,
     amount,
@@ -290,8 +295,8 @@ describe('the funnel over a period', () => {
     const dana = await addLead();
     const marat = await addLead();
     const road = ['Новый лид', 'В диалоге', 'Интерес проявлен', 'Квалифицирован'];
-    await walk(aigul, [...road, 'Счёт отправлен', 'Продажа']);
-    await walk(erzhan, [...road, 'Счёт отправлен']);
+    await walk(aigul, [...road, 'Заказано', 'Оплачено']);
+    await walk(erzhan, [...road, 'Заказано']);
     await walk(dana, road.slice(0, 3));
     await walk(marat, ['Новый лид', 'В диалоге', 'Отказ']);
 
@@ -312,8 +317,8 @@ describe('the funnel over a period', () => {
       ['Готов к покупке', 0, null],
       // And the stage below the two skipped ones is not silent: two of the two leads that
       // were qualified got an invoice.
-      ['Счёт отправлен', 2, 1],
-      ['Продажа', 1, 0.5],
+      ['Заказано', 2, 1],
+      ['Оплачено', 1, 0.5],
     ]);
     expect(answer.failureEntries).toBe(1);
   });
@@ -321,17 +326,17 @@ describe('the funnel over a period', () => {
   it('does not count a lead into the stages it skipped', async () => {
     const lead = await addLead();
     await move(lead, fixture.stage('Новый лид').id);
-    await move(lead, fixture.stage('Продажа').id);
+    await move(lead, fixture.stage('Оплачено').id);
 
     const answer = await body();
     expect(step(answer, 'Новый лид')!.entered).toBe(1);
-    expect(step(answer, 'Продажа')!.entered).toBe(1);
+    expect(step(answer, 'Оплачено')!.entered).toBe(1);
     // The three in between were never entered. A monotonic closure would print them as
     // entered too, and the conversion into «Продажа» would read as 100% of a stage the
     // lead never stood in.
     expect(step(answer, 'Квалифицирован')!.entered).toBe(0);
     expect(step(answer, 'Предложение отправлено')!.entered).toBe(0);
-    expect(step(answer, 'Счёт отправлен')!.entered).toBe(0);
+    expect(step(answer, 'Заказано')!.entered).toBe(0);
   });
 
   it('counts a lead once in a stage it entered twice', async () => {
@@ -395,7 +400,7 @@ describe('the funnel over a period', () => {
 
   it('orders the chain by position, whatever order the moves happened in', async () => {
     const lead = await addLead();
-    await move(lead, fixture.stage('Счёт отправлен').id);
+    await move(lead, fixture.stage('Заказано').id);
     await move(lead, fixture.stage('Новый лид').id);
 
     const answer = await body();
@@ -542,7 +547,7 @@ describe('the sources', () => {
       adHeadline: 'Двери со скидкой',
       ctwaClid: null,
     });
-    await move(won, fixture.stage('Продажа').id);
+    await move(won, fixture.stage('Оплачено').id);
 
     const answer = await body();
     expect(answer.sources).toHaveLength(1);

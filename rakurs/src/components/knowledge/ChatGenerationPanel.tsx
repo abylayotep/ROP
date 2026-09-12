@@ -56,8 +56,29 @@ export function scheduleGenerationPolling({
   };
 }
 
+export class GenerationRunTarget {
+  constructor(private runId: string | null) {}
+
+  get current(): string | null {
+    return this.runId;
+  }
+
+  switchTo(runId: string | null): void {
+    this.runId = runId;
+  }
+
+  isCurrent(runId: string): boolean {
+    return this.runId === runId;
+  }
+
+  async loadCurrent<T>(load: (runId: string) => Promise<T>): Promise<T | null> {
+    const runId = this.runId;
+    return runId === null ? null : load(runId);
+  }
+}
+
 export const generationDetailErrorPresentation = (
-  status: KbGenerationRunDetail['run']['status'],
+  status: KbGenerationRunDetail['run']['status'] | undefined,
 ): { automatic: boolean; retryLabel: string | null } => {
   const automatic = status === 'queued' || status === 'running';
   return { automatic, retryLabel: automatic ? null : 'Повторить загрузку' };
@@ -80,7 +101,7 @@ export function ChatGenerationPanel({
   const requestKey = useRef<{ previewId: string; key: string } | null>(null);
   const epoch = useRef(0);
   const actionAbort = useRef<AbortController | null>(null);
-  const activeRunId = useRef<string | null>(initialRunId);
+  const runTarget = useRef(new GenerationRunTarget(initialRunId));
   const detailSnapshot = useRef<KbGenerationRunDetail | null>(null);
   const loadingCollections = useRef(new Set<GenerationDetailCollection>());
   const [busy, setBusy] = useState(false);
@@ -118,7 +139,7 @@ export function ChatGenerationPanel({
     if (!polling) setDetailLoading(true);
     try {
       const detail = await api.getKnowledgeGenerationRun(agentId, runId, signal);
-      if (!isCurrentGenerationResponse(startedAt, runId, epoch.current, activeRunId.current)) return detail;
+      if (!isCurrentGenerationResponse(startedAt, runId, epoch.current, runTarget.current.current)) return detail;
       const currentDetail = detailSnapshot.current;
       const nextDetail = preserveLoadedPages && currentDetail?.run.id === runId
         ? mergeRefreshedGenerationDetail(currentDetail, detail)
@@ -135,11 +156,12 @@ export function ChatGenerationPanel({
 
   useEffect(() => {
     epoch.current += 1;
-    activeRunId.current = initialRunId;
+    runTarget.current.switchTo(initialRunId);
+    detailSnapshot.current = null;
+    dispatch({ type: 'run_requested' });
+    setDetailError(null);
     if (!initialRunId) {
-      dispatch({ type: 'reset' });
       setDetailLoading(false);
-      setDetailError(null);
       return;
     }
     const controller = new AbortController();
@@ -157,7 +179,8 @@ export function ChatGenerationPanel({
       poll: async () => { await loadRun(run.id, controller.signal, true, true); },
       isActive: () => {
         const current = detailSnapshot.current?.run;
-        return !controller.signal.aborted && current?.id === run.id && (current.status === 'queued' || current.status === 'running');
+        return !controller.signal.aborted && runTarget.current.isCurrent(run.id)
+          && current?.id === run.id && (current.status === 'queued' || current.status === 'running');
       },
       onError: (caught) => {
         if (!controller.signal.aborted) setDetailError(api.humanError(caught));
@@ -191,7 +214,7 @@ export function ChatGenerationPanel({
       };
       setLoadedRuns((current) => [summary, ...(current ?? visibleRuns).filter((item) => item.id !== summary.id)]);
       epoch.current += 1;
-      activeRunId.current = run.id;
+      runTarget.current.switchTo(run.id);
       onRunId(run.id);
     } catch (caught) {
       setActionError(api.humanError(caught));
@@ -201,24 +224,24 @@ export function ChatGenerationPanel({
   }
 
   function selectRun(runId: string) {
-    if (runId === activeRunId.current) {
+    if (runTarget.current.isCurrent(runId)) {
       void reloadSelectedRun();
       return;
     }
     epoch.current += 1;
-    activeRunId.current = runId;
+    runTarget.current.switchTo(runId);
     setDetailError(null);
     setActionError(null);
     onRunId(runId);
   }
 
   async function reloadSelectedRun() {
-    const runId = activeRunId.current;
+    const runId = runTarget.current.current;
     if (!runId || detailLoading) return;
     try {
-      await loadRun(runId, undefined, false, true);
+      await runTarget.current.loadCurrent((targetRunId) => loadRun(targetRunId, undefined, false, true));
     } catch (caught) {
-      if (runId === activeRunId.current) setDetailError(api.humanError(caught));
+      if (runTarget.current.isCurrent(runId)) setDetailError(api.humanError(caught));
     }
   }
 
@@ -264,7 +287,7 @@ export function ChatGenerationPanel({
     const startedAt = epoch.current;
     try {
       const next = await api.getKnowledgeGenerationRun(agentId, current.run.id, undefined, collectionOptions(collection, cursor ?? undefined));
-      if (!isCurrentGenerationResponse(startedAt, current.run.id, epoch.current, activeRunId.current)) return current;
+      if (!isCurrentGenerationResponse(startedAt, current.run.id, epoch.current, runTarget.current.current)) return current;
       dispatch({ type: 'append_page', detail: next, collection });
       return appendGenerationDetailPage(current, next, collection);
     } catch (caught) {
@@ -283,7 +306,7 @@ export function ChatGenerationPanel({
     while (cursor) {
       const startedAt = epoch.current;
       const next = await api.getKnowledgeGenerationRun(agentId, detail.run.id, undefined, { proposalCursor: cursor });
-      if (!isCurrentGenerationResponse(startedAt, detail.run.id, epoch.current, activeRunId.current)) return detail.proposals.items;
+      if (!isCurrentGenerationResponse(startedAt, detail.run.id, epoch.current, runTarget.current.current)) return detail.proposals.items;
       detail = appendGenerationDetailPage(detail, next, 'proposals');
       dispatch({ type: 'append_page', detail: next, collection: 'proposals' });
       cursor = detail.proposals.nextCursor;
@@ -293,7 +316,7 @@ export function ChatGenerationPanel({
 
   const reset = () => {
     epoch.current += 1;
-    activeRunId.current = null;
+    runTarget.current.switchTo(null);
     requestKey.current = null;
     dispatch({ type: 'reset' });
     setDetailError(null);

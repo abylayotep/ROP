@@ -6,8 +6,9 @@ import {
   isCurrentGenerationResponse,
   mergeRefreshedGenerationDetail,
   reduceGenerationState,
+  type GenerationUiState,
 } from './generation-state';
-import { localMidnight } from './ChatGenerationPanel';
+import { GenerationRunTarget, generationDetailErrorPresentation, localMidnight } from './ChatGenerationPanel';
 
 const selection = { conversationIds: ['conversation-1'], from: '2026-01-01', to: '2026-02-01' };
 const preview = { previewId: 'preview-1' } as KbGenerationPreview;
@@ -54,6 +55,32 @@ describe('generation UI state', () => {
     expect(isCurrentGenerationResponse(2, 'run-b', 2, 'run-b')).toBe(true);
     expect(isCurrentGenerationResponse(1, 'run-b', 2, 'run-b')).toBe(false);
     expect(isCurrentGenerationResponse(2, 'run-a', 2, 'run-b')).toBe(false);
+  });
+
+  it('clears active run A while run B loads and retries B after its failed load', async () => {
+    const runA = { ...detail('running'), run: { ...detail('running').run, id: 'run-a' } } as KbGenerationRunDetail;
+    const runB = { ...detail('completed'), run: { ...detail('completed').run, id: 'run-b' } } as KbGenerationRunDetail;
+    const target = new GenerationRunTarget('run-a');
+    let state: GenerationUiState = { ...initialGenerationState(selection), detail: runA };
+
+    target.switchTo('run-b');
+    state = reduceGenerationState(state, { type: 'run_requested' });
+    expect(state.detail).toBeNull();
+    expect(target.isCurrent('run-a')).toBe(false);
+    expect(generationDetailErrorPresentation(state.detail?.run.status)).toEqual({ automatic: false, retryLabel: 'Повторить загрузку' });
+
+    const requested: string[] = [];
+    await expect(target.loadCurrent(async (runId) => {
+      requested.push(runId);
+      throw new Error('load failed');
+    })).rejects.toThrow('load failed');
+    const loaded = await target.loadCurrent(async (runId) => {
+      requested.push(runId);
+      return runB;
+    });
+
+    expect(requested).toEqual(['run-b', 'run-b']);
+    expect(loaded?.run.id).toBe('run-b');
   });
 
   it('keeps loaded proposal pages when the first page is refreshed', () => {

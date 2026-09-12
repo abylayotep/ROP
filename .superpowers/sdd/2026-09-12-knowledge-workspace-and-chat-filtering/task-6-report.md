@@ -114,3 +114,29 @@ Completed. The Task 6 implementation is contained in the `feat: redesign the kno
 ### Remaining Concern
 
 - Authenticated visual smoke testing remains unavailable; mobile acceptance is covered by scoped responsive CSS, component behavior tests, and the production build.
+
+## Fix Round 3
+
+### Diagnosis
+
+- Changing the requested run ID updated the request guard but left the previous detail in reducer state until the replacement request succeeded.
+- If active run A was replaced by run B and B failed to load, the rendered status still came from A. The UI therefore promised automatic polling even though A had been stopped and B had no detail or retry target in the visible state.
+
+### Correction
+
+- Added an explicit `run_requested` state transition that clears stale detail, preview, and proposal-selection state before a replacement detail request begins.
+- Added a shared run target used by initial loads, selected-run reloads, stale-response checks, and polling activity checks. Switching to B makes A non-current immediately, before B resolves.
+- Detail snapshots are cleared with the state transition, so A cannot drive status or error presentation while B is loading.
+- A failed B load now renders the no-detail explicit retry state. Retry reads the current target and requests B; a successful retry installs B and clears the scoped error.
+- An in-flight A poll cannot deliver an error or schedule another tick after the target switches to B.
+
+### TDD and Verification
+
+- The state transition test first failed because the run target and `run_requested` transition did not exist.
+- The regression covers A active detail removal, honest explicit retry presentation, two consecutive B requests after failure, successful B detail, and A target invalidation. The fake-timer polling test uses the same target guard.
+- Focused state/polling suite: 2 files, 18 tests passed.
+- Full Rakurs frontend suite: 26 files, 155 tests passed. Typecheck, production build, and `git diff --check` passed.
+
+### Remaining Concern
+
+- Authenticated visual smoke testing remains unavailable; this round changes state coordination and reuses the already-tested loading/error UI.

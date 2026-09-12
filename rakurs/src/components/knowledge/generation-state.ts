@@ -15,6 +15,7 @@ export interface GenerationUiState {
 export type GenerationUiAction =
   | { type: 'selection'; selection: KbGenerationSelection }
   | { type: 'preview'; preview: KbGenerationPreview }
+  | { type: 'run_requested' }
   | { type: 'run'; detail: KbGenerationRunDetail }
   | { type: 'poll'; detail: KbGenerationRunDetail }
   | { type: 'select_proposal'; proposalId: string; selected: boolean }
@@ -41,6 +42,8 @@ export function reduceGenerationState(
       return initialGenerationState(action.selection);
     case 'preview':
       return { ...state, preview: action.preview, detail: null, selectedProposalIds: [] };
+    case 'run_requested':
+      return { ...state, preview: null, detail: null, selectedProposalIds: [] };
     case 'run':
       return { ...state, detail: action.detail, selectedProposalIds: [] };
     case 'poll':

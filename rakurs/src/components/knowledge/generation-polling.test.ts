@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { generationDetailErrorPresentation, scheduleGenerationPolling } from './ChatGenerationPanel';
+import { GenerationRunTarget, generationDetailErrorPresentation, scheduleGenerationPolling } from './ChatGenerationPanel';
 
 afterEach(() => {
   vi.useRealTimers();
@@ -39,20 +39,20 @@ describe('generation polling timer', () => {
 
   it('suppresses an in-flight error and reschedule after the active run switches', async () => {
     vi.useFakeTimers();
-    let activeRunId = 'run-1';
+    const target = new GenerationRunTarget('run-1');
     let rejectPoll!: (error: Error) => void;
     const onError = vi.fn();
     const poll = vi.fn(() => new Promise<void>((_resolve, reject) => { rejectPoll = reject; }));
     const stop = scheduleGenerationPolling({
       poll,
-      isActive: () => activeRunId === 'run-1',
+      isActive: () => target.isCurrent('run-1'),
       onError,
       delayMs: 1500,
     });
 
     await vi.advanceTimersByTimeAsync(1500);
     expect(poll).toHaveBeenCalledTimes(1);
-    activeRunId = 'run-2';
+    target.switchTo('run-2');
     rejectPoll(new Error('old run failed'));
     await Promise.resolve();
     await vi.advanceTimersByTimeAsync(3000);

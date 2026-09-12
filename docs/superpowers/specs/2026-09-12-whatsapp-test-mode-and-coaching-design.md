@@ -1,7 +1,7 @@
 # WhatsApp Test Mode and Coaching Design
 
 **Date:** 2026-09-12  
-**Status:** Approved in chat; awaiting written-spec review  
+**Status:** Approved
 **Scope:** Agent automation safety, isolated chat simulation, and reviewed knowledge correction
 
 ## Summary

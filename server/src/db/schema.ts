@@ -3,6 +3,7 @@ import {
   boolean,
   check,
   customType,
+  foreignKey,
   index,
   integer,
   jsonb,
@@ -249,6 +250,30 @@ export const whatsappNumbers = pgTable(
   ],
 );
 
+/** A Page-linked Instagram professional account used for Direct messaging. */
+export const instagramAccounts = pgTable(
+  'instagram_accounts',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    agentId: uuid('agent_id').notNull().references(() => agents.id, { onDelete: 'cascade' }),
+    instagramUserId: text('instagram_user_id').notNull(),
+    pageId: text('page_id').notNull(),
+    username: text('username'),
+    /** Encrypted Page access token, sealed with instagramUserId. */
+    accessToken: text('access_token').notNull(),
+    tokenExpiresAt: timestamp('token_expires_at', { withTimezone: true }),
+    enabled: boolean('enabled').notNull().default(true),
+    subscribedAt: timestamp('subscribed_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique('instagram_accounts_instagram_user_id_key').on(t.instagramUserId),
+    unique('instagram_accounts_id_agent_key').on(t.id, t.agentId),
+    index('instagram_accounts_agent_id_idx').on(t.agentId),
+  ],
+);
+
 /**
  * One entry of a linked device's Baileys session.
  *
@@ -282,12 +307,32 @@ export const contacts = pgTable(
     agentId: uuid('agent_id')
       .notNull()
       .references(() => agents.id, { onDelete: 'cascade' }),
-    phone: text('phone').notNull(),
+    phone: text('phone'),
     // WhatsApp's profile name. Absent until the person's first message carries it.
     name: text('name'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [unique('contacts_agent_phone_key').on(t.agentId, t.phone)],
+  (t) => [
+    unique('contacts_id_agent_key').on(t.id, t.agentId),
+    uniqueIndex('contacts_agent_phone_key').on(t.agentId, t.phone),
+  ],
+);
+
+/** Instagram-scoped identity attached to a provider-neutral CRM contact. */
+export const instagramContacts = pgTable(
+  'instagram_contacts',
+  {
+    contactId: uuid('contact_id').primaryKey().references(() => contacts.id, { onDelete: 'cascade' }),
+    agentId: uuid('agent_id').notNull().references(() => agents.id, { onDelete: 'cascade' }),
+    instagramAccountId: uuid('instagram_account_id').notNull(),
+    instagramUserId: text('instagram_user_id').notNull(),
+    username: text('username'),
+  },
+  (t) => [
+    unique('instagram_contacts_account_user_key').on(t.instagramAccountId, t.instagramUserId),
+    foreignKey({ columns: [t.contactId, t.agentId], foreignColumns: [contacts.id, contacts.agentId], name: 'instagram_contacts_contact_agent_fk' }).onDelete('cascade'),
+    foreignKey({ columns: [t.instagramAccountId, t.agentId], foreignColumns: [instagramAccounts.id, instagramAccounts.agentId], name: 'instagram_contacts_account_agent_fk' }).onDelete('cascade'),
+  ],
 );
 
 /**
@@ -342,8 +387,9 @@ export const conversations = pgTable(
       .notNull()
       .references(() => contacts.id, { onDelete: 'cascade' }),
     whatsappNumberId: uuid('whatsapp_number_id')
-      .notNull()
       .references(() => whatsappNumbers.id, { onDelete: 'cascade' }),
+    instagramAccountId: uuid('instagram_account_id')
+      .references(() => instagramAccounts.id, { onDelete: 'cascade' }),
     // The 24-hour window for a free-form reply is measured from this.
     lastInboundAt: timestamp('last_inbound_at', { withTimezone: true }),
     lastMessageAt: timestamp('last_message_at', { withTimezone: true }),
@@ -366,7 +412,12 @@ export const conversations = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    unique('conversations_number_contact_key').on(t.whatsappNumberId, t.contactId),
+    uniqueIndex('conversations_number_contact_key').on(t.whatsappNumberId, t.contactId),
+    uniqueIndex('conversations_instagram_contact_key').on(t.instagramAccountId, t.contactId)
+      .where(sql`${t.instagramAccountId} is not null`),
+    check('conversations_one_provider_check', sql`num_nonnulls(${t.whatsappNumberId}, ${t.instagramAccountId}) = 1`),
+    foreignKey({ columns: [t.contactId, t.agentId], foreignColumns: [contacts.id, contacts.agentId], name: 'conversations_contact_agent_fk' }).onDelete('cascade'),
+    foreignKey({ columns: [t.instagramAccountId, t.agentId], foreignColumns: [instagramAccounts.id, instagramAccounts.agentId], name: 'conversations_instagram_account_agent_fk' }).onDelete('cascade'),
     index('conversations_agent_last_message_idx').on(t.agentId, t.lastMessageAt),
   ],
 );
@@ -389,6 +440,7 @@ export const messages = pgTable(
     // Still unique — Postgres treats nulls as distinct, so many rows may hold null while
     // the deduplication of real ids is untouched.
     waMessageId: text('wa_message_id').unique(),
+    instagramMessageId: text('instagram_message_id').unique(),
     // 'in' | 'out'
     direction: text('direction').notNull(),
     // 'client' | 'operator' | 'ai' | 'system' | 'phone' — 'phone' is the operator answering
@@ -775,6 +827,22 @@ export const whatsappEvents = pgTable(
     attempts: integer('attempts').notNull().default(0),
   },
   (t) => [index('whatsapp_events_processed_at_idx').on(t.processedAt)],
+);
+
+/** Signed Instagram webhook deliveries, retained until their normalized work succeeds. */
+export const instagramEvents = pgTable(
+  'instagram_events',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    payload: jsonb('payload').notNull(),
+    receivedAt: timestamp('received_at', { withTimezone: true }).notNull().defaultNow(),
+    processedAt: timestamp('processed_at', { withTimezone: true }),
+    error: text('error'),
+    attempts: integer('attempts').notNull().default(0),
+    processingAt: timestamp('processing_at', { withTimezone: true }),
+    conversationIds: jsonb('conversation_ids').$type<string[]>(),
+  },
+  (t) => [index('instagram_events_processed_at_idx').on(t.processedAt)],
 );
 
 /**

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { runInstagramLogin } from './embedded-signup';
+import { runInstagramLogin, runInstagramMessagingLogin } from './embedded-signup';
 
 afterEach(() => {
   vi.useRealTimers();
@@ -64,5 +64,25 @@ describe('Instagram login recovery', () => {
     respond('code');
     await expect(result).resolves.toBe('code');
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('requests messaging permissions without changing the knowledge import permissions', async () => {
+    vi.useFakeTimers();
+    const scopes: string[] = [];
+    vi.stubGlobal('window', {
+      setTimeout, clearTimeout,
+      FB: { login: (callback: (response: { authResponse?: { code?: string } }) => void, options: { scope: string }) => {
+        scopes.push(options.scope);
+        callback({ authResponse: { code: 'code' } });
+      } },
+    });
+
+    await expect(runInstagramLogin({ appId: 'test' })).resolves.toBe('code');
+    await expect(runInstagramMessagingLogin({ appId: 'test' })).resolves.toBe('code');
+
+    expect(scopes).toEqual([
+      'instagram_basic,pages_show_list,pages_read_engagement',
+      'instagram_basic,pages_show_list,instagram_manage_messages,pages_manage_metadata',
+    ]);
   });
 });

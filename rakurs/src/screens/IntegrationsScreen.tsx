@@ -8,12 +8,15 @@ import { Card, CardHead, Toggle } from '@/components/ui/primitives';
 import { Async, EmptyState, RowsSkeleton, Skeleton } from '@/components/ui/states';
 import { useToast } from '@/components/ui/Toast';
 import { useApi } from '@/hooks/useApi';
-import { runCoexistenceSignup } from '@/lib/embedded-signup';
+import { runCoexistenceSignup, runInstagramMessagingLogin } from '@/lib/embedded-signup';
 import { numbersToRenew, tokenDeadline } from '@/lib/whatsapp-token';
 import { useAgent } from '@/store/agent';
 import type {
   CapiEvent,
   CapiSettings,
+  InstagramAccountChoice,
+  InstagramDirectAccount,
+  InstagramSetup,
   LinkedPairingEvent,
   WebhookSetup,
   WhatsappNumber,
@@ -49,6 +52,8 @@ const when = (iso: string) =>
 
 interface Loaded {
   numbers: WhatsappNumber[];
+  instagramAccounts: InstagramDirectAccount[];
+  instagramSetup: InstagramSetup | null;
   setup: WebhookSetup | null;
 }
 
@@ -57,19 +62,30 @@ export function IntegrationsScreen() {
   const owner = role === 'owner';
 
   const query = useApi<Loaded>(
-    async (signal) => ({
-      numbers: await api.listWhatsappNumbers(agent.id, signal),
-      // The verification string is a shared secret, so the server shows it to owners only.
-      setup: owner ? await api.getWebhookSetup(agent.id, signal) : null,
-    }),
+    async (signal) => {
+      const [numbers, instagramAccounts, setup, instagramSetup] = await Promise.all([
+        api.listWhatsappNumbers(agent.id, signal),
+        api.listInstagramAccounts(agent.id, signal),
+        owner ? api.getWebhookSetup(agent.id, signal) : Promise.resolve(null),
+        owner ? api.getInstagramSetup(agent.id, signal) : Promise.resolve(null),
+      ]);
+      return { numbers, instagramAccounts, setup, instagramSetup };
+    },
     [agent.id, owner],
   );
 
   return (
     <Async state={query} skeleton={<Skeleton height={200} />}>
-      {({ numbers, setup }) => (
+      {({ numbers, instagramAccounts, setup, instagramSetup }) => (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <KaspiIntegration agentId={agent.id} canManage={owner} />
+          <InstagramDirectCard
+            accounts={instagramAccounts}
+            setup={instagramSetup}
+            owner={owner}
+            agentId={agent.id}
+            onChanged={query.reload}
+          />
           {/* Above everything, including the numbers themselves: the sixty-day token is
               the one failure that arrives on a working cabinet with no warning at all. */}
           <TokenRenewalCard numbers={numbers} owner={owner} agentId={agent.id} onChanged={query.reload} />
@@ -115,6 +131,87 @@ export function IntegrationsScreen() {
       )}
     </Async>
   );
+}
+
+export function instagramDirectStatus(account: InstagramDirectAccount): string {
+  if (!account.subscribed) return 'Нужна переподписка на сообщения';
+  if (!account.enabled) return 'Приём сообщений выключен';
+  if (account.tokenExpiresAt && new Date(account.tokenExpiresAt).getTime() <= Date.now()) {
+    return 'Доступ Meta истёк — подключите аккаунт заново';
+  }
+  return 'Подключение настроено — проверьте входящим сообщением';
+}
+
+export function InstagramDirectCard({ accounts, setup, owner, agentId, onChanged }: {
+  accounts: InstagramDirectAccount[];
+  setup: InstagramSetup | null;
+  owner: boolean;
+  agentId: string;
+  onChanged: () => void;
+}) {
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+  const [choices, setChoices] = useState<InstagramAccountChoice[]>([]);
+  const [error, setError] = useState<string | null>(null);
+
+  async function connect(instagramAccountId?: string) {
+    if (!setup || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const code = await runInstagramMessagingLogin(setup);
+      const result = await api.connectInstagramAccount(agentId, code, instagramAccountId);
+      if (result.account) {
+        setChoices([]);
+        toast.ok('Instagram Direct подключён');
+        onChanged();
+      } else if (result.choices?.length) {
+        setChoices(result.choices);
+      } else {
+        setError('У выбранного профиля Meta нет профессионального Instagram-аккаунта, связанного со Страницей.');
+      }
+    } catch (caught) {
+      setError(api.humanError(caught));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return <Card>
+    <CardHead title="Instagram Direct" gap={8} />
+    <p style={{ ...hint, lineHeight: 1.5 }}>
+      Новые сообщения попадут в общие диалоги. Сейчас поддерживаются текстовые сообщения; файлы и история переписки не загружаются.
+    </p>
+    {accounts.map((account) => <div key={account.id} style={{ padding: '10px 0', borderTop: '1px solid var(--line-soft)', display: 'flex', gap: 12, alignItems: 'center' }}>
+      <div style={{ minWidth: 0 }}>
+        <strong>@{account.username || account.instagramUserId}</strong>
+        <div style={{ ...hint, color: account.enabled && account.subscribed ? 'var(--accent)' : 'var(--danger)' }}>
+          {instagramDirectStatus(account)}
+        </div>
+      </div>
+      {owner && <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+        <button className="btn-sm" type="button" disabled={busy || !setup} onClick={() => void connect(account.instagramUserId)}>
+          Переподключить
+        </button>
+        <button className="btn-sm" type="button" disabled={busy} onClick={async () => {
+          try { await api.setInstagramAccountEnabled(agentId, account.id, !account.enabled); onChanged(); }
+          catch (caught) { toast.fail(caught); }
+        }}>{account.enabled ? 'Выключить' : 'Включить'}</button>
+      </div>}
+    </div>)}
+    {owner && choices.length > 0 && <div style={{ marginTop: 12 }}>
+      <div style={label}>Выберите аккаунт. Meta попросит войти ещё раз, чтобы выдать новый одноразовый код.</div>
+      {choices.map((choice) => <button key={choice.instagramUserId} type="button" className="btn" disabled={busy}
+        style={{ marginTop: 8, marginRight: 8 }} onClick={() => void connect(choice.instagramUserId)}>
+        @{choice.username || choice.instagramUserId} · {choice.pageName}
+      </button>)}
+    </div>}
+    {error && <div role="alert" style={{ ...hint, color: 'var(--danger)', lineHeight: 1.5 }}>{error} Проверьте связь Instagram со Страницей и разрешения Meta, затем повторите вход.</div>}
+    {owner && accounts.length === 0 && <button className="btn" type="button" disabled={busy || !setup} onClick={() => void connect()}>
+      {busy ? 'Ждём Meta…' : 'Подключить Instagram Direct'}
+    </button>}
+    {!owner && accounts.length === 0 && <div style={hint}>Instagram Direct подключает владелец компании.</div>}
+  </Card>;
 }
 
 // Module scope, not nested inside IntegrationsScreen: a function declared inside a

@@ -8,9 +8,10 @@ import { testEnv } from './helpers/env.js';
 import { fakeLinked } from './helpers/fake-linked.js';
 import { fakeGraph } from './helpers/fake-graph.js';
 import { createAccountWithOwner } from '../src/lib/provision.js';
-import { agents, contacts, conversations, crmAnalyses, kaspiPayments, messages, orders, whatsappNumbers } from '../src/db/schema.js';
+import { agents, contacts, conversations, crmAnalyses, instagramAccounts, instagramContacts, kaspiPayments, messages, notes, orders, whatsappNumbers } from '../src/db/schema.js';
 import { createCrmDeps, createLiveCrmHandler } from '../src/lib/crm/live.js';
 import { createKaspiCheckout } from '../src/lib/kaspi/service.js';
+import { encryptSecret } from '../src/lib/secret-box.js';
 vi.mock('../src/lib/kaspi/service.js',async (original)=>({...await original<typeof import('../src/lib/kaspi/service.js')>(),createKaspiCheckout:vi.fn()}));
 let db: Awaited<ReturnType<typeof withDb>>;
 let paymentId:string;let orderId:string;let agentId:string;let conversationId:string;let messageId:string;let numberId:string;let dir:string;
@@ -39,6 +40,24 @@ it('does not create a checkout or send when automation is denied',async()=>{
   expect(createKaspiCheckout).not.toHaveBeenCalled();
   expect(linked.calls.filter(c=>c.method==='sendText'||c.method==='sendMedia')).toHaveLength(0);
   expect((await db.select().from(messages)).filter(m=>m.author==='ai')).toHaveLength(0);
+});
+it('records an actionable note and never uses an Instagram identity as a checkout phone',async()=>{
+  const [conversation] = await db.select().from(conversations).where(eq(conversations.id,conversationId));
+  const [account] = await db.insert(instagramAccounts).values({agentId,instagramUserId:'ig-business',pageId:'page',
+    accessToken:encryptSecret('page-token',key,'ig-business'),subscribedAt:new Date()}).returning();
+  await db.insert(instagramContacts).values({contactId:conversation!.contactId,agentId,
+    instagramAccountId:account!.id,instagramUserId:'ig-customer'});
+  await db.update(conversations).set({whatsappNumberId:null,instagramAccountId:account!.id})
+    .where(eq(conversations.id,conversationId));
+  await db.update(contacts).set({phone:null}).where(eq(contacts.id,conversation!.contactId));
+
+  await createCrmDeps(db,testEnv({MEDIA_DIR:dir}),deps).checkout!(input());
+
+  expect(createKaspiCheckout).not.toHaveBeenCalled();
+  expect(linked.calls.filter(c=>c.method==='sendText'||c.method==='sendMedia')).toHaveLength(0);
+  const text=(await db.select().from(notes)).map((row)=>row.body).join(' ');
+  expect(text).toContain('у клиента нет номера телефона');
+  expect(text).not.toContain('ig-customer');
 });
 it('does not queue live CRM work when automation is denied',async()=>{
   await db.update(agents).set({responseMode:'off'}).where(eq(agents.id,agentId));

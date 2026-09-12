@@ -25,6 +25,8 @@ import { sendStageMessage } from '../lib/funnel-message.js';
 import { credentialsKey } from '../lib/secret-box.js';
 import { isUuid } from '../lib/uuid.js';
 import type { GraphClient } from '../lib/whatsapp/graph.js';
+import type { LinkedClient } from '../lib/whatsapp/linked/client.js';
+import type { InstagramMessagingClient } from '../lib/instagram/messaging-graph.js';
 import { requireAgent } from './require-agent.js';
 
 const patchLead = z.object({
@@ -164,6 +166,8 @@ export function registerLeadRoutes(
   env: Env,
   guard: preHandlerHookHandler,
   graph: GraphClient,
+  linked: LinkedClient,
+  instagramMessaging: InstagramMessagingClient,
 ): void {
   const anyMember = requireAgent(db);
 
@@ -326,7 +330,7 @@ export function registerLeadRoutes(
       if (moved && stagePatch.stageId != null && current.stageId !== null) {
         await sendStageMessage(
           db,
-          { graph, key: credentialsKey(env) },
+          { graph, linked, instagramMessaging, env, key: credentialsKey(env) },
           { agentId: req.agent!.id, conversationId, stageId: stagePatch.stageId },
         );
       }

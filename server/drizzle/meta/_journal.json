@@ -218,6 +218,20 @@
       "when": 1789215574353,
       "tag": "0030_repair-finalized-effect-columns",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1789221636426,
+      "tag": "0031_sticky_colonel_america",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1789222544711,
+      "tag": "0032_tan_ken_ellis",
+      "breakpoints": true
     }
   ]
 }

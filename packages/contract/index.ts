@@ -158,8 +158,10 @@ export interface Message {
 
 export interface ConversationSummary {
   id: string;
+  channel: 'whatsapp' | 'instagram';
+  contactAddress: string;
   contactName: string | null;
-  contactPhone: string;
+  contactPhone: string | null;
   lastMessageAt: string | null;
   /** The last line, for the list. */
   preview: string | null;
@@ -242,7 +244,7 @@ export interface Lead {
   sourceType?: string | null;
   conversationId: string;
   contactName: string | null;
-  contactPhone: string;
+  contactPhone: string | null;
   stageId: string | null;
   stageSetAt: string | null;
   /** 'operator' | 'ai' | 'scenario' | 'system' */
@@ -290,8 +292,10 @@ export interface BoardCard {
   sourceLabel?: string | null;
   analysisStatus?: string | null;
   conversationId: string;
+  channel: 'whatsapp' | 'instagram';
+  contactAddress: string;
   contactName: string | null;
-  contactPhone: string;
+  contactPhone: string | null;
   lastMessageAt: string | null;
   preview: string | null;
   /** Whether a free-form reply is still allowed. */
@@ -317,8 +321,10 @@ export interface Board {
 
 export interface Customer {
   conversationId: string;
+  channel: 'whatsapp' | 'instagram';
+  contactAddress: string;
   contactName: string | null;
-  contactPhone: string;
+  contactPhone: string | null;
   stageName: string | null;
   stageKind: StageKind | null;
   paidTotal: string;
@@ -416,6 +422,26 @@ export interface InstagramImportRequest {
 /** Что нужно браузеру, чтобы открыть окно входа Meta. */
 export interface InstagramSetup {
   appId: string;
+}
+
+export interface InstagramAccountChoice {
+  instagramUserId: string;
+  username: string | null;
+  pageName: string;
+}
+
+export interface InstagramDirectAccount {
+  id: string;
+  instagramUserId: string;
+  username: string | null;
+  enabled: boolean;
+  subscribed: boolean;
+  tokenExpiresAt: string | null;
+}
+
+export interface InstagramDirectConnectResult {
+  account: InstagramDirectAccount | null;
+  choices?: InstagramAccountChoice[];
 }
 
 export interface KbImport {
@@ -578,7 +604,7 @@ export type AgentResponseMode = 'off' | 'test' | 'live';
 export interface AiTestContact {
   id: string;
   name: string | null;
-  phone: string;
+  phone: string | null;
 }
 
 export interface AiSettings {

@@ -50,6 +50,8 @@ export const DISABLED = 'Не отправлено: отправка в Meta о�
 export const NO_CLID =
   'Не отправлено: диалог начался не с рекламы, у него нет ctwa_clid, ' +
   'и Meta не с чем его сопоставить.';
+export const NON_WHATSAPP =
+  'Не отправлено: Meta Conversions API поддерживается только для диалогов WhatsApp.';
 
 /**
  * Why this event cannot go, or null when it can.
@@ -146,7 +148,9 @@ export async function queuePurchase(
     if (await alreadyQueued(db, eventId)) return;
 
     const ctwaClid = row.conversation.ctwaClid;
-    const reason = await skipReason(db, input.agentId, ctwaClid);
+    const reason = row.conversation.whatsappNumberId === null
+      ? NON_WHATSAPP
+      : await skipReason(db, input.agentId, ctwaClid);
 
     await insertEvent(db, {
       agentId: input.agentId,
@@ -155,7 +159,7 @@ export async function queuePurchase(
       kind: 'purchase',
       eventId,
       payload:
-        ctwaClid === null
+        ctwaClid === null || row.contact.phone === null
           ? UNREPORTABLE_BODY
           : serialiseEvent(
               buildPurchase({
@@ -211,7 +215,9 @@ export async function queueLead(
       if (await alreadyQueued(effectDb, eventId)) return;
 
       const ctwaClid = row.conversation.ctwaClid;
-      const reason = await skipReason(effectDb, input.agentId, ctwaClid);
+      const reason = row.conversation.whatsappNumberId === null
+        ? NON_WHATSAPP
+        : await skipReason(effectDb, input.agentId, ctwaClid);
       await insertEvent(effectDb, {
         agentId: input.agentId,
         conversationId: row.conversation.id,
@@ -219,7 +225,7 @@ export async function queueLead(
         kind: 'lead',
         eventId,
         payload:
-          ctwaClid === null
+          ctwaClid === null || row.contact.phone === null
             ? UNREPORTABLE_BODY
             : serialiseEvent(
                 buildLead({

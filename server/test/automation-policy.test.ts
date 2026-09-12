@@ -118,18 +118,11 @@ describe('automation snapshot loader', () => {
     expect(snapshot).toBeNull();
   });
 
-  it('does not load a conversation linked to another agent contact', async () => {
-    await db
+  it('rejects a conversation linked to another agent contact', async () => {
+    await expect(db
       .update(conversations)
       .set({ contactId: foreign.contactId })
-      .where(eq(conversations.id, own.conversationId));
-
-    const snapshot = await loadAutomationSnapshot(db, {
-      agentId: own.agentId,
-      conversationId: own.conversationId,
-    });
-
-    expect(snapshot).toBeNull();
+      .where(eq(conversations.id, own.conversationId))).rejects.toThrow();
   });
 
   it('does not load a conversation linked to another agent number', async () => {

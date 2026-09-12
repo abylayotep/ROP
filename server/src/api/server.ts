@@ -9,6 +9,9 @@ import { ApiError } from '../lib/errors.js';
 import { createPageFetcher, type PageFetcher } from '../lib/knowledge/fetch-page.js';
 import { credentialsKey } from '../lib/secret-box.js';
 import { createInstagramClient, type InstagramClient } from '../lib/instagram/graph.js';
+import { createInstagramMessagingClient, type InstagramMessagingClient } from '../lib/instagram/messaging-graph.js';
+import { registerInstagramRoutes } from './instagram.js';
+import { registerInstagramWebhook } from './instagram-webhook.js';
 import { createGraphClient, type GraphClient } from '../lib/whatsapp/graph.js';
 import { registerAgentRoutes } from './agents.js';
 import { registerAiRoutes } from './ai.js';
@@ -47,6 +50,7 @@ export interface ServerDeps {
   pageFetcher?: PageFetcher;
   /** And for Instagram: no test asks Meta for somebody's posts. */
   instagram?: InstagramClient;
+  instagramMessaging?: InstagramMessagingClient;
   /** And for the model: no test spends a token or depends on a live OpenRouter key. */
   model?: ModelClient;
   /** And for Meta's Conversions API: no test reports a conversion to a real dataset. */
@@ -68,6 +72,7 @@ export function buildServer(env: Env, db: Db, deps: ServerDeps = {}): FastifyIns
   const graph = deps.graph ?? createGraphClient();
   const pageFetcher = deps.pageFetcher ?? createPageFetcher();
   const instagram = deps.instagram ?? createInstagramClient();
+  const instagramMessaging = deps.instagramMessaging ?? createInstagramMessagingClient();
   // Taken the same way every other outbound client is: the AI routes and the inbound queue
   // both answer with it, and a test replaces it once for both.
   const model = deps.model ?? createModelClient();
@@ -79,7 +84,7 @@ export function buildServer(env: Env, db: Db, deps: ServerDeps = {}): FastifyIns
   const linked =
     deps.linked ?? createLinkedClient({ session: createLinkedSocket(db, credentialsKey(env)) });
 
-  const turnDeps = { graph, linked, key: credentialsKey(env), model };
+  const turnDeps = { graph, linked, instagramMessaging, env, key: credentialsKey(env), model };
   const crm = (deps.crmEnabled ?? env.NODE_ENV !== 'test') ? createLiveCrmHandler(db, env, turnDeps) : undefined;
 
   app.register(cookie, { secret: env.SESSION_SECRET });
@@ -136,9 +141,10 @@ export function buildServer(env: Env, db: Db, deps: ServerDeps = {}): FastifyIns
       paceMs: deps.historyPaceMs,
     });
     registerWhatsappHistoryArchiveRoutes(app, db, guard);
-    registerConversationRoutes(app, db, env, guard, graph, linked);
+    registerConversationRoutes(app, db, env, guard, graph, linked, instagramMessaging);
+    registerInstagramRoutes(app, db, env, guard, graph, instagramMessaging);
     registerStageRoutes(app, db, guard);
-    registerLeadRoutes(app, db, env, guard, graph);
+    registerLeadRoutes(app, db, env, guard, graph, linked, instagramMessaging);
     registerOrderRoutes(app, db, guard);
     registerKaspiRoutes(app, db, env, guard);
     registerBoardRoutes(app, db, guard);
@@ -169,6 +175,7 @@ export function buildServer(env: Env, db: Db, deps: ServerDeps = {}): FastifyIns
       // The Conversions API queue is drained by the same delivery, once Meta has its 200.
       { capi, key: credentialsKey(env) },
     );
+    registerInstagramWebhook(app, db, env, turnDeps);
     // Later plans register their routes here, reusing the same guard.
   });
 

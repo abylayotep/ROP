@@ -36,7 +36,6 @@ async function lockAutomationPolicy(
   const [locked] = await tx.select({id:conversations.id}).from(conversations)
     .innerJoin(agents,and(eq(agents.id,conversations.agentId),eq(agents.id,input.agentId)))
     .innerJoin(contacts,and(eq(contacts.id,conversations.contactId),eq(contacts.agentId,agents.id)))
-    .innerJoin(whatsappNumbers,and(eq(whatsappNumbers.id,conversations.whatsappNumberId),eq(whatsappNumbers.agentId,agents.id)))
     .where(eq(conversations.id,input.conversationId)).for('update');
   return locked !== undefined && await automationAllowed(tx as unknown as Db,input,'crm');
 }
@@ -194,9 +193,11 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
         if (deps.checkout && analysis.checkout?.messageId === liveId && analysis.confidence >= 85
           && !await hasConfirmedKaspiPayment(db,agent.id,conversation.id)
           && await automationAllowed(db,input,'checkout')) {
-          await deps.checkout({agentId:agent.id,conversationId:conversation.id,phone:contact.phone,
-            intent:analysis.checkout,summary:analysis.summary});
-          checkedOut = true;
+          if (contact.phone) {
+            await deps.checkout({agentId:agent.id,conversationId:conversation.id,phone:contact.phone,
+              intent:analysis.checkout,summary:analysis.summary});
+            checkedOut = true;
+          }
         } else if (deps.reply && await automationAllowed(db,input,'reply')) {
           await deps.reply(agent.id,conversation.id);
         }
@@ -228,7 +229,6 @@ export async function drainCrmAnalyses(db: Db, deps: CrmDeps): Promise<void> {
   const pending = await db.select({conversationId:conversations.id,agentId:conversations.agentId}).from(conversations)
     .innerJoin(agents,eq(agents.id,conversations.agentId))
     .innerJoin(contacts,and(eq(contacts.id,conversations.contactId),eq(contacts.agentId,agents.id)))
-    .innerJoin(whatsappNumbers,and(eq(whatsappNumbers.id,conversations.whatsappNumberId),eq(whatsappNumbers.agentId,agents.id)))
     .leftJoin(crmAnalyses,eq(crmAnalyses.conversationId,conversations.id))
     .where(and(isNotNull(agents.openrouterKey),eq(conversations.aiEnabled,true),
       or(eq(agents.responseMode,'live'),and(eq(agents.responseMode,'test'),eq(agents.testContactId,contacts.id))),

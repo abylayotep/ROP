@@ -5,6 +5,7 @@ import { Card, CardHead } from '@/components/ui/primitives';
 import { Async, EmptyState, RowsSkeleton } from '@/components/ui/states';
 import { useApi } from '@/hooks/useApi';
 import { formatMoney } from '@/lib/money';
+import { formatPhone } from '@/lib/phone';
 import { useAgent } from '@/store/agent';
 import type { Customer } from '@/types';
 
@@ -16,8 +17,12 @@ const date = (iso: string | null) =>
 const cell = { padding: '11px 14px', fontSize: 12.5, verticalAlign: 'middle' } as const;
 
 /** The query is matched against both the name and the phone: people search by either. */
+const address = (customer: Customer) => customer.channel === 'instagram'
+  ? (customer.contactAddress.startsWith('@') ? customer.contactAddress : `@${customer.contactAddress}`)
+  : formatPhone(customer.contactPhone);
+
 const matches = (customer: Customer, query: string) =>
-  `${customer.contactName ?? ''} ${customer.contactPhone}`.toLowerCase().includes(query);
+  `${customer.contactName ?? ''} ${customer.contactPhone ?? ''} ${customer.contactAddress} ${customer.channel}`.toLowerCase().includes(query);
 
 export function CustomersScreen() {
   const { agent } = useAgent();
@@ -38,7 +43,7 @@ export function CustomersScreen() {
     return [...found].sort((a, b) => {
       if (sort === 'paid') return Number(b.paidTotal) - Number(a.paidTotal);
       if (sort === 'name') {
-        return (a.contactName ?? a.contactPhone).localeCompare(b.contactName ?? b.contactPhone, 'ru');
+        return (a.contactName ?? a.contactAddress).localeCompare(b.contactName ?? b.contactAddress, 'ru');
       }
       // Compared as plain strings, not with localeCompare: these are ISO timestamps, where
       // byte order is time order, and a locale has no business deciding it. No activity goes
@@ -60,8 +65,8 @@ export function CustomersScreen() {
               <input
                 value={query}
                 type="search"
-                aria-label="Поиск по имени или телефону"
-                placeholder="Имя или телефон"
+                aria-label="Поиск клиентов"
+                placeholder="Имя, телефон или Instagram"
                 onChange={(e) => setQuery(e.target.value)}
                 style={{
                   padding: '7px 10px',
@@ -151,11 +156,15 @@ export function CustomersScreen() {
                   >
                     <td style={cell}>
                       <div style={{ fontWeight: 600 }}>
-                        {customer.contactName ?? customer.contactPhone}
+                        {address(customer)}
                       </div>
-                      {customer.contactName && (
+                      {customer.channel === 'instagram' ? (
+                        <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>
+                          {customer.contactName && customer.contactName !== customer.contactAddress ? `${customer.contactName} · ` : ''}Instagram
+                        </div>
+                      ) : customer.contactName && (
                         <div className="mono" style={{ fontSize: 11, color: 'var(--text-dim)' }}>
-                          {customer.contactPhone}
+                          {formatPhone(customer.contactPhone)}
                         </div>
                       )}
                     </td>

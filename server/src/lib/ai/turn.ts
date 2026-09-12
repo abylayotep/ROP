@@ -34,6 +34,9 @@ import {
   stages,
   whatsappNumbers,
 } from '../../db/schema.js';
+import type { Env } from '../../env.js';
+import type { InstagramMessagingClient } from '../instagram/messaging-graph.js';
+import { deliveryForConversation, type ConversationDelivery } from '../messaging/transport.js';
 import { hasConfirmedKaspiPayment } from '../kaspi/service.js';
 import {
   decideAutomation,
@@ -74,6 +77,8 @@ export interface TurnDeps {
   linked: LinkedClient;
   /** The credentials key. Both secrets a turn touches are sealed with it. */
   key: Buffer;
+  env?: Env;
+  instagramMessaging?: InstagramMessagingClient;
 }
 
 export interface TurnInput {
@@ -520,7 +525,7 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
     .select({ conversation: conversations, contact: contacts, number: whatsappNumbers })
     .from(conversations)
     .innerJoin(contacts, eq(contacts.id, conversations.contactId))
-    .innerJoin(whatsappNumbers, eq(whatsappNumbers.id, conversations.whatsappNumberId))
+    .leftJoin(whatsappNumbers, eq(whatsappNumbers.id, conversations.whatsappNumberId))
     .where(
       and(eq(conversations.id, input.conversationId), eq(conversations.agentId, input.agentId)),
     );
@@ -944,7 +949,7 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
     // Checked in both modes: a sandbox that reported «отправлено» where a real turn would
     // fail on a disabled number or an unreadable token would be answering a different
     // question than the one the owner asked. Only the Graph call itself is skipped.
-    const ready = readySend(db, deps, number);
+    const ready = await readySend(db, deps, input.agentId, input.conversationId, number);
     if (!ready.ok) {
       details.push(ready.detail);
     } else if (dryRun) {
@@ -953,8 +958,8 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
       const send = (tx: AutomationTransaction) =>
         deliver(tx, deps, {
           conversation,
-          contact,
-          number,
+          channel: ready.delivery.channel,
+          address: ready.delivery.address,
           transport: ready.transport,
           body,
         });
@@ -1059,7 +1064,7 @@ async function handOff(
   return result.allowed && result.value;
 }
 
-type Ready = { ok: true; transport: MessageTransport } | { ok: false; detail: string };
+type Ready = { ok: true; transport: MessageTransport; delivery: ConversationDelivery } | { ok: false; detail: string };
 
 /**
  * Everything that has to be true before a reply can leave, and none of it a write.
@@ -1068,16 +1073,30 @@ type Ready = { ok: true; transport: MessageTransport } | { ok: false; detail: st
  * credentials key no longer opens are the two failures an owner will actually meet, and a
  * sandbox that reported success on either would be lying about the only thing it is for.
  */
-function readySend(
+async function readySend(
   db: Db,
   deps: TurnDeps,
-  number: typeof whatsappNumbers.$inferSelect,
-): Ready {
+  agentId: string,
+  conversationId: string,
+  number: typeof whatsappNumbers.$inferSelect | null,
+): Promise<Ready> {
+  if (!number && (!deps.env || !deps.instagramMessaging)) return { ok: false, detail: 'Ответ не отправлен: Instagram не подключён.' };
+  if (!number) {
+    try {
+      const delivery = await deliveryForConversation(db, deps.env!, { graph: deps.graph, linked: deps.linked,
+        instagramMessaging: deps.instagramMessaging! }, agentId, conversationId);
+      return delivery.enabled ? { ok: true, transport: delivery.transport, delivery }
+        : { ok: false, detail: 'Ответ не отправлен: Instagram отключён.' };
+    } catch (error) { return { ok: false, detail: error instanceof Error ? error.message : 'Instagram недоступен.' }; }
+  }
   if (!number.enabled) return { ok: false, detail: 'Ответ не отправлен: номер отключён.' };
 
   try {
+    const delivery = await deliveryForConversation(db, deps.env ?? ({ CREDENTIALS_KEY: deps.key.toString('base64') } as Env),
+      { graph: deps.graph, linked: deps.linked, instagramMessaging: deps.instagramMessaging! }, agentId, conversationId);
     return {
       ok: true,
+      delivery,
       transport: transportFor(number, {
         graph: deps.graph,
         linked: deps.linked,
@@ -1118,19 +1137,24 @@ async function deliver(
   deps: TurnDeps,
   input: {
     conversation: typeof conversations.$inferSelect;
-    contact: typeof contacts.$inferSelect;
-    number: typeof whatsappNumbers.$inferSelect;
+    channel: 'whatsapp' | 'instagram';
+    address: string;
     transport: MessageTransport;
     body: string;
   },
 ): Promise<Delivery> {
-  const { conversation, contact, number, transport, body } = input;
+  const { conversation, channel, address, transport, body } = input;
 
   // Set the instant Meta accepts the message, before any write of our own. It is the only
   // thing that can tell a failed send apart from a send we failed to record.
   let accepted = false;
   try {
-    const { messageId } = await transport.sendText(contact.phone, body);
+    const [fresh] = await db.select({ lastInboundAt: conversations.lastInboundAt })
+      .from(conversations).where(eq(conversations.id, conversation.id));
+    if (!fresh || !windowOpen(fresh.lastInboundAt)) {
+      return { state: 'failed', detail: 'Окно ответа закрылось до отправки.' };
+    }
+    const { messageId } = await transport.sendText(address, body);
     accepted = true;
 
     const storedId = await db.transaction(async (savepoint) => {
@@ -1139,7 +1163,8 @@ async function deliver(
         .insert(messages)
         .values({
           conversationId: conversation.id,
-          waMessageId: messageId,
+          waMessageId: channel === 'whatsapp' ? messageId : null,
+          instagramMessageId: channel === 'instagram' ? messageId : null,
           direction: 'out',
           author: 'ai',
           kind: 'text',

@@ -21,7 +21,7 @@ export function registerKaspiRoutes(app: FastifyInstance, db: Db, env: Env, guar
   });
   app.post(`${root}/auth/init`, owner, async (req) => {
     const response = await kaspiClient(env).request('POST', '/api/auth/init');
-    if (typeof response.processId !== 'string') throw new ApiError(502, 'Kaspi не начал авторизацию');
+    if (response.success !== true || response.view !== 'KPUniversalEnterPhoneNumber' || typeof response.processId !== 'string') throw new ApiError(502, 'Kaspi не начал авторизацию');
     await db.insert(kaspiSessions).values({ agentId: req.agent!.id, processId: response.processId, processExpiresAt: new Date(Date.now() + 10 * 60_000) }).onConflictDoUpdate({ target: kaspiSessions.agentId, set: { processId: response.processId, processExpiresAt: new Date(Date.now() + 10 * 60_000) } });
     return { ready: true };
   });
@@ -35,7 +35,14 @@ export function registerKaspiRoutes(app: FastifyInstance, db: Db, env: Env, guar
     if (!parsed.success) throw new ApiError(400, 'Укажите номер кассира');
     const phone = normalisePhone(parsed.data.phone);
     const response = await kaspiClient(env).request('POST', '/api/auth/send-phone', { processId: await challenge(req.agent!.id), phoneNumber: phone.slice(1) });
-    if (response.success !== true) throw new ApiError(400, 'Kaspi отклонил номер кассира');
+    if (response.success !== true || response.view !== 'EnterOtp') {
+      await db.update(kaspiSessions).set({ processId: null, processExpiresAt: null }).where(eq(kaspiSessions.agentId, req.agent!.id));
+      const body = z.object({ meta: z.object({ sn: z.string().optional() }).passthrough().optional(), data: z.object({ type: z.string().optional() }).passthrough().optional(), isClosed: z.boolean().optional() }).passthrough().safeParse(response.body);
+      if (body.success && (body.data.meta?.sn === 'MobileOrgRegistration' || body.data.data?.type === 'kpOrgRegistration')) {
+        throw new ApiError(400, 'Kaspi запросил регистрацию или подтверждение организации вместо SMS. Откройте Kaspi Pay под этим номером, проверьте доступ к магазину и завершите предложенные шаги. Затем подключите кассу заново.');
+      }
+      throw new ApiError(400, 'Kaspi не отправил SMS или завершил сессию. Проверьте номер кассира Kaspi Pay и начните подключение заново.');
+    }
     await db.update(kaspiSessions).set({ phone }).where(eq(kaspiSessions.agentId, req.agent!.id));
     return { sent: true };
   });

@@ -28,7 +28,7 @@ import {
   stages,
   whatsappNumbers,
 } from '../db/schema.js';
-import { lockAgentAutomation } from '../lib/automation/execution.js';
+import { withAgentAutomationLock } from '../lib/automation/execution.js';
 import { releaseTurnSlot, sandboxTurns, SANDBOX_TURNS, tryTakeTurnSlot } from '../db/turn-cap.js';
 import type { Env } from '../env.js';
 import { MODELS } from '../lib/ai/openrouter.js';
@@ -238,12 +238,10 @@ export function registerAiRoutes(
       // would say. Bumped inside the same transaction as the write it describes, so a
       // version can never land ahead of — or behind — the row it is meant to describe.
       const bumps = temperature !== undefined || replyLanguage !== undefined;
-      const result = await db.transaction(async (tx) => {
+      const result = await withAgentAutomationLock(db, req.agent!.id, async (tx) => {
         // The same lock is held by every automated final effect. Whichever side acquires it
         // first finishes first: once this PATCH returns, no effect authorized under the old
         // response scope can still begin or complete behind it.
-        await lockAgentAutomation(tx, req.agent!.id);
-
         // Every partial PATCH derives its omitted fields from the same locked row it updates.
         // Without this lock, two valid requests can both validate stale state and commit the
         // invalid combination `responseMode = 'test', testContactId = null`.

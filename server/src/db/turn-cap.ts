@@ -1,8 +1,8 @@
 import { POOL_MAX } from './client.js';
 
 /**
- * How many turns that hold a database connection across a slow model call may run at once,
- * across the whole process — and the one counter every such turn shares to enforce it.
+ * How many operations that hold a database connection across slow or contended work may run at
+ * once, across the whole process — and the one counter every such operation shares to enforce it.
  *
  * A turn like this holds a connection for as long as the model thinks — up to the client's
  * sixty-second deadline — because the transaction it rolls back (the sandbox) or the row it
@@ -23,12 +23,12 @@ import { POOL_MAX } from './client.js';
  * and a count per minute says nothing about how many are in flight at one instant.
  *
  * The counter below is process-wide and shared by every feature shaped this way — the
- * sandbox (`api/ai.ts`) and the coach (`api/coach.ts`) today. It is deliberately one counter,
- * not one per feature: what the pool feels is how many connections are held at once, not
- * which feature is holding them, so a sandbox that is careful to stay under its own limit
- * while a busy coach holds three more connections would still empty the same pool. Any future
- * path that holds a connection across a model call joins this counter rather than starting
- * a third one of its own.
+ * sandbox (`api/ai.ts`), coach (`api/coach.ts`), and automation advisory-lock users today. It is
+ * deliberately one counter, not one per feature: what the pool feels is how many connections
+ * are held at once, not which feature is holding them. Automation admission happens before its
+ * transaction, leaving pool capacity for independently committed provider intents and other
+ * root-pool work reached from inside the locked callback. Any future path with this shape joins
+ * this counter rather than starting a feature-local one.
  */
 export const sandboxTurns = (poolMax: number): number => Math.max(1, Math.min(3, poolMax - 2));
 

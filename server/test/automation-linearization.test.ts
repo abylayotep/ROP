@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { eq, sql } from 'drizzle-orm';
+import postgres from 'postgres';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildServer } from '../src/api/server.js';
-import type { Db } from '../src/db/client.js';
+import { POOL_MAX, type Db } from '../src/db/client.js';
+import { SANDBOX_TURNS } from '../src/db/turn-cap.js';
 import {
   agents,
   capiEvents,
@@ -34,6 +36,8 @@ import { fakeModel, type FakeModel } from './helpers/fake-model.js';
 
 const PASSWORD = 'correct-horse-battery';
 const OPENROUTER_KEY = 'sk-or-v1-0123456789abcdef';
+const TEST_DATABASE_URL =
+  process.env.TEST_DATABASE_URL ?? 'postgres://rakurs:rakurs@localhost:55432/rakurs_test';
 const env = testEnv({ KASPI_POS_URL: 'http://kaspi.test' });
 const key = credentialsKey(env);
 
@@ -234,6 +238,129 @@ afterEach(async () => {
 });
 
 describe('response mode linearization', () => {
+  it('keeps settings PATCH outside its lock transaction while admission is saturated', async () => {
+    let slotTransactionStarts = 0;
+    const slotTx = {
+      execute: async () => [],
+    } as unknown as automationExecution.AutomationTransaction;
+    const slotDb = {
+      transaction: async <T>(
+        effect: (tx: automationExecution.AutomationTransaction) => Promise<T>,
+      ) => {
+        slotTransactionStarts += 1;
+        return effect(slotTx);
+      },
+    } as unknown as Db;
+    const blockers = Array.from({ length: SANDBOX_TURNS }, gate);
+    const slotUsers = blockers.map((blocker) =>
+      automationExecution.withAgentAutomationLock(slotDb, agentId, async () => blocker.wait),
+    );
+    let patch: ReturnType<typeof patchOff> | undefined;
+
+    try {
+      await vi.waitFor(() => {
+        expect(slotTransactionStarts).toBe(SANDBOX_TURNS);
+      });
+
+      let settled = false;
+      patch = patchOff().then((response) => {
+        settled = true;
+        return response;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      expect(settled).toBe(false);
+
+      blockers[0]!.release();
+      expect((await patch).statusCode).toBe(200);
+    } finally {
+      for (const blocker of blockers) blocker.release();
+      await Promise.allSettled(slotUsers);
+      if (patch) await patch;
+    }
+  });
+
+  it('keeps a root-pool connection available when same-agent lock admission is saturated', async () => {
+    const observer = postgres(TEST_DATABASE_URL, { max: 1 });
+    const boundary = gate();
+    const forceHolderExit = gate();
+    const nestedStarted = gate();
+    let nestedQuery: Promise<unknown> | undefined;
+    let transactionStarts = 0;
+    const originalTransaction = db.transaction.bind(db);
+    const admittedDb = new Proxy(db, {
+      get(target, property) {
+        if (property === 'transaction') {
+          return <T>(effect: Parameters<Db['transaction']>[0]): Promise<T> => {
+            transactionStarts += 1;
+            return originalTransaction(effect) as Promise<T>;
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as Db;
+    const lockUsers: Promise<unknown>[] = [];
+
+    try {
+      const holder = automationExecution.withAgentAutomationLock(
+        admittedDb,
+        agentId,
+        async () => {
+          boundary.reach();
+          await boundary.wait;
+          nestedQuery = Promise.resolve(db.execute(sql`select 1`));
+          nestedStarted.reach();
+          await Promise.race([nestedQuery, forceHolderExit.wait]);
+        },
+      );
+      lockUsers.push(holder);
+      await boundary.reached;
+
+      for (let index = 1; index < POOL_MAX; index += 1) {
+        lockUsers.push(
+          automationExecution.withAgentAutomationLock(admittedDb, agentId, async () => undefined),
+        );
+      }
+      await new Promise((resolve) => setImmediate(resolve));
+      const openedBeforeRelease = transactionStarts;
+
+      await vi.waitFor(async () => {
+        const [row] = await observer<{ waiters: number }[]>`
+          select count(*)::int as waiters
+          from pg_stat_activity
+          where datname = current_database()
+            and state = 'active'
+            and wait_event_type = 'Lock'
+            and query like '%pg_advisory_xact_lock%'
+        `;
+        expect(row!.waiters).toBe(openedBeforeRelease - 1);
+      });
+
+      boundary.release();
+      await nestedStarted.reached;
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const completedBeforeDeadline = await Promise.race([
+        nestedQuery!.then(() => true),
+        new Promise<boolean>((resolve) => {
+          timeout = setTimeout(() => resolve(false), 500);
+        }),
+      ]);
+      if (timeout) clearTimeout(timeout);
+
+      expect({ openedBeforeRelease, completedBeforeDeadline }).toEqual({
+        openedBeforeRelease: SANDBOX_TURNS,
+        completedBeforeDeadline: true,
+      });
+    } finally {
+      boundary.release();
+      forceHolderExit.release();
+      await Promise.allSettled(lockUsers);
+      if (nestedQuery) await nestedQuery;
+      await observer.end();
+    }
+  });
+
   it('holds the agent lock from the final reply authorization through the send', async () => {
     const model = fakeModel(answer());
     const boundary = gate();

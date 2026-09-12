@@ -10,8 +10,8 @@ import * as schema from './schema.js';
  * transaction it rolls back. Anything that keeps a connection across a slow call has to stay
  * **well below** this number, or the pool empties and every other route — the webhook Meta is
  * waiting on included — queues behind it. `turn-cap.ts`'s shared cap is that limit today,
- * held in common by the sandbox and the coach alike — see that file for why it is one
- * counter and not one per feature.
+ * held in common by slow model work and automation advisory-lock users alike — see that file
+ * for why it is one counter and not one per feature.
  */
 export const POOL_MAX = 10;
 

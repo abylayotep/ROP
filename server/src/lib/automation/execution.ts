@@ -1,5 +1,6 @@
 import { sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
+import { releaseTurnSlot, takeTurnSlotWaiting } from '../../db/turn-cap.js';
 import {
   decideAutomation,
   loadAutomationSnapshot,
@@ -19,7 +20,7 @@ export type AutomationTransaction = Parameters<Parameters<Db['transaction']>[0]>
  * protocol accidentally. Callers must not acquire it twice in the same workflow: compose
  * all work inside the callback instead.
  */
-export async function lockAgentAutomation(
+async function lockAgentAutomation(
   tx: AutomationTransaction,
   agentId: string,
 ): Promise<void> {
@@ -28,16 +29,27 @@ export async function lockAgentAutomation(
   );
 }
 
-/** Holds the per-agent lock until the callback and its transaction both finish. */
-export function withAgentAutomationLock<T>(
+/**
+ * Waits for shared pool admission before opening the transaction, then holds the per-agent
+ * PostgreSQL lock until the callback and transaction both finish. The process-local permit
+ * keeps lock waiters out of the connection pool; PostgreSQL remains the cross-process ordering
+ * authority.
+ */
+export async function withAgentAutomationLock<T>(
   db: Db,
   agentId: string,
   effect: (tx: AutomationTransaction) => Promise<T>,
 ): Promise<T> {
-  return db.transaction(async (tx) => {
-    await lockAgentAutomation(tx, agentId);
-    return effect(tx);
-  });
+  const acquired = await takeTurnSlotWaiting();
+  if (!acquired) throw new Error('Automation lock admission unexpectedly timed out');
+  try {
+    return await db.transaction(async (tx) => {
+      await lockAgentAutomation(tx, agentId);
+      return effect(tx);
+    });
+  } finally {
+    releaseTurnSlot();
+  }
 }
 
 export type AutomationEffectResult<T> =

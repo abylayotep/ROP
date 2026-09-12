@@ -584,10 +584,10 @@ export interface AiTestContact {
 export interface AiSettings {
   /** The agent answers customers only when this is on. A new agent starts off. */
   aiEnabled: boolean;
-  /** Explicit automation scope. Omitted by older API producers during the staged rollout. */
-  responseMode?: AgentResponseMode;
+  /** Explicit automation scope. */
+  responseMode: AgentResponseMode;
   /** Contact selected for test mode, or null when no contact is selected. */
-  testContact?: AiTestContact | null;
+  testContact: AiTestContact | null;
   /** An OpenRouter model id, one of `AiModel.id`. */
   model: string;
   /**

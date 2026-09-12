@@ -7,6 +7,7 @@
 import type {
   AiModel,
   AiSettings,
+  AiTestContact,
   AiTurn,
   AiUsage,
   AiUsageModel,
@@ -19,6 +20,7 @@ import type { Db } from '../db/client.js';
 import {
   agents,
   aiReplies,
+  contacts,
   conversations,
   kbChunks,
   leadFields,
@@ -54,6 +56,8 @@ export { SANDBOX_TURNS, sandboxTurns };
 const settings = z
   .object({
     aiEnabled: z.boolean().optional(),
+    responseMode: z.enum(['off', 'test', 'live']).optional(),
+    testContactId: z.uuid().nullable().optional(),
     model: z.string().trim().optional(),
     temperature: z.number().min(0).max(2).optional(),
     replyLanguage: z.string().trim().min(1).max(40).optional(),
@@ -113,8 +117,19 @@ const toTotals = (row: UsageRow): AiUsageTotals => ({
 });
 
 /** The key is never part of this. Only whether there is one. */
-const toApi = (row: typeof agents.$inferSelect): AiSettings => ({
+const toContact = (row: typeof contacts.$inferSelect): AiTestContact => ({
+  id: row.id,
+  name: row.name,
+  phone: row.phone,
+});
+
+const toApi = (
+  row: typeof agents.$inferSelect,
+  testContact: typeof contacts.$inferSelect | undefined,
+): AiSettings => ({
   aiEnabled: row.aiEnabled,
+  responseMode: row.responseMode,
+  testContact: testContact ? toContact(testContact) : null,
   model: row.model,
   temperature: Number(row.temperature),
   replyLanguage: row.replyLanguage,
@@ -134,7 +149,33 @@ export function registerAiRoutes(
   app.get(
     '/api/agents/:agentId/ai',
     { preHandler: [guard, anyMember] },
-    async (req): Promise<AiSettings> => toApi(req.agent!),
+    async (req): Promise<AiSettings> => {
+      const [selected] = req.agent!.testContactId
+        ? await db
+            .select()
+            .from(contacts)
+            .where(
+              and(
+                eq(contacts.id, req.agent!.testContactId),
+                eq(contacts.agentId, req.agent!.id),
+              ),
+            )
+        : [];
+      return toApi(req.agent!, selected);
+    },
+  );
+
+  app.get(
+    '/api/agents/:agentId/ai/test-contacts',
+    { preHandler: [guard, ownerOnly] },
+    async (req): Promise<AiTestContact[]> => {
+      const rows = await db
+        .select()
+        .from(contacts)
+        .where(eq(contacts.agentId, req.agent!.id))
+        .orderBy(asc(contacts.name), asc(contacts.phone));
+      return rows.map(toContact);
+    },
   );
 
   app.patch(
@@ -146,7 +187,15 @@ export function registerAiRoutes(
     async (req): Promise<AiSettings> => {
       const parsed = settings.safeParse(req.body);
       if (!parsed.success) throw new ApiError(400, 'Не удалось разобрать настройки агента');
-      const { aiEnabled, model, temperature, replyLanguage, openrouterKey } = parsed.data;
+      const {
+        aiEnabled,
+        responseMode,
+        testContactId,
+        model,
+        temperature,
+        replyLanguage,
+        openrouterKey,
+      } = parsed.data;
 
       // A list, not free text: an id OpenRouter does not know would be learned about from a
       // customer's silence.
@@ -156,6 +205,15 @@ export function registerAiRoutes(
 
       const changes: Partial<typeof agents.$inferInsert> = {};
       if (aiEnabled !== undefined) changes.aiEnabled = aiEnabled;
+      if (responseMode !== undefined) {
+        changes.responseMode = responseMode;
+        // Kept in sync while the legacy boolean remains in the turn pipeline. The explicit
+        // mode is the owner-facing source of truth; this compatibility write prevents a new
+        // agent (whose old boolean defaults false) from staying silent after selecting test
+        // or live mode.
+        changes.aiEnabled = responseMode !== 'off';
+      }
+      if (testContactId !== undefined) changes.testContactId = testContactId;
       if (model !== undefined) changes.model = model;
       // The column is numeric(3,2) and hands back a string; two decimals is all it keeps.
       if (temperature !== undefined) changes.temperature = temperature.toFixed(2);
@@ -175,7 +233,7 @@ export function registerAiRoutes(
       // opposite of what they wanted.
       const keyAfter =
         openrouterKey !== undefined ? changes.openrouterKey : req.agent!.openrouterKey;
-      const enabledAfter = aiEnabled ?? req.agent!.aiEnabled;
+      const enabledAfter = changes.aiEnabled ?? req.agent!.aiEnabled;
       if (enabledAfter && !keyAfter) {
         throw new ApiError(
           400,
@@ -194,16 +252,39 @@ export function registerAiRoutes(
       // would say. Bumped inside the same transaction as the write it describes, so a
       // version can never land ahead of — or behind — the row it is meant to describe.
       const bumps = temperature !== undefined || replyLanguage !== undefined;
-      const row = await db.transaction(async (tx) => {
+      const result = await db.transaction(async (tx) => {
+        const effectiveMode = responseMode ?? req.agent!.responseMode;
+        const effectiveContactId =
+          testContactId !== undefined ? testContactId : req.agent!.testContactId;
+        const [selected] = effectiveContactId
+          ? await tx
+              .select()
+              .from(contacts)
+              .where(
+                and(
+                  eq(contacts.id, effectiveContactId),
+                  eq(contacts.agentId, req.agent!.id),
+                ),
+              )
+              .for('share')
+          : [];
+
+        if (testContactId !== undefined && effectiveContactId && !selected) {
+          throw new ApiError(400, 'Выберите клиента этого агента');
+        }
+        if (effectiveMode === 'test' && !selected) {
+          throw new ApiError(400, 'Выберите клиента для тестового режима');
+        }
+
         const [updated] = await tx
           .update(agents)
           .set(changes)
           .where(eq(agents.id, req.agent!.id))
           .returning();
         if (bumps) await bumpConfigVersion(tx as unknown as Db, req.agent!.id);
-        return updated!;
+        return { updated: updated!, selected };
       });
-      return toApi(row);
+      return toApi(result.updated, result.selected);
     },
   );
 

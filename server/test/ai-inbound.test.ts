@@ -568,6 +568,8 @@ describe('the settings routes', () => {
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({
       aiEnabled: true,
+      responseMode: 'live',
+      testContact: null,
       model: 'openai/gpt-4o-mini',
       temperature: 0.3,
       replyLanguage: 'auto',

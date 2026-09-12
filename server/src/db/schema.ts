@@ -54,7 +54,7 @@ import type {
   GenerationStoredCounts,
   GenerationStoredSource,
 } from '../lib/knowledge/generation-types.js';
-import type { KbGenerationSelection, KbGenerationWarning } from '@rakurs/contract';
+import type { AiTurnField, KbGenerationSelection, KbGenerationWarning } from '@rakurs/contract';
 
 export type AgentResponseMode = 'off' | 'test' | 'live';
 
@@ -174,7 +174,79 @@ export const agents = pgTable(
   },
   (t) => [
     index('agents_account_id_idx').on(t.accountId),
+    unique('agents_account_id_id_key').on(t.accountId, t.id),
     check('agents_response_mode_check', sql`${t.responseMode} in ('off', 'test', 'live')`),
+  ],
+);
+
+/** A browser-only conversation whose state never enters the production CRM. */
+export const aiSandboxSessions = pgTable(
+  'ai_sandbox_sessions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    accountId: uuid('account_id').notNull(),
+    agentId: uuid('agent_id').notNull(),
+    title: text('title').notNull().default(''),
+    phone: text('phone'),
+    revision: integer('revision').notNull().default(0),
+    // Deliberately not foreign keys: proposed state remains inspectable if a production funnel
+    // item is later removed, and no sandbox operation may mutate that production row.
+    stageId: uuid('stage_id'),
+    stageName: text('stage_name'),
+    fields: jsonb('fields').$type<AiTurnField[]>().notNull().default([]),
+    outcome: text('outcome'),
+    handoff: text('handoff'),
+    archivedAt: timestamp('archived_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    foreignKey({
+      columns: [t.accountId, t.agentId],
+      foreignColumns: [agents.accountId, agents.id],
+      name: 'ai_sandbox_sessions_account_agent_fk',
+    }).onDelete('cascade'),
+    unique('ai_sandbox_sessions_scope_id_key').on(t.accountId, t.agentId, t.id),
+    index('ai_sandbox_sessions_agent_updated_idx').on(t.agentId, t.updatedAt),
+    check('ai_sandbox_sessions_revision_check', sql`${t.revision} >= 0`),
+  ],
+);
+
+/** One ordered user/assistant exchange and its validated, unapplied effects. */
+export const aiSandboxTurns = pgTable(
+  'ai_sandbox_turns',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    accountId: uuid('account_id').notNull(),
+    agentId: uuid('agent_id').notNull(),
+    sessionId: uuid('session_id').notNull(),
+    revision: integer('revision').notNull(),
+    userText: text('user_text').notNull(),
+    reply: text('reply'),
+    configVersion: integer('config_version').notNull(),
+    model: text('model').notNull(),
+    sourceIds: jsonb('source_ids').$type<string[]>().notNull().default([]),
+    stageId: uuid('stage_id'),
+    stageName: text('stage_name'),
+    fields: jsonb('fields').$type<AiTurnField[]>().notNull().default([]),
+    handoff: text('handoff'),
+    outcome: text('outcome').notNull(),
+    detail: text('detail'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    foreignKey({
+      columns: [t.accountId, t.agentId, t.sessionId],
+      foreignColumns: [
+        aiSandboxSessions.accountId,
+        aiSandboxSessions.agentId,
+        aiSandboxSessions.id,
+      ],
+      name: 'ai_sandbox_turns_session_scope_fk',
+    }).onDelete('cascade'),
+    unique('ai_sandbox_turns_session_revision_key').on(t.sessionId, t.revision),
+    index('ai_sandbox_turns_session_revision_idx').on(t.sessionId, t.revision),
+    check('ai_sandbox_turns_revision_check', sql`${t.revision} > 0`),
   ],
 );
 

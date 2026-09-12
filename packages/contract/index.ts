@@ -717,6 +717,48 @@ export interface AiTurn {
   detail: string | null;
 }
 
+/** The optimistic write token accepted by the multi-turn simulator. */
+export type AiSandboxTurnRequest = { text: string; revision: number };
+
+/** Optional presentation details for a new browser-only conversation. */
+export type AiSandboxCreateRequest = { title?: string; phone?: string };
+
+/** One persisted exchange and the production effects it only proposed. */
+export interface AiSandboxTurn extends AiTurn {
+  id: string;
+  /** The session revision after this exchange was committed. */
+  revision: number;
+  userText: string;
+  configVersion: number;
+  model: string;
+  /** Stable knowledge identifiers retained even if their display records later change. */
+  sourceIds: string[];
+  /** The proposed stage identifier; it never grants permission to update that stage. */
+  stageId: string | null;
+  createdAt: string;
+}
+
+/** Browser-only state carried into the next simulated exchange. */
+export interface AiSandboxSessionSummary {
+  id: string;
+  title: string;
+  phone: string | null;
+  revision: number;
+  stageId: string | null;
+  stageName: string | null;
+  fields: AiTurnField[];
+  outcome: string | null;
+  handoff: string | null;
+  archivedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** A simulator session with its exchanges in ascending revision order. */
+export interface AiSandboxSessionDetail extends AiSandboxSessionSummary {
+  turns: AiSandboxTurn[];
+}
+
 /* ── Расход агента ──────────────────────────────────────────────────────────
  * Что стоили ответы агента за период — чтобы выбор модели можно было сравнить
  * с ценой, а не только с ощущением. Строится по журналу ответов. */

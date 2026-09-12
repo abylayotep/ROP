@@ -232,6 +232,13 @@
       "when": 1789222544711,
       "tag": "0032_tan_ken_ellis",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1789222596232,
+      "tag": "0033_tricky_loa",
+      "breakpoints": true
     }
   ]
 }

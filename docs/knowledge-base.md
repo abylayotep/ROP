@@ -354,3 +354,9 @@ Instagram можно в настройках Meta, и это сработает 
 | В поиске пусто, хотя заметка есть | Проверьте слова: агент найдёт ровно то же, что и вы. Попробуйте короче и словами клиента. |
 | В списке ровно 100 заметок | Это предел списка, а не вся база. Остальное ищется поиском. |
 | На графе показаны не все заметки | Кабинет рисует не больше 500 — об этом он пишет прямо над графом. |
+
+## Reviewed WhatsApp history
+
+Owners can generate proposals from selected stored conversations and dates, review their source messages, and publish selected knowledge through the existing draft test/apply workflow. Members can read the results. Generation never publishes automatically and does not recover history the provider has not supplied.
+
+See [the workflow and release evidence](whatsapp-knowledge-verification.md) for limits, privacy caveats, validation results, and deployment requirements; see [Meta setup verification](meta-setup-verification.md) for provider-specific checks.

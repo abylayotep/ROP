@@ -53,11 +53,9 @@ function raw(over: Partial<RawLinkedMessage> = {}): RawLinkedMessage {
 }
 
 beforeEach(async () => {
+  forgetLids();
   db = await withDb();
   errors = [];
-  // The LID directory lives for the life of the process, so one case's customer would
-  // otherwise still be known in the next.
-  forgetLids();
   const { accountId } = await createAccountWithOwner(db, {
     company: 'Sealhouse',
     email: 'owner@example.com',
@@ -101,7 +99,7 @@ describe('jidToPhone', () => {
     expect(jidToPhone(null)).toBeNull();
   });
 
-  it('refuses a LID, which is an account id and not a number', () => {
+  it('reads a LID without treating it as a phone number', () => {
     expect(jidToPhone(LID)).toBeNull();
     expect(jidToLid(LID)).toBe('47536731594988');
     expect(jidToLid('47536731594988:3@lid')).toBe('47536731594988');
@@ -154,7 +152,7 @@ describe('normalize', () => {
     // dropped every one of them, with nothing in the log to say so.
     const line = normalize(raw({
       key: { id: 'wa.1', remoteJid: LID, fromMe: false, senderPn: JID },
-    }));
+    }), 'number-a');
     expect(line).toMatchObject({ from: '77085807932', fromMe: false });
   });
 
@@ -165,15 +163,25 @@ describe('normalize', () => {
     });
     // `senderPn` on an outgoing line is the owner's own number; filing the thread under it
     // would put the shop in its own contact list.
-    expect(normalize(own)).toBeNull();
+    expect(normalize(own, 'number-a')).toBeNull();
 
-    normalize(raw({ key: { id: 'wa.1', remoteJid: LID, fromMe: false, senderPn: JID } }));
-    expect(normalize(own)).toMatchObject({ from: '77085807932', fromMe: true });
+    normalize(raw({ key: { id: 'wa.1', remoteJid: LID, fromMe: false, senderPn: JID } }), 'number-a');
+    expect(normalize(own, 'number-a')).toMatchObject({ from: '77085807932', fromMe: true });
   });
 
   it('reads a timestamp handed over as a Long', () => {
     const line = normalize(raw({ messageTimestamp: { toNumber: () => 1_789_000_000 } }));
     expect(line!.sentAt.toISOString()).toBe(new Date(1_789_000_000_000).toISOString());
+  });
+
+  it('resolves an outgoing LID only after that number learned its customer', () => {
+    const inbound = raw({ key: { id: 'wa.lid.in', remoteJid: LID, fromMe: false, senderPn: JID } });
+    const outbound = raw({ key: { id: 'wa.lid.out', remoteJid: LID, fromMe: true } });
+
+    expect(normalize(outbound, 'number-a')).toBeNull();
+    expect(normalize(inbound, 'number-a')).toMatchObject({ from: '77085807932' });
+    expect(normalize(outbound, 'number-a')).toMatchObject({ from: '77085807932' });
+    expect(normalize(outbound, 'number-b')).toBeNull();
   });
 });
 
@@ -187,6 +195,27 @@ describe('linked inbound', () => {
     expect(stored).toMatchObject({ direction: 'in', author: 'client', kind: 'text' });
     const [contact] = await db.select().from(contacts);
     expect(contact).toMatchObject({ phone: '77085807932', name: 'Айгерим' });
+  });
+
+  it('stores a live message from a LID-addressed chat', async () => {
+    const client = fakeLinked();
+
+    await applyMessage(db, deps, client, numberId, raw({
+      key: { id: 'wa.lid', remoteJid: LID, fromMe: false, senderPn: JID },
+    }));
+
+    expect((await db.select().from(messages))[0]).toMatchObject({ direction: 'in', author: 'client' });
+    expect((await db.select().from(contacts))[0]).toMatchObject({ phone: '77085807932' });
+    expect(errors).toEqual([]);
+  });
+
+  it('reports an unresolved live LID message', async () => {
+    await applyMessage(db, deps, fakeLinked(), numberId, raw({
+      key: { id: 'wa.unknown', remoteJid: LID, fromMe: true },
+    }));
+
+    expect(await db.select().from(messages)).toHaveLength(0);
+    expect(errors.join(' ')).toContain('the contact phone number is unknown');
   });
 
   it('mirrors what the owner sent from the phone as an outgoing line', async () => {
@@ -268,7 +297,7 @@ describe('linked inbound', () => {
     }));
 
     expect(await db.select().from(messages)).toHaveLength(0);
-    expect(errors.join(' ')).toContain('номер собеседника неизвестен');
+    expect(errors.join(' ')).toContain('the contact phone number is unknown');
   });
 
   it('ignores a group message entirely', async () => {
@@ -354,5 +383,16 @@ describe('linked inbound', () => {
 
     await expect(applyMessage(db, deps, client, numberId, raw())).resolves.toBeUndefined();
     expect(await db.select().from(messages)).toHaveLength(0);
+  });
+
+  it('does not learn a LID mapping after its linked number was deleted', async () => {
+    const client = fakeLinked();
+    await db.delete(whatsappNumbers).where(eq(whatsappNumbers.id, numberId));
+
+    await applyMessage(db, deps, client, numberId, raw({
+      key: { id: 'wa.deleted', remoteJid: LID, fromMe: false, senderPn: JID },
+    }));
+
+    expect(normalize(raw({ key: { id: 'wa.out', remoteJid: LID, fromMe: true } }), numberId)).toBeNull();
   });
 });

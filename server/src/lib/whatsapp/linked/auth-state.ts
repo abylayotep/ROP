@@ -1,4 +1,9 @@
-import { BufferJSON, initAuthCreds, type AuthenticationCreds } from '@whiskeysockets/baileys';
+import {
+  BufferJSON,
+  initAuthCreds,
+  proto,
+  type AuthenticationCreds,
+} from '@whiskeysockets/baileys';
 import { and, eq, inArray } from 'drizzle-orm';
 import type { Db } from '../../../db/client.js';
 import { linkedSessionKeys } from '../../../db/schema.js';
@@ -131,7 +136,10 @@ export async function linkedAuthState(
 
           const found: Record<string, unknown> = {};
           for (const row of rows) {
-            const value = readValue(row.value, type, row.keyId);
+            let value = readValue(row.value, type, row.keyId);
+            if (type === 'app-state-sync-key' && value) {
+              value = proto.Message.AppStateSyncKeyData.fromObject(value);
+            }
             if (value !== undefined) found[row.keyId] = value;
           }
           return found;

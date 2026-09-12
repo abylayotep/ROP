@@ -8,12 +8,13 @@ import {
 } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import * as api from '@/api';
+import { HistoryImportPanel } from '@/components/knowledge/HistoryImportPanel';
 import { AiSwitch } from '@/components/lead/AiSwitch';
 import { LeadPanel } from '@/components/lead/LeadPanel';
 import { Card } from '@/components/ui/primitives';
 import { Async, EmptyState, Skeleton } from '@/components/ui/states';
 import { useToast } from '@/components/ui/Toast';
-import { useApi } from '@/hooks/useApi';
+import { usePollingApi } from '@/hooks/usePollingApi';
 import { useAgent } from '@/store/agent';
 import type { ConversationSummary, ConversationThread, Message, Role } from '@/types';
 
@@ -59,14 +60,15 @@ export function coachLink(conversationId: string, aiReplyId?: string | null): st
 }
 
 export function DialogsScreen() {
-  const { agent } = useAgent();
+  const { agent, role } = useAgent();
   // The selected conversation lives in the URL, so a card on the board opens its thread.
   const [params, setParams] = useSearchParams();
   const selected = params.get('conversation');
+  const targetMessageId = params.get('message');
   const select = (conversationId: string) =>
     setParams({ conversation: conversationId }, { replace: true });
 
-  const list = useApi<ConversationSummary[]>(
+  const list = usePollingApi<ConversationSummary[]>(
     (signal) => api.listConversations(agent.id, signal),
     [agent.id],
   );
@@ -77,8 +79,20 @@ export function DialogsScreen() {
   const [aiNonce, setAiNonce] = useState(0);
 
   return (
-    <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
-      <div style={{ width: 320, flex: '0 0 320px' }}>
+    <>
+      <div style={{ marginBottom: 16 }}>
+        <HistoryImportPanel agentId={agent.id} readOnly={role !== 'owner'} />
+      </div>
+      <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+      <div style={{ width: 320, maxWidth: '100%', flex: '1 1 280px', minWidth: 0 }}>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
+          <button type="button" className="btn-sm" onClick={list.reload} disabled={list.refreshing}>
+            {list.refreshing && list.data !== undefined ? 'Обновляем…' : 'Обновить список'}
+          </button>
+        </div>
+        {list.error !== undefined && list.data !== undefined && <div role="alert" style={{ color: 'var(--danger)', fontSize: 12, marginBottom: 8 }}>
+          Не удалось обновить список: {api.humanError(list.error)}
+        </div>}
         <Async state={list} skeleton={<Skeleton height={220} />}>
           {(conversations) =>
             conversations.length === 0 ? (
@@ -138,14 +152,14 @@ export function DialogsScreen() {
         </Async>
       </div>
 
-      <div style={{ flex: 1, minWidth: 0 }}>
+      <div style={{ flex: '999 1 420px', minWidth: 0, maxWidth: '100%' }}>
         {selected === null ? (
           <Card>
             <EmptyState>Выберите переписку слева.</EmptyState>
           </Card>
         ) : (
-          <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
-            <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+            <div style={{ flex: '999 1 360px', minWidth: 0, maxWidth: '100%' }}>
               {/* `key={selected}` forces a remount on every conversation switch: a new
                   conversation is a new subject, and neither the loaded thread nor the
                   composer's draft belongs to the previous one. Without it `Thread` would
@@ -153,14 +167,15 @@ export function DialogsScreen() {
                   text left in the composer would still be sitting there, ready to be sent
                   to the wrong person. */}
               <Thread
-                key={selected}
+                key={`${selected}:${targetMessageId ?? ''}`}
                 agentId={agent.id}
                 conversationId={selected}
+                targetMessageId={targetMessageId}
                 onSent={list.reload}
                 onAiChanged={() => setAiNonce((n) => n + 1)}
               />
             </div>
-            <div style={{ width: 300, flex: '0 0 300px' }}>
+            <div style={{ width: 300, maxWidth: '100%', flex: '1 1 280px', minWidth: 0 }}>
               {/* The same key for the same reason: another client's card must not flash
                   on screen under the wrong name. */}
               <LeadPanel
@@ -173,18 +188,21 @@ export function DialogsScreen() {
           </div>
         )}
       </div>
-    </div>
+      </div>
+    </>
   );
 }
 
 function Thread({
   agentId,
   conversationId,
+  targetMessageId,
   onSent,
   onAiChanged,
 }: {
   agentId: string;
   conversationId: string;
+  targetMessageId: string | null;
   onSent: () => void;
   onAiChanged: () => void;
 }) {
@@ -195,16 +213,32 @@ function Thread({
   // loaded. Null means nobody has touched it and the loaded thread still speaks for it.
   const [ai, setAi] = useState<boolean | null>(null);
   const bottom = useRef<HTMLDivElement>(null);
+  const messageList = useRef<HTMLDivElement>(null);
+  const stickToBottom = useRef(true);
+  const initialScrollDone = useRef(false);
+  const scrolledTarget = useRef<string | null>(null);
 
-  const thread = useApi<ConversationThread>(
+  const thread = usePollingApi<ConversationThread>(
     (signal) => api.getConversation(agentId, conversationId, signal),
     [agentId, conversationId],
   );
 
-  // A conversation is read from the bottom: the newest message is the one being answered.
+  // A source link names an exact stored message; ordinary opens start at the end. Background
+  // refreshes only follow new messages when the operator was already near the bottom.
   useEffect(() => {
-    bottom.current?.scrollIntoView();
-  }, [thread.data]);
+    const target = targetMessageId && scrolledTarget.current !== targetMessageId
+      ? document.getElementById(`message-${targetMessageId}`)
+      : null;
+    if (target) {
+      target.scrollIntoView({ block: 'center' });
+      target.focus({ preventScroll: true });
+      scrolledTarget.current = targetMessageId;
+      initialScrollDone.current = true;
+    } else if (!initialScrollDone.current || stickToBottom.current) {
+      bottom.current?.scrollIntoView();
+      initialScrollDone.current = true;
+    }
+  }, [thread.data, targetMessageId]);
 
   async function attach(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
@@ -275,6 +309,13 @@ function Thread({
           </div>
 
           <div
+            ref={messageList}
+            onScroll={() => {
+              const element = messageList.current;
+              if (!element) return;
+              stickToBottom.current =
+                element.scrollHeight - element.scrollTop - element.clientHeight < 48;
+            }}
             style={{
               display: 'flex',
               flexDirection: 'column',
@@ -296,13 +337,14 @@ function Thread({
           </div>
 
           {data.windowOpen ? (
-            <form onSubmit={submit} style={{ display: 'flex', gap: 8 }}>
+            <form onSubmit={submit} style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
               <input
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
                 placeholder="Ответить"
                 style={{
                   flex: 1,
+                  minWidth: 140,
                   padding: '10px 12px',
                   background: 'var(--sunken)',
                   color: 'var(--text)',
@@ -381,7 +423,7 @@ function Bubble({
   }
 
   return (
-    <div style={bubble(mine)}>
+    <div id={`message-${message.id}`} tabIndex={-1} style={bubble(mine)}>
       {/* A file from imported history is downloaded by the server on this very request, so
           the first open of an old photo takes a moment longer than the rest. */}
       {message.hasMedia && message.mediaMime?.startsWith('image/') && (

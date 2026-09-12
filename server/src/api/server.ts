@@ -19,6 +19,7 @@ import { registerCoachRoutes } from './coach.js';
 import { registerConversationRoutes } from './conversations.js';
 import { registerDraftRoutes } from './drafts.js';
 import { registerKnowledgeRoutes } from './knowledge.js';
+import { registerKnowledgeGenerationRoutes } from './knowledge-generation.js';
 import { registerLeadRoutes } from './leads.js';
 import { registerOrderRoutes } from './orders.js';
 import { requireSession } from './require-session.js';
@@ -32,6 +33,7 @@ import { registerWhatsappWebhook } from './whatsapp-webhook.js';
 import { createLinkedClient, type LinkedRegistry } from '../lib/whatsapp/linked/client.js';
 import { createLinkedSocket } from '../lib/whatsapp/linked/socket.js';
 import { registerWhatsappLinkedRoutes } from './whatsapp-linked.js';
+import { registerWhatsappHistoryRoutes } from './whatsapp-history.js';
 import multipart from '@fastify/multipart';
 
 export interface ServerDeps {
@@ -49,6 +51,8 @@ export interface ServerDeps {
   linked?: LinkedRegistry;
   /** How long a pairing may go unscanned. Shortened by tests, five minutes otherwise. */
   pairingTimeoutMs?: number;
+  historyTimeoutMs?: number;
+  historyPaceMs?: number;
 }
 
 /**
@@ -120,6 +124,10 @@ export function buildServer(env: Env, db: Db, deps: ServerDeps = {}): FastifyIns
     registerWhatsappNumberRoutes(app, db, env, guard, graph);
     registerWhatsappCoexistenceRoutes(app, db, env, guard, graph);
     registerWhatsappLinkedRoutes(app, db, env, guard, linked, { timeoutMs: deps.pairingTimeoutMs });
+    registerWhatsappHistoryRoutes(app, db, guard, linked, {
+      timeoutMs: deps.historyTimeoutMs,
+      paceMs: deps.historyPaceMs,
+    });
     registerConversationRoutes(app, db, env, guard, graph, linked);
     registerStageRoutes(app, db, guard);
     registerLeadRoutes(app, db, env, guard, graph);
@@ -127,6 +135,7 @@ export function buildServer(env: Env, db: Db, deps: ServerDeps = {}): FastifyIns
     registerBoardRoutes(app, db, guard);
     registerStatsRoutes(app, db, guard);
     registerKnowledgeRoutes(app, db, env, guard, { pageFetcher, graph, instagram });
+    registerKnowledgeGenerationRoutes(app, db, env, guard, { model });
     registerRuleRoutes(app, db, guard);
     registerAiRoutes(app, db, env, guard, { model, graph, linked });
     // The coach writes only `coach_messages` — see the file's own comment for why a

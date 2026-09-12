@@ -55,6 +55,26 @@ function loadSdk(appId: string): Promise<FacebookSdk> {
   return loading;
 }
 
+function loadSdkForLogin(appId: string, signal?: AbortSignal): Promise<FacebookSdk> {
+  if (!signal) return loadSdk(appId);
+  if (signal.aborted) return Promise.reject(new Error('Вход отменён. Закройте окно Meta.'));
+
+  return new Promise<FacebookSdk>((resolve, reject) => {
+    const cancel = () => reject(new Error('Вход отменён. Закройте окно Meta.'));
+    signal.addEventListener('abort', cancel, { once: true });
+    loadSdk(appId).then(
+      (fb) => {
+        signal.removeEventListener('abort', cancel);
+        resolve(fb);
+      },
+      (error) => {
+        signal.removeEventListener('abort', cancel);
+        reject(error);
+      },
+    );
+  });
+}
+
 /**
  * Runs Meta's Embedded Signup for a number that lives in the WhatsApp Business app.
  *
@@ -177,17 +197,30 @@ const INSTAGRAM_SCOPE = 'instagram_basic,pages_show_list,pages_read_engagement';
  * removes the application in Meta has actually removed our access, with nothing of theirs
  * left behind here.
  */
-export function runInstagramLogin(setup: InstagramSetup): Promise<string> {
-  return loadSdk(setup.appId).then(
+export function runInstagramLogin(setup: InstagramSetup, signal?: AbortSignal): Promise<string> {
+  return loadSdkForLogin(setup.appId, signal).then(
     (fb) =>
       new Promise<string>((resolve, reject) => {
+        let settled = false;
+        const finish = (code?: string, message = 'Вход через Meta не завершён') => {
+          if (settled) return;
+          settled = true;
+          window.clearTimeout(timer);
+          signal?.removeEventListener('abort', cancel);
+          if (code) resolve(code);
+          else reject(new Error(message));
+        };
+        const cancel = () => finish(undefined, 'Вход отменён. Закройте окно Meta.');
+        const timer = window.setTimeout(
+          () => finish(undefined, 'Meta не ответила. Закройте окно входа и проверьте настройки приложения Meta.'),
+          2 * 60 * 1000,
+        );
+        signal?.addEventListener('abort', cancel, { once: true });
+        if (signal?.aborted) { cancel(); return; }
+        try {
         fb.login(
           (response) => {
-            if (response.authResponse?.code) {
-              resolve(response.authResponse.code);
-              return;
-            }
-            reject(new Error('Вход через Meta не завершён'));
+            finish(response.authResponse?.code);
           },
           {
             scope: INSTAGRAM_SCOPE,
@@ -195,6 +228,9 @@ export function runInstagramLogin(setup: InstagramSetup): Promise<string> {
             override_default_response_type: true,
           },
         );
+        } catch (error) {
+          finish(undefined, error instanceof Error ? error.message : 'Не удалось открыть Meta');
+        }
       }),
   );
 }

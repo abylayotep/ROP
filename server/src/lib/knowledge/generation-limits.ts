@@ -1,0 +1,14 @@
+export const GENERATION_LIMITS = {
+  maxConversations: 200,
+  maxEligibleMessages: 5_000,
+  maxInputCharacters: 200_000,
+  maxBatches: 20,
+  maxBatchCharacters: 10_000,
+  maxBatchMessages: 100,
+  maxProposalsPerBatch: 20,
+  previewTtlMs: 15 * 60 * 1_000,
+  slotAcquisitionTimeoutMs: 60 * 1_000,
+  maxOutputTokens: 2_000,
+  maxBatchAttempts: 2,
+  maxDraftProposals: 20,
+} as const;

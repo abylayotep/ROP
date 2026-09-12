@@ -8,7 +8,8 @@ import {
   upsertConversation,
 } from '../store.js';
 import type { LinkedClient, LinkedEvent, RawLinkedHistory } from './client.js';
-import { jidToPhone, mimeOf, normalize } from './normalize.js';
+import { phoneForLid } from './lid-directory.js';
+import { jidToLid, jidToPhone, learnLid, mimeOf, normalize } from './normalize.js';
 
 /**
  * The chats already on the phone, brought in after pairing.
@@ -33,7 +34,7 @@ export interface LinkedHistoryDeps {
    * is watching, and when the phone sends nothing at all the result looks exactly like a
    * bug in this file. A line per chunk is what tells the two apart.
    */
-  onImported?: (report: { messages: number; contacts: number; progress: number | null }) => void;
+  onImported?: (report: { messages: number; contacts: number; progress: number | null; skippedUnresolved: number }) => void;
 }
 
 export function registerLinkedHistory(
@@ -43,14 +44,18 @@ export function registerLinkedHistory(
 ): void {
   client.on((event: LinkedEvent) => {
     if (event.type !== 'history') return;
-    void applyHistoryChunk(db, event.numberId, event.chunk)
-      .then(() =>
+    void applyHistoryChunkWithReport(db, event.numberId, event.chunk)
+      .then(({ skippedUnresolved }) => {
+        if (skippedUnresolved > 0) {
+          deps.onError?.(`${skippedUnresolved} history messages were not stored: the contact phone number is unknown`);
+        }
         deps.onImported?.({
           messages: event.chunk.messages?.length ?? 0,
           contacts: event.chunk.contacts?.length ?? 0,
           progress: event.chunk.progress ?? null,
-        }),
-      )
+          skippedUnresolved,
+        });
+      })
       .catch((error: unknown) => {
         deps.onError?.(error instanceof Error ? error.message : String(error));
       });
@@ -62,11 +67,19 @@ export async function applyHistoryChunk(
   numberId: string,
   chunk: RawLinkedHistory,
 ): Promise<void> {
+  await applyHistoryChunkWithReport(db, numberId, chunk);
+}
+
+async function applyHistoryChunkWithReport(
+  db: Db,
+  numberId: string,
+  chunk: RawLinkedHistory,
+): Promise<{ skippedUnresolved: number }> {
   const [number] = await db
     .select()
     .from(whatsappNumbers)
     .where(eq(whatsappNumbers.id, numberId));
-  if (!number) return;
+  if (!number) return { skippedUnresolved: 0 };
 
   for (const entry of chunk.contacts ?? []) {
     const phone = jidToPhone(entry.id);
@@ -85,9 +98,22 @@ export async function applyHistoryChunk(
       });
   }
 
-  for (const raw of chunk.messages ?? []) {
-    const line = normalize(raw);
-    if (!line) continue;
+  const rawMessages = chunk.messages ?? [];
+  // Chunks are not guaranteed chronological: learn every inbound mapping before an older
+  // owner reply tries to resolve the same LID.
+  for (const raw of rawMessages) learnLid(number.id, raw);
+
+  let skippedUnresolved = 0;
+  for (const raw of rawMessages) {
+    const line = normalize(raw, number.id);
+    if (!line) {
+      const lid = raw.message ? jidToLid(raw.key?.remoteJid) : null;
+      const unresolved = lid && (raw.key?.fromMe === true
+        ? phoneForLid(number.id, lid) === null
+        : jidToPhone(raw.key?.senderPn) === null);
+      if (unresolved) skippedUnresolved += 1;
+      continue;
+    }
 
     const contactId = await upsertContact(
       db,
@@ -111,7 +137,9 @@ export async function applyHistoryChunk(
       pending: line.hasMedia ? { ref: { key: raw.key, message: raw.message }, mime: mimeOf(raw) } : null,
     });
 
-    await advanceConversation(db, conversationId, line.sentAt, !line.fromMe);
+    // History affects ordering only. An old inbound message must not reopen the live reply
+    // window; the next real delivery advances `lastInboundAt` through the live pipeline.
+    await advanceConversation(db, conversationId, line.sentAt, false);
   }
 
   if (typeof chunk.progress === 'number') {
@@ -124,4 +152,5 @@ export async function applyHistoryChunk(
       })
       .where(eq(whatsappNumbers.id, numberId));
   }
+  return { skippedUnresolved };
 }

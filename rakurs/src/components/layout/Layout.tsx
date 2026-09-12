@@ -3,14 +3,13 @@ import { Header } from './Header';
 import { Sidebar } from './Sidebar';
 
 /**
- * Fixed sidebar and a content area from 1150px. Desktop from 1440px by design: a phone
- * layout has to be drawn on its own, not squeezed out of these screens.
+ * The shell shrinks with the viewport; individual screens own their content layout.
  */
 export function Layout() {
   return (
-    <div style={{ display: 'flex', minHeight: '100vh', background: 'var(--page)' }}>
+    <div className="app-layout" style={{ display: 'flex', minHeight: '100vh', background: 'var(--page)' }}>
       <Sidebar />
-      <main style={{ flex: 1, minWidth: 1150, display: 'flex', flexDirection: 'column' }}>
+      <main style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
         <Header />
         <section
           style={{

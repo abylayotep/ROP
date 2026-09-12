@@ -19,6 +19,16 @@ import type {
   InstagramSetup,
   KbGraph,
   KbImport,
+  KbGenerationDraftRequest,
+  KbGenerationDraftResponse,
+  KbGenerationPreview,
+  KbGenerationPreviewRequest,
+  KbGenerationProposal,
+  KbGenerationProposalUpdateRequest,
+  KbGenerationRun,
+  KbGenerationRunDetail,
+  KbGenerationRunPage,
+  KbGenerationStartRequest,
   KbNote,
   KbNoteDetail,
   KbDraft,
@@ -43,6 +53,7 @@ import type {
   WhatsappNumber,
 } from '@/types';
 import { API_URL, LONG_TIMEOUT_MS, request } from './client';
+import type { WhatsappHistoryRun, WhatsappHistoryOverview } from '@rakurs/contract';
 
 export { API_URL, ApiError, humanError, request } from './client';
 
@@ -79,6 +90,14 @@ export const updateAgent = (
 ) => request<Agent>(`/agents/${agentId}`, { method: 'PATCH', body });
 
 // ── WhatsApp ─────────────────────────────────────────────────────────────────
+
+export const getWhatsappHistory = (agentId: string, signal?: AbortSignal) =>
+  request<WhatsappHistoryOverview>(`/agents/${agentId}/whatsapp/history`, { signal });
+
+export const startWhatsappHistory = (agentId: string, limit: 100 | 200, signal?: AbortSignal) =>
+  request<WhatsappHistoryRun>(`/agents/${agentId}/whatsapp/history`, {
+    method: 'POST', body: { limit }, signal,
+  });
 
 export const listWhatsappNumbers = (agentId: string, signal?: AbortSignal) =>
   request<WhatsappNumber[]>(`/agents/${agentId}/whatsapp/numbers`, { signal });
@@ -167,6 +186,43 @@ export const sendFile = (
 /** The address of a file inside a message. Access is checked by the session cookie. */
 export const mediaUrl = (agentId: string, messageId: string) =>
   `${API_URL}/agents/${agentId}/messages/${messageId}/media`;
+
+// ── Генерация базы знаний из диалогов ──────────────────────────────────────
+
+const generationPath = (agentId: string) => `/agents/${agentId}/knowledge/generation`;
+
+export const previewKnowledgeGeneration = (
+  agentId: string,
+  body: KbGenerationPreviewRequest,
+  signal?: AbortSignal,
+) => request<KbGenerationPreview>(`${generationPath(agentId)}/preview`, { method: 'POST', body, signal });
+
+export const startKnowledgeGeneration = (agentId: string, body: KbGenerationStartRequest, signal?: AbortSignal) =>
+  request<KbGenerationRun>(`${generationPath(agentId)}/runs`, { method: 'POST', body, signal });
+
+export const listKnowledgeGenerationRuns = (agentId: string, cursor?: string, signal?: AbortSignal) =>
+  request<KbGenerationRunPage>(`${generationPath(agentId)}/runs${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`, { signal });
+
+export const getKnowledgeGenerationRun = (agentId: string, runId: string, signal?: AbortSignal, cursor?: string) =>
+  request<KbGenerationRunDetail>(`${generationPath(agentId)}/runs/${runId}${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`, { signal });
+
+export const cancelKnowledgeGenerationRun = (agentId: string, runId: string) =>
+  request<KbGenerationRun>(`${generationPath(agentId)}/runs/${runId}/cancel`, { method: 'POST' });
+
+export const retryKnowledgeGenerationRun = (agentId: string, runId: string) =>
+  request<KbGenerationRun>(`${generationPath(agentId)}/runs/${runId}/retry`, { method: 'POST' });
+
+export const updateKnowledgeGenerationProposal = (
+  agentId: string,
+  proposalId: string,
+  body: KbGenerationProposalUpdateRequest,
+) => request<KbGenerationProposal>(`${generationPath(agentId)}/proposals/${proposalId}`, { method: 'PATCH', body });
+
+export const createKnowledgeGenerationDraft = (
+  agentId: string,
+  runId: string,
+  body: KbGenerationDraftRequest,
+) => request<KbGenerationDraftResponse>(`${generationPath(agentId)}/runs/${runId}/draft`, { method: 'POST', body });
 
 // ── Воронка ──────────────────────────────────────────────────────────────────
 

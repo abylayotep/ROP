@@ -1,4 +1,5 @@
 import makeWASocket, {
+  Browsers,
   DisconnectReason,
   downloadMediaMessage,
   type WASocket,
@@ -54,8 +55,9 @@ const silent = (): SilentLogger => {
   return logger;
 };
 
-/** What the phone shows in «Связанные устройства». */
-const BROWSER: [string, string, string] = ['Ракурс', 'Chrome', '1.0.0'];
+// Native DARWIN/WIN32 subplatforms are rejected with 428 before authentication.
+// Keep the supported web subplatform even when requesting available full history.
+const BROWSER = Browsers.ubuntu('Chrome');
 
 /** `77085807932:12@s.whatsapp.net` → `+77085807932`. */
 function displayPhoneOf(jid: string): string {
@@ -122,7 +124,9 @@ export function createLinkedSocket(db: Db, key: Buffer): LinkedSessionFactory {
         // everything else — a restart, a timeout, a flat battery — is worth reconnecting.
         const status = (update.lastDisconnect?.error as { output?: { statusCode?: number } })
           ?.output?.statusCode;
-        emit({ type: 'closed', numberId, loggedOut: status === DisconnectReason.loggedOut });
+        emit({ type: 'closed', numberId, loggedOut: status === DisconnectReason.loggedOut,
+          ...(typeof status === 'number' && Number.isFinite(status) ? { statusCode: status } : {}),
+        });
       }
     });
 
@@ -140,6 +144,7 @@ export function createLinkedSocket(db: Db, key: Buffer): LinkedSessionFactory {
         messages: (chunk.messages ?? []) as unknown as RawLinkedMessage[],
         contacts: (chunk.contacts ?? []) as RawLinkedHistory['contacts'],
         progress: chunk.progress ?? null,
+        peerDataRequestSessionId: chunk.peerDataRequestSessionId ?? null,
       };
       emit({ type: 'history', numberId, chunk: history });
     });
@@ -170,6 +175,10 @@ export function createLinkedSocket(db: Db, key: Buffer): LinkedSessionFactory {
           // WhatsApp's servers has expired — which is most of what history holds.
           { logger: logger as never, reuploadRequest: sock.updateMediaMessage },
         )) as Buffer;
+      },
+
+      requestHistory(count, oldestMsgKey, oldestMsgTimestamp) {
+        return sock.fetchMessageHistory(count, oldestMsgKey as never, oldestMsgTimestamp);
       },
 
       async close() {

@@ -80,7 +80,7 @@ export function registerConversationRoutes(
           preview: sql<string | null>`(
             select m.body from messages m
             where m.conversation_id = ${conversations.id}
-            order by m.sent_at desc
+            order by m.sent_at desc, m.id desc
             limit 1
           )`,
         })
@@ -117,7 +117,7 @@ export function registerConversationRoutes(
         .from(messages)
         .leftJoin(aiReplies, eq(aiReplies.messageId, messages.id))
         .where(eq(messages.conversationId, conversation.id))
-        .orderBy(messages.sentAt);
+        .orderBy(messages.sentAt, messages.id);
 
       return {
         id: conversation.id,

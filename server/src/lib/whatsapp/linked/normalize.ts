@@ -49,32 +49,25 @@ export function jidToLid(jid: string | null | undefined): string | null {
   const [user, domain] = jid.split('@');
   if (domain !== 'lid') return null;
   const digits = (user ?? '').split(':')[0]?.replace(/\D/g, '') ?? '';
-  return digits.length > 0 ? digits : null;
+  return digits || null;
 }
 
-/**
- * Whose thread this line belongs to, in digits.
- *
- * WhatsApp addresses a growing share of one-to-one chats by LID rather than by number:
- * `remoteJid` arrives as `<lid>@lid`, and the number the cabinet keys contacts on sits in
- * `senderPn` instead. Reading `remoteJid` alone — which is what this did — drops every one
- * of those messages silently, and that is exactly how it looked in production: the socket
- * decrypting message after message, and not one row in `messages`.
- *
- * An outgoing line carries the owner's own number in `senderPn`, never the customer's, so
- * a LID chat of the owner's own making is answered from the directory the customer's
- * messages fill — and left unanswered when they have filled nothing yet.
- */
-function chatPhone(raw: RawLinkedMessage): string | null {
+/** Learn an inbound mapping without normalizing or storing the message. */
+export function learnLid(numberId: string, raw: RawLinkedMessage): void {
+  if (raw.key?.fromMe === true) return;
+  const lid = jidToLid(raw.key?.remoteJid);
+  const phone = jidToPhone(raw.key?.senderPn);
+  if (lid && phone) rememberLid(numberId, lid, phone);
+}
+
+function chatPhone(numberId: string | undefined, raw: RawLinkedMessage): string | null {
   const direct = jidToPhone(raw.key?.remoteJid);
   if (direct) return direct;
-
   const lid = jidToLid(raw.key?.remoteJid);
-  if (!lid) return null;
-  if (raw.key?.fromMe === true) return phoneForLid(lid);
-
+  if (!lid || !numberId) return null;
+  if (raw.key?.fromMe === true) return phoneForLid(numberId, lid);
   const phone = jidToPhone(raw.key?.senderPn);
-  if (phone) rememberLid(lid, phone);
+  if (phone) rememberLid(numberId, lid, phone);
   return phone;
 }
 
@@ -138,9 +131,9 @@ function contentOf(message: RawLinkedContent): Content {
  * - a LID chat no message has yet named a number for. `inbound.ts` says so in the log:
  *   unlike the others this one is a line we meant to keep.
  */
-export function normalize(raw: RawLinkedMessage): NormalizedLine | null {
+export function normalize(raw: RawLinkedMessage, numberId?: string): NormalizedLine | null {
   const waMessageId = raw.key?.id ?? null;
-  const from = chatPhone(raw);
+  const from = chatPhone(numberId, raw);
   if (!waMessageId || !from) return null;
 
   const message = raw.message;

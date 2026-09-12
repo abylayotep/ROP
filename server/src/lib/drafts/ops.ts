@@ -87,12 +87,17 @@ const ruleName = (text: string): string => clampTitle(text, RULE_NAME_MAX);
  * committed row. The apply route bumps once, after this returns, inside the transaction it
  * keeps.
  */
-export async function applyOps(tx: Db, agentId: string, ops: DraftOp[]): Promise<void> {
-  for (const op of ops) {
+export type NoteApplied = (opIndex: number, noteId: string) => void | Promise<void>;
+
+export async function applyOps(tx: Db, agentId: string, ops: DraftOp[], onNoteApplied?: NoteApplied): Promise<void> {
+  for (let opIndex = 0; opIndex < ops.length; opIndex += 1) {
+    const op = ops[opIndex]!;
     switch (op.op) {
-      case 'note_create':
-        await saveNote(tx, { agentId, path: op.path, body: op.body });
+      case 'note_create': {
+        const note = await saveNote(tx, { agentId, path: op.path, body: op.body });
+        await onNoteApplied?.(opIndex, note.id);
         break;
+      }
 
       case 'note_update': {
         const [current] = await tx
@@ -100,7 +105,8 @@ export async function applyOps(tx: Db, agentId: string, ops: DraftOp[]): Promise
           .from(kbNotes)
           .where(and(eq(kbNotes.id, op.noteId), eq(kbNotes.agentId, agentId)));
         if (!current) throw new MissingDraftRowError('note', op.noteId);
-        await saveNote(tx, { agentId, noteId: op.noteId, path: current.path, body: op.body });
+        const note = await saveNote(tx, { agentId, noteId: op.noteId, path: current.path, body: op.body });
+        await onNoteApplied?.(opIndex, note.id);
         break;
       }
 

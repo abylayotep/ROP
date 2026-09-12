@@ -52,6 +52,8 @@ export interface RawLinkedHistory {
   contacts: { id: string; name?: string | null; notify?: string | null }[];
   /** 0..100 while the phone is still sending, absent when the library does not say. */
   progress?: number | null;
+  /** Correlates an on-demand request with the phone's eventual response. */
+  peerDataRequestSessionId?: string | null;
 }
 
 export interface OutgoingFile {
@@ -65,7 +67,7 @@ export interface OutgoingFile {
 export type LinkedEvent =
   | { type: 'qr'; numberId: string; qr: string }
   | { type: 'open'; numberId: string; jid: string; displayPhone: string }
-  | { type: 'closed'; numberId: string; loggedOut: boolean }
+  | { type: 'closed'; numberId: string; loggedOut: boolean; statusCode?: number }
   | { type: 'message'; numberId: string; message: RawLinkedMessage }
   | { type: 'history'; numberId: string; chunk: RawLinkedHistory };
 
@@ -93,6 +95,12 @@ export interface LinkedClient {
   sendText(numberId: string, toJid: string, body: string): Promise<{ messageId: string }>;
   sendMedia(numberId: string, toJid: string, file: OutgoingFile): Promise<{ messageId: string }>;
   downloadMedia(numberId: string, message: RawLinkedMessage): Promise<Buffer>;
+  requestHistory?(
+    numberId: string,
+    count: number,
+    oldestMsgKey: RawLinkedMessage['key'],
+    oldestMsgTimestamp: number,
+  ): Promise<string>;
   isOpen(numberId: string): boolean;
   /**
    * Subscribes to every event, and answers with the way to stop.
@@ -109,6 +117,7 @@ export interface LinkedSession {
   sendText(toJid: string, body: string): Promise<{ messageId: string }>;
   sendMedia(toJid: string, file: OutgoingFile): Promise<{ messageId: string }>;
   downloadMedia(message: RawLinkedMessage): Promise<Buffer>;
+  requestHistory?(count: number, oldestMsgKey: RawLinkedMessage['key'], oldestMsgTimestamp: number): Promise<string>;
   close(): Promise<void>;
   logout(): Promise<void>;
 }
@@ -226,6 +235,12 @@ export function createLinkedClient(deps: LinkedClientDeps): LinkedRegistry {
 
     async downloadMedia(numberId, message) {
       return (await live(numberId)).downloadMedia(message);
+    },
+
+    async requestHistory(numberId, count, oldestMsgKey, oldestMsgTimestamp) {
+      const request = (await live(numberId)).requestHistory;
+      if (!request) throw new Error('Linked session does not support on-demand history');
+      return request(count, oldestMsgKey, oldestMsgTimestamp);
     },
 
     isOpen: (numberId) => open.has(numberId),

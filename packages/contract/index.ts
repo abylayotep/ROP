@@ -86,6 +86,33 @@ export type LinkedPairingEvent =
   | { type: 'open' }
   | { type: 'failed'; reason: string };
 
+export type WhatsappHistoryStatus =
+  | 'requesting'
+  | 'waiting'
+  | 'completed'
+  | 'partial'
+  | 'failed';
+
+export interface WhatsappHistoryRun {
+  id: string;
+  status: WhatsappHistoryStatus;
+  limit: 100 | 200;
+  totalChats: number;
+  requestedChats: number;
+  receivedChats: number;
+  receivedMessages: number;
+  failedChats: number;
+  startedAt: string;
+  finishedAt: string | null;
+  error: string | null;
+}
+
+export interface WhatsappHistoryOverview {
+  connectedNumbers: number;
+  availableChats: number;
+  run: WhatsappHistoryRun | null;
+}
+
 /** What to paste into the Meta application's webhook settings. */
 export interface WebhookSetup {
   url: string;
@@ -334,6 +361,8 @@ export interface KbNoteDetail extends KbNote {
   backlinks: KbLinkRef[];
   /** What this note links to. `noteId` null is a link whose target does not exist. */
   links: KbLinkRef[];
+  /** WhatsApp messages that support a note created through reviewed generation. */
+  generationSources?: KbGenerationSource[];
 }
 
 /** The graph tab. Capped at 500 notes; `truncated` says the cap was hit. */
@@ -396,6 +425,137 @@ export interface KbImport {
    * honest thing to do is name how many records the owner should go and check.
    */
   keptEdited: number;
+}
+
+/* ── Generation from stored WhatsApp history ───────────────────────────── */
+
+export type KbGenerationStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+export type KbGenerationBatchStatus = 'pending' | 'running' | 'done' | 'failed' | 'cancelled';
+export type KbGenerationProposalStatus = 'pending' | 'rejected' | 'drafted' | 'applied';
+export type KbGenerationWarning = 'dated' | 'conflict' | 'context_limited';
+
+export interface KbGenerationSelection {
+  conversationIds: string[];
+  /** Inclusive ISO instant, normalized to UTC by the client. */
+  from: string;
+  /** Exclusive ISO instant, normalized to UTC by the client. */
+  to: string;
+}
+
+export interface KbGenerationCounts {
+  selectedConversations: number;
+  selectedMessages: number;
+  eligibleMessages: number;
+  eligibleCharacters: number;
+  skippedAiOrSystem: number;
+  skippedUnsupported: number;
+  skippedEmpty: number;
+  skippedSensitive: number;
+  skippedOversize: number;
+  skippedNoSeller: number;
+}
+
+export interface KbGenerationUsage {
+  promptTokens: number;
+  completionTokens: number;
+  /** Actual provider-reported cost in US dollars. */
+  cost: string;
+}
+
+export type KbGenerationPreviewRequest = KbGenerationSelection;
+
+export interface KbGenerationPreview {
+  previewId: string;
+  expiresAt: string;
+  counts: KbGenerationCounts;
+  batchCount: number;
+  modelId: string;
+  maxCalls: number;
+  maxOutputTokens: number;
+  truncated: boolean;
+}
+
+export interface KbGenerationStartRequest {
+  previewId: string;
+  requestKey: string;
+}
+
+export interface KbGenerationRun {
+  id: string;
+  status: KbGenerationStatus;
+  selection: KbGenerationSelection;
+  modelId: string;
+  temperature: string;
+  counts: KbGenerationCounts;
+  batchCount: number;
+  completedBatchCount: number;
+  failedBatchCount: number;
+  proposalCount: number;
+  usage: KbGenerationUsage;
+  cancelRequestedAt: string | null;
+  errorCode: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface KbGenerationRunPage {
+  items: KbGenerationRun[];
+  nextCursor: string | null;
+}
+
+export interface KbGenerationSource {
+  conversationId: string;
+  messageId: string;
+  sentAt: string;
+  excerpt: string | null;
+  available: boolean;
+}
+
+export interface KbGenerationMatch {
+  noteId: string;
+  path: string;
+  title: string;
+  exact: boolean;
+}
+
+export interface KbGenerationProposal {
+  id: string;
+  revision: number;
+  path: string;
+  body: string;
+  sources: KbGenerationSource[];
+  warnings: KbGenerationWarning[];
+  matches: KbGenerationMatch[];
+  status: KbGenerationProposalStatus;
+  draftId: string | null;
+  noteId: string | null;
+}
+
+export interface KbGenerationProposalPage {
+  items: KbGenerationProposal[];
+  nextCursor: string | null;
+}
+
+export interface KbGenerationRunDetail {
+  run: KbGenerationRun;
+  proposals: KbGenerationProposalPage;
+}
+
+export interface KbGenerationProposalUpdateRequest {
+  revision: number;
+  path?: string;
+  body?: string;
+  status?: Extract<KbGenerationProposalStatus, 'pending' | 'rejected'>;
+}
+
+export interface KbGenerationDraftRequest {
+  proposalIds: string[];
+  revisions: Record<string, number>;
+  updateTargets?: Record<string, string>;
+}
+
+export interface KbGenerationDraftResponse {
+  draftId: string;
 }
 
 /* ── Агент ──────────────────────────────────────────────────────────────────

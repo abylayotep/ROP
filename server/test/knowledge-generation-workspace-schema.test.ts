@@ -44,6 +44,7 @@ describe('knowledge generation workspace schema', () => {
     expect(getTableColumns(kbGenerationDrafts)).toMatchObject({
       runId: expect.anything(),
       draftId: expect.anything(),
+      requestKey: expect.objectContaining({ notNull: false }),
     });
     expect(getTableConfig(kbGenerationDrafts).uniqueConstraints.map((constraint) =>
       constraint.columns.map((column) => column.name),

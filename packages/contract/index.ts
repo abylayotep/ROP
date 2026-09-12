@@ -645,6 +645,7 @@ export interface KbGenerationDraftRequest {
 
 export interface KbGenerationDraftResponse {
   draftId: string;
+  draftIds: string[];
 }
 
 export interface CommunicationStyleSettings {

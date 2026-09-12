@@ -1085,6 +1085,7 @@ export const kbGenerationDrafts = pgTable(
   {
     runId: uuid('run_id').notNull().references(() => kbGenerationRuns.id, { onDelete: 'cascade' }),
     draftId: uuid('draft_id').notNull().references(() => kbDrafts.id, { onDelete: 'cascade' }),
+    requestKey: text('request_key'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [

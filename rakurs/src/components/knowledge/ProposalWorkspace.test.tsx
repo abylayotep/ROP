@@ -110,7 +110,7 @@ describe('ProposalWorkspace', () => {
   });
 
   it('creates a draft from the complete persisted selection only', async () => {
-    const create = vi.fn().mockResolvedValue({ draftId: 'draft-1' });
+    const create = vi.fn().mockResolvedValue({ draftId: 'draft-1', draftIds: ['draft-1'] });
     const selected = proposal({ id: 'later', revision: 7, selected: true });
     const rejected = proposal({ id: 'rejected', selected: true, status: 'rejected' });
     await createDraftFromPersistedSelection('agent-1', 'run-1', [proposal({ selected: false }), selected, rejected], { later: 'note-2' }, create);

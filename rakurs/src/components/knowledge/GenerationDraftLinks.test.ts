@@ -8,7 +8,7 @@ const render = (drafts: { id: string; title: string }[]) => renderToStaticMarkup
   createElement(GenerationDraftLinks, { drafts })));
 
 it('links to both generated drafts without requiring proposal pagination', () => {
-  const html = render([{ id: 'knowledge', title: 'База знаний из WhatsApp' }, { id: 'script', title: 'Скрипт продаж из WhatsApp' }]);
+  const html = render([{ id: 'knowledge', title: 'База знаний из WhatsApp · 4' }, { id: 'script', title: 'Скрипт продаж из WhatsApp · 4' }]);
   expect(html).toContain('drafts/knowledge');
   expect(html).toContain('drafts/script');
   expect(html).toContain('Ничего не опубликовано');

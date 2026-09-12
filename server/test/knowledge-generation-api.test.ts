@@ -243,14 +243,18 @@ describe('knowledge generation API', () => {
       },
     });
     expect(explicit.statusCode).toBe(200);
+    expect(explicit.json().draftIds).toHaveLength(2);
+    expect(explicit.json().draftId).toBe(explicit.json().draftIds[0]);
 
     const paged = await app.inject({
       method: 'GET', url: `${base}/runs/${started.json().id}?cursor=20`, cookies: jar,
     });
     expect(paged.json().proposals.items).toEqual([]);
-    expect(paged.json().drafts).toEqual([
-      expect.objectContaining({ id: explicit.json().draftId, title: 'Знания из WhatsApp · 2' }),
-    ]);
+    expect(paged.json().drafts).toHaveLength(2);
+    expect(paged.json().drafts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: explicit.json().draftIds[0], title: 'База знаний из WhatsApp · 1' }),
+      expect.objectContaining({ id: explicit.json().draftIds[1], title: 'Скрипт продаж из WhatsApp · 1' }),
+    ]));
     expect(paged.json().draftsNextCursor).toBeNull();
   });
 

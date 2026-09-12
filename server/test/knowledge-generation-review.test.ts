@@ -229,13 +229,149 @@ describe('generation review', () => {
     const first = await createGenerationDraft(db, agentId, userId, runId, input);
     const second = await createGenerationDraft(db, agentId, userId, runId, input);
     expect(second).toEqual(first);
+    expect(first.draftIds).toEqual([first.draftId]);
     expect((await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.id, proposalId)))[0]).toMatchObject({ status: 'drafted', draftId: first.draftId, draftOpIndex: 0, revision: 3 });
-    expect((await db.select().from(kbDrafts).where(eq(kbDrafts.id, first.draftId)))[0]?.title).toBe('Знания из WhatsApp · 1');
+    expect((await db.select().from(kbDrafts).where(eq(kbDrafts.id, first.draftId)))[0]?.title).toBe('База знаний из WhatsApp · 1');
     expect(await db.select().from(kbGenerationDrafts)).toEqual([
       expect.objectContaining({ runId, draftId: first.draftId }),
     ]);
     expect(await db.select().from(kbNotes)).toHaveLength(0);
     expect(await db.select().from(agentRules)).toHaveLength(0);
+  });
+
+  it('atomically creates one idempotent draft per selected proposal kind', async () => {
+    const [batch] = await db.select().from(kbGenerationBatches).where(eq(kbGenerationBatches.runId, runId));
+    const [script] = await db.insert(kbGenerationProposals).values({
+      runId,
+      batchId: batch!.id,
+      fingerprint: 'script-selected',
+      kind: 'script',
+      path: 'Скрипт/Доставка',
+      body: 'Подскажите адрес, и я рассчитаю доставку.',
+      sources: [],
+      selected: true,
+    }).returning();
+    await updateGenerationProposal(db, agentId, proposalId, { revision: 1, selected: true });
+    const input = {
+      proposalIds: [proposalId, script!.id],
+      revisions: { [proposalId]: 2, [script!.id]: 1 },
+    };
+
+    const first = await createGenerationDraft(db, agentId, userId, runId, input);
+    const second = await createGenerationDraft(db, agentId, userId, runId, input);
+
+    expect(second).toEqual(first);
+    expect(first.draftIds).toHaveLength(2);
+    const drafts = await db.select().from(kbDrafts);
+    const knowledgeDraft = drafts.find((draft) => draft.title === 'База знаний из WhatsApp · 1');
+    const scriptDraft = drafts.find((draft) => draft.title === 'Скрипт продаж из WhatsApp · 1');
+    expect(knowledgeDraft?.ops).toEqual([
+      { op: 'note_create', path: 'База знаний/Delivery', body: 'Two days' },
+    ]);
+    expect(scriptDraft?.ops).toEqual([
+      { op: 'note_create', path: 'Скрипт/Доставка', body: 'Подскажите адрес, и я рассчитаю доставку.' },
+    ]);
+    expect(first).toEqual({
+      draftId: knowledgeDraft!.id,
+      draftIds: [knowledgeDraft!.id, scriptDraft!.id],
+    });
+    expect((await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.id, proposalId)))[0])
+      .toMatchObject({ status: 'drafted', selected: false, draftId: knowledgeDraft!.id, draftOpIndex: 0, revision: 3 });
+    expect((await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.id, script!.id)))[0])
+      .toMatchObject({ status: 'drafted', selected: false, draftId: scriptDraft!.id, draftOpIndex: 0, revision: 2 });
+    expect((await db.select().from(kbGenerationDrafts)).map((link) => link.draftId).sort())
+      .toEqual([knowledgeDraft!.id, scriptDraft!.id].sort());
+    expect(await db.select().from(kbNotes)).toHaveLength(0);
+    expect(await db.select().from(agentRules)).toHaveLength(0);
+  });
+
+  it('rejects replaying only one draft from a mixed-kind request', async () => {
+    const [batch] = await db.select().from(kbGenerationBatches).where(eq(kbGenerationBatches.runId, runId));
+    const [script] = await db.insert(kbGenerationProposals).values({
+      runId,
+      batchId: batch!.id,
+      fingerprint: 'mixed-subset-script',
+      kind: 'script',
+      path: 'Скрипт/Доставка',
+      body: 'Подскажите адрес доставки.',
+      sources: [],
+      selected: true,
+    }).returning();
+    await updateGenerationProposal(db, agentId, proposalId, { revision: 1, selected: true });
+    await createGenerationDraft(db, agentId, userId, runId, {
+      proposalIds: [proposalId, script!.id],
+      revisions: { [proposalId]: 2, [script!.id]: 1 },
+    });
+
+    await expect(createGenerationDraft(db, agentId, userId, runId, {
+      proposalIds: [proposalId],
+      revisions: { [proposalId]: 2 },
+    })).rejects.toMatchObject({ statusCode: 409 });
+  });
+
+  it('rejects combining drafts created by two independent requests', async () => {
+    await updateGenerationProposal(db, agentId, proposalId, { revision: 1, selected: true });
+    await createGenerationDraft(db, agentId, userId, runId, {
+      proposalIds: [proposalId],
+      revisions: { [proposalId]: 2 },
+    });
+    const [batch] = await db.select().from(kbGenerationBatches).where(eq(kbGenerationBatches.runId, runId));
+    const [script] = await db.insert(kbGenerationProposals).values({
+      runId,
+      batchId: batch!.id,
+      fingerprint: 'independent-script',
+      kind: 'script',
+      path: 'Скрипт/Оплата',
+      body: 'Оплатить можно удобным для вас способом.',
+      sources: [],
+      selected: true,
+    }).returning();
+    await createGenerationDraft(db, agentId, userId, runId, {
+      proposalIds: [script!.id],
+      revisions: { [script!.id]: 1 },
+    });
+
+    await expect(createGenerationDraft(db, agentId, userId, runId, {
+      proposalIds: [proposalId, script!.id],
+      revisions: { [proposalId]: 2, [script!.id]: 1 },
+    })).rejects.toMatchObject({ statusCode: 409 });
+  });
+
+  it('replays an exact historical mixed-kind request stored in one legacy draft', async () => {
+    const [batch] = await db.select().from(kbGenerationBatches).where(eq(kbGenerationBatches.runId, runId));
+    const [script] = await db.insert(kbGenerationProposals).values({
+      runId,
+      batchId: batch!.id,
+      fingerprint: 'legacy-mixed-script',
+      kind: 'script',
+      path: 'Скрипт/Оплата',
+      body: 'Оплатить можно удобным для вас способом.',
+      sources: [],
+    }).returning();
+    const ops = [
+      { op: 'note_create' as const, path: 'База знаний/Delivery', body: 'Two days' },
+      { op: 'note_create' as const, path: 'Скрипт/Оплата', body: 'Оплатить можно удобным для вас способом.' },
+    ];
+    const [draft] = await db.insert(kbDrafts).values({
+      agentId,
+      title: 'Знания из WhatsApp · 2',
+      origin: 'manual',
+      ops,
+      base: {},
+      createdBy: userId,
+    }).returning();
+    await db.insert(kbGenerationDrafts).values({ runId, draftId: draft!.id });
+    await db.update(kbGenerationProposals).set({
+      status: 'drafted', draftId: draft!.id, draftOpIndex: 0, revision: 2,
+    }).where(eq(kbGenerationProposals.id, proposalId));
+    await db.update(kbGenerationProposals).set({
+      status: 'drafted', draftId: draft!.id, draftOpIndex: 1, revision: 2,
+    }).where(eq(kbGenerationProposals.id, script!.id));
+
+    await expect(createGenerationDraft(db, agentId, userId, runId, {
+      proposalIds: [proposalId, script!.id],
+      revisions: { [proposalId]: 1, [script!.id]: 1 },
+    })).resolves.toEqual({ draftId: draft!.id, draftIds: [draft!.id] });
   });
 
   it('refuses a draft request that omits a proposal from the persisted checked set', async () => {

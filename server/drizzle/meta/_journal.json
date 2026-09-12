@@ -232,6 +232,13 @@
       "when": 1789204102092,
       "tag": "0032_migrate_remaining_legacy_raw_proposals",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1789220646644,
+      "tag": "0033_generation_draft_request_key",
+      "breakpoints": true
     }
   ]
 }

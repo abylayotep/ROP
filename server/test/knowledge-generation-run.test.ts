@@ -1,6 +1,6 @@
 import { eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { agents, contacts, conversations, kbGenerationBatches, kbGenerationProposals, kbGenerationRuns, messages, users, whatsappNumbers, accounts } from '../src/db/schema.js';
+import { agents, contacts, conversations, kbDrafts, kbGenerationBatches, kbGenerationProposals, kbGenerationRuns, messages, users, whatsappNumbers, accounts } from '../src/db/schema.js';
 import { keyAad } from '../src/lib/ai/turn.js';
 import { cancelGenerationRun, executeGenerationRun, reconcileGenerationRuns, retryGenerationRun, startGenerationRun } from '../src/lib/knowledge/generation-run.js';
 import { previewSelection } from '../src/lib/knowledge/generation-selection.js';
@@ -66,6 +66,28 @@ describe('generation runs', () => {
     await executeGenerationRun({ db, model, credentialsKey: key }, run.id);
     expect(model.calls).toHaveLength(0);
     expect((await db.select().from(kbGenerationRuns).where(eq(kbGenerationRuns.id, run.id)))[0]?.status).toBe('failed');
+  });
+
+  it('continues after a paid batch returns unusable structured output', async () => {
+    const run = await admitted('unusable-output');
+    const [firstBatch] = await db.select().from(kbGenerationBatches).where(eq(kbGenerationBatches.runId, run.id));
+    await db.insert(kbGenerationBatches).values({
+      runId: run.id,
+      ordinal: 1,
+      manifest: { ...firstBatch!.manifest, ordinal: 1 },
+    });
+    const model = fakeModel('{"proposals":"invalid"}', '{"proposals":[]}');
+
+    await executeGenerationRun({ db, model, credentialsKey: key }, run.id);
+
+    expect(model.calls).toHaveLength(2);
+    expect(await db.select().from(kbGenerationBatches).where(eq(kbGenerationBatches.runId, run.id)))
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ ordinal: 0, status: 'done', errorCode: 'invalid_output' }),
+        expect.objectContaining({ ordinal: 1, status: 'done', errorCode: null }),
+      ]));
+    expect((await db.select().from(kbGenerationRuns).where(eq(kbGenerationRuns.id, run.id)))[0])
+      .toMatchObject({ status: 'completed', promptTokens: 200, completionTokens: 40, cost: '0.00020000' });
   });
 
   it('records paid usage but discards proposals when cancellation wins the call', async () => {
@@ -153,5 +175,23 @@ describe('generation runs', () => {
     await executeGenerationRun({ db, model, credentialsKey: key }, second.id);
 
     expect(await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.runId, second.id))).toHaveLength(1);
+  });
+
+  it('finishes a successful run with categorized review drafts without applying them', async () => {
+    const run = await admitted('categorized-drafts');
+    const model = fakeModel(JSON.stringify({ proposals: [
+      { path: 'База знаний/Доставка', body: 'Доставка занимает два дня.', sources: [messageId], warnings: [] },
+      { path: 'Скрипт/Срок доставки', body: 'Сообщите срок и уточните адрес.', sources: [messageId], warnings: [] },
+    ] }));
+
+    await executeGenerationRun({ db, model, credentialsKey: key }, run.id);
+
+    expect(await db.select().from(kbDrafts)).toHaveLength(2);
+    expect(await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.runId, run.id)))
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ path: 'База знаний/Доставка', status: 'drafted', draftOpIndex: 0, noteId: null }),
+        expect.objectContaining({ path: 'Скрипт/Срок доставки', status: 'drafted', draftOpIndex: 0, noteId: null }),
+      ]));
+    expect((await db.select().from(kbGenerationRuns).where(eq(kbGenerationRuns.id, run.id)))[0]?.status).toBe('completed');
   });
 });

@@ -1,3 +1,4 @@
+import type { Referral } from '../attribution.js';
 import type { RawLinkedContent, RawLinkedMessage, Timestamp } from './client.js';
 import { phoneForLid, rememberLid } from './lid-directory.js';
 
@@ -22,6 +23,7 @@ export interface NormalizedLine {
   pushName: string | null;
   /** True when the message carries a file worth downloading. */
   hasMedia: boolean;
+  referral?: Referral;
 }
 
 /**
@@ -68,7 +70,7 @@ function chatPhone(numberId: string | undefined, raw: RawLinkedMessage): string 
   if (raw.key?.fromMe === true) return phoneForLid(numberId, lid);
   const phone = jidToPhone(raw.key?.senderPn);
   if (phone) rememberLid(numberId, lid, phone);
-  return phone;
+  return phone ?? phoneForLid(numberId, lid);
 }
 
 /** Seconds, as a number or as protobuf's Long. */
@@ -121,15 +123,29 @@ function contentOf(message: RawLinkedContent): Content {
   return { kind: 'unsupported', body: null, hasMedia: false };
 }
 
+/** Read only provider-supplied identifiers; ordinary link previews are not attribution. */
+export function extractLinkedReferral(message: RawLinkedContent): Referral | undefined {
+  const context = message.extendedTextMessage?.contextInfo ?? message.imageMessage?.contextInfo
+    ?? message.videoMessage?.contextInfo ?? message.audioMessage?.contextInfo
+    ?? message.documentMessage?.contextInfo ?? message.stickerMessage?.contextInfo;
+  const ad = context?.externalAdReply;
+  if (!ad || (!ad.sourceId && !ad.ctwaClid && ad.sourceType !== 'ad')) return undefined;
+  return {
+    source_id: ad.sourceId || undefined,
+    source_type: ad.sourceType || undefined,
+    headline: ad.title || undefined,
+    body: ad.body || undefined,
+    ctwa_clid: ad.ctwaClid || undefined,
+  };
+}
+
 /**
  * Null for everything the cabinet does not store.
  *
  * - a group (`@g.us`) or a status broadcast: not a customer conversation;
  * - a protocol or reaction message: WhatsApp talking to itself, or an emoji on someone
  *   else's line, neither of which is a message in a thread;
- * - no id, or no content at all: nothing to deduplicate on and nothing to show;
- * - a LID chat no message has yet named a number for. `inbound.ts` says so in the log:
- *   unlike the others this one is a line we meant to keep.
+ * - no id, or no content at all: nothing to deduplicate on and nothing to show.
  */
 export function normalize(raw: RawLinkedMessage, numberId?: string): NormalizedLine | null {
   const waMessageId = raw.key?.id ?? null;
@@ -150,6 +166,7 @@ export function normalize(raw: RawLinkedMessage, numberId?: string): NormalizedL
     body: content.body,
     pushName: raw.pushName ?? null,
     hasMedia: content.hasMedia,
+    referral: extractLinkedReferral(message),
   };
 }
 

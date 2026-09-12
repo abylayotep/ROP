@@ -21,6 +21,8 @@ import { registerDraftRoutes } from './drafts.js';
 import { registerKnowledgeRoutes } from './knowledge.js';
 import { registerKnowledgeGenerationRoutes } from './knowledge-generation.js';
 import { registerLeadRoutes } from './leads.js';
+import { registerKaspiRoutes } from './kaspi.js';
+import { createLiveCrmHandler } from '../lib/crm/live.js';
 import { registerOrderRoutes } from './orders.js';
 import { requireSession } from './require-session.js';
 import { registerRuleRoutes } from './rules.js';
@@ -34,11 +36,13 @@ import { createLinkedClient, type LinkedRegistry } from '../lib/whatsapp/linked/
 import { createLinkedSocket } from '../lib/whatsapp/linked/socket.js';
 import { registerWhatsappLinkedRoutes } from './whatsapp-linked.js';
 import { registerWhatsappHistoryRoutes } from './whatsapp-history.js';
+import { registerWhatsappHistoryArchiveRoutes } from './whatsapp-history-archive.js';
 import multipart from '@fastify/multipart';
 
 export interface ServerDeps {
   /** Injected by tests so a suite never reaches the network. Defaults to the real client. */
   graph?: GraphClient;
+  crmEnabled?: boolean;
   /** The same arrangement for the knowledge base's one outbound fetch. */
   pageFetcher?: PageFetcher;
   /** And for Instagram: no test asks Meta for somebody's posts. */
@@ -74,6 +78,9 @@ export function buildServer(env: Env, db: Db, deps: ServerDeps = {}): FastifyIns
   // mean two devices claiming one number.
   const linked =
     deps.linked ?? createLinkedClient({ session: createLinkedSocket(db, credentialsKey(env)) });
+
+  const turnDeps = { graph, linked, key: credentialsKey(env), model };
+  const crm = (deps.crmEnabled ?? env.NODE_ENV !== 'test') ? createLiveCrmHandler(db, env, turnDeps) : undefined;
 
   app.register(cookie, { secret: env.SESSION_SECRET });
   // Only the one route reads a file part; registered here because a content-type parser
@@ -128,10 +135,12 @@ export function buildServer(env: Env, db: Db, deps: ServerDeps = {}): FastifyIns
       timeoutMs: deps.historyTimeoutMs,
       paceMs: deps.historyPaceMs,
     });
+    registerWhatsappHistoryArchiveRoutes(app, db, guard);
     registerConversationRoutes(app, db, env, guard, graph, linked);
     registerStageRoutes(app, db, guard);
     registerLeadRoutes(app, db, env, guard, graph);
     registerOrderRoutes(app, db, guard);
+    registerKaspiRoutes(app, db, env, guard);
     registerBoardRoutes(app, db, guard);
     registerStatsRoutes(app, db, guard);
     registerKnowledgeRoutes(app, db, env, guard, { pageFetcher, graph, instagram });
@@ -156,7 +165,7 @@ export function buildServer(env: Env, db: Db, deps: ServerDeps = {}): FastifyIns
       app,
       db,
       env,
-      { graph, linked, key: credentialsKey(env), mediaDir: env.MEDIA_DIR, model },
+      { ...turnDeps, mediaDir: env.MEDIA_DIR, crm },
       // The Conversions API queue is drained by the same delivery, once Meta has its 200.
       { capi, key: credentialsKey(env) },
     );

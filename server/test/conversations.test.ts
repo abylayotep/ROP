@@ -144,6 +144,51 @@ const closeWindow = () =>
     .where(eq(conversations.id, conversationId));
 
 describe('reading conversations', () => {
+  it('pages messages with stable cursors and opens old source messages', async () => {
+    const stored = [];
+    for (let index = 0; index < 5; index++) {
+      stored.push(await seedMessage({ body: String(index), sentAt: new Date('2026-09-01T00:00:00Z') }));
+    }
+    stored.sort((a, b) => a.id.localeCompare(b.id));
+    const page = async (query: string) => {
+      const res = await app.inject({ method: 'GET', cookies: jar,
+        url: `/api/agents/${agentId}/conversations/${conversationId}?limit=2${query}` });
+      expect(res.statusCode).toBe(200);
+      return res.json();
+    };
+    const latest = await page('');
+    expect(latest.messages.map((message: { id: string }) => message.id)).toEqual(stored.slice(3).map((message) => message.id));
+    expect(latest).toMatchObject({ hasOlder: true, hasNewer: false });
+    const older = await page(`&before=${stored[3]!.id}`);
+    expect(older.messages.map((message: { id: string }) => message.id)).toEqual(stored.slice(1, 3).map((message) => message.id));
+    expect(older).toMatchObject({ hasOlder: true, hasNewer: true });
+    const newer = await page(`&after=${stored[2]!.id}`);
+    expect(newer.messages).toEqual(latest.messages);
+    const source = await page(`&around=${stored[0]!.id}`);
+    expect(source.messages.map((message: { id: string }) => message.id)).toEqual(stored.slice(0, 2).map((message) => message.id));
+    expect(source).toMatchObject({ hasOlder: false, hasNewer: true });
+    expect((await thread()).json().messages).toHaveLength(5);
+  });
+
+  it('bounds conversation summaries and supports the next page', async () => {
+    const getPage = (query: string) => app.inject({ method: 'GET', cookies: jar,
+      url: `/api/agents/${agentId}/conversations?${query}` });
+    expect((await getPage('limit=1&offset=0')).json()).toHaveLength(1);
+    expect((await getPage('limit=1&offset=1')).json()).toHaveLength(0);
+    expect((await getPage('limit=201')).statusCode).toBe(400);
+    expect((await getPage('limit=1&offset=-1')).statusCode).toBe(400);
+  });
+
+  it('rejects invalid pagination and cursors outside the conversation', async () => {
+    for (const query of ['limit=0', 'limit=201', 'limit=2&before=invalid',
+      'limit=2&before=00000000-0000-4000-8000-000000000000',
+      'limit=2&before=00000000-0000-4000-8000-000000000000&after=00000000-0000-4000-8000-000000000000']) {
+      const res = await app.inject({ method: 'GET', cookies: jar,
+        url: `/api/agents/${agentId}/conversations/${conversationId}?${query}` });
+      expect([400, 404]).toContain(res.statusCode);
+    }
+  });
+
   it('lists the conversation with the client behind it', async () => {
     await seedMessage({ body: 'Бағасы қанша?' });
 

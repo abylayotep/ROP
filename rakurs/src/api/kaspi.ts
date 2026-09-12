@@ -1,0 +1,12 @@
+import { request } from './client';
+export type KaspiStatus = { configured: boolean; connected: boolean; organization: string | null; phone: string | null };
+export type KaspiPayment = { id: string; orderId: string; conversationId: string; method: string; phone: string; amount: string; status: string; operationId: string | null; qrToken: string | null; paymentUrl: string | null; error: string | null; confirmedAt: string | null };
+const root = (agentId: string) => `/agents/${agentId}/kaspi`;
+export const getKaspiStatus = (id: string) => request<KaspiStatus>(`${root(id)}/status`);
+export const initKaspi = (id: string) => request(`${root(id)}/auth/init`, { method: 'POST' });
+export const sendKaspiPhone = (id: string, phone: string) => request(`${root(id)}/auth/send-phone`, { method: 'POST', body: { phone } });
+export const verifyKaspi = (id: string, otp: string) => request(`${root(id)}/auth/verify-otp`, { method: 'POST', body: { otp } });
+export const disconnectKaspi = (id: string) => request(`${root(id)}/session`, { method: 'DELETE' });
+export const getKaspiPayments = (id: string, conversationId: string) => request<{ payments: KaspiPayment[] }>(`${root(id)}/payments`, { query: { conversationId } });
+export const createKaspiPayment = (id: string, body: { conversationId: string; amount: string; phone: string; method: 'invoice' | 'qr'; requestKey: string; comment: string }) => request<KaspiPayment>(`${root(id)}/payments`, { method: 'POST', body });
+export const checkKaspiPayment = (id: string, paymentId: string) => request<KaspiPayment>(`${root(id)}/payments/${paymentId}/check`, { method: 'POST' });

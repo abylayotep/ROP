@@ -95,4 +95,37 @@ describe('knowledge generation API', () => {
     expect(draft.statusCode).toBe(200);
     expect(draft.json().draftId).toBeTruthy();
   });
+
+  it('returns every generated category draft independently of proposal pagination', async () => {
+    model.complete = async (input) => {
+      model.calls.push(input);
+      return {
+        text: JSON.stringify({ proposals: [
+          { path: 'База знаний/Доставка', body: 'Два дня.', sources: [messageId], warnings: [] },
+          { path: 'Скрипт/Доставка', body: 'Уточните адрес.', sources: [messageId], warnings: [] },
+        ] }),
+        promptTokens: 10, completionTokens: 4, cost: '0.00100000',
+      };
+    };
+    const base = `/api/agents/${agentId}/knowledge/generation`;
+    const preview = await app.inject({ method: 'POST', url: `${base}/preview`, cookies: jar, payload: {
+      conversationIds: [conversationId], from: '2026-09-01T00:00:00.000Z', to: '2026-09-02T00:00:00.000Z',
+    } });
+    const started = await app.inject({ method: 'POST', url: `${base}/runs`, cookies: jar, payload: {
+      previewId: preview.json().previewId, requestKey: 'all-generated-drafts',
+    } });
+    let detail;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      detail = await app.inject({ method: 'GET', url: `${base}/runs/${started.json().id}?cursor=20`, cookies: jar });
+      if (detail.json().run.status === 'completed') break;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+
+    expect(detail!.json().proposals.items).toEqual([]);
+    expect(detail!.json().drafts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: expect.any(String), title: 'База знаний из WhatsApp' }),
+      expect.objectContaining({ id: expect.any(String), title: 'Скрипт продаж из WhatsApp' }),
+    ]));
+    expect(detail!.json().drafts).toHaveLength(2);
+  });
 });

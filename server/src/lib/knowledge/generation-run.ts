@@ -23,6 +23,7 @@ import {
   type GenerationExtractionUsage,
 } from './generation-extract.js';
 import { GENERATION_LIMITS } from './generation-limits.js';
+import { createGenerationCategoryDrafts } from './generation-review.js';
 import { generationContentHash, loadPreview } from './generation-selection.js';
 
 export interface GenerationRunDeps {
@@ -249,7 +250,13 @@ async function executeClaimedGenerationRun(deps: GenerationRunDeps, runId: strin
       if (cancelled) return;
     } catch (error) {
       const code = error instanceof GenerationExtractionError ? error.code : 'batch_failed';
-      if (error instanceof GenerationExtractionError) await addUsage(db, runId, batch.id, error.usage);
+      if (error instanceof GenerationExtractionError) {
+        await addUsage(db, runId, batch.id, error.usage);
+        if (error.code !== 'invalid_batch') {
+          await db.update(kbGenerationBatches).set({ status: 'done', errorCode: code, updatedAt: new Date() }).where(eq(kbGenerationBatches.id, batch.id));
+          continue;
+        }
+      }
       await db.update(kbGenerationBatches).set({ status: 'failed', errorCode: code, updatedAt: new Date() }).where(eq(kbGenerationBatches.id, batch.id));
       await db.update(kbGenerationRuns).set({ status: 'failed', errorCode: code, updatedAt: new Date() }).where(eq(kbGenerationRuns.id, runId));
       return;
@@ -257,6 +264,7 @@ async function executeClaimedGenerationRun(deps: GenerationRunDeps, runId: strin
       releaseTurnSlot();
     }
   }
+  await createGenerationCategoryDrafts(db, run.agentId, run.userId, runId, true);
   const completed = await db.update(kbGenerationRuns).set({ status: 'completed', updatedAt: new Date() }).where(and(
     eq(kbGenerationRuns.id, runId), eq(kbGenerationRuns.status, 'running'), isNull(kbGenerationRuns.cancelRequestedAt),
   )).returning({ id: kbGenerationRuns.id });

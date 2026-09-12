@@ -203,7 +203,7 @@ describe('the operator moves a lead', () => {
   });
 
   it('records a move backwards like any other', async () => {
-    const later = await stageNamed('Счёт отправлен');
+    const later = await stageNamed('Заказано');
     const earlier = await stageNamed('В диалоге');
     await patch({ stageId: later.id });
 

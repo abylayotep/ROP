@@ -28,8 +28,8 @@ export const DEFAULT_STAGES: { name: string; color: string; kind: StageKind }[] 
   { name: 'Квалифицирован', color: '#7b61ff', kind: 'qualified' },
   { name: 'Предложение отправлено', color: '#e0a13a', kind: 'active' },
   { name: 'Готов к покупке', color: '#e0a13a', kind: 'active' },
-  { name: 'Счёт отправлен', color: '#e0a13a', kind: 'awaiting_payment' },
-  { name: 'Продажа', color: '#0d9668', kind: 'success' },
+  { name: 'Заказано', color: '#e0a13a', kind: 'awaiting_payment' },
+  { name: 'Оплачено', color: '#0d9668', kind: 'success' },
   { name: 'Отказ', color: '#d24b4b', kind: 'failure' },
 ];
 

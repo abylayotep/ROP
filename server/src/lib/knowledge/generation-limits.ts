@@ -2,7 +2,7 @@ export const GENERATION_LIMITS = {
   maxConversations: 200,
   maxEligibleMessages: 5_000,
   maxInputCharacters: 200_000,
-  maxBatches: 20,
+  maxBatches: 200,
   maxBatchCharacters: 10_000,
   maxBatchMessages: 100,
   maxProposalsPerBatch: 20,

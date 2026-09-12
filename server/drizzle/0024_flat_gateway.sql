@@ -1,0 +1,1 @@
+ALTER TABLE "kaspi_sessions" ADD COLUMN "merchant_id" text;

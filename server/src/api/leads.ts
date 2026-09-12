@@ -7,6 +7,8 @@ import type { Env } from '../env.js';
 import {
   accountMembers,
   contacts,
+  crmAnalyses,
+  kaspiPayments,
   conversations,
   leadFields,
   leadValues,
@@ -15,6 +17,7 @@ import {
   stages,
   users,
 } from '../db/schema.js';
+import { hasConfirmedKaspiPayment } from '../lib/kaspi/service.js';
 import { queueLead } from '../lib/capi/enqueue.js';
 import { ApiError } from '../lib/errors.js';
 import { recordStageMove } from '../lib/funnel-history.js';
@@ -77,7 +80,7 @@ export function sumAmounts(values: string[]): string {
  */
 export async function loadLead(
   db: Db,
-  agent: { id: string; currency: string },
+  agent: { id: string; currency: string; openrouterKey?: string | null },
   conversationId: string,
 ): Promise<Lead> {
   if (!isUuid(conversationId)) throw new ApiError(404, 'Диалог не найден');
@@ -116,7 +119,14 @@ export async function loadLead(
     .where(eq(orders.conversationId, conversationId))
     .orderBy(asc(orders.createdAt));
 
+  const [crm] = await db.select().from(crmAnalyses).where(eq(crmAnalyses.conversationId, conversationId));
+  const confirmed = await db.select({orderId:kaspiPayments.orderId}).from(kaspiPayments)
+    .where(and(eq(kaspiPayments.conversationId,conversationId),eq(kaspiPayments.status,'paid')));
+  const paidIds = new Set(confirmed.map((payment)=>payment.orderId));
   return {
+    crm: {status:crm?.status ?? (agent.openrouterKey ? 'pending' : 'needs_key'), summary:crm?.summary??null,
+      profile:crm?.profile??{},error:crm?.error??null,analyzedAt:crm?.analyzedAt?.toISOString()??null},
+    sourceId:row.conversation.adSourceId,sourceType:row.conversation.adSourceType,
     conversationId,
     contactName: row.contact.name,
     contactPhone: row.contact.phone,
@@ -141,7 +151,7 @@ export async function loadLead(
         // another currency into that total would print a number in a unit it is not in.
         // Nothing can change an agent's currency today, so this excludes nothing today —
         // it is one line now and an audit of every sum later.
-        .filter((order) => order.status === 'paid' && order.currency === agent.currency)
+        .filter((order) => paidIds.has(order.id) && order.status === 'paid' && order.currency === agent.currency)
         .map((order) => order.amount),
     ),
     currency: agent.currency,
@@ -219,6 +229,9 @@ export function registerLeadRoutes(
             );
           const stage = rows.find((row) => row.id === targetId);
           if (!stage) throw new ApiError(404, 'Стадия не найдена');
+          if (stage.kind === 'success' && !(await hasConfirmedKaspiPayment(db, req.agent!.id, conversationId))) {
+            throw new ApiError(409, 'Сначала дождитесь подтверждения оплаты Kaspi. Заказ без оплаты остаётся в стадии «Заказано».');
+          }
           to = stage;
           from = rows.find((row) => row.id === current.stageId) ?? null;
         }

@@ -8,6 +8,27 @@ const targets = [
 ];
 
 describe('linked on-demand history manager', () => {
+  it('reports dispatch and timeout without exposing message keys or payloads', async () => {
+    vi.useFakeTimers();
+    const reports: unknown[] = [];
+    const linked = fakeLinked({ requestHistory: async () => 'private-session-id' });
+    const manager = createHistoryRequestManager(linked, {
+      loadTargets: async () => targets.slice(0, 1), paceMs: 0, timeoutMs: 100,
+      onDiagnostic: (report) => reports.push(report),
+    });
+    try {
+      await manager.start('a1', 100);
+      await vi.advanceTimersByTimeAsync(101);
+      expect(reports).toEqual([
+        { event: 'sent', requestedChats: 1, receivedChats: 0, receivedMessages: 0, failedChats: 0 },
+        { event: 'finished', status: 'failed', requestedChats: 1, receivedChats: 0, receivedMessages: 0, failedChats: 1 },
+      ]);
+      expect(JSON.stringify(reports)).not.toContain('private-session-id');
+    } finally {
+      manager.close();
+      vi.useRealTimers();
+    }
+  });
   it('counts only correlated raw history responses and completes after every chat responds', async () => {
     const linked = fakeLinked({ requestHistory: vi.fn(async (_numberId, _count, key) => `session-${key.id}`) });
     linked.setOpen('n1', true);

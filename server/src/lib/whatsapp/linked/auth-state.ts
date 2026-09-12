@@ -6,7 +6,7 @@ import {
 } from '@whiskeysockets/baileys';
 import { and, eq, inArray } from 'drizzle-orm';
 import type { Db } from '../../../db/client.js';
-import { linkedSessionKeys } from '../../../db/schema.js';
+import { linkedSessionKeys, whatsappNumbers } from '../../../db/schema.js';
 import { decryptSecret, encryptSecret } from '../../secret-box.js';
 
 /**
@@ -46,6 +46,8 @@ const aad = (numberId: string, category: string, keyId: string): string =>
   `${numberId}:${category}:${keyId}`;
 
 export interface LinkedAuthState {
+  /** Existing phone identity; re-pairing must not attach a different account to its chats. */
+  expectedPhone?: string;
   state: {
     creds: AuthenticationCreds;
     keys: {
@@ -112,8 +114,12 @@ export async function linkedAuthState(
 
   const stored = (await readOne(CREDS_CATEGORY, CREDS_ID)) as AuthenticationCreds | undefined;
   const creds = stored ?? initAuthCreds();
+  const [number] = await db.select({ jid: whatsappNumbers.linkedJid }).from(whatsappNumbers)
+    .where(eq(whatsappNumbers.id, numberId));
+  const expectedPhone = number?.jid?.match(/^(\d+)(?::\d+)?@s\.whatsapp\.net$/)?.[1];
 
   return {
+    expectedPhone,
     state: {
       creds,
       keys: {

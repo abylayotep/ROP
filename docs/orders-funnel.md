@@ -1,5 +1,8 @@
 # Воронка, заказы и клиенты
 
+> Historical guide. The current automated funnel and provider-verified payment
+> behavior are documented in [Automated CRM and Kaspi checkout](crm-kaspi.md).
+
 Инструкция для владельца компании и для менеджера. Она не требует чтения кода — только
 кабинета: разделы «Заказы», «Диалоги», «Клиенты» и «Настройки».
 

@@ -10,6 +10,11 @@ export interface HistoryTarget {
 }
 
 export interface HistoryRequestManagerDeps {
+  onDiagnostic?: (report: {
+    event: 'sent' | 'received' | 'send_failed' | 'finished';
+    status?: WhatsappHistoryRun['status'];
+    requestedChats: number; receivedChats: number; receivedMessages: number; failedChats: number;
+  }) => void;
   loadTargets(agentId: string, limit: 100 | 200): Promise<HistoryTarget[]>;
   timeoutMs?: number;
   paceMs?: number;
@@ -30,6 +35,15 @@ export function createHistoryRequestManager(client: LinkedClient, deps: HistoryR
   const sendTimeoutMs = deps.sendTimeoutMs ?? 10_000;
   const jobTimeoutMs = deps.jobTimeoutMs ?? 300_000;
   let closed = false;
+
+  // Only bounded counters and enums cross the logging boundary, never WhatsApp payloads.
+  const report = (event: 'sent' | 'received' | 'send_failed' | 'finished', run: WhatsappHistoryRun) => {
+    try {
+      deps.onDiagnostic?.({ event, ...(event === 'finished' ? { status: run.status } : {}),
+        requestedChats: run.requestedChats, receivedChats: run.receivedChats,
+        receivedMessages: run.receivedMessages, failedChats: run.failedChats });
+    } catch { /* Diagnostics must not interrupt message processing. */ }
+  };
 
   class SendTimeout extends Error {}
 
@@ -72,6 +86,7 @@ export function createHistoryRequestManager(client: LinkedClient, deps: HistoryR
     run.finishedAt = new Date().toISOString();
     run.error = error;
     run.failedChats = run.requestedChats - run.receivedChats;
+    report('finished', run);
     clearAgentTimers(agentId);
     for (const [sessionId, pending] of sessions) {
       if (pending.agentId === agentId) sessions.delete(sessionId);
@@ -85,6 +100,7 @@ export function createHistoryRequestManager(client: LinkedClient, deps: HistoryR
     pending.received = true;
     run.receivedChats += 1;
     run.receivedMessages += messageCount;
+    report('received', run);
     if (run.status === 'waiting' && run.receivedChats + run.failedChats === run.requestedChats) {
       finish(agentId, run, run.failedChats === 0 ? 'completed' : 'partial');
     }
@@ -131,6 +147,7 @@ export function createHistoryRequestManager(client: LinkedClient, deps: HistoryR
           client.requestHistory(target.numberId, 50, target.key, target.timestamp),
         );
         if (closed || !active(run)) return;
+        report('sent', run);
         const pending = { agentId, numberId: target.numberId, received: false };
         sessions.set(responseKey(target.numberId, sessionId), pending);
         pruneEarlyResponses();
@@ -141,6 +158,7 @@ export function createHistoryRequestManager(client: LinkedClient, deps: HistoryR
         }
       } catch (error) {
         run.failedChats += 1;
+        report('send_failed', run);
         if (error instanceof SendTimeout) {
           finish(agentId, run, run.receivedChats > 0 ? 'partial' : 'failed', 'WhatsApp не ответил на запрос истории вовремя.');
           return;

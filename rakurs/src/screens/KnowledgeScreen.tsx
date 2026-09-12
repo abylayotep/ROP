@@ -174,7 +174,6 @@ export function KnowledgeScreen() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-      <HistoryImportPanel key={`history-${agent.id}`} agentId={agent.id} readOnly={!owner} />
       <ChatGenerationPanel
           key={agent.id}
           agentId={agent.id}
@@ -186,6 +185,10 @@ export function KnowledgeScreen() {
           }}
           readOnly={!owner}
         />
+      <details>
+        <summary style={{ cursor: 'pointer', fontSize: 13, color: 'var(--text-dim)' }}>История WhatsApp — загрузка и состояние</summary>
+        <div style={{ marginTop: 10 }}><HistoryImportPanel key={`history-${agent.id}`} agentId={agent.id} readOnly={!owner} /></div>
+      </details>
       <div className="knowledge-layout">
       <div className="knowledge-sidebar">
         <Card pad={false}>

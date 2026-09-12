@@ -1,3 +1,4 @@
+import { KaspiIntegration } from '@/components/integrations/KaspiIntegration';
 import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from 'react';
 import { toCanvas } from 'qrcode';
 import { Link } from 'react-router-dom';
@@ -68,6 +69,7 @@ export function IntegrationsScreen() {
     <Async state={query} skeleton={<Skeleton height={200} />}>
       {({ numbers, setup }) => (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <KaspiIntegration agentId={agent.id} canManage={owner} />
           {/* Above everything, including the numbers themselves: the sixty-day token is
               the one failure that arrives on a working cabinet with no warning at all. */}
           <TokenRenewalCard numbers={numbers} owner={owner} agentId={agent.id} onChanged={query.reload} />
@@ -78,6 +80,10 @@ export function IntegrationsScreen() {
             agentId={agent.id}
           />
           {owner && setup && <WebhookCard setup={setup} />}
+          {owner && numbers.filter(number => number.connectionKind === 'linked' && number.displayPhone).map(number => (
+            <LinkedPhoneCard key={number.id} agentId={agent.id} onConnected={query.reload}
+              reconnectNumberId={number.id} phone={number.displayPhone} />
+          ))}
           {/* Способы подключения показываются, только пока подключать нечего: кабинет
               работает с одним номером, и три карточки над уже подключённым номером
               предлагают то, что всё равно не выйдет сделать. */}
@@ -638,7 +644,9 @@ function PhoneNumberCard({ agentId, onConnected }: { agentId: string; onConnecte
  * the button is not decoration — the owner chose this connection knowing what it risks,
  * and the next person to open this screen did not.
  */
-function LinkedPhoneCard({ agentId, onConnected }: { agentId: string; onConnected: () => void }) {
+function LinkedPhoneCard({ agentId, onConnected, reconnectNumberId, phone }: {
+  agentId: string; onConnected: () => void; reconnectNumberId?: string; phone?: string;
+}) {
   const toast = useToast();
   const [numberId, setNumberId] = useState<string | null>(null);
   const [qr, setQr] = useState<string | null>(null);
@@ -693,7 +701,9 @@ function LinkedPhoneCard({ agentId, onConnected }: { agentId: string; onConnecte
     setBusy(true);
     setFailure(null);
     try {
-      const number = await api.startLinkedPairing(agentId);
+      const number = reconnectNumberId
+        ? await api.reconnectLinkedPhone(agentId, reconnectNumberId)
+        : await api.startLinkedPairing(agentId);
       setNumberId(number.id);
     } catch (error) {
       toast.fail(error);
@@ -705,7 +715,8 @@ function LinkedPhoneCard({ agentId, onConnected }: { agentId: string; onConnecte
   return (
     <Card>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-        <div style={{ fontSize: 13.5, fontWeight: 650 }}>Телефон по QR</div>
+        <div style={{ fontSize: 13.5, fontWeight: 650 }}>{reconnectNumberId ? `Переподключить ${phone}` : 'Телефон по QR'}</div>
+        {reconnectNumberId && <div style={hint}>Переписки сохранятся. Текущее соединение отключится до сканирования. Привяжите тот же номер: {phone}. Загрузка старой истории зависит от WhatsApp.</div>}
 
         {numberId ? (
           <>
@@ -724,6 +735,12 @@ function LinkedPhoneCard({ agentId, onConnected }: { agentId: string; onConnecte
               Код сам меняется каждые 20 секунд — это нормально. После сканирования
               подождите: телефон отвечает не сразу.
             </div>
+            {reconnectNumberId && <button type="button" className="btn-sm" onClick={async () => {
+              try {
+                await api.unlinkPhone(agentId, reconnectNumberId);
+                setNumberId(null); setQr(null); onConnected();
+              } catch (error) { toast.fail(error); }
+            }}>Отменить переподключение</button>}
           </>
         ) : (
           <>
@@ -734,7 +751,7 @@ function LinkedPhoneCard({ agentId, onConnected }: { agentId: string; onConnecte
             {failure && <div style={{ ...hint, color: 'var(--danger)' }}>{failure}</div>}
             <div>
               <button type="button" className="btn" disabled={busy} onClick={start}>
-                {busy ? 'Открываем…' : failure ? 'Попробовать снова' : 'Подключить телефон по QR'}
+                {busy ? 'Открываем…' : failure ? 'Попробовать снова' : reconnectNumberId ? 'Переподключить по QR' : 'Подключить телефон по QR'}
               </button>
             </div>
           </>

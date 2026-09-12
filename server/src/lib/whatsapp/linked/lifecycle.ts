@@ -1,4 +1,4 @@
-import { and, eq } from 'drizzle-orm';
+import { and, eq, like, notLike } from 'drizzle-orm';
 import type { Db } from '../../../db/client.js';
 import { whatsappNumbers } from '../../../db/schema.js';
 import { linkedAuthState } from './auth-state.js';
@@ -77,7 +77,11 @@ export function registerLinkedLifecycle(
 
     const wait = Math.min(FIRST_BACKOFF_MS * 2 ** (attempt - 1), MAX_BACKOFF_MS);
     schedule(() => {
-      void client.connect(event.numberId).catch((error: unknown) => report(error));
+      void (async () => {
+        const [number] = await db.select().from(whatsappNumbers).where(eq(whatsappNumbers.id, event.numberId));
+        if (!number?.enabled || !['pairing', 'open'].includes(number.linkedState ?? '')) return;
+        await client.connect(event.numberId);
+      })().catch((error: unknown) => report(error));
     }, wait);
   });
 
@@ -105,12 +109,17 @@ export function registerLinkedLifecycle(
  * идёт».
  */
 export async function clearStalePairings(db: Db): Promise<number> {
+  // An interrupted re-pair belongs to a real number with conversations: never cascade it.
+  await db.update(whatsappNumbers).set({ linkedState: 'logged_out', enabled: false })
+    .where(and(eq(whatsappNumbers.connectionKind, 'linked'), eq(whatsappNumbers.linkedState, 'pairing'),
+      notLike(whatsappNumbers.linkedJid, 'pending:%')));
   const removed = await db
     .delete(whatsappNumbers)
     .where(
       and(
         eq(whatsappNumbers.connectionKind, 'linked'),
         eq(whatsappNumbers.linkedState, 'pairing'),
+        like(whatsappNumbers.linkedJid, 'pending:%'),
       ),
     )
     .returning({ id: whatsappNumbers.id });

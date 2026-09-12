@@ -2,7 +2,7 @@ import type { Board, BoardCard, Customer, Stage } from '@rakurs/contract';
 import { asc, eq, sql } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import type { Db } from '../db/client.js';
-import { contacts, conversations, stages, users } from '../db/schema.js';
+import { contacts, conversations, crmAnalyses, stages, users } from '../db/schema.js';
 import { windowOpen } from './conversations.js';
 import { requireAgent } from './require-agent.js';
 
@@ -46,6 +46,10 @@ function selectCards(db: Db, agentId: string, currency: string) {
     .select({
       id: conversations.id,
       stageId: conversations.stageId,
+      stageSetBy: conversations.stageSetBy,
+      adSourceId: conversations.adSourceId,
+      crmSummary: crmAnalyses.summary,
+      analysisStatus: sql<string>`case when ${crmAnalyses.status} = 'ready' and ${crmAnalyses.analyzedMessageId} is distinct from (select m.id from messages m where m.conversation_id = ${conversations.id} order by m.created_at desc, m.id desc limit 1) then 'pending' else coalesce(${crmAnalyses.status}, 'pending') end`,
       lastInboundAt: conversations.lastInboundAt,
       lastMessageAt: conversations.lastMessageAt,
       createdAt: conversations.createdAt,
@@ -77,6 +81,7 @@ function selectCards(db: Db, agentId: string, currency: string) {
         select sum(o.amount) from orders o
         where o.conversation_id = ${conversations.id}
           and o.status = 'paid'
+          and exists (select 1 from kaspi_payments kp where kp.order_id = o.id and kp.status = 'paid' and kp.confirmed_at is not null and kp.operation_id is not null)
           and o.currency = ${currency}
       ), 0)::numeric(16,2)::text`,
       orderCount: sql<number>`(
@@ -84,6 +89,7 @@ function selectCards(db: Db, agentId: string, currency: string) {
       )`,
     })
     .from(conversations)
+    .leftJoin(crmAnalyses, eq(crmAnalyses.conversationId, conversations.id))
     .innerJoin(contacts, eq(contacts.id, conversations.contactId))
     .leftJoin(users, eq(users.id, conversations.assignedTo))
     .where(eq(conversations.agentId, agentId))
@@ -96,6 +102,10 @@ type CardRow = Awaited<ReturnType<typeof selectCards>>[number];
 
 const toCard = (row: CardRow): BoardCard => ({
   conversationId: row.id,
+  crmSummary: row.crmSummary,
+  stageSetBy: row.stageSetBy,
+  sourceLabel: row.adHeadline ?? (row.adSourceId ? `Реклама · ${row.adSourceId}` : 'WhatsApp · источник не передан'),
+  analysisStatus: row.analysisStatus,
   contactName: row.contactName,
   contactPhone: row.contactPhone,
   lastMessageAt: row.lastMessageAt?.toISOString() ?? null,
@@ -146,6 +156,7 @@ export function registerBoardRoutes(
       }
 
       return {
+        analysisConfigured: req.agent!.openrouterKey !== null,
         columns: funnel.map((stage) => ({ stage: toStage(stage), cards: byStage.get(stage.id)! })),
         unsorted,
         currency: req.agent!.currency,

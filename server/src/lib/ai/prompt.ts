@@ -346,6 +346,7 @@ function rulesSection(agent: PromptAgent, guard: string): string {
     '2. Никогда не сообщай клиенту факт, которого нет в записях выше. Это правило про любой факт, а не про список: цена, скидка, наличие, сроки, гарантия, состав, размеры, вес, совместимость, условия рассрочки, адрес, телефон, время работы и доставки — это только примеры. Нет точного ответа в записях — значит, его нет. Ни примерного, ни «обычно», ни «около», ни «как правило».',
     `3. ${language}`,
     '4. Ответ — один JSON-объект и ничего больше. Без текста до и после него, без пояснений, без markdown-ограждения ``` — первый символ ответа «{», последний «}».',
+    'When the product and quantity are agreed, quote the final payable total explicitly as Итого <amount> ₸ and ask for confirmation before payment. Never claim that you issued an invoice, sent a QR, or received money. Payment actions run separately and their result is recorded by the server. When payment details are missing, ask one clarifying question. Default payment method is a Kaspi invoice to the customer phone; QR is only on explicit request.',
     '5. Поля объекта:',
     '   - reply — текст для клиента. Обязательное поле.',
     '   - stageId — id этапа, на который перевести сделку, или null.',

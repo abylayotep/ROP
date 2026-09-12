@@ -186,6 +186,26 @@ describe('normalize', () => {
 });
 
 describe('linked inbound', () => {
+  it('records inbound ad attribution once and ignores outbound ad context', async () => {
+    const client = fakeLinked();
+    const ad = (id: string, fromMe = false): RawLinkedMessage => raw({
+      key: { id, remoteJid: JID, fromMe },
+      message: { extendedTextMessage: { text: 'Ad response', contextInfo: {
+        externalAdReply: { sourceId: id, sourceType: 'ad', title: 'Custom stamp',
+          body: 'Made to order', ctwaClid: `click-${id}` },
+      } } },
+    });
+    await applyMessage(db, deps, client, numberId, ad('outbound', true));
+    expect((await db.select().from(conversations))[0]?.referralSeenAt).toBeNull();
+    await applyMessage(db, deps, client, numberId, ad('first'));
+    await applyMessage(db, deps, client, numberId, ad('second'));
+    await applyMessage(db, deps, client, numberId, ad('first'));
+    expect((await db.select().from(conversations))[0]).toMatchObject({
+      adSourceId: 'first', adSourceType: 'ad', adHeadline: 'Custom stamp',
+      adBody: 'Made to order', ctwaClid: 'click-first', referralSeenAt: expect.any(Date),
+    });
+  });
+
   it('stores an incoming message and answers it', async () => {
     const client = fakeLinked();
 

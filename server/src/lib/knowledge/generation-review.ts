@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { KbGenerationDraftRequest, KbGenerationDraftResponse, KbGenerationProposalUpdateRequest } from '@rakurs/contract';
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import { kbDrafts, kbGenerationProposals, kbGenerationRuns, kbNotes } from '../../db/schema.js';
 import { baseOf, type DraftOp } from '../drafts/ops.js';
@@ -126,5 +126,81 @@ export async function createGenerationDraft(
       }).where(eq(kbGenerationProposals.id, rows[index]!.id));
     }
     return { draftId: draft!.id };
+  });
+}
+
+const generatedCategories = [
+  { prefix: 'База знаний/', title: 'База знаний из WhatsApp' },
+  { prefix: 'Скрипт/', title: 'Скрипт продаж из WhatsApp' },
+] as const;
+
+/** Converts only still-pending categorized proposals into at most two open review drafts. */
+export async function createGenerationCategoryDrafts(
+  db: Db,
+  agentId: string,
+  userId: string | null,
+  runId: string,
+  finalize = false,
+): Promise<string[]> {
+  return db.transaction(async (tx) => {
+    const [run] = await tx.select({
+      id: kbGenerationRuns.id,
+      status: kbGenerationRuns.status,
+      cancelRequestedAt: kbGenerationRuns.cancelRequestedAt,
+    }).from(kbGenerationRuns).where(and(
+      eq(kbGenerationRuns.id, runId), eq(kbGenerationRuns.agentId, agentId),
+    )).for('update');
+    if (!run) throw new ApiError(404, 'Запуск не найден');
+    if (!['running', 'completed'].includes(run.status) || run.cancelRequestedAt !== null) return [];
+
+    const pending = await tx.select({ proposal: kbGenerationProposals }).from(kbGenerationProposals)
+      .where(and(eq(kbGenerationProposals.runId, runId), eq(kbGenerationProposals.status, 'pending')))
+      .orderBy(asc(kbGenerationProposals.createdAt), asc(kbGenerationProposals.id))
+      .for('update');
+    const created: string[] = [];
+    for (const category of generatedCategories) {
+      const rows = pending.map((row) => row.proposal).filter((proposal) => proposal.path.startsWith(category.prefix));
+      if (rows.length === 0) continue;
+      const grouped = new Map<string, typeof rows>();
+      for (const proposal of rows) {
+        const group = grouped.get(proposal.path);
+        if (group) group.push(proposal);
+        else grouped.set(proposal.path, [proposal]);
+      }
+      const groups = [...grouped.entries()];
+      const ops: DraftOp[] = groups.map(([path, proposals]) => {
+        const body = proposals.map((proposal) => proposal.body).join('\n\n');
+        if (body.length > BODY_MAX) throw new ApiError(400, 'Слишком много текста для одной заметки');
+        return { op: 'note_create', path, body };
+      });
+      const base = await baseOf(tx as unknown as Db, agentId, ops);
+      const [draft] = await tx.insert(kbDrafts).values({
+        agentId,
+        title: category.title,
+        origin: 'manual',
+        ops,
+        base,
+        createdBy: userId,
+      }).returning({ id: kbDrafts.id });
+      created.push(draft!.id);
+      for (let index = 0; index < groups.length; index += 1) {
+        for (const proposal of groups[index]![1]) {
+          await tx.update(kbGenerationProposals).set({
+            status: 'drafted',
+            draftId: draft!.id,
+            draftOpIndex: index,
+            updatedAt: new Date(),
+          }).where(and(
+            eq(kbGenerationProposals.id, proposal.id),
+            eq(kbGenerationProposals.status, 'pending'),
+          ));
+        }
+      }
+    }
+    if (finalize) {
+      await tx.update(kbGenerationRuns).set({ status: 'completed', updatedAt: new Date() })
+        .where(eq(kbGenerationRuns.id, runId));
+    }
+    return created;
   });
 }

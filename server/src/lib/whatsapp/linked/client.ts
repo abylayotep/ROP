@@ -58,7 +58,7 @@ export interface OutgoingFile {
 export type LinkedEvent =
   | { type: 'qr'; numberId: string; qr: string }
   | { type: 'open'; numberId: string; jid: string; displayPhone: string }
-  | { type: 'closed'; numberId: string; loggedOut: boolean }
+  | { type: 'closed'; numberId: string; loggedOut: boolean; statusCode?: number }
   | { type: 'message'; numberId: string; message: RawLinkedMessage }
   | { type: 'history'; numberId: string; chunk: RawLinkedHistory };
 

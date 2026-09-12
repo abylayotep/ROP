@@ -55,8 +55,9 @@ const silent = (): SilentLogger => {
   return logger;
 };
 
-/** What the phone shows in «Связанные устройства». */
-const BROWSER = Browsers.macOS('Ракурс');
+// Native DARWIN/WIN32 subplatforms are rejected with 428 before authentication.
+// Keep the supported web subplatform even when requesting available full history.
+const BROWSER = Browsers.ubuntu('Chrome');
 
 /** `77085807932:12@s.whatsapp.net` → `+77085807932`. */
 function displayPhoneOf(jid: string): string {
@@ -123,7 +124,9 @@ export function createLinkedSocket(db: Db, key: Buffer): LinkedSessionFactory {
         // everything else — a restart, a timeout, a flat battery — is worth reconnecting.
         const status = (update.lastDisconnect?.error as { output?: { statusCode?: number } })
           ?.output?.statusCode;
-        emit({ type: 'closed', numberId, loggedOut: status === DisconnectReason.loggedOut });
+        emit({ type: 'closed', numberId, loggedOut: status === DisconnectReason.loggedOut,
+          ...(typeof status === 'number' && Number.isFinite(status) ? { statusCode: status } : {}),
+        });
       }
     });
 

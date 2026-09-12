@@ -39,6 +39,16 @@ const capi = createCapiClient();
 const linked = createLinkedClient({ session: createLinkedSocket(db, credentialsKey(env)) });
 const app = buildServer(env, db, { capi, linked });
 
+// Only connection metadata crosses into logs; never log frames, credentials or messages.
+linked.on((event) => {
+  if (event.type === 'closed') {
+    app.log.warn({ numberId: event.numberId, statusCode: event.statusCode ?? null,
+      loggedOut: event.loggedOut }, 'linked: connection closed');
+  } else if (event.type === 'open') {
+    app.log.info({ numberId: event.numberId }, 'linked: connection open');
+  }
+});
+
 registerLinkedLifecycle(db, credentialsKey(env), linked, {
   onError: (message) => app.log.error({ message }, 'linked: lifecycle'),
 });

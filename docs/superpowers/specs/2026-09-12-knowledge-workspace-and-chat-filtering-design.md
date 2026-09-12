@@ -1,7 +1,7 @@
 # Knowledge Workspace and Chat Filtering Design
 
 Date: 2026-09-12
-Status: Proposed
+Status: Approved
 
 ## Summary
 

@@ -13,7 +13,17 @@ import { and, asc, desc, eq, inArray, isNotNull, notLike } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
-import { conversations, kbChunks, kbGenerationProposals, kbLinks, kbNotes, kbSources, messages } from '../db/schema.js';
+import {
+  conversations,
+  kbChunks,
+  kbGenerationProposals,
+  kbGenerationRawFindings,
+  kbGenerationRuns,
+  kbLinks,
+  kbNotes,
+  kbSources,
+  messages,
+} from '../db/schema.js';
 import type { Env } from '../env.js';
 import {
   InstagramError,
@@ -333,14 +343,30 @@ export function registerKnowledgeRoutes(
   async function loadNoteDetail(agentId: string, noteId: string): Promise<KbNoteDetail> {
     const note = await loadNote(agentId, noteId);
 
-    const generated = await db.select({ sources: kbGenerationProposals.sources })
-      .from(kbGenerationProposals)
-      .where(and(
-        eq(kbGenerationProposals.noteId, noteId),
-        eq(kbGenerationProposals.status, 'applied'),
-        notLike(kbGenerationProposals.fingerprint, LEGACY_RAW_FINGERPRINT_PATTERN),
-      ));
-    const storedSources = generated.flatMap((row) => row.sources);
+    const [generated, migrated] = await Promise.all([
+      db.select({ sources: kbGenerationProposals.sources })
+        .from(kbGenerationProposals)
+        .innerJoin(kbGenerationRuns, and(
+          eq(kbGenerationRuns.id, kbGenerationProposals.runId),
+          eq(kbGenerationRuns.agentId, agentId),
+        ))
+        .where(and(
+          eq(kbGenerationProposals.noteId, noteId),
+          eq(kbGenerationProposals.status, 'applied'),
+          notLike(kbGenerationProposals.fingerprint, LEGACY_RAW_FINGERPRINT_PATTERN),
+        )),
+      db.select({ sources: kbGenerationRawFindings.sources })
+        .from(kbGenerationRawFindings)
+        .innerJoin(kbGenerationRuns, and(
+          eq(kbGenerationRuns.id, kbGenerationRawFindings.runId),
+          eq(kbGenerationRuns.agentId, agentId),
+        ))
+        .where(and(
+          eq(kbGenerationRawFindings.legacyNoteId, noteId),
+          eq(kbGenerationRawFindings.legacyStatus, 'applied'),
+        )),
+    ]);
+    const storedSources = [...generated, ...migrated].flatMap((row) => row.sources);
     const sourceIds = [...new Set(storedSources.map((source) => source.messageId))];
     const currentSources = sourceIds.length === 0 ? [] : await db.select({
       id: messages.id, conversationId: messages.conversationId, body: messages.body,

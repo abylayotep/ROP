@@ -31,6 +31,7 @@ describe('migration 0032: remaining legacy raw proposals become immutable findin
   const discardedDraftId = randomUUID();
   const appliedNoteId = randomUUID();
   const sourceMessageId = randomUUID();
+  const sourceConversationId = randomUUID();
   const createdAt = new Date('2026-09-12T03:04:05.000Z');
   let runId: string;
   let batchId: string;
@@ -56,6 +57,24 @@ describe('migration 0032: remaining legacy raw proposals become immutable findin
       INSERT INTO agents (account_id, name) VALUES (${account!.id}, 'Agent') RETURNING id
     `;
     agentId = agent!.id as string;
+    const [number] = await scratchSql`
+      INSERT INTO whatsapp_numbers (agent_id, phone_number_id, waba_id, display_phone, access_token)
+      VALUES (${agent!.id}, 'migration-number', 'migration-waba', '+77000000000', 'token') RETURNING id
+    `;
+    const [contact] = await scratchSql`
+      INSERT INTO contacts (agent_id, phone) VALUES (${agent!.id}, '77000000001') RETURNING id
+    `;
+    await scratchSql`
+      INSERT INTO conversations (id, agent_id, contact_id, whatsapp_number_id)
+      VALUES (${sourceConversationId}, ${agent!.id}, ${contact!.id}, ${number!.id})
+    `;
+    await scratchSql`
+      INSERT INTO messages (id, conversation_id, wa_message_id, direction, author, kind, body, sent_at)
+      VALUES (
+        ${sourceMessageId}, ${sourceConversationId}, 'migration-message', 'out', 'operator', 'text',
+        'Доставка занимает два дня.', ${createdAt}
+      )
+    `;
     const [run] = await scratchSql`
       INSERT INTO kb_generation_runs (
         agent_id, user_id, requested_preview_id, request_key, selection, manifest, counts,
@@ -90,11 +109,12 @@ describe('migration 0032: remaining legacy raw proposals become immutable findin
       ) VALUES (
         ${rawId}, ${run!.id}, ${batch!.id}, 'raw:batch:0:hash', 4, 'База знаний/Доставка',
         'Доставка занимает два дня.', ARRAY['context_limited']::text[],
-        ${scratchSql.json([{ conversationId: 'conversation-1', messageId: sourceMessageId, sentAt: createdAt.toISOString() }])},
+        ${scratchSql.json([{ conversationId: sourceConversationId, messageId: sourceMessageId, sentAt: createdAt.toISOString() }])},
         'drafted', ${openDraftId}, 0, NULL, ${createdAt}
       ), (
         ${appliedRawId}, ${run!.id}, ${batch!.id}, 'raw:batch:1:hash', 7, 'База знаний/Опубликовано',
-        'Уже опубликовано.', ARRAY[]::text[], ${scratchSql.json([])},
+        'Уже опубликовано.', ARRAY[]::text[],
+        ${scratchSql.json([{ conversationId: sourceConversationId, messageId: sourceMessageId, sentAt: createdAt.toISOString() }])},
         'applied', ${appliedDraftId}, 2, ${appliedNoteId}, ${createdAt}
       ), (
         ${discardedRawId}, ${run!.id}, ${batch!.id}, 'raw:batch:2:hash', 9, 'Скрипт/Отклонено',
@@ -114,7 +134,9 @@ describe('migration 0032: remaining legacy raw proposals become immutable findin
         id, run_id, batch_id, fingerprint, path, body, warnings, sources, created_at
       ) VALUES (
         ${appliedRawId}, ${run!.id}, ${batch!.id}, 'raw:batch:1:hash', 'База знаний/Опубликовано',
-        'Уже опубликовано.', ARRAY[]::text[], ${scratchSql.json([])}, ${createdAt}
+        'Уже опубликовано.', ARRAY[]::text[],
+        ${scratchSql.json([{ conversationId: sourceConversationId, messageId: sourceMessageId, sentAt: createdAt.toISOString() }])},
+        ${createdAt}
       )
     `;
     await runMigration(scratchSql, DRAFT_LINK_TAG);
@@ -159,7 +181,7 @@ describe('migration 0032: remaining legacy raw proposals become immutable findin
       path: 'База знаний/Доставка',
       body: 'Доставка занимает два дня.',
       warnings: ['context_limited'],
-      sources: [{ conversationId: 'conversation-1', messageId: sourceMessageId, sentAt: createdAt.toISOString() }],
+      sources: [{ conversationId: sourceConversationId, messageId: sourceMessageId, sentAt: createdAt.toISOString() }],
       legacy_kind: 'knowledge',
       legacy_revision: 4,
       legacy_status: 'drafted',
@@ -219,6 +241,23 @@ describe('migration 0032: remaining legacy raw proposals become immutable findin
         },
       }),
     ]));
+  });
+
+  it('shows a migrated applied finding as the published note source', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/agents/${agentId}/knowledge/notes/${appliedNoteId}`,
+      cookies: cookieJar,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().generationSources).toEqual([{
+      conversationId: sourceConversationId,
+      messageId: sourceMessageId,
+      sentAt: createdAt.toISOString(),
+      excerpt: 'Доставка занимает два дня.',
+      available: true,
+    }]);
   });
 
   it('discards only linked open drafts and prevents their raw ops from being applied', async () => {

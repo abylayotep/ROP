@@ -175,6 +175,8 @@ describe('generation proposal consolidation', () => {
 
   it.each([
     ['personal address', 'Адрес: улица Абая, 10'],
+    ['personal introduction', 'Меня зовут Алия.'],
+    ['Kazakh personal introduction', 'Менің атым Әлия.'],
     ['natural personal address', 'Меня зовут Алия, я живу на улице Абая, дом 12, квартира 4.'],
     ['Kazakh personal address', 'Менің атым Әлия, Абай көшесі 12 үй, 4 пәтерде тұрамын.'],
     ['phone number', 'Позвоните по телефону +7 701 123 45 67'],

@@ -109,7 +109,7 @@ describe('ChatGenerationPanel run switching', () => {
 
     try {
       await act(async () => { renderer = create(panel('run-a')); });
-      await act(async () => { button('Повторить незавершённые пакеты').props.onClick(); });
+      await act(async () => { button('Повторить запуск').props.onClick(); });
       await act(async () => { button('Показать ещё черновики').props.onClick(); });
       await act(async () => { button('Load proposals').props.onClick(); });
       expect(output()).toContain('A action failed');

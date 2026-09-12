@@ -1165,7 +1165,10 @@ export function registerDraftRoutes(
         try {
           await applyOps(tx as unknown as Db, agentId, draft.ops, async (opIndex, noteId) => {
             await tx.update(kbGenerationProposals).set({
-              status: 'applied', noteId, updatedAt: new Date(),
+              status: 'applied',
+              noteId,
+              revision: sql`${kbGenerationProposals.revision} + 1`,
+              updatedAt: new Date(),
             }).where(and(
               eq(kbGenerationProposals.draftId, draft.id),
               eq(kbGenerationProposals.draftOpIndex, opIndex),

@@ -338,7 +338,7 @@ describe('applying a draft', () => {
     expect(discarded.statusCode).toBe(200);
     await expect(createGenerationDraft(db, agentId, owner!.id, run!.id, input)).rejects.toMatchObject({ statusCode: 409 });
     const [released] = await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.id, proposal!.id));
-    expect(released).toMatchObject({ status: 'pending', revision: 2, draftId: null, draftOpIndex: null });
+    expect(released).toMatchObject({ status: 'pending', revision: 3, draftId: null, draftOpIndex: null });
     const history = await app.inject({
       method: 'GET',
       url: `/api/agents/${agentId}/knowledge/generation/runs/${run!.id}`,
@@ -368,6 +368,8 @@ describe('applying a draft', () => {
     expect((await apply(draft.draftId)).statusCode).toBe(200);
     expect(await db.select().from(kbGenerationDrafts).where(eq(kbGenerationDrafts.draftId, draft.draftId)))
       .toEqual([expect.objectContaining({ runId: run!.id, draftId: draft.draftId })]);
+    expect((await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.id, proposal!.id)))[0])
+      .toMatchObject({ status: 'applied', revision: 3 });
   });
 
   it('applies over a red verdict, because the owner decides', async () => {

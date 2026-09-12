@@ -14,12 +14,23 @@ let agentId: string;
 let userId: string;
 let conversationId: string;
 let messageId: string;
+let customerMessageId: string;
 const key = Buffer.alloc(32, 7);
 const classified = (
   proposals: unknown[] = [],
   classification: 'customer' | 'irrelevant' | 'uncertain' = 'customer',
   reason = 'The client asks about delivery and the seller answers.',
-) => JSON.stringify({ classification: { value: classification, reason }, proposals });
+) => JSON.stringify({
+  classification: {
+    value: classification,
+    reason,
+    evidence: classification === 'customer' ? [
+      { messageId: customerMessageId, quote: 'How long does delivery take?' },
+      { messageId, quote: 'Delivery takes two days' },
+    ] : [],
+  },
+  proposals,
+});
 
 const consolidated = (items: unknown[]) => JSON.stringify({ items });
 
@@ -60,7 +71,8 @@ beforeEach(async () => {
   const [contact] = await db.insert(contacts).values({ agentId, phone: '77000000003' }).returning();
   const [conversation] = await db.insert(conversations).values({ agentId, contactId: contact!.id, whatsappNumberId: number!.id }).returning();
   conversationId = conversation!.id;
-  await db.insert(messages).values({ conversationId, direction: 'in', author: 'client', kind: 'text', body: 'How long does delivery take?', sentAt: new Date('2026-09-01T09:59:00Z') });
+  const [customerMessage] = await db.insert(messages).values({ conversationId, direction: 'in', author: 'client', kind: 'text', body: 'How long does delivery take?', sentAt: new Date('2026-09-01T09:59:00Z') }).returning();
+  customerMessageId = customerMessage!.id;
   const [message] = await db.insert(messages).values({ conversationId, direction: 'out', author: 'operator', kind: 'text', body: 'Delivery takes two days', sentAt: new Date('2026-09-01T10:00:00Z') }).returning();
   messageId = message!.id;
 });
@@ -256,6 +268,94 @@ describe('generation runs', () => {
     expect(await db.select().from(kbDrafts)).toHaveLength(0);
     expect((await db.select().from(kbGenerationRuns).where(eq(kbGenerationRuns.id, run.id)))[0])
       .toMatchObject({ status: 'failed', errorCode: 'consolidation_failed', promptTokens: 100, completionTokens: 20 });
+  });
+
+  it('retries consolidation from saved raw findings without buying extraction again', async () => {
+    const run = await admitted('consolidation-retry');
+    const extraction = classified([
+      { path: 'База знаний/Доставка', body: 'Доставка занимает два дня.', sources: [messageId], warnings: [] },
+    ]);
+    await executeGenerationRun({
+      db,
+      model: fakeModel(extraction, new Error('provider unavailable')),
+      credentialsKey: key,
+    }, run.id);
+
+    await expect(retryGenerationRun(db, agentId, run.id)).resolves.toMatchObject({ status: 'queued' });
+    const model = fakeModel(consolidated([{
+      path: 'База знаний/Доставка',
+      body: 'Доставка занимает два дня.',
+      confidence: 'high',
+      sourceProposalIds: [],
+    }]));
+    model.complete = async (call) => {
+      model.calls.push(call);
+      const payload = JSON.parse(call.messages[1]!.content) as { proposals: { id: string }[] };
+      return {
+        text: consolidated([{
+          path: 'База знаний/Доставка',
+          body: 'Доставка занимает два дня.',
+          confidence: 'high',
+          sourceProposalIds: [payload.proposals[0]!.id],
+        }]),
+        promptTokens: 50,
+        completionTokens: 10,
+        cost: '0.00005000',
+      };
+    };
+
+    await executeGenerationRun({ db, model, credentialsKey: key }, run.id);
+
+    expect(model.calls).toHaveLength(1);
+    expect((await db.select().from(kbGenerationBatches).where(eq(kbGenerationBatches.runId, run.id)))[0])
+      .toMatchObject({ status: 'done', attempts: 1, promptTokens: 100, completionTokens: 20 });
+    expect((await db.select().from(kbGenerationRuns).where(eq(kbGenerationRuns.id, run.id)))[0])
+      .toMatchObject({ status: 'completed', promptTokens: 150, completionTokens: 30, cost: '0.00015000' });
+  });
+
+  it('resumes only consolidation after an interruption that followed persisted extraction', async () => {
+    const run = await admitted('post-extraction-interruption');
+    const [batch] = await db.select().from(kbGenerationBatches).where(eq(kbGenerationBatches.runId, run.id));
+    await db.update(kbGenerationBatches).set({
+      status: 'done', attempts: 1, promptTokens: 80, completionTokens: 12, cost: '0.00008000',
+    }).where(eq(kbGenerationBatches.id, batch!.id));
+    await db.insert(kbGenerationRawFindings).values({
+      runId: run.id,
+      batchId: batch!.id,
+      fingerprint: 'post-extraction-finding',
+      path: 'База знаний/Доставка',
+      body: 'Доставка занимает два дня.',
+      warnings: [],
+      sources: [{ conversationId, messageId, sentAt: '2026-09-01T10:00:00.000Z' }],
+    });
+    await db.update(kbGenerationRuns).set({
+      status: 'running', promptTokens: 80, completionTokens: 12, cost: '0.00008000',
+    }).where(eq(kbGenerationRuns.id, run.id));
+    await reconcileGenerationRuns(db);
+
+    await expect(retryGenerationRun(db, agentId, run.id)).resolves.toMatchObject({ status: 'queued' });
+    const model = fakeModel();
+    model.complete = async (call) => {
+      model.calls.push(call);
+      const payload = JSON.parse(call.messages[1]!.content) as { proposals: { id: string }[] };
+      return {
+        text: consolidated([{
+          path: 'База знаний/Доставка',
+          body: 'Доставка занимает два дня.',
+          confidence: 'high',
+          sourceProposalIds: [payload.proposals[0]!.id],
+        }]),
+        promptTokens: 40,
+        completionTokens: 8,
+        cost: '0.00004000',
+      };
+    };
+
+    await executeGenerationRun({ db, model, credentialsKey: key }, run.id);
+
+    expect(model.calls).toHaveLength(1);
+    expect((await db.select().from(kbGenerationRuns).where(eq(kbGenerationRuns.id, run.id)))[0])
+      .toMatchObject({ status: 'completed', promptTokens: 120, completionTokens: 20, cost: '0.00012000' });
   });
 
   it('persists classification and excludes proposals from an irrelevant batch', async () => {

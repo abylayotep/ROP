@@ -161,11 +161,22 @@ const promptFor = (kind: KbGenerationProposalKind, style: CommunicationStyle): s
   return `${BASE_PROMPT}\nWrite directly sendable sales phrases under paths beginning with "Скрипт/", never meta-instructions such as “tell the customer.”\n${communicationStyleInstruction(style)}`;
 };
 
-const PROFANITY = /(?:\b(?:fuck|shit|bitch)\b|(?:^|[^\p{L}])(?:бля(?:дь|ть)?|сука|хуй|пизд\p{L}*|[её]б(?:ать|ан|уч))(?=$|[^\p{L}]))/iu;
+const PROFANITY = /(?:\b(?:fuck|shit|bitch)\b|(?:^|[^\p{L}])(?:бля\p{L}*|сук\p{L}*|ху[йеяё]\p{L}*|пизд\p{L}*|[её]б\p{L}*))(?=$|[^\p{L}])/iu;
+const PERSONAL_INTRODUCTION = /(?:меня\s+зовут\s+[А-ЯЁ][а-яё]+|менің\s+атым\s+[А-ЯӘҒҚҢӨҰҮҺІЁ][а-яәғқңөұүһіё]+)/u;
+const NATURAL_ADDRESS = /(?:(?:улиц(?:а|е|ы)|ул\.)\s+[\p{L}.-]+[^\n]{0,48}дом\s*\d+|[\p{L}.-]+\s+көшесі\s*\d+\s*үй)/iu;
+const INTERNAL_COMMAND = /(?:(?:передайте|скажите|сообщите)\s+(?:сотрудник|менеджер|курьер)\p{L}*|(?:сотрудник|менеджер|курьер)\p{L}*\s+(?:надо|нужно|должен)|(?:надо|нужно)\s+(?:упаковать|передать|отправить|позвонить))/iu;
+const ONE_OFF_PROMISE = /(?:я\s+лично\s+(?:привезу|доставлю|позвоню|напишу|верну)|(?:я\s+)?обещаю)/iu;
+
+const violatesFinalContentPolicy = (text: string): boolean =>
+  PROFANITY.test(text) ||
+  PERSONAL_INTRODUCTION.test(text) ||
+  NATURAL_ADDRESS.test(text) ||
+  INTERNAL_COMMAND.test(text) ||
+  ONE_OFF_PROMISE.test(text);
 
 const safeGeneratedText = (text: string): string | null => {
   const redacted = redactGenerationText(text);
-  if (redacted === null || redacted !== text || PROFANITY.test(text)) return null;
+  if (redacted === null || redacted !== text || violatesFinalContentPolicy(text)) return null;
   return redacted;
 };
 

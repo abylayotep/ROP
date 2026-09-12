@@ -29,7 +29,14 @@ const customer = (over: Partial<GenerationExtractionMessage> = {}): GenerationEx
 
 const answer = (sources = ['seller-1'], body = 'Delivery costs 1,500 tenge.') =>
   JSON.stringify({
-    classification: { value: 'customer', reason: 'Клиент спрашивает о доставке, продавец отвечает.' },
+    classification: {
+      value: 'customer',
+      reason: 'Клиент спрашивает о доставке, продавец отвечает.',
+      evidence: [
+        { messageId: 'customer-1', quote: 'How much is delivery?' },
+        { messageId: 'seller-1', quote: 'Delivery costs 1,500 tenge.' },
+      ],
+    },
     proposals: [{ path: 'База знаний/Доставка', body, sources, warnings: [] }],
   });
 
@@ -72,6 +79,8 @@ const customerFixtures = [
   ['payment', 'Can I pay when I collect it?', 'Payment is accepted when the order is collected.', 'База знаний/Оплата'],
   ['delivery', 'How long does delivery take?', 'Delivery takes two business days.', 'База знаний/Доставка'],
   ['support', 'Can you help configure the product?', 'Support is available every day from 9:00 to 18:00.', 'База знаний/Поддержка'],
+  ['Russian delivery', 'Когда доставите заказ?', 'Доставка заказа занимает два дня.', 'База знаний/Доставка'],
+  ['Kazakh payment', 'Төлемді алған кезде жасай аламын ба?', 'Төлем тауарды алған кезде қабылданады.', 'База знаний/Оплата'],
 ] as const;
 
 const deps = (model: ReturnType<typeof fakeModel>) => ({
@@ -130,7 +139,14 @@ describe('generation extraction', () => {
 
   it.each(customerFixtures)('%s customer context accepts grounded proposals', async (_name, clientBody, sellerBody, path) => {
     const model = fakeModel(JSON.stringify({
-      classification: { value: 'customer', reason: 'Клиент обсуждает товар или условия покупки.' },
+      classification: {
+        value: 'customer',
+        reason: 'Клиент обсуждает товар или условия покупки.',
+        evidence: [
+          { messageId: 'customer-1', quote: clientBody },
+          { messageId: 'seller-1', quote: sellerBody },
+        ],
+      },
       proposals: [{ path, body: sellerBody, sources: ['seller-1'], warnings: [] }],
     }));
 
@@ -143,6 +159,55 @@ describe('generation extraction', () => {
     const prompt = model.calls[0]!.messages.find((message) => message.role === 'user')!.content;
     expect(JSON.parse(prompt).messages.map((message: { body: string }) => message.body))
       .toEqual([clientBody, sellerBody]);
+  });
+
+  it('downgrades a personal conversation even when the model invents a customer delivery proposal', async () => {
+    const messages = conversation('Привет! Как дела?', 'Всё хорошо, встретимся вечером.');
+    const model = fakeModel(JSON.stringify({
+      classification: {
+        value: 'customer',
+        reason: 'Клиент договаривается о доставке.',
+        evidence: [
+          { messageId: 'customer-1', quote: 'Привет! Как дела?' },
+          { messageId: 'seller-1', quote: 'Всё хорошо, встретимся вечером.' },
+        ],
+      },
+      proposals: [{
+        path: 'База знаний/Доставка',
+        body: 'Доставка выполняется вечером.',
+        sources: ['seller-1'],
+        warnings: [],
+      }],
+    }));
+
+    await expect(extractGenerationBatch(deps(model), messages)).resolves.toMatchObject({
+      classification: 'uncertain',
+      proposals: [],
+    });
+  });
+
+  it.each([
+    ['unknown message', [{ messageId: 'invented', quote: 'How much is delivery?' }]],
+    ['unsupported quote', [{ messageId: 'customer-1', quote: 'I want overnight delivery.' }]],
+  ])('downgrades customer classification with %s evidence', async (_name, evidence) => {
+    const model = fakeModel(JSON.stringify({
+      classification: {
+        value: 'customer',
+        reason: 'Клиент спрашивает о доставке.',
+        evidence,
+      },
+      proposals: [{
+        path: 'База знаний/Доставка',
+        body: 'Delivery costs 1,500 tenge.',
+        sources: ['seller-1'],
+        warnings: [],
+      }],
+    }));
+
+    await expect(extractGenerationBatch(deps(model), [customer(), seller()])).resolves.toMatchObject({
+      classification: 'uncertain',
+      proposals: [],
+    });
   });
 
   it('does not call the provider without both customer and seller messages', async () => {

@@ -11,6 +11,7 @@ import { fakeGraph } from './helpers/fake-graph.js';
 import { fakeModel } from './helpers/fake-model.js';
 import { ADMIN_URL, runMigration, tagsBefore, withDatabase } from './helpers/migration-db.js';
 
+const REVIEW_WORKSPACE_TAG = '0029_knowledge_review_workspace';
 const ORIGINAL_TABLE_TAG = '0030_knowledge_generation_raw_findings';
 const DRAFT_LINK_TAG = '0031_backfill_generation_draft_links';
 const TARGET_TAG = '0032_migrate_remaining_legacy_raw_proposals';
@@ -28,6 +29,8 @@ describe('migration 0032: remaining legacy raw proposals become immutable findin
   const openDraftId = randomUUID();
   const appliedDraftId = randomUUID();
   const discardedDraftId = randomUUID();
+  const appliedNoteId = randomUUID();
+  const sourceMessageId = randomUUID();
   const createdAt = new Date('2026-09-12T03:04:05.000Z');
   let runId: string;
   let batchId: string;
@@ -38,7 +41,7 @@ describe('migration 0032: remaining legacy raw proposals become immutable findin
     adminSql = postgres(ADMIN_URL, { max: 1 });
     await adminSql.unsafe(`CREATE DATABASE "${dbName}"`);
     scratchSql = postgres(withDatabase(ADMIN_URL, dbName), { max: 1 });
-    for (const tag of tagsBefore(ORIGINAL_TABLE_TAG)) await runMigration(scratchSql, tag);
+    for (const tag of tagsBefore(REVIEW_WORKSPACE_TAG)) await runMigration(scratchSql, tag);
 
     const [account] = await scratchSql`INSERT INTO accounts (name) VALUES ('Migration') RETURNING id`;
     const [user] = await scratchSql`
@@ -77,29 +80,34 @@ describe('migration 0032: remaining legacy raw proposals become immutable findin
         (${discardedDraftId}, ${agent!.id}, 'Raw discarded', 'manual', 'discarded', '[]', '{}', ${user!.id})
     `;
     await scratchSql`
+      INSERT INTO kb_notes (id, agent_id, path, title, body)
+      VALUES (${appliedNoteId}, ${agent!.id}, 'База знаний/Опубликовано', 'Опубликовано', 'Уже опубликовано.')
+    `;
+    await scratchSql`
       INSERT INTO kb_generation_proposals (
-        id, run_id, batch_id, fingerprint, path, body, warnings, sources, status,
-        draft_id, draft_op_index, created_at
+        id, run_id, batch_id, fingerprint, revision, path, body, warnings, sources, status,
+        draft_id, draft_op_index, note_id, created_at
       ) VALUES (
-        ${rawId}, ${run!.id}, ${batch!.id}, 'raw:batch:0:hash', 'База знаний/Доставка',
+        ${rawId}, ${run!.id}, ${batch!.id}, 'raw:batch:0:hash', 4, 'База знаний/Доставка',
         'Доставка занимает два дня.', ARRAY['context_limited']::text[],
-        ${scratchSql.json([{ conversationId: 'conversation-1', messageId: 'message-1', sentAt: createdAt.toISOString() }])},
-        'drafted', ${openDraftId}, 0, ${createdAt}
+        ${scratchSql.json([{ conversationId: 'conversation-1', messageId: sourceMessageId, sentAt: createdAt.toISOString() }])},
+        'drafted', ${openDraftId}, 0, NULL, ${createdAt}
       ), (
-        ${appliedRawId}, ${run!.id}, ${batch!.id}, 'raw:batch:1:hash', 'База знаний/Опубликовано',
+        ${appliedRawId}, ${run!.id}, ${batch!.id}, 'raw:batch:1:hash', 7, 'База знаний/Опубликовано',
         'Уже опубликовано.', ARRAY[]::text[], ${scratchSql.json([])},
-        'applied', ${appliedDraftId}, 0, ${createdAt}
+        'applied', ${appliedDraftId}, 2, ${appliedNoteId}, ${createdAt}
       ), (
-        ${discardedRawId}, ${run!.id}, ${batch!.id}, 'raw:batch:2:hash', 'База знаний/Отклонено',
+        ${discardedRawId}, ${run!.id}, ${batch!.id}, 'raw:batch:2:hash', 9, 'Скрипт/Отклонено',
         'Уже отклонено.', ARRAY[]::text[], ${scratchSql.json([])},
-        'rejected', ${discardedDraftId}, 0, ${createdAt}
+        'rejected', ${discardedDraftId}, 1, NULL, ${createdAt}
       ), (
-        ${proposalId}, ${run!.id}, ${batch!.id}, 'normal-hash', 'База знаний/Оплата',
+        ${proposalId}, ${run!.id}, ${batch!.id}, 'normal-hash', 1, 'База знаний/Оплата',
         'Оплата при получении.', ARRAY[]::text[], ${scratchSql.json([])},
-        'pending', NULL, NULL, ${createdAt}
+        'pending', NULL, NULL, NULL, ${createdAt}
       )
     `;
 
+    await runMigration(scratchSql, REVIEW_WORKSPACE_TAG);
     await runMigration(scratchSql, ORIGINAL_TABLE_TAG);
     await scratchSql`
       INSERT INTO kb_generation_raw_findings (
@@ -151,7 +159,30 @@ describe('migration 0032: remaining legacy raw proposals become immutable findin
       path: 'База знаний/Доставка',
       body: 'Доставка занимает два дня.',
       warnings: ['context_limited'],
-      sources: [{ conversationId: 'conversation-1', messageId: 'message-1', sentAt: createdAt.toISOString() }],
+      sources: [{ conversationId: 'conversation-1', messageId: sourceMessageId, sentAt: createdAt.toISOString() }],
+      legacy_kind: 'knowledge',
+      legacy_revision: 4,
+      legacy_status: 'drafted',
+      legacy_draft_id: openDraftId,
+      legacy_draft_op_index: 0,
+      legacy_note_id: null,
+    });
+    expect(findings.find((row) => row.id === appliedRawId)).toMatchObject({
+      legacy_kind: 'knowledge',
+      legacy_revision: 7,
+      legacy_status: 'applied',
+      legacy_draft_id: appliedDraftId,
+      legacy_draft_op_index: 2,
+      legacy_note_id: appliedNoteId,
+    });
+    expect(findings.find((row) => row.id === discardedRawId)).toMatchObject({
+      path: 'Скрипт/Отклонено',
+      legacy_kind: 'script',
+      legacy_revision: 9,
+      legacy_status: 'rejected',
+      legacy_draft_id: discardedDraftId,
+      legacy_draft_op_index: 1,
+      legacy_note_id: null,
     });
     expect(new Date(migrated!.created_at as string | Date).toISOString()).toBe(createdAt.toISOString());
     const links = await scratchSql`
@@ -165,6 +196,29 @@ describe('migration 0032: remaining legacy raw proposals become immutable findin
       expect.objectContaining({ run_id: runId, draft_id: discardedDraftId }),
     ]));
     expect(links).toHaveLength(3);
+  });
+
+  it('exposes immutable legacy provenance through the raw findings API', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/agents/${agentId}/knowledge/generation/runs/${runId}?includeRawFindings=true`,
+      cookies: cookieJar,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().rawFindings).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: appliedRawId,
+        legacyProvenance: {
+          kind: 'knowledge',
+          revision: 7,
+          status: 'applied',
+          draftId: appliedDraftId,
+          draftOpIndex: 2,
+          noteId: appliedNoteId,
+        },
+      }),
+    ]));
   });
 
   it('discards only linked open drafts and prevents their raw ops from being applied', async () => {

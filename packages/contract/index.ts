@@ -603,6 +603,14 @@ export interface KbGenerationRawFinding {
   body: string;
   warnings: KbGenerationWarning[];
   sources: KbGenerationSource[];
+  legacyProvenance: {
+    kind: KbGenerationProposalKind;
+    revision: number;
+    status: KbGenerationProposalStatus;
+    draftId: string | null;
+    draftOpIndex: number | null;
+    noteId: string | null;
+  } | null;
 }
 
 export interface KbGenerationRawFindingPage {

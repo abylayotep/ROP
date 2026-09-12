@@ -175,8 +175,14 @@ describe('generation proposal consolidation', () => {
 
   it.each([
     ['personal address', 'Адрес: улица Абая, 10'],
+    ['natural personal address', 'Меня зовут Алия, я живу на улице Абая, дом 12, квартира 4.'],
+    ['Kazakh personal address', 'Менің атым Әлия, Абай көшесі 12 үй, 4 пәтерде тұрамын.'],
     ['phone number', 'Позвоните по телефону +7 701 123 45 67'],
     ['profanity', 'Это, блядь, лучший вариант'],
+    ['inflected profanity in an internal command', 'Передайте сотруднику: ебаный товар надо упаковать сегодня.'],
+    ['inflected profanity', 'Клиент остался недоволен хуёвым товаром.'],
+    ['internal command', 'Передайте сотруднику: товар надо упаковать сегодня.'],
+    ['one-off promise', 'Я лично привезу заказ сегодня вечером.'],
     ['personal name', 'Напишите Алексею'],
   ])('drops unsafe %s returned by the model', async (_name, body) => {
     const model = fakeModel(answer([{

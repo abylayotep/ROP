@@ -68,11 +68,17 @@ const outputSchema = z.object({
   classification: z.object({
     value: z.enum(['customer', 'irrelevant', 'uncertain']),
     reason: z.string().trim().min(1).max(240),
+    evidence: z.array(z.object({
+      messageId: z.string().min(1),
+      quote: z.string().trim().min(1).max(160),
+    })).max(8).default([]),
   }),
   proposals: z.array(proposalSchema).max(GENERATION_LIMITS.maxProposalsPerBatch),
 });
 
 const MISSING_SIDE_REASON = 'После редактирования нет пригодных сообщений от обеих сторон диалога.';
+const UNSUPPORTED_CUSTOMER_REASON = 'Не удалось подтвердить, что переписка относится к клиентскому запросу.';
+const BUSINESS_SIGNAL = /(?:\b(?:product|item|size|price|order|buy|payment|pay|delivery|shipping|return|refund|support|service|booking|reserve)\b|(?<!\p{L})(?:товар|размер|цен|заказ|куп|оплат|достав|возврат|поддержк|услуг|брон)\p{L}*(?!\p{L})|(?<!\p{L})(?:тауар|өлшем|баға|тапсырыс|сатып|төлем|жеткіз|қайтар|қолдау|қызмет)\p{L}*(?!\p{L}))/iu;
 
 const emptyUsage = (): GenerationExtractionUsage => ({
   promptTokens: 0,
@@ -94,10 +100,33 @@ Every proposal must cite one or more supplied seller messages authored by phone 
 Preserve dates, qualifications, and uncertainty. Never include profanity, personal names, addresses, phone numbers, internal commands, or one-off promises.
 Write every user-facing path and body in Russian.
 Write classification.reason in Russian. Keep it short and omit personal or sensitive details.
+For customer classification, classification.evidence must contain short exact quotes tied to supplied messageId values from both the customer and seller. Never cite text outside the messages.
 Put durable facts under paths beginning with "База знаний/".
 Put seller-supported sales wording under paths beginning with "Скрипт/". If the seller messages do not support a sales script, do not invent one.
 Each path must use one of those two prefixes. Warnings may contain dated, conflict, or context_limited.
-Return JSON only, for example: {"classification":{"value":"customer","reason":"Клиент уточняет условия доставки."},"proposals":[{"path":"База знаний/Доставка","body":"...","sources":["message-id"],"warnings":[]}]}.`;
+Return JSON only, for example: {"classification":{"value":"customer","reason":"Клиент уточняет условия доставки.","evidence":[{"messageId":"customer-id","quote":"Когда будет доставка?"},{"messageId":"seller-id","quote":"Доставка завтра."}]},"proposals":[{"path":"База знаний/Доставка","body":"...","sources":["seller-id"],"warnings":[]}]}.`;
+
+const normalizeEvidenceText = (text: string): string => text.trim().replace(/\s+/g, ' ').toLocaleLowerCase('ru');
+
+const hasSupportedCustomerEvidence = (
+  evidence: readonly { messageId: string; quote: string }[],
+  messages: readonly GenerationExtractionMessage[],
+): boolean => {
+  const messagesById = new Map(messages.map((message) => [message.id, message]));
+  let hasCustomer = false;
+  let hasSeller = false;
+  const supportedQuotes: string[] = [];
+  for (const item of evidence) {
+    const message = messagesById.get(item.messageId);
+    if (!message) return false;
+    const quote = normalizeEvidenceText(item.quote);
+    if (!normalizeEvidenceText(message.body).includes(quote)) return false;
+    hasCustomer ||= message.author === 'client';
+    hasSeller ||= message.author === 'phone' || message.author === 'operator';
+    supportedQuotes.push(item.quote);
+  }
+  return hasCustomer && hasSeller && BUSINESS_SIGNAL.test(supportedQuotes.join(' '));
+};
 
 export function hasBothConversationSides(
   messages: readonly Pick<GenerationExtractionMessage, 'author'>[],
@@ -190,6 +219,14 @@ export async function extractGenerationBatch(
   const classification = parsed.data.classification.value;
   if (classification !== 'customer') {
     return { classification, classificationReason, proposals: [], usage };
+  }
+  if (!hasSupportedCustomerEvidence(parsed.data.classification.evidence, safeMessages)) {
+    return {
+      classification: 'uncertain',
+      classificationReason: UNSUPPORTED_CUSTOMER_REASON,
+      proposals: [],
+      usage,
+    };
   }
 
   const proposals: ExtractedGenerationProposal[] = [];

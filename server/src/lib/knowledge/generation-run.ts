@@ -410,10 +410,23 @@ export async function retryGenerationRun(db: Db, agentId: string, runId: string)
     const unfinished = await tx.select({ id: kbGenerationBatches.id, attempts: kbGenerationBatches.attempts }).from(kbGenerationBatches).where(and(
       eq(kbGenerationBatches.runId, runId), inArray(kbGenerationBatches.status, ['pending', 'failed', 'running']),
     ));
-    if (unfinished.length === 0 || unfinished.some((batch) => batch.attempts >= GENERATION_LIMITS.maxBatchAttempts)) {
+    const [rawState] = await tx.select({ value: count() }).from(kbGenerationRawFindings)
+      .where(eq(kbGenerationRawFindings.runId, runId));
+    const [proposalState] = await tx.select({ value: count() }).from(kbGenerationProposals).where(and(
+      eq(kbGenerationProposals.runId, runId),
+      notLike(kbGenerationProposals.fingerprint, LEGACY_RAW_FINGERPRINT_PATTERN),
+    ));
+    const consolidationOnly = unfinished.length === 0 &&
+      Number(rawState?.value ?? 0) > 0 && Number(proposalState?.value ?? 0) === 0;
+    if (
+      (!consolidationOnly && unfinished.length === 0) ||
+      unfinished.some((batch) => batch.attempts >= GENERATION_LIMITS.maxBatchAttempts)
+    ) {
       throw new ApiError(409, 'Попытки исчерпаны. Создайте новый запуск.');
     }
-    await tx.update(kbGenerationBatches).set({ status: 'pending', errorCode: null, updatedAt: new Date() }).where(inArray(kbGenerationBatches.id, unfinished.map((batch) => batch.id)));
+    if (unfinished.length > 0) {
+      await tx.update(kbGenerationBatches).set({ status: 'pending', errorCode: null, updatedAt: new Date() }).where(inArray(kbGenerationBatches.id, unfinished.map((batch) => batch.id)));
+    }
     await tx.update(kbGenerationRuns).set({ status: 'queued', errorCode: null, cancelRequestedAt: null, updatedAt: new Date() }).where(eq(kbGenerationRuns.id, runId));
     });
   } catch (error) {

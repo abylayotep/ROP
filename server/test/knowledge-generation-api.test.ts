@@ -30,6 +30,7 @@ let app: FastifyInstance;
 let agentId: string;
 let conversationId: string;
 let messageId: string;
+let customerMessageId: string;
 let jar: Record<string, string>;
 let model: ReturnType<typeof fakeModel>;
 
@@ -43,10 +44,11 @@ beforeEach(async () => {
   const [contact] = await db.insert(contacts).values({ agentId, phone: '77000000004' }).returning();
   const [conversation] = await db.insert(conversations).values({ agentId, contactId: contact!.id, whatsappNumberId: number!.id }).returning();
   conversationId = conversation!.id;
-  await db.insert(messages).values({ conversationId, direction: 'in', author: 'client', kind: 'text', body: 'How long does delivery take?', sentAt: new Date('2026-09-01T09:59:00Z') });
+  const [customerMessage] = await db.insert(messages).values({ conversationId, direction: 'in', author: 'client', kind: 'text', body: 'How long does delivery take?', sentAt: new Date('2026-09-01T09:59:00Z') }).returning();
+  customerMessageId = customerMessage!.id;
   const [message] = await db.insert(messages).values({ conversationId, direction: 'out', author: 'operator', kind: 'text', body: 'Delivery takes two days', sentAt: new Date('2026-09-01T10:00:00Z') }).returning();
   messageId = message!.id;
-  model = fakeModel('{"classification":{"value":"customer","reason":"Customer asks about delivery."},"proposals":[]}');
+  model = fakeModel('{"classification":{"value":"uncertain","reason":"Customer status is unclear.","evidence":[]},"proposals":[]}');
   app = buildServer(env, db, { graph: fakeGraph(), model });
   await app.ready();
   const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { email: 'generation-api@example.test', password: PASSWORD } });
@@ -64,7 +66,14 @@ function useConsolidatingModel(proposals: { path: string; body: string }[]): voi
     if (model.calls.length === 1) {
       return {
         text: JSON.stringify({
-          classification: { value: 'customer', reason: 'Customer asks about delivery.' },
+          classification: {
+            value: 'customer',
+            reason: 'Customer asks about delivery.',
+            evidence: [
+              { messageId: customerMessageId, quote: 'How long does delivery take?' },
+              { messageId, quote: 'Delivery takes two days' },
+            ],
+          },
           proposals: proposals.map((proposal) => ({ ...proposal, sources: [messageId], warnings: [] })),
         }),
         promptTokens: 10,

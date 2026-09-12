@@ -255,6 +255,14 @@ async function rawFindingPage(db: Db, agentId: string, runId: string, offset: nu
     path: finding.path,
     body: finding.body,
     warnings: finding.warnings,
+    legacyProvenance: finding.legacyStatus === null ? null : {
+      kind: finding.legacyKind ?? (finding.path.startsWith('Скрипт/') ? 'script' as const : 'knowledge' as const),
+      revision: finding.legacyRevision ?? 1,
+      status: finding.legacyStatus,
+      draftId: finding.legacyDraftId,
+      draftOpIndex: finding.legacyDraftOpIndex,
+      noteId: finding.legacyNoteId,
+    },
     sources: finding.sources.map((source) => ({
       ...source,
       excerpt: sourceById.get(source.messageId)?.body?.slice(0, 240) ?? null,

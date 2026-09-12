@@ -125,7 +125,7 @@ export function mergeRefreshedGenerationDetail(
       items: mergeProposals(current.proposals.items, refreshed.proposals.items),
       nextCursor: current.proposals.nextCursor,
     },
-    drafts: mergeByKey(current.drafts ?? [], refreshed.drafts ?? [], (draft) => draft.id),
+    drafts: mergeReplacingByKey(current.drafts ?? [], refreshed.drafts ?? [], (draft) => draft.id),
     draftsNextCursor: current.draftsNextCursor === undefined ? refreshed.draftsNextCursor : current.draftsNextCursor,
     exclusions: mergeByKey(current.exclusions ?? [], refreshed.exclusions ?? [], (exclusion) => exclusion.batchId),
     exclusionsNextCursor: current.exclusionsNextCursor === undefined ? refreshed.exclusionsNextCursor : current.exclusionsNextCursor,
@@ -158,7 +158,7 @@ export function appendGenerationDetailPage(
     case 'drafts':
       return {
         ...base,
-        drafts: mergeByKey(current.drafts, next.drafts, (draft) => draft.id),
+        drafts: mergeReplacingByKey(current.drafts, next.drafts, (draft) => draft.id),
         draftsNextCursor: next.draftsNextCursor,
       };
     case 'exclusions':
@@ -201,6 +201,21 @@ function mergeByKey<T>(current: readonly T[], next: readonly T[], key: (item: T)
     if (seen.has(key(item))) continue;
     seen.add(key(item));
     items.push(item);
+  }
+  return items;
+}
+
+function mergeReplacingByKey<T>(current: readonly T[], next: readonly T[], key: (item: T) => string): T[] {
+  const items = [...current];
+  const indexByKey = new Map(items.map((item, index) => [key(item), index]));
+  for (const item of next) {
+    const index = indexByKey.get(key(item));
+    if (index === undefined) {
+      indexByKey.set(key(item), items.length);
+      items.push(item);
+    } else {
+      items[index] = item;
+    }
   }
   return items;
 }

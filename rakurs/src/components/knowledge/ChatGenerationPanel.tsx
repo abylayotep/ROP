@@ -84,6 +84,62 @@ export const generationDetailErrorPresentation = (
   return { automatic, retryLabel: automatic ? null : 'Повторить загрузку' };
 };
 
+export const generationRunErrorPresentation = (
+  error: KbGenerationRunSummary['errors'][number],
+): { reason: string; recovery: string } => {
+  const prefix = error.ordinal === null ? '' : `Пакет ${error.ordinal + 1}: `;
+  switch (error.code) {
+    case 'missing_ai_configuration':
+      return {
+        reason: 'Не сохранён API-ключ OpenRouter.',
+        recovery: 'Откройте настройки ИИ, сохраните ключ и повторите запуск.',
+      };
+    case 'invalid_ai_configuration':
+      return {
+        reason: 'Сохранённый API-ключ OpenRouter не удалось прочитать.',
+        recovery: 'Сохраните ключ заново в настройках ИИ и повторите запуск.',
+      };
+    case 'provider_error':
+    case 'batch_failed':
+      return {
+        reason: `${prefix}AI-провайдер не ответил.`,
+        recovery: 'Проверьте ключ и баланс у провайдера, затем повторите запуск.',
+      };
+    case 'consolidation_failed':
+      return {
+        reason: 'Не удалось собрать итоговые предложения.',
+        recovery: 'Повторите запуск: сохранённые находки будут использованы без повторной обработки чатов.',
+      };
+    case 'slot_timeout':
+      return {
+        reason: 'Сервис ИИ был занят слишком долго.',
+        recovery: 'Подождите немного и повторите запуск.',
+      };
+    case 'attempts_exhausted':
+      return {
+        reason: `${prefix}повторные попытки исчерпаны.`,
+        recovery: 'Подготовьте новый запуск для выбранных чатов.',
+      };
+    case 'interrupted':
+      return {
+        reason: `${prefix}обработка прервалась при перезапуске сервера.`,
+        recovery: 'Повторите запуск: готовые пакеты не будут обрабатываться заново.',
+      };
+    case 'malformed_output':
+    case 'invalid_output':
+    case 'unsafe_output':
+      return {
+        reason: `${prefix}AI-провайдер вернул непригодный ответ.`,
+        recovery: 'Повторите запуск; небезопасный текст не был добавлен.',
+      };
+    default:
+      return {
+        reason: `${prefix}обработка завершилась с ошибкой (${error.code}).`,
+        recovery: 'Повторите запуск. Если ошибка повторится, сообщите код поддержке.',
+      };
+  }
+};
+
 function useRunScopedState<T>(scope: object, initialValue: T) {
   const [stored, setStored] = useState({ scope, value: initialValue });
   const current = stored.scope === scope;
@@ -393,7 +449,7 @@ export function ChatGenerationPanel({
             <RunStatus detail={state.detail} />
             <div className="generation-review__actions">
               {view === 'active' && !readOnly && <button type="button" className="btn-sm" disabled={busy || state.detail.run.cancelRequestedAt !== null} onClick={() => void action('cancel')}>Отменить после текущего запроса</button>}
-              {state.detail.run.status === 'failed' && !readOnly && <button type="button" className="btn-sm" disabled={busy} onClick={() => void action('retry')}>Повторить незавершённые пакеты</button>}
+              {state.detail.run.status === 'failed' && !readOnly && <button type="button" className="btn-sm" disabled={busy} onClick={() => void action('retry')}>Повторить запуск</button>}
               <button type="button" className="btn-quiet" onClick={reset}>Подготовить заново</button>
             </div>
             {(view === 'review' || view === 'empty' || view === 'partial_failure' || (view === 'cancelled' && state.detail.run.proposalCount > 0)) && (
@@ -460,7 +516,14 @@ function RunStatus({ detail }: { detail: KbGenerationRunDetail }) {
         <div><dt>Токены / стоимость</dt><dd>{run.usage.promptTokens + run.usage.completionTokens} / ${run.usage.cost}</dd></div>
       </dl>
       <p className="generation-review__notice">Стоимость отдельных запросов может отсутствовать; точный счёт хранит AI-провайдер.</p>
-      {run.errors.length > 0 && <p className="generation-review__notice generation-review__notice--error">Ошибок: {run.errors.length}. Готовые предложения сохранены.</p>}
+      {run.errors.length > 0 && (
+        <div className="generation-review__notice generation-review__notice--error" role="alert">
+          {run.errors.map((error, index) => {
+            const presentation = generationRunErrorPresentation(error);
+            return <p key={`${error.batchId ?? 'run'}:${error.code}:${index}`}><strong>{presentation.reason}</strong> {presentation.recovery}</p>;
+          })}
+        </div>
+      )}
     </section>
   );
 }

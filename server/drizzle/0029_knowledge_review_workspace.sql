@@ -2,6 +2,8 @@ ALTER TABLE "agents" ADD COLUMN "communication_style" text DEFAULT 'warm' NOT NU
 ALTER TABLE "kb_generation_batches" ADD COLUMN "classification" text;--> statement-breakpoint
 ALTER TABLE "kb_generation_batches" ADD COLUMN "classification_reason" text;--> statement-breakpoint
 ALTER TABLE "kb_generation_proposals" ADD COLUMN "kind" text DEFAULT 'knowledge' NOT NULL;--> statement-breakpoint
+UPDATE "kb_generation_proposals"
+SET "kind" = CASE WHEN "path" LIKE 'Скрипт/%' THEN 'script' ELSE 'knowledge' END;--> statement-breakpoint
 ALTER TABLE "kb_generation_proposals" ADD COLUMN "confidence" text DEFAULT 'review' NOT NULL;--> statement-breakpoint
 ALTER TABLE "kb_generation_proposals" ADD COLUMN "selected" boolean DEFAULT false NOT NULL;--> statement-breakpoint
 CREATE TABLE "kb_generation_drafts" (

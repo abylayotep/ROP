@@ -47,7 +47,10 @@ export async function updateGenerationProposal(
     const nextBody = input.body ?? current.body;
     try {
       const [updated] = await tx.update(kbGenerationProposals).set({
-        ...(input.path === undefined ? {} : { path: input.path }),
+        ...(input.path === undefined ? {} : {
+          path: input.path,
+          kind: input.path.startsWith('Скрипт/') ? 'script' as const : 'knowledge' as const,
+        }),
         ...(input.body === undefined ? {} : { body: input.body }),
         ...(input.path === undefined && input.body === undefined ? {} : { fingerprint: fingerprint(nextPath, nextBody) }),
         ...(input.selected === undefined ? {} : { selected: input.selected }),
@@ -105,7 +108,7 @@ export async function createGenerationDraft(
           notLike(kbGenerationProposals.fingerprint, LEGACY_RAW_FINGERPRINT_PATTERN),
         ));
       const sameIds = allDrafted.length === ids.length && allDrafted.every((row) => ids.includes(row.id));
-      const sameRevisions = allDrafted.every((row) => input.revisions[row.id] === row.revision);
+      const sameRevisions = allDrafted.every((row) => input.revisions[row.id] === row.revision - 1);
       const sameTargets = allDrafted.every((row) => {
         const op = row.draftOpIndex === null ? undefined : draft?.ops[row.draftOpIndex];
         const target = op?.op === 'note_update' ? op.noteId : undefined;
@@ -157,7 +160,12 @@ export async function createGenerationDraft(
     await tx.insert(kbGenerationDrafts).values({ runId, draftId: draft!.id });
     for (let index = 0; index < rows.length; index += 1) {
       await tx.update(kbGenerationProposals).set({
-        status: 'drafted', selected: false, draftId: draft!.id, draftOpIndex: index, updatedAt: new Date(),
+        status: 'drafted',
+        selected: false,
+        draftId: draft!.id,
+        draftOpIndex: index,
+        revision: sql`${kbGenerationProposals.revision} + 1`,
+        updatedAt: new Date(),
       }).where(and(
         eq(kbGenerationProposals.id, rows[index]!.id),
         notLike(kbGenerationProposals.fingerprint, LEGACY_RAW_FINGERPRINT_PATTERN),

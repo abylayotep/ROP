@@ -8,7 +8,12 @@ import {
   reduceGenerationState,
   type GenerationUiState,
 } from './generation-state';
-import { GenerationRunTarget, generationDetailErrorPresentation, localMidnight } from './ChatGenerationPanel';
+import {
+  GenerationRunTarget,
+  generationDetailErrorPresentation,
+  generationRunErrorPresentation,
+  localMidnight,
+} from './ChatGenerationPanel';
 
 const selection = { conversationIds: ['conversation-1'], from: '2026-01-01', to: '2026-02-01' };
 const preview = { previewId: 'preview-1' } as KbGenerationPreview;
@@ -49,6 +54,15 @@ describe('generation UI state', () => {
   it('treats a cleared date as invalid instead of throwing', () => {
     expect(localMidnight('')).toBeNull();
     expect(localMidnight('2026-09-11')).toBe(new Date('2026-09-11T00:00:00').toISOString());
+  });
+
+  it.each([
+    ['missing_ai_configuration', null, 'Не сохранён API-ключ OpenRouter.', 'Откройте настройки ИИ, сохраните ключ и повторите запуск.'],
+    ['provider_error', 2, 'Пакет 3: AI-провайдер не ответил.', 'Проверьте ключ и баланс у провайдера, затем повторите запуск.'],
+    ['consolidation_failed', null, 'Не удалось собрать итоговые предложения.', 'Повторите запуск: сохранённые находки будут использованы без повторной обработки чатов.'],
+  ])('shows an actionable reason and recovery for %s', (code, ordinal, reason, recovery) => {
+    expect(generationRunErrorPresentation({ batchId: ordinal === null ? null : 'batch-id', ordinal, code }))
+      .toEqual({ reason, recovery });
   });
 
   it('rejects a response from an earlier epoch or another run', () => {
@@ -100,6 +114,26 @@ describe('generation UI state', () => {
     ]);
     expect(merged.proposals.nextCursor).toBeNull();
   });
+
+  it.each(['applied', 'discarded'] as const)(
+    'replaces a stale open draft when another client reports it as %s',
+    (status) => {
+    const current = {
+      ...detail('completed', 1),
+      drafts: [{ id: 'draft-1', title: 'Draft', status: 'open', createdAt: '2026-09-12T09:00:00.000Z' }],
+      draftsNextCursor: null,
+    } as KbGenerationRunDetail;
+    const refreshed = {
+      ...detail('completed', 1),
+      drafts: [{ id: 'draft-1', title: 'Draft', status, createdAt: '2026-09-12T09:00:00.000Z' }],
+      draftsNextCursor: null,
+    } as KbGenerationRunDetail;
+
+    expect(mergeRefreshedGenerationDetail(current, refreshed).drafts).toEqual([
+      expect.objectContaining({ id: 'draft-1', status }),
+    ]);
+    },
+  );
 
   it('does not let an older polling row overwrite a newer persisted proposal revision', () => {
     const current = {

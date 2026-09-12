@@ -207,13 +207,29 @@ describe('generation review', () => {
     expect(proposal).toMatchObject({ fingerprint: 'one', path: 'База знаний/Delivery', body: 'Two days', revision: 1 });
   });
 
+  it('keeps proposal kind consistent when an owner changes the path prefix', async () => {
+    await updateGenerationProposal(db, agentId, proposalId, {
+      revision: 1,
+      path: 'Скрипт/Доставка',
+    });
+    expect((await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.id, proposalId)))[0])
+      .toMatchObject({ kind: 'script', path: 'Скрипт/Доставка', revision: 2 });
+
+    await updateGenerationProposal(db, agentId, proposalId, {
+      revision: 2,
+      path: 'База знаний/Доставка',
+    });
+    expect((await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.id, proposalId)))[0])
+      .toMatchObject({ kind: 'knowledge', path: 'База знаний/Доставка', revision: 3 });
+  });
+
   it('converts the complete persisted checked set once and records the run relation without publishing', async () => {
     await updateGenerationProposal(db, agentId, proposalId, { revision: 1, selected: true });
     const input = { proposalIds: [proposalId], revisions: { [proposalId]: 2 } };
     const first = await createGenerationDraft(db, agentId, userId, runId, input);
     const second = await createGenerationDraft(db, agentId, userId, runId, input);
     expect(second).toEqual(first);
-    expect((await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.id, proposalId)))[0]).toMatchObject({ status: 'drafted', draftId: first.draftId, draftOpIndex: 0 });
+    expect((await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.id, proposalId)))[0]).toMatchObject({ status: 'drafted', draftId: first.draftId, draftOpIndex: 0, revision: 3 });
     expect((await db.select().from(kbDrafts).where(eq(kbDrafts.id, first.draftId)))[0]?.title).toBe('Знания из WhatsApp · 1');
     expect(await db.select().from(kbGenerationDrafts)).toEqual([
       expect.objectContaining({ runId, draftId: first.draftId }),

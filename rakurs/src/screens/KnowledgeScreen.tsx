@@ -4,8 +4,7 @@ import * as api from '@/api';
 import { Graph } from '@/components/knowledge/Graph';
 import { ChatGenerationPanel } from '@/components/knowledge/ChatGenerationPanel';
 import { KnowledgeWorkspace, knowledgeTabFromSearch, type KnowledgeTab } from '@/components/knowledge/KnowledgeWorkspace';
-import { HistoryImportPanel } from '@/components/knowledge/HistoryImportPanel';
-import { ImportPanel } from '@/components/knowledge/ImportPanel';
+import { KnowledgeSourceCards, recentHistorySearch } from '@/components/knowledge/KnowledgeSourceCards';
 import { NoteEditor } from '@/components/knowledge/NoteEditor';
 import { buildTree, NoteTree } from '@/components/knowledge/NoteTree';
 import { NotePanel } from '@/components/knowledge/NotePanel';
@@ -201,12 +200,15 @@ export function KnowledgeScreen() {
           <header className="knowledge-source-seam__intro">
             <p className="knowledge-kicker">Источники</p>
             <h2 id="knowledge-sources-title">Источники и загрузка</h2>
-            <p>Здесь собраны существующие загрузки. Компактные карточки источников подключаются на следующем этапе.</p>
+            <p>Выберите один способ загрузки. Остальные источники останутся свернутыми и не будут мешать работе.</p>
           </header>
-          <div className="knowledge-source-seam__panels">
-            <HistoryImportPanel key={`history-${agent.id}`} agentId={agent.id} readOnly={!owner} />
-            {owner && <ImportPanel agentId={agent.id} onChanged={refreshLists} />}
-          </div>
+          <KnowledgeSourceCards
+            key={`sources-${agent.id}`}
+            agentId={agent.id}
+            readOnly={!owner}
+            onChanged={refreshLists}
+            onOpenRecentHistory={() => setParams(recentHistorySearch(params), { replace: true })}
+          />
         </section>
       )}
 

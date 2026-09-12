@@ -10,6 +10,7 @@ COPY package.json package-lock.json ./
 COPY packages/contract/package.json packages/contract/
 COPY rakurs/package.json rakurs/
 COPY server/package.json server/
+COPY scripts scripts
 RUN npm ci
 # Workspaces hoist everything to the root, so this directory exists only when a version
 # conflict forces a package-local copy. Make sure it is there for the COPY below either way.

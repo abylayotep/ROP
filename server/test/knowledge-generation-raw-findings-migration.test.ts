@@ -141,6 +141,17 @@ describe('migration 0029: legacy raw proposals become immutable findings', () =>
       sources: [{ conversationId: 'conversation-1', messageId: 'message-1', sentAt: createdAt.toISOString() }],
     });
     expect(new Date(migrated!.created_at as string | Date).toISOString()).toBe(createdAt.toISOString());
+    const links = await scratchSql`
+      SELECT run_id, draft_id FROM kb_generation_drafts
+      WHERE run_id = ${runId}
+      ORDER BY draft_id
+    `;
+    expect(links).toEqual(expect.arrayContaining([
+      expect.objectContaining({ run_id: runId, draft_id: openDraftId }),
+      expect.objectContaining({ run_id: runId, draft_id: appliedDraftId }),
+      expect.objectContaining({ run_id: runId, draft_id: discardedDraftId }),
+    ]));
+    expect(links).toHaveLength(3);
   });
 
   it('discards only linked open drafts and prevents their raw ops from being applied', async () => {

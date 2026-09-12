@@ -233,7 +233,9 @@ import {
   agents,
   coachMessages,
   kbDrafts,
+  kbGenerationDrafts,
   kbGenerationProposals,
+  kbGenerationRuns,
   testCases,
   testResults,
   testRuns,
@@ -1138,6 +1140,21 @@ export function registerDraftRoutes(
           throw new ApiError(409, 'База изменилась после проверки — прогоните черновик заново');
         }
 
+        const linkedRuns = await tx.selectDistinct({ runId: kbGenerationProposals.runId })
+          .from(kbGenerationProposals)
+          .innerJoin(kbGenerationRuns, and(
+            eq(kbGenerationRuns.id, kbGenerationProposals.runId),
+            eq(kbGenerationRuns.agentId, agentId),
+          ))
+          .where(and(
+            eq(kbGenerationProposals.draftId, draft.id),
+            notLike(kbGenerationProposals.fingerprint, LEGACY_RAW_FINGERPRINT_PATTERN),
+          ));
+        if (linkedRuns.length > 0) {
+          await tx.insert(kbGenerationDrafts).values(linkedRuns.map(({ runId }) => ({ runId, draftId: draft.id })))
+            .onConflictDoNothing();
+        }
+
         // `staleOps` and `isDraftApplicable` above only see a row this draft's own `note_update`
         // or `rule_update` names moving out from under it — neither has anything to check a
         // `note_create` op against, because it names no existing row at all. So a `note_create`
@@ -1188,6 +1205,20 @@ export function registerDraftRoutes(
         )).for('update');
         if (!draft) throw new ApiError(404, 'Черновик не найден');
         if (draft.status !== 'open') throw new ApiError(409, 'Черновик уже применён или отклонён');
+        const linkedRuns = await tx.selectDistinct({ runId: kbGenerationProposals.runId })
+          .from(kbGenerationProposals)
+          .innerJoin(kbGenerationRuns, and(
+            eq(kbGenerationRuns.id, kbGenerationProposals.runId),
+            eq(kbGenerationRuns.agentId, agentId),
+          ))
+          .where(and(
+            eq(kbGenerationProposals.draftId, draft.id),
+            notLike(kbGenerationProposals.fingerprint, LEGACY_RAW_FINGERPRINT_PATTERN),
+          ));
+        if (linkedRuns.length > 0) {
+          await tx.insert(kbGenerationDrafts).values(linkedRuns.map(({ runId }) => ({ runId, draftId: draft.id })))
+            .onConflictDoNothing();
+        }
         await tx.update(kbGenerationProposals).set({
           status: 'pending',
           draftId: null,

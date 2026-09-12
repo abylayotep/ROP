@@ -519,6 +519,11 @@ export interface KbGenerationDraftLink {
   createdAt: string;
 }
 
+export interface KbGenerationDraftLinkPage {
+  items: KbGenerationDraftLink[];
+  nextCursor: string | null;
+}
+
 export interface KbGenerationRunError {
   batchId: string | null;
   ordinal: number | null;
@@ -536,6 +541,7 @@ export interface KbGenerationRunSummary extends KbGenerationRun {
   excludedBatchCount: number;
   errors: KbGenerationRunError[];
   drafts: KbGenerationDraftLink[];
+  draftsNextCursor: string | null;
 }
 
 export interface KbGenerationRunPage {
@@ -586,6 +592,11 @@ export interface KbGenerationExclusion {
   reason: string;
 }
 
+export interface KbGenerationExclusionPage {
+  items: KbGenerationExclusion[];
+  nextCursor: string | null;
+}
+
 export interface KbGenerationRawFinding {
   id: string;
   path: string;
@@ -594,12 +605,20 @@ export interface KbGenerationRawFinding {
   sources: KbGenerationSource[];
 }
 
+export interface KbGenerationRawFindingPage {
+  items: KbGenerationRawFinding[];
+  nextCursor: string | null;
+}
+
 export interface KbGenerationRunDetail {
   run: KbGenerationRunSummary;
   proposals: KbGenerationProposalPage;
   drafts: KbGenerationDraftLink[];
+  draftsNextCursor: string | null;
   exclusions: KbGenerationExclusion[];
+  exclusionsNextCursor: string | null;
   rawFindings?: KbGenerationRawFinding[];
+  rawFindingsNextCursor?: string | null;
 }
 
 export interface KbGenerationProposalUpdateRequest {

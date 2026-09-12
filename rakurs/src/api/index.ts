@@ -250,16 +250,30 @@ export const startKnowledgeGeneration = (agentId: string, body: KbGenerationStar
 export const listKnowledgeGenerationRuns = (agentId: string, cursor?: string, signal?: AbortSignal) =>
   request<KbGenerationRunPage>(`${generationPath(agentId)}/runs${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`, { signal });
 
+export interface KnowledgeGenerationRunPageOptions {
+  proposalCursor?: string;
+  draftCursor?: string;
+  exclusionCursor?: string;
+  rawFindingCursor?: string;
+  includeRawFindings?: boolean;
+}
+
 export const getKnowledgeGenerationRun = (
   agentId: string,
   runId: string,
   signal?: AbortSignal,
-  cursor?: string,
+  page?: string | KnowledgeGenerationRunPageOptions,
   includeRawFindings = false,
 ) => {
   const query = new URLSearchParams();
-  if (cursor) query.set('cursor', cursor);
-  if (includeRawFindings) query.set('includeRawFindings', 'true');
+  if (typeof page === 'string') query.set('proposalCursor', page);
+  else if (page) {
+    if (page.proposalCursor) query.set('proposalCursor', page.proposalCursor);
+    if (page.draftCursor) query.set('draftCursor', page.draftCursor);
+    if (page.exclusionCursor) query.set('exclusionCursor', page.exclusionCursor);
+    if (page.rawFindingCursor) query.set('rawFindingCursor', page.rawFindingCursor);
+  }
+  if (includeRawFindings || (typeof page === 'object' && page.includeRawFindings)) query.set('includeRawFindings', 'true');
   const suffix = query.size > 0 ? `?${query}` : '';
   return request<KbGenerationRunDetail>(`${generationPath(agentId)}/runs/${runId}${suffix}`, { signal });
 };

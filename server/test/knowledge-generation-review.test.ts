@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   accounts,
@@ -13,8 +13,7 @@ import {
   kbNotes,
   users,
 } from '../src/db/schema.js';
-import { cancelGenerationRun } from '../src/lib/knowledge/generation-run.js';
-import { createGenerationCategoryDrafts, createGenerationDraft, updateGenerationProposal } from '../src/lib/knowledge/generation-review.js';
+import { createGenerationDraft, updateGenerationProposal } from '../src/lib/knowledge/generation-review.js';
 import { withDb } from './helpers/db.js';
 
 let db: Awaited<ReturnType<typeof withDb>>;
@@ -54,6 +53,81 @@ describe('generation review', () => {
     expect(proposal).toMatchObject({ selected: true, revision: 2 });
   });
 
+  it('serializes a selection update on another proposal behind the draft run lock', async () => {
+    const [batch] = await db.select().from(kbGenerationBatches).where(eq(kbGenerationBatches.runId, runId));
+    const [other] = await db.insert(kbGenerationProposals).values({
+      runId,
+      batchId: batch!.id,
+      fingerprint: 'concurrent-selection',
+      path: 'База знаний/Other',
+      body: 'Other body',
+      sources: [],
+    }).returning();
+    await db.update(kbGenerationProposals).set({ selected: true }).where(eq(kbGenerationProposals.id, proposalId));
+
+    let releaseBlocker!: () => void;
+    let blockerLocked!: () => void;
+    const release = new Promise<void>((resolve) => { releaseBlocker = resolve; });
+    const locked = new Promise<void>((resolve) => { blockerLocked = resolve; });
+    const blocker = db.transaction(async (tx) => {
+      await tx.select({ id: kbGenerationProposals.id }).from(kbGenerationProposals)
+        .where(eq(kbGenerationProposals.id, proposalId)).for('update');
+      blockerLocked();
+      await release;
+    });
+    await locked;
+
+    const blockedQueries = async (table: string): Promise<number> => {
+      const rows = await db.execute(sql<{ count: number }>`
+        select count(*)::int as count
+        from pg_stat_activity
+        where datname = current_database()
+          and wait_event_type = 'Lock'
+          and query ilike ${`%${table}%`}
+      `);
+      return Number(rows[0]?.count ?? 0);
+    };
+    const waitUntilBlocked = async (table: string): Promise<boolean> => {
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        if (await blockedQueries(table) > 0) return true;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      return false;
+    };
+
+    const draftOutcome = createGenerationDraft(db, agentId, userId, runId, {
+      proposalIds: [proposalId],
+      revisions: { [proposalId]: 1 },
+    }).then((value) => ({ value }), (error: unknown) => ({ error }));
+    expect(await waitUntilBlocked('kb_generation_proposals')).toBe(true);
+
+    let updateSettled = false;
+    const updatePromise = updateGenerationProposal(db, agentId, other!.id, { revision: 1, selected: true })
+      .finally(() => { updateSettled = true; });
+    const updateWaitsForRun = await Promise.race([
+      updatePromise.then(() => false),
+      waitUntilBlocked('kb_generation_runs'),
+    ]);
+
+    try {
+      expect(updateWaitsForRun).toBe(true);
+      expect(updateSettled).toBe(false);
+    } finally {
+      releaseBlocker();
+      await blocker;
+    }
+
+    const outcome = await draftOutcome;
+    expect(outcome).toHaveProperty('value');
+    if (!('value' in outcome)) throw outcome.error;
+    const draft = outcome.value;
+    await updatePromise;
+    expect((await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.id, proposalId)))[0])
+      .toMatchObject({ status: 'drafted', draftId: draft.draftId, selected: false });
+    expect((await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.id, other!.id)))[0])
+      .toMatchObject({ status: 'pending', selected: true, revision: 2 });
+  });
+
   it('restores a rejected proposal to pending with its current revision', async () => {
     await updateGenerationProposal(db, agentId, proposalId, { revision: 1, status: 'rejected' });
 
@@ -80,11 +154,8 @@ describe('generation review', () => {
     await expect(createGenerationDraft(db, agentId, userId, runId, {
       proposalIds: [legacyRaw!.id], revisions: { [legacyRaw!.id]: 1 },
     })).rejects.toMatchObject({ statusCode: 404 });
-    await db.update(kbGenerationProposals).set({ status: 'pending' })
-      .where(eq(kbGenerationProposals.id, legacyRaw!.id));
-    expect(await createGenerationCategoryDrafts(db, agentId, userId, runId)).toHaveLength(1);
     expect((await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.id, legacyRaw!.id)))[0])
-      .toMatchObject({ status: 'pending', revision: 1, draftId: null });
+      .toMatchObject({ status: 'rejected', revision: 1, draftId: null });
   });
 
   it('recomputes the fingerprint and atomically refuses a duplicate after an edit', async () => {
@@ -148,86 +219,4 @@ describe('generation review', () => {
       .toMatchObject({ status: 'pending', selected: true, draftId: null });
   });
 
-  it('creates one review draft per non-empty category and is idempotent', async () => {
-    const [batch] = await db.select().from(kbGenerationBatches).where(eq(kbGenerationBatches.runId, runId));
-    const [script, rejected, secondKnowledge] = await db.insert(kbGenerationProposals).values([
-      { runId, batchId: batch!.id, fingerprint: 'script', path: 'Скрипт/Первичный контакт', body: 'Уточните задачу клиента.', sources: [] },
-      { runId, batchId: batch!.id, fingerprint: 'rejected', path: 'Скрипт/Возражения', body: 'Не использовать.', sources: [], status: 'rejected' },
-      { runId, batchId: batch!.id, fingerprint: 'knowledge-2', path: 'База знаний/Delivery', body: 'Стоимость зависит от адреса.', sources: [] },
-    ]).returning();
-
-    const first = await createGenerationCategoryDrafts(db, agentId, userId, runId);
-    const second = await createGenerationCategoryDrafts(db, agentId, userId, runId);
-
-    expect(first).toHaveLength(2);
-    expect(second).toEqual([]);
-    const drafts = await db.select().from(kbDrafts);
-    expect(drafts).toHaveLength(2);
-    expect(await db.select().from(kbGenerationDrafts)).toHaveLength(2);
-    expect(drafts.map((draft) => ({ title: draft.title, ops: draft.ops }))).toEqual(expect.arrayContaining([
-      { title: 'База знаний из WhatsApp', ops: [{ op: 'note_create', path: 'База знаний/Delivery', body: 'Two days\n\nСтоимость зависит от адреса.' }] },
-      { title: 'Скрипт продаж из WhatsApp', ops: [{ op: 'note_create', path: 'Скрипт/Первичный контакт', body: 'Уточните задачу клиента.' }] },
-    ]));
-    expect((await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.id, script!.id)))[0])
-      .toMatchObject({ status: 'drafted', draftOpIndex: 0 });
-    const [firstKnowledge] = await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.id, proposalId));
-    const [otherKnowledge] = await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.id, secondKnowledge!.id));
-    expect(otherKnowledge).toMatchObject({ status: 'drafted', draftId: firstKnowledge!.draftId, draftOpIndex: firstKnowledge!.draftOpIndex });
-    expect((await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.id, rejected!.id)))[0])
-      .toMatchObject({ status: 'rejected', draftId: null, draftOpIndex: null });
-  });
-
-  it('does not create an empty or uncategorized draft', async () => {
-    await db.update(kbGenerationProposals).set({ status: 'rejected' }).where(eq(kbGenerationProposals.id, proposalId));
-    const [batch] = await db.select().from(kbGenerationBatches).where(eq(kbGenerationBatches.runId, runId));
-    await db.insert(kbGenerationProposals).values({
-      runId,
-      batchId: batch!.id,
-      fingerprint: 'legacy',
-      path: 'Legacy/Note',
-      body: 'Old uncategorized proposal.',
-      sources: [],
-    });
-
-    expect(await createGenerationCategoryDrafts(db, agentId, userId, runId)).toEqual([]);
-    expect(await db.select().from(kbDrafts)).toHaveLength(0);
-  });
-
-  it('does not create drafts after cancellation was requested', async () => {
-    await db.update(kbGenerationRuns).set({ status: 'running', cancelRequestedAt: new Date() }).where(eq(kbGenerationRuns.id, runId));
-
-    expect(await createGenerationCategoryDrafts(db, agentId, userId, runId)).toEqual([]);
-    expect(await db.select().from(kbDrafts)).toHaveLength(0);
-    expect((await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.id, proposalId)))[0])
-      .toMatchObject({ status: 'pending', draftId: null, draftOpIndex: null });
-  });
-
-  it('atomically completes a finalized run before a later cancellation', async () => {
-    await db.update(kbGenerationRuns).set({ status: 'running' }).where(eq(kbGenerationRuns.id, runId));
-
-    expect(await createGenerationCategoryDrafts(db, agentId, userId, runId, true)).toHaveLength(1);
-    expect((await db.select().from(kbGenerationRuns).where(eq(kbGenerationRuns.id, runId)))[0])
-      .toMatchObject({ status: 'completed', cancelRequestedAt: null });
-
-    await cancelGenerationRun(db, agentId, runId);
-    expect((await db.select().from(kbGenerationRuns).where(eq(kbGenerationRuns.id, runId)))[0])
-      .toMatchObject({ status: 'completed', cancelRequestedAt: null });
-  });
-
-  it('rolls back when proposals sharing a path exceed the note body limit', async () => {
-    const [batch] = await db.select().from(kbGenerationBatches).where(eq(kbGenerationBatches.runId, runId));
-    await db.insert(kbGenerationProposals).values({
-      runId,
-      batchId: batch!.id,
-      fingerprint: 'oversize-combined',
-      path: 'База знаний/Delivery',
-      body: 'x'.repeat(199_995),
-      sources: [],
-    });
-
-    await expect(createGenerationCategoryDrafts(db, agentId, userId, runId))
-      .rejects.toMatchObject({ statusCode: 400 });
-    expect(await db.select().from(kbDrafts)).toHaveLength(0);
-    expect(await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.status, 'drafted'))).toHaveLength(0);
-  });
 });

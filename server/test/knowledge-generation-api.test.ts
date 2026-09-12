@@ -224,6 +224,7 @@ describe('knowledge generation API', () => {
 
     expect(detail!.json().proposals.items).toHaveLength(2);
     expect(detail!.json().drafts).toEqual([]);
+    expect(detail!.json().draftsNextCursor).toBeNull();
     const items = detail!.json().proposals.items as { id: string; revision: number }[];
     const explicit = await app.inject({
       method: 'POST', url: `${base}/runs/${started.json().id}/draft`, cookies: jar,
@@ -241,6 +242,7 @@ describe('knowledge generation API', () => {
     expect(paged.json().drafts).toEqual([
       expect.objectContaining({ id: explicit.json().draftId, title: 'Знания из WhatsApp · 2' }),
     ]);
+    expect(paged.json().draftsNextCursor).toBeNull();
   });
 
   it('paginates run history and includes complete draft, classification, usage, and error summaries', async () => {
@@ -306,6 +308,7 @@ describe('knowledge generation API', () => {
       usage: { promptTokens: 12, completionTokens: 4, cost: '0.12500000' },
       errors: [{ batchId: batch!.id, ordinal: 0, code: 'malformed_output' }],
       drafts: [expect.objectContaining({ id: draft!.id, title: 'Исторический черновик', status: 'open' })],
+      draftsNextCursor: null,
     });
     const second = await app.inject({
       method: 'GET',
@@ -338,12 +341,25 @@ describe('knowledge generation API', () => {
       temperature: '0.30',
       status: 'completed',
     }).returning();
-    const [historical, irrelevant] = await db.insert(kbGenerationBatches).values([
+    const [historical, , , irrelevant] = await db.insert(kbGenerationBatches).values([
       {
         runId: run!.id,
         ordinal: 0,
         manifest: { ordinal: 0, conversationId, messages: [], characterCount: 0 },
         status: 'done',
+      },
+      {
+        runId: run!.id,
+        ordinal: 2,
+        manifest: { ordinal: 2, conversationId, messages: [], characterCount: 0 },
+        status: 'failed',
+        errorCode: 'provider_error',
+      },
+      {
+        runId: run!.id,
+        ordinal: 3,
+        manifest: { ordinal: 3, conversationId, messages: [], characterCount: 0 },
+        status: 'cancelled',
       },
       {
         runId: run!.id,
@@ -381,6 +397,7 @@ describe('knowledge generation API', () => {
       draftId: historicalDraft!.id,
       draftOpIndex: 0,
     });
+    await db.insert(kbGenerationDrafts).values({ runId: run!.id, draftId: historicalDraft!.id });
 
     const base = `/api/agents/${agentId}/knowledge/generation/runs/${run!.id}`;
     const withoutRaw = await app.inject({ method: 'GET', url: base, cookies: jar });
@@ -390,15 +407,18 @@ describe('knowledge generation API', () => {
       { batchId: historical!.id, ordinal: 0, classification: 'uncertain', reason: 'Более ранний запуск' },
       { batchId: irrelevant!.id, ordinal: 1, classification: 'irrelevant', reason: 'Это разговор с поставщиком.' },
     ]);
+    expect(withoutRaw.json().exclusionsNextCursor).toBeNull();
     expect(withoutRaw.json().run.classificationCounts).toEqual({ customer: 0, irrelevant: 1, uncertain: 1 });
     expect(withoutRaw.json().drafts).toEqual([
       expect.objectContaining({ id: historicalDraft!.id, title: 'Черновик до связи запусков' }),
     ]);
+    expect(withoutRaw.json().draftsNextCursor).toBeNull();
 
     const withRaw = await app.inject({ method: 'GET', url: `${base}?includeRawFindings=true`, cookies: jar });
     expect(withRaw.json().rawFindings).toEqual([
       expect.objectContaining({ id: raw!.id, path: 'База знаний/Аудит', body: 'Исходная находка.', warnings: ['context_limited'] }),
     ]);
+    expect(withRaw.json().rawFindingsNextCursor).toBeNull();
     const [storedHistorical] = await db.select().from(kbGenerationBatches).where(eq(kbGenerationBatches.id, historical!.id));
     expect(storedHistorical).toMatchObject({ classification: null, classificationReason: null });
   });
@@ -445,5 +465,85 @@ describe('knowledge generation API', () => {
     expect(await db.select().from(kbGenerationDrafts)).toEqual([
       expect.objectContaining({ runId: started.json().id, draftId: draft.json().draftId }),
     ]);
+  });
+
+  it('bounds proposals, drafts, exclusions, and raw findings with independent cursors', async () => {
+    const [run] = await db.insert(kbGenerationRuns).values({
+      agentId,
+      requestedPreviewId: crypto.randomUUID(),
+      requestKey: 'bounded-detail',
+      selection: { conversationIds: [], from: '2026-09-01T00:00:00Z', to: '2026-09-02T00:00:00Z' },
+      manifest: { messages: [], batches: [] },
+      counts: {
+        selectedConversations: 0, selectedMessages: 0, eligibleMessages: 0, eligibleCharacters: 0,
+        skippedAiOrSystem: 0, skippedUnsupported: 0, skippedEmpty: 0, skippedSensitive: 0,
+        skippedOversize: 0, skippedNoSeller: 0,
+      },
+      modelId: 'model',
+      temperature: '0.30',
+      status: 'completed',
+    }).returning();
+    const batches = await db.insert(kbGenerationBatches).values(Array.from({ length: 21 }, (_, ordinal) => ({
+      runId: run!.id,
+      ordinal,
+      manifest: { ordinal, conversationId, messages: [], characterCount: 0 },
+      classification: 'irrelevant' as const,
+      classificationReason: `Причина ${ordinal}`,
+      status: 'done',
+    }))).returning();
+    await db.insert(kbGenerationProposals).values(batches.map((batch, index) => ({
+      runId: run!.id,
+      batchId: batch.id,
+      fingerprint: `bounded-proposal-${index}`,
+      path: `База знаний/${index}`,
+      body: `Предложение ${index}`,
+      sources: [],
+      createdAt: new Date(Date.UTC(2026, 8, 1, 0, index)),
+    })));
+    await db.insert(kbGenerationRawFindings).values(batches.map((batch, index) => ({
+      runId: run!.id,
+      batchId: batch.id,
+      fingerprint: `bounded-raw-${index}`,
+      path: `База знаний/Исходное ${index}`,
+      body: `Находка ${index}`,
+      sources: [],
+      createdAt: new Date(Date.UTC(2026, 8, 1, 0, index)),
+    })));
+    const drafts = await db.insert(kbDrafts).values(Array.from({ length: 21 }, (_, index) => ({
+      agentId,
+      title: `Черновик ${index}`,
+      origin: 'manual',
+      ops: [],
+      base: {},
+      createdAt: new Date(Date.UTC(2026, 8, 1, 0, index)),
+    }))).returning();
+    await db.insert(kbGenerationDrafts).values(drafts.map((draft) => ({ runId: run!.id, draftId: draft.id })));
+
+    const base = `/api/agents/${agentId}/knowledge/generation/runs/${run!.id}`;
+    const first = await app.inject({ method: 'GET', url: `${base}?includeRawFindings=true`, cookies: jar });
+    expect(first.statusCode).toBe(200);
+    expect(first.json().proposals).toMatchObject({ items: expect.any(Array), nextCursor: '20' });
+    expect(first.json().proposals.items).toHaveLength(20);
+    expect(first.json().drafts).toHaveLength(20);
+    expect(first.json().draftsNextCursor).toBe('20');
+    expect(first.json().run.drafts).toHaveLength(20);
+    expect(first.json().run.draftsNextCursor).toBe('20');
+    expect(first.json().exclusions).toHaveLength(20);
+    expect(first.json().exclusionsNextCursor).toBe('20');
+    expect(first.json().rawFindings).toHaveLength(20);
+    expect(first.json().rawFindingsNextCursor).toBe('20');
+
+    const second = await app.inject({
+      method: 'GET',
+      url: `${base}?proposalCursor=20&draftCursor=20&exclusionCursor=20&rawFindingCursor=20&includeRawFindings=true`,
+      cookies: jar,
+    });
+    expect(second.statusCode).toBe(200);
+    expect(second.json().proposals).toMatchObject({ items: [expect.any(Object)], nextCursor: null });
+    expect(second.json()).toMatchObject({
+      drafts: [expect.any(Object)], draftsNextCursor: null,
+      exclusions: [expect.any(Object)], exclusionsNextCursor: null,
+      rawFindings: [expect.any(Object)], rawFindingsNextCursor: null,
+    });
   });
 });

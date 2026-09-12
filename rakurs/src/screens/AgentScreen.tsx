@@ -19,6 +19,8 @@ import type {
 import {
   changeResponseMode,
   initialResponseModeDraft,
+  persistedResponseModeWarning,
+  responseModeDraftDirty,
   responseModeSaveDecision,
   testContactLabel,
 } from './agent-response-mode';
@@ -218,10 +220,9 @@ function ResponseModeCard({
 
   const selected = contacts.find((contact) => contact.id === draft.testContactId)
     ?? (settings.testContact?.id === draft.testContactId ? settings.testContact : null);
-  const dirty =
-    draft.responseMode !== settings.responseMode
-    || draft.testContactId !== settings.testContact?.id;
+  const dirty = responseModeDraftDirty(draft, settings);
   const missingKey = draft.responseMode !== 'off' && !settings.keySet;
+  const persistedWarning = persistedResponseModeWarning(settings);
 
   function chooseMode(responseMode: AgentResponseMode) {
     setDraft((current) => changeResponseMode(current, responseMode));
@@ -284,6 +285,14 @@ function ResponseModeCard({
             : draft.responseMode === 'test'
               ? 'Тест'
               : 'Для всех'}
+        </div>
+      )}
+
+      {persistedWarning && (
+        <div role="alert" style={{ ...hint, color: 'var(--danger)' }}>
+          {owner
+            ? persistedWarning
+            : 'Тестовый клиент больше недоступен. Попросите владельца выбрать другого клиента.'}
         </div>
       )}
 

@@ -3,6 +3,8 @@ import type { AiTestContact } from '@/types';
 import {
   changeResponseMode,
   initialResponseModeDraft,
+  persistedResponseModeWarning,
+  responseModeDraftDirty,
   responseModeSaveDecision,
   testContactLabel,
 } from './agent-response-mode';
@@ -49,5 +51,20 @@ describe('agent response mode form state', () => {
   it('shows the selected contact name with a normalized phone number', () => {
     expect(testContactLabel(contact)).toBe('Айгуль · +7 700 123 45 67');
     expect(testContactLabel({ ...contact, name: null })).toBe('+7 700 123 45 67');
+  });
+
+  it('keeps an unchanged missing contact clean', () => {
+    const draft = initialResponseModeDraft({ responseMode: 'test', testContact: null });
+
+    expect(responseModeDraftDirty(draft, { responseMode: 'test', testContact: null })).toBe(false);
+  });
+
+  it('warns immediately when persisted test mode has no valid contact', () => {
+    expect(persistedResponseModeWarning({ responseMode: 'test', testContact: null })).toBe(
+      'Тестовый клиент больше недоступен. Выберите другого клиента и сохраните режим.',
+    );
+    expect(
+      persistedResponseModeWarning({ responseMode: 'test', testContact: contact }),
+    ).toBeNull();
   });
 });

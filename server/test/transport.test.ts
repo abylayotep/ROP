@@ -300,6 +300,26 @@ describe('transportFor', () => {
     await expect(send).rejects.toThrow('websocket exploded');
     expect(LinkedOffline.name).toBe('LinkedOffline');
   });
+
+  it('bounds a linked send whose socket never settles promptly', async () => {
+    const linked = fakeLinked({
+      sendText: () =>
+        new Promise((_, reject) => {
+          setTimeout(() => reject(new Error('late socket failure')), 30);
+        }),
+    });
+    linked.setOpen('n1', true);
+
+    const send = transportFor(linkedRow(), deps({ linked, linkedSendTimeoutMs: 5 })).sendText(
+      '77001234567',
+      'привет',
+    );
+
+    await expect(send).rejects.toMatchObject({
+      statusCode: 504,
+      message: 'Телефон не ответил вовремя. Результат отправки сообщения неизвестен.',
+    });
+  });
 });
 
 

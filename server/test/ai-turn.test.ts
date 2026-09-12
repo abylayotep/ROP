@@ -737,7 +737,7 @@ describe('applying what the model asked for', () => {
     expect(atSendTime).toHaveLength(1);
   });
 
-  it('does not queue a lead when response mode changes inside the queue helper', async () => {
+  it('does not queue a lead when the final queue policy snapshot is denied', async () => {
     const target = (await db.select().from(stages).where(eq(stages.agentId, agentId))).find(
       (stage) => stage.kind === 'qualified',
     )!;
@@ -754,7 +754,7 @@ describe('applying what the model asked for', () => {
           .where(eq(conversations.id, conversationId));
         if (!modeChanged && snapshot?.responseMode === 'live' && current?.stageId === target.id) {
           modeChanged = true;
-          await db.update(agents).set({ responseMode: 'off' }).where(eq(agents.id, agentId));
+          return { ...snapshot, responseMode: 'off' };
         }
         return snapshot;
       });
@@ -782,8 +782,8 @@ describe('applying what the model asked for', () => {
       const snapshot = await originalLoad(...args);
       const [current] = await db.select({ stageId: conversations.stageId }).from(conversations)
         .where(eq(conversations.id, conversationId));
-      if (snapshot?.responseMode === 'live' && current?.stageId === second.id && ++checksAfterMove === 2) {
-        await db.update(agents).set({ responseMode: 'off' }).where(eq(agents.id, agentId));
+      if (snapshot?.responseMode === 'live' && current?.stageId === second.id && ++checksAfterMove >= 2) {
+        return { ...snapshot, responseMode: 'off' };
       }
       return snapshot;
     });

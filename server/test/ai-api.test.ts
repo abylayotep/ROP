@@ -15,6 +15,7 @@ const PASSWORD = 'correct-horse-battery';
 let app: FastifyInstance;
 let db: Db;
 let agentId: string;
+let ownerUserId: string;
 let ownerJar: Record<string, string>;
 let memberJar: Record<string, string>;
 
@@ -57,15 +58,29 @@ async function queryWaitsOn(
   return Boolean([...rows][0]?.waiting);
 }
 
+async function queryWaitsOnAutomationLock(): Promise<boolean> {
+  const rows = await db.execute(sql`
+    select exists (
+      select 1 from pg_stat_activity
+      where datname = current_database()
+        and state = 'active'
+        and wait_event_type = 'Lock'
+        and query like '%pg_advisory_xact_lock%'
+    ) as waiting
+  `);
+  return Boolean([...rows][0]?.waiting);
+}
+
 beforeEach(async () => {
   db = await withDb();
-  const { accountId } = await createAccountWithOwner(db, {
+  const { accountId, userId } = await createAccountWithOwner(db, {
     company: 'Сафина',
     email: 'owner@example.com',
     name: 'Владелец',
     initials: 'ВЛ',
     password: PASSWORD,
   });
+  ownerUserId = userId;
   await addMember(db, {
     company: 'Сафина',
     email: 'member@example.com',
@@ -131,6 +146,43 @@ describe('AI response mode settings', () => {
       responseMode: 'test',
       testContact: { id: contact!.id, name: 'Айгуль', phone: '77001234567' },
     });
+  });
+
+  it('records the actor and the previous and new response scope atomically', async () => {
+    const [contact] = await db
+      .insert(contacts)
+      .values({ agentId, name: 'Айгуль', phone: '77001234567' })
+      .returning();
+
+    const relation = await db.execute(sql`
+      select to_regclass('public.agent_response_mode_changes')::text as name
+    `);
+    expect([...relation][0]?.name).toBe('agent_response_mode_changes');
+
+    const response = await patchSettings({ responseMode: 'test', testContactId: contact!.id });
+
+    expect(response.statusCode).toBe(200);
+    const rows = await db.execute(sql`
+      select
+        agent_id as "agentId",
+        actor_user_id as "actorUserId",
+        old_response_mode as "oldResponseMode",
+        old_test_contact_id as "oldTestContactId",
+        new_response_mode as "newResponseMode",
+        new_test_contact_id as "newTestContactId"
+      from agent_response_mode_changes
+      where agent_id = ${agentId}::uuid
+    `);
+    expect([...rows]).toEqual([
+      {
+        agentId,
+        actorUserId: ownerUserId,
+        oldResponseMode: 'off',
+        oldTestContactId: null,
+        newResponseMode: 'test',
+        newTestContactId: contact!.id,
+      },
+    ]);
   });
 
   it('retains a selected contact outside test mode and reuses it atomically', async () => {
@@ -199,7 +251,7 @@ describe('AI response mode settings', () => {
           .select({ testContactId: agents.testContactId })
           .from(agents)
           .where(eq(agents.id, agentId));
-        return stored!.testContactId === null || queryWaitsOn('agents', 'update');
+        return stored!.testContactId === null || queryWaitsOnAutomationLock();
       });
     } finally {
       releaseContact();

@@ -204,6 +204,20 @@
       "when": 1789204102088,
       "tag": "0028_sparkling_vampiro",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1789215013346,
+      "tag": "0029_skinny_hobgoblin",
+      "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1789215574353,
+      "tag": "0030_repair-finalized-effect-columns",
+      "breakpoints": true
     }
   ]
 }

@@ -3,13 +3,14 @@ import { windowOpen } from '../api/conversations.js';
 import type { Db } from '../db/client.js';
 import { contacts, conversations, messages, notes, stages, whatsappNumbers } from '../db/schema.js';
 import { decryptSecret } from './secret-box.js';
+import { withAgentAutomationLock } from './automation/execution.js';
 import { asCloudNumber } from './whatsapp/cloud-number.js';
 import { GraphError, withoutSecret, type GraphClient } from './whatsapp/graph.js';
 
 export interface StageMessageDeps {
   graph: GraphClient;
   key: Buffer;
-  canSend?: () => Promise<boolean>;
+  canSend?: (db: Db) => Promise<boolean>;
 }
 
 /**
@@ -36,6 +37,21 @@ export async function sendStageMessage(
   deps: StageMessageDeps,
   input: { agentId: string; conversationId: string; stageId: string },
 ): Promise<void> {
+  if (deps.canSend) {
+    try {
+      await withAgentAutomationLock(db, input.agentId, async (tx) => {
+        const effectDb = tx as unknown as Db;
+        if (!await deps.canSend!(effectDb)) return;
+        // The callback is removed deliberately: the recursive core must not acquire the
+        // same lock again while this transaction holds it.
+        await sendStageMessage(effectDb, { graph: deps.graph, key: deps.key }, input);
+      });
+    } catch {
+      // The stage move has already committed; preserve this helper's never-throw contract.
+    }
+    return;
+  }
+
   const note = (body: string) =>
     db.insert(notes).values({ conversationId: input.conversationId, authorId: null, body });
 
@@ -93,7 +109,6 @@ export async function sendStageMessage(
     // thing that can tell a failed send apart from a send we failed to record.
     let sent = false;
     try {
-      if (deps.canSend && !await deps.canSend()) return;
       const { messageId } = await deps.graph.sendText(
         asCloudNumber(row.number).phoneNumberId,
         token,

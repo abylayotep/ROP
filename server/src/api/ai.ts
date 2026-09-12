@@ -18,6 +18,7 @@ import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
 import {
+  agentResponseModeChanges,
   agents,
   aiReplies,
   contacts,
@@ -27,6 +28,7 @@ import {
   stages,
   whatsappNumbers,
 } from '../db/schema.js';
+import { lockAgentAutomation } from '../lib/automation/execution.js';
 import { releaseTurnSlot, sandboxTurns, SANDBOX_TURNS, tryTakeTurnSlot } from '../db/turn-cap.js';
 import type { Env } from '../env.js';
 import { MODELS } from '../lib/ai/openrouter.js';
@@ -237,6 +239,11 @@ export function registerAiRoutes(
       // version can never land ahead of — or behind — the row it is meant to describe.
       const bumps = temperature !== undefined || replyLanguage !== undefined;
       const result = await db.transaction(async (tx) => {
+        // The same lock is held by every automated final effect. Whichever side acquires it
+        // first finishes first: once this PATCH returns, no effect authorized under the old
+        // response scope can still begin or complete behind it.
+        await lockAgentAutomation(tx, req.agent!.id);
+
         // Every partial PATCH derives its omitted fields from the same locked row it updates.
         // Without this lock, two valid requests can both validate stale state and commit the
         // invalid combination `responseMode = 'test', testContactId = null`.
@@ -290,6 +297,20 @@ export function registerAiRoutes(
           .set(changes)
           .where(eq(agents.id, current.id))
           .returning();
+        if (
+          updated
+          && (updated.responseMode !== current.responseMode
+            || updated.testContactId !== current.testContactId)
+        ) {
+          await tx.insert(agentResponseModeChanges).values({
+            agentId: current.id,
+            actorUserId: req.user!.id,
+            oldResponseMode: current.responseMode,
+            oldTestContactId: current.testContactId,
+            newResponseMode: updated.responseMode,
+            newTestContactId: updated.testContactId,
+          });
+        }
         if (bumps) await bumpConfigVersion(tx as unknown as Db, current.id);
         return { updated: updated!, selected };
       });

@@ -31,6 +31,25 @@ export function changeResponseMode(
   return { ...draft, responseMode };
 }
 
+export function responseModeDraftDirty(
+  draft: ResponseModeDraft,
+  settings: { responseMode: AgentResponseMode; testContact: AiTestContact | null },
+): boolean {
+  return (
+    draft.responseMode !== settings.responseMode
+    || draft.testContactId !== (settings.testContact?.id ?? null)
+  );
+}
+
+export function persistedResponseModeWarning(settings: {
+  responseMode: AgentResponseMode;
+  testContact: AiTestContact | null;
+}): string | null {
+  return settings.responseMode === 'test' && settings.testContact === null
+    ? 'Тестовый клиент больше недоступен. Выберите другого клиента и сохраните режим.'
+    : null;
+}
+
 export function responseModeSaveDecision(
   draft: ResponseModeDraft,
   liveConfirmed: boolean,

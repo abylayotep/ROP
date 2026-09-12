@@ -55,7 +55,11 @@ export interface TransportDeps {
    * database and no business acquiring one — `markTokenRejected` is the other half.
    */
   onTokenRejected: () => Promise<void>;
+  /** Bounds linked-device I/O while callers retain database serialization locks. */
+  linkedSendTimeoutMs?: number;
 }
+
+const LINKED_SEND_TIMEOUT_MS = 60_000;
 
 /** WhatsApp addresses one person by jid; the cabinet stores digits. */
 export const jidFor = (phone: string): string => `${phone}@s.whatsapp.net`;
@@ -122,13 +126,30 @@ function linkedTransport(number: WhatsappNumberRow, deps: TransportDeps): Messag
         );
 
   const send = async <T>(attempt: () => Promise<T>): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      return await attempt();
+      return await Promise.race([
+        attempt(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () =>
+              reject(
+                new TransportRefusal(
+                  504,
+                  'Телефон не ответил вовремя. Результат отправки сообщения неизвестен.',
+                ),
+              ),
+            deps.linkedSendTimeoutMs ?? LINKED_SEND_TIMEOUT_MS,
+          );
+        }),
+      ]);
     } catch (error) {
-      // Nothing was sent: the socket is not there. Every other failure is the library's
-      // and is reported as it is, because we do not know what it means.
+      // Only LinkedOffline proves nothing was attempted. A deadline is deliberately
+      // reported as unknown because the socket operation itself cannot be cancelled here.
       if (error instanceof LinkedOffline) throw refusal();
       throw error;
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   };
 

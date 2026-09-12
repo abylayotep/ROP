@@ -5,6 +5,7 @@ import { agents, aiReplies, contacts, conversations, crmAnalyses, leadFields, le
 import type { ModelClient } from '../ai/openrouter.js';
 import { keyAad } from '../ai/turn.js';
 import { decideAutomation, loadAutomationSnapshot, type AutomationPurpose } from '../automation/policy.js';
+import { lockAgentAutomation } from '../automation/execution.js';
 import { queueLead } from '../capi/enqueue.js';
 import { recordStageMove } from '../funnel-history.js';
 import { decryptSecret } from '../secret-box.js';
@@ -116,6 +117,7 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
     let applied = false;
     let policyDenied = false;
     await db.transaction(async (tx) => {
+      await lockAgentAutomation(tx, input.agentId);
       const [lease] = await tx.select().from(crmAnalyses).where(ownLease).for('update');
       if (!lease) return;
       if (!await lockAutomationPolicy(tx,input)) {
@@ -183,7 +185,7 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
       && Date.now()-last.sentAt.getTime() < 5*60_000) {
       if (moved && await automationAllowed(db,input,'crm')) {
         await queueLead(db,{agentId:agent.id,conversationId:conversation.id,
-          canQueue:()=>automationAllowed(db,input,'crm')});
+          canQueue:(effectDb)=>automationAllowed(effectDb,input,'crm')});
       }
       const [current] = await db.select({agentEnabled:agents.aiEnabled,conversationEnabled:conversations.aiEnabled})
         .from(conversations).innerJoin(agents,eq(agents.id,conversations.agentId)).where(eq(conversations.id,conversation.id));

@@ -291,6 +291,40 @@ export const contacts = pgTable(
 );
 
 /**
+ * An append-only record of every owner change to an agent's WhatsApp response scope.
+ *
+ * Contact ids are deliberately snapshots rather than foreign keys: deleting a contact may
+ * clear the live setting, but it must not rewrite what an earlier owner selected. The actor
+ * id is retained for the same reason even if that user later leaves the account.
+ */
+export const agentResponseModeChanges = pgTable(
+  'agent_response_mode_changes',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    agentId: uuid('agent_id')
+      .notNull()
+      .references(() => agents.id, { onDelete: 'cascade' }),
+    actorUserId: uuid('actor_user_id').notNull(),
+    oldResponseMode: text('old_response_mode').$type<AgentResponseMode>().notNull(),
+    oldTestContactId: uuid('old_test_contact_id'),
+    newResponseMode: text('new_response_mode').$type<AgentResponseMode>().notNull(),
+    newTestContactId: uuid('new_test_contact_id'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('agent_response_mode_changes_agent_created_idx').on(t.agentId, t.createdAt),
+    check(
+      'agent_response_mode_changes_old_mode_check',
+      sql`${t.oldResponseMode} in ('off', 'test', 'live')`,
+    ),
+    check(
+      'agent_response_mode_changes_new_mode_check',
+      sql`${t.newResponseMode} in ('off', 'test', 'live')`,
+    ),
+  ],
+);
+
+/**
  * One thread: this client, on this number.
  *
  * The advertising columns are filled once, from the `referral` block on the first message of

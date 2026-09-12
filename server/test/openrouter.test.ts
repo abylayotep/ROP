@@ -166,6 +166,32 @@ describe('a completion', () => {
   });
 });
 
+describe('audio transcription', () => {
+  it('sends raw base64 audio to the dedicated transcription endpoint', async () => {
+    answerWith({ text: 'Мне нужна входная дверь.' });
+
+    const transcript = await client.transcribe({
+      key: KEY,
+      bytes: Buffer.from([1, 2, 3]),
+      mime: 'audio/ogg; codecs=opus',
+    });
+
+    expect(transcript).toBe('Мне нужна входная дверь.');
+    expect(calls[0]!.url).toBe('https://openrouter.ai/api/v1/audio/transcriptions');
+    expect(body()).toMatchObject({
+      model: 'openai/whisper-large-v3',
+      input_audio: { data: 'AQID', format: 'ogg' },
+    });
+  });
+
+  it('rejects an empty transcription as a provider failure', async () => {
+    answerWith({ text: '   ' });
+
+    await expect(client.transcribe({ key: KEY, bytes: Buffer.from([1]), mime: 'audio/mpeg' }))
+      .rejects.toMatchObject({ status: 502, message: 'Модель не распознала речь в аудио.' });
+  });
+});
+
 describe('a failure', () => {
   it('raises a Russian ModelError when the answer carries no choices', async () => {
     answerWith({ choices: [] });

@@ -1,4 +1,4 @@
-import type { Completion, CompletionInput, ModelClient } from '../../src/lib/ai/openrouter.js';
+import type { Completion, CompletionInput, ModelClient, TranscriptionInput } from '../../src/lib/ai/openrouter.js';
 
 export interface FakeModel extends ModelClient {
   /** Every call in order, so a test can assert what the model was actually told. */
@@ -15,12 +15,22 @@ export interface FakeModel extends ModelClient {
  * The token counts and the cost are fixed and small, so a test asserting them is asserting
  * the code that reads a `Completion` rather than a number this fake invented.
  */
-export function fakeModel(...answers: (string | Error)[]): FakeModel {
+export function fakeModel(...answers: (string | Error)[]) {
   const calls: CompletionInput[] = [];
+  const transcriptionCalls: TranscriptionInput[] = [];
+  const transcriptions: (string | Error)[] = [];
 
   return {
     calls,
-    async complete(input): Promise<Completion> {
+    transcriptionCalls,
+    transcriptions,
+    async transcribe(input: TranscriptionInput): Promise<string> {
+      transcriptionCalls.push(input);
+      const answer = transcriptions.shift() ?? '';
+      if (answer instanceof Error) throw answer;
+      return answer;
+    },
+    async complete(input: CompletionInput): Promise<Completion> {
       calls.push(input);
       // Answers run out by repeating the last one: a test that scripts one answer and takes
       // two turns is testing the turns, not the length of this array.

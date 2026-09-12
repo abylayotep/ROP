@@ -4,6 +4,7 @@ import type { Db } from '../../../db/client.js';
 import { messages, whatsappNumbers } from '../../../db/schema.js';
 import type { TurnDeps } from '../../ai/turn.js';
 import { storeInboundMedia } from '../media.js';
+import { transcribeInboundAudio } from '../../ai/transcription.js';
 import {
   advanceConversation,
   runTurns,
@@ -92,6 +93,7 @@ export async function applyMessage(
     .where(eq(messages.waMessageId, line.waMessageId));
 
   let media: StoredMedia | null = null;
+  let body = line.body;
   if (line.hasMedia && !known) {
     try {
       const bytes = await client.downloadMedia(numberId, raw);
@@ -101,6 +103,19 @@ export async function applyMessage(
         agentId: number.agentId,
         waMessageId: line.waMessageId,
       });
+      if (line.kind === 'audio' && !line.fromMe) {
+        try {
+          body = await transcribeInboundAudio(
+            db, deps, number.agentId, bytes, mimeOf(raw) ?? 'application/octet-stream',
+          );
+        } catch (error) {
+          deps.onError?.(
+            `аудио сообщения ${line.waMessageId} не распознано: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+      }
     } catch (error) {
       // The message is still worth having: its caption, its sender and its place in the
       // thread are all real. Only the file is missing.
@@ -119,7 +134,7 @@ export async function applyMessage(
       direction: line.fromMe ? 'out' : 'in',
       author: line.fromMe ? 'phone' : 'client',
       kind: line.kind,
-      body: line.body,
+      body,
       status: line.fromMe ? 'sent' : null,
       sentAt: line.sentAt,
       media,

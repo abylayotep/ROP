@@ -49,6 +49,17 @@ const photo = {
   ],
 };
 
+const voice = {
+  object: 'whatsapp_business_account',
+  entry: [{ id: '932', changes: [{ field: 'messages', value: {
+    messaging_product: 'whatsapp',
+    metadata: { display_phone_number: '77085807932', phone_number_id: '136' },
+    contacts: [{ profile: { name: 'Айгерім' }, wa_id: '77771234567' }],
+    messages: [{ from: '77771234567', id: 'wamid.VOICE', timestamp: '1756000000', type: 'audio',
+      audio: { id: 'media-voice', mime_type: 'audio/ogg; codecs=opus' } }],
+  } }] }],
+};
+
 beforeEach(async () => {
   db = await withDb();
   const { accountId } = await createAccountWithOwner(db, {
@@ -60,6 +71,7 @@ beforeEach(async () => {
   });
   const [agent] = await db.insert(agents).values({ accountId, name: 'Сафина' }).returning();
   agentId = agent!.id;
+  await db.update(agents).set({ openrouterKey: encryptSecret('sk-or-test', key, agentId) }).where(eq(agents.id, agentId));
   await db.insert(whatsappNumbers).values({
     agentId,
     phoneNumberId: '136',
@@ -75,6 +87,38 @@ afterEach(async () => {
 });
 
 describe('inbound media', () => {
+  it('stores a voice-note transcription as message text', async () => {
+    await db.delete(whatsappEvents);
+    await db.insert(whatsappEvents).values({ payload: voice });
+    const model = fakeModel();
+    model.transcriptions.push('Мне нужна входная дверь');
+
+    await processPendingEvents(db, { ...deps(fakeGraph({ getMediaUrl: async () => ({
+      url: 'https://lookaside.fb/audio', mimeType: 'audio/ogg; codecs=opus', fileSize: 3,
+    }) })), model });
+
+    const [message] = await db.select().from(messages);
+    expect(message).toMatchObject({ kind: 'audio', body: 'Мне нужна входная дверь' });
+    expect(model.transcriptionCalls[0]).toMatchObject({ mime: 'audio/ogg; codecs=opus' });
+  });
+
+  it('keeps the audio file when transcription fails', async () => {
+    await db.delete(whatsappEvents);
+    await db.insert(whatsappEvents).values({ payload: voice });
+    const model = fakeModel();
+    model.transcriptions.push(new Error('speech service unavailable'));
+
+    await processPendingEvents(db, { ...deps(fakeGraph({ getMediaUrl: async () => ({
+      url: 'https://lookaside.fb/audio', mimeType: 'audio/ogg; codecs=opus', fileSize: 3,
+    }) })), model });
+
+    const [message] = await db.select().from(messages);
+    expect(message).toMatchObject({ kind: 'audio', body: null, mediaMime: 'audio/ogg; codecs=opus' });
+    expect(message!.mediaPath).not.toBeNull();
+    const [event] = await db.select().from(whatsappEvents);
+    expect(event!.error).toContain('speech service unavailable');
+  });
+
   it('downloads the file and remembers where it went', async () => {
     const graph = fakeGraph();
 

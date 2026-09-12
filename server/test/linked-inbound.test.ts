@@ -58,6 +58,7 @@ beforeEach(async () => {
   forgetLids();
   db = await withDb();
   errors = [];
+  const credentialsKey = randomBytes(32);
   const { accountId } = await createAccountWithOwner(db, {
     company: 'Sealhouse',
     email: 'owner@example.com',
@@ -70,6 +71,7 @@ beforeEach(async () => {
     .values({ accountId, name: 'Sealhouse', responseMode: 'live' })
     .returning();
   agentId = agent!.id;
+  await db.update(agents).set({ openrouterKey: encryptSecret('sk-or-test', credentialsKey, agentId) }).where(eq(agents.id, agentId));
   const [number] = await db
     .insert(whatsappNumbers)
     .values({
@@ -86,7 +88,7 @@ beforeEach(async () => {
     model: fakeModel(),
     graph: fakeGraph(),
     linked: fakeLinked(),
-    key: randomBytes(32),
+    key: credentialsKey,
     mediaDir: await mkdtemp(join(tmpdir(), 'rakurs-media-')),
     onError: (message) => errors.push(message),
   };
@@ -326,6 +328,20 @@ describe('linked inbound', () => {
     const [stored] = await db.select().from(messages);
     expect(stored!.mediaPath).toMatch(/\.jpg$/);
     expect(await readFile(join(deps.mediaDir, stored!.mediaPath!))).toEqual(client.media);
+  });
+
+  it('stores a voice-note transcription as message text', async () => {
+    const client = fakeLinked();
+    const model = fakeModel();
+    model.transcriptions.push('Доставка нужна в Астану');
+    deps.model = model;
+
+    await applyMessage(db, deps, client, numberId, raw({
+      message: { audioMessage: { mimetype: 'audio/ogg; codecs=opus' } },
+    }));
+
+    const [stored] = await db.select().from(messages);
+    expect(stored).toMatchObject({ kind: 'audio', body: 'Доставка нужна в Астану' });
   });
 
   it('keeps the message when its file cannot be downloaded', async () => {

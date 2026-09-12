@@ -88,6 +88,32 @@ export interface Completion extends CompletionUsage {
 
 export interface ModelClient {
   complete(input: CompletionInput): Promise<Completion>;
+  transcribe?(input: TranscriptionInput): Promise<string>;
+}
+
+export interface TranscriptionInput {
+  /** Decrypted immediately before the call and never persisted in plain text. */
+  key: string;
+  bytes: Buffer;
+  mime: string;
+}
+
+/** A multilingual STT model exposed by OpenRouter's dedicated transcription endpoint. */
+export const TRANSCRIPTION_MODEL = 'openai/whisper-large-v3';
+
+function audioFormat(mime: string): string {
+  const base = mime.split(';')[0]!.trim().toLowerCase();
+  const formats: Record<string, string> = {
+    'audio/aac': 'aac',
+    'audio/flac': 'flac',
+    'audio/mp4': 'm4a',
+    'audio/mpeg': 'mp3',
+    'audio/ogg': 'ogg',
+    'audio/wav': 'wav',
+    'audio/webm': 'webm',
+    'audio/x-wav': 'wav',
+  };
+  return formats[base] ?? base.replace(/^audio\//, '');
 }
 
 /**
@@ -196,8 +222,44 @@ interface ChatResponse {
   };
 }
 
-export function createModelClient(): ModelClient {
+export function createModelClient(): ModelClient & {
+  transcribe(input: TranscriptionInput): Promise<string>;
+} {
   return {
+    async transcribe({ key, bytes, mime }) {
+      return within(key, async () => {
+        const response = await fetch(`${BASE}/audio/transcriptions`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${key}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: TRANSCRIPTION_MODEL,
+            input_audio: { data: bytes.toString('base64'), format: audioFormat(mime) },
+          }),
+          signal: AbortSignal.timeout(TIMEOUT_MS),
+        });
+        if (!response.ok) throw await failure(response, key);
+
+        const raw = await response.text();
+        let parsed: { text?: unknown };
+        try {
+          parsed = JSON.parse(raw) as { text?: unknown };
+        } catch {
+          throw new ModelError(
+            'Ответ распознавания аудио не удалось прочитать.',
+            502,
+            withoutSecret(raw, key).slice(0, 500) || undefined,
+          );
+        }
+        const transcript = typeof parsed.text === 'string' ? parsed.text.trim() : '';
+        if (transcript === '') {
+          throw new ModelError('Модель не распознала речь в аудио.', 502);
+        }
+        return transcript;
+      });
+    },
     async complete({ key, model, temperature, maxTokens, messages }) {
       return within(key, async () => {
         const response = await fetch(`${BASE}/chat/completions`, {

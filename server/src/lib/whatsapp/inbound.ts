@@ -8,6 +8,7 @@ import {
   whatsappNumbers,
 } from '../../db/schema.js';
 import type { ModelClient } from '../ai/openrouter.js';
+import { transcribeInboundAudio } from '../ai/transcription.js';
 import { runTurn } from '../ai/turn.js';
 import { decryptSecret } from '../secret-box.js';
 import { recordReferral, type Referral } from './attribution.js';
@@ -442,6 +443,7 @@ async function applyMessages(
       .where(eq(messages.waMessageId, incoming.id));
 
     let media: { path: string; mime: string } | null = null;
+    let body = bodyOf(incoming);
     const mediaId = mediaIdOf(incoming);
     if (mediaId && !known) {
       let token = '';
@@ -453,12 +455,22 @@ async function applyMessages(
         // is what failed.
         const cloud = asCloudNumber(number);
         token = decryptSecret(cloud.accessToken, deps.key, cloud.phoneNumberId);
-        media = await downloadInboundMedia(deps, {
+        const downloaded = await downloadInboundMedia(deps, {
           mediaId,
           token,
           agentId: number.agentId,
           waMessageId: incoming.id,
         });
+        media = downloaded;
+        if (incoming.type === 'audio') {
+          try {
+            body = await transcribeInboundAudio(
+              db, deps, number.agentId, downloaded.bytes, downloaded.mime,
+            );
+          } catch (error) {
+            errors.push(withoutSecret(error instanceof Error ? error.message : String(error), token));
+          }
+        }
       } catch (error) {
         // The message is still worth having: its caption, its sender and its place in the
         // thread are all real. Only the file is missing, and the event says why.
@@ -486,7 +498,7 @@ async function applyMessages(
       direction: 'in' as const,
       author: 'client' as const,
       kind: incoming.type,
-      body: bodyOf(incoming),
+      body,
       sentAt: at(incoming.timestamp),
       media,
     };
@@ -598,4 +610,3 @@ async function applyContactSync(db: Db, agentId: string, items: ContactSync[]): 
       });
   }
 }
-

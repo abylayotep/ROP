@@ -46,7 +46,7 @@ export interface DownloadParams {
 export async function downloadInboundMedia(
   deps: { graph: GraphClient; mediaDir: string },
   params: DownloadParams,
-): Promise<{ path: string; mime: string }> {
+): Promise<{ path: string; mime: string; bytes: Buffer }> {
   const descriptor = await deps.graph.getMediaUrl(params.mediaId, params.token);
 
   if (descriptor.fileSize > MAX_BYTES) {
@@ -55,12 +55,13 @@ export async function downloadInboundMedia(
 
   const bytes = await deps.graph.downloadMedia(descriptor.url, params.token);
 
-  return storeInboundMedia(deps, {
+  const stored = await storeInboundMedia(deps, {
     bytes,
     mime: descriptor.mimeType,
     agentId: params.agentId,
     waMessageId: params.waMessageId,
   });
+  return { ...stored, bytes };
 }
 
 export interface StoreParams {

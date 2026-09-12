@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { agents, contacts, conversations, kbDrafts, kbGenerationBatches, kbGenerationProposals, kbGenerationRuns, messages, users, whatsappNumbers, accounts } from '../src/db/schema.js';
 import { keyAad } from '../src/lib/ai/turn.js';
 import { cancelGenerationRun, executeGenerationRun, reconcileGenerationRuns, retryGenerationRun, startGenerationRun } from '../src/lib/knowledge/generation-run.js';
+import { RAW_PROPOSAL_FINGERPRINT_PREFIX } from '../src/lib/knowledge/generation-consolidate.js';
 import { previewSelection } from '../src/lib/knowledge/generation-selection.js';
 import { encryptSecret } from '../src/lib/secret-box.js';
 import { withDb } from './helpers/db.js';
@@ -20,6 +21,33 @@ const classified = (
   classification: 'customer' | 'irrelevant' | 'uncertain' = 'customer',
   reason = 'The client asks about delivery and the seller answers.',
 ) => JSON.stringify({ classification: { value: classification, reason }, proposals });
+
+const consolidated = (items: unknown[]) => JSON.stringify({ items });
+
+const consolidationModel = (extraction: string) => {
+  const model = fakeModel();
+  model.complete = async (call) => {
+    model.calls.push(call);
+    if (model.calls.length === 1) {
+      return { text: extraction, promptTokens: 100, completionTokens: 20, cost: '0.00010000' };
+    }
+    const payload = JSON.parse(call.messages[1]!.content) as {
+      proposals: { id: string; path: string; body: string }[];
+    };
+    return {
+      text: consolidated(payload.proposals.map((proposal) => ({
+        path: proposal.path,
+        body: proposal.body,
+        confidence: 'high',
+        sourceProposalIds: [proposal.id],
+      }))),
+      promptTokens: 100,
+      completionTokens: 20,
+      cost: '0.00010000',
+    };
+  };
+  return model;
+};
 
 beforeEach(async () => {
   db = await withDb();
@@ -173,35 +201,64 @@ describe('generation runs', () => {
     const first = await admitted('old');
     const [firstBatch] = await db.select().from(kbGenerationBatches).where(eq(kbGenerationBatches.runId, first.id));
     const body = 'Two days';
-    const path = 'Delivery';
+    const path = 'База знаний/Доставка';
     const { createHash } = await import('node:crypto');
     const fingerprint = createHash('sha256').update(`${path.toLocaleLowerCase('ru')}\n${body.toLocaleLowerCase('ru')}`).digest('hex');
     await db.insert(kbGenerationProposals).values({ runId: first.id, batchId: firstBatch!.id, fingerprint, path, body, sources: [], status: 'applied' });
     await db.update(kbGenerationRuns).set({ status: 'completed' }).where(eq(kbGenerationRuns.id, first.id));
     const second = await admitted('new');
-    const model = fakeModel(classified([{ path, body, sources: [messageId], warnings: [] }]));
+    const model = consolidationModel(classified([{ path, body, sources: [messageId], warnings: [] }]));
 
     await executeGenerationRun({ db, model, credentialsKey: key }, second.id);
 
-    expect(await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.runId, second.id))).toHaveLength(1);
+    const proposals = await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.runId, second.id));
+    expect(proposals.filter((proposal) => !proposal.fingerprint.startsWith(RAW_PROPOSAL_FINGERPRINT_PREFIX)))
+      .toHaveLength(1);
   });
 
-  it('finishes a successful run with categorized review drafts without applying them', async () => {
+  it('finishes with consolidated review items without automatically creating category drafts', async () => {
     const run = await admitted('categorized-drafts');
-    const model = fakeModel(classified([
+    const model = consolidationModel(classified([
       { path: 'База знаний/Доставка', body: 'Доставка занимает два дня.', sources: [messageId], warnings: [] },
-      { path: 'Скрипт/Срок доставки', body: 'Сообщите срок и уточните адрес.', sources: [messageId], warnings: [] },
+      { path: 'Скрипт/Срок доставки', body: 'Доставка займёт два дня. Подскажите, пожалуйста, адрес.', sources: [messageId], warnings: [] },
     ]));
 
     await executeGenerationRun({ db, model, credentialsKey: key }, run.id);
 
-    expect(await db.select().from(kbDrafts)).toHaveLength(2);
-    expect(await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.runId, run.id)))
+    expect(await db.select().from(kbDrafts)).toHaveLength(0);
+    const proposals = await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.runId, run.id));
+    expect(proposals.filter((proposal) => !proposal.fingerprint.startsWith(RAW_PROPOSAL_FINGERPRINT_PREFIX)))
       .toEqual(expect.arrayContaining([
-        expect.objectContaining({ path: 'База знаний/Доставка', status: 'drafted', draftOpIndex: 0, noteId: null }),
-        expect.objectContaining({ path: 'Скрипт/Срок доставки', status: 'drafted', draftOpIndex: 0, noteId: null }),
+        expect.objectContaining({ kind: 'knowledge', path: 'База знаний/Доставка', confidence: 'high', selected: true, status: 'pending', draftId: null }),
+        expect.objectContaining({ kind: 'script', path: 'Скрипт/Срок доставки', confidence: 'high', selected: true, status: 'pending', draftId: null }),
       ]));
-    expect((await db.select().from(kbGenerationRuns).where(eq(kbGenerationRuns.id, run.id)))[0]?.status).toBe('completed');
+    expect(proposals.filter((proposal) => proposal.fingerprint.startsWith(RAW_PROPOSAL_FINGERPRINT_PREFIX)))
+      .toHaveLength(2);
+    expect((await db.select().from(kbGenerationRuns).where(eq(kbGenerationRuns.id, run.id)))[0])
+      .toMatchObject({ status: 'completed', promptTokens: 300, completionTokens: 60, cost: '0.00030000' });
+  });
+
+  it('keeps grounded raw findings and reports an honest error when consolidation fails', async () => {
+    const run = await admitted('consolidation-failure');
+    const model = fakeModel(
+      classified([{ path: 'База знаний/Доставка', body: 'Доставка занимает два дня.', sources: [messageId], warnings: [] }]),
+      new Error('provider unavailable'),
+    );
+
+    await executeGenerationRun({ db, model, credentialsKey: key }, run.id);
+
+    const proposals = await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.runId, run.id));
+    expect(proposals).toEqual([
+      expect.objectContaining({
+        path: 'База знаний/Доставка',
+        body: 'Доставка занимает два дня.',
+        status: 'rejected',
+      }),
+    ]);
+    expect(proposals[0]!.fingerprint).toMatch(/^raw:/);
+    expect(await db.select().from(kbDrafts)).toHaveLength(0);
+    expect((await db.select().from(kbGenerationRuns).where(eq(kbGenerationRuns.id, run.id)))[0])
+      .toMatchObject({ status: 'failed', errorCode: 'consolidation_failed', promptTokens: 100, completionTokens: 20 });
   });
 
   it('persists classification and excludes proposals from an irrelevant batch', async () => {

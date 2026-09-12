@@ -53,6 +53,7 @@ import type {
   WhatsappNumber,
 } from '@/types';
 import { API_URL, LONG_TIMEOUT_MS, request } from './client';
+import type { WhatsappHistoryRun, WhatsappHistoryOverview } from '@rakurs/contract';
 
 export { API_URL, ApiError, humanError, request } from './client';
 
@@ -89,6 +90,14 @@ export const updateAgent = (
 ) => request<Agent>(`/agents/${agentId}`, { method: 'PATCH', body });
 
 // ── WhatsApp ─────────────────────────────────────────────────────────────────
+
+export const getWhatsappHistory = (agentId: string, signal?: AbortSignal) =>
+  request<WhatsappHistoryOverview>(`/agents/${agentId}/whatsapp/history`, { signal });
+
+export const startWhatsappHistory = (agentId: string, limit: 100 | 200, signal?: AbortSignal) =>
+  request<WhatsappHistoryRun>(`/agents/${agentId}/whatsapp/history`, {
+    method: 'POST', body: { limit }, signal,
+  });
 
 export const listWhatsappNumbers = (agentId: string, signal?: AbortSignal) =>
   request<WhatsappNumber[]>(`/agents/${agentId}/whatsapp/numbers`, { signal });

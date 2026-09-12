@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import * as api from '@/api';
 import { Graph } from '@/components/knowledge/Graph';
 import { ChatGenerationPanel } from '@/components/knowledge/ChatGenerationPanel';
+import { HistoryImportPanel } from '@/components/knowledge/HistoryImportPanel';
 import { ImportPanel } from '@/components/knowledge/ImportPanel';
 import { NoteEditor } from '@/components/knowledge/NoteEditor';
 import { buildTree, NoteTree } from '@/components/knowledge/NoteTree';
@@ -173,6 +174,7 @@ export function KnowledgeScreen() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <HistoryImportPanel key={`history-${agent.id}`} agentId={agent.id} readOnly={!owner} />
       <ChatGenerationPanel
           key={agent.id}
           agentId={agent.id}

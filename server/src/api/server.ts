@@ -33,6 +33,7 @@ import { registerWhatsappWebhook } from './whatsapp-webhook.js';
 import { createLinkedClient, type LinkedRegistry } from '../lib/whatsapp/linked/client.js';
 import { createLinkedSocket } from '../lib/whatsapp/linked/socket.js';
 import { registerWhatsappLinkedRoutes } from './whatsapp-linked.js';
+import { registerWhatsappHistoryRoutes } from './whatsapp-history.js';
 import multipart from '@fastify/multipart';
 
 export interface ServerDeps {
@@ -50,6 +51,8 @@ export interface ServerDeps {
   linked?: LinkedRegistry;
   /** How long a pairing may go unscanned. Shortened by tests, five minutes otherwise. */
   pairingTimeoutMs?: number;
+  historyTimeoutMs?: number;
+  historyPaceMs?: number;
 }
 
 /**
@@ -121,6 +124,10 @@ export function buildServer(env: Env, db: Db, deps: ServerDeps = {}): FastifyIns
     registerWhatsappNumberRoutes(app, db, env, guard, graph);
     registerWhatsappCoexistenceRoutes(app, db, env, guard, graph);
     registerWhatsappLinkedRoutes(app, db, env, guard, linked, { timeoutMs: deps.pairingTimeoutMs });
+    registerWhatsappHistoryRoutes(app, db, guard, linked, {
+      timeoutMs: deps.historyTimeoutMs,
+      paceMs: deps.historyPaceMs,
+    });
     registerConversationRoutes(app, db, env, guard, graph, linked);
     registerStageRoutes(app, db, guard);
     registerLeadRoutes(app, db, env, guard, graph);

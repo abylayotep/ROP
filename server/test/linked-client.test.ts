@@ -20,6 +20,7 @@ function session(overrides: Partial<LinkedSession> = {}): LinkedSession {
     sendText: async () => ({ messageId: 'wa.1' }),
     sendMedia: async () => ({ messageId: 'wa.2' }),
     downloadMedia: async () => Buffer.from([1]),
+    requestHistory: async () => 'history-session',
     close: async () => undefined,
     logout: async () => undefined,
     ...overrides,

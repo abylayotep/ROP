@@ -8,12 +8,13 @@ import {
 } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import * as api from '@/api';
+import { HistoryImportPanel } from '@/components/knowledge/HistoryImportPanel';
 import { AiSwitch } from '@/components/lead/AiSwitch';
 import { LeadPanel } from '@/components/lead/LeadPanel';
 import { Card } from '@/components/ui/primitives';
 import { Async, EmptyState, Skeleton } from '@/components/ui/states';
 import { useToast } from '@/components/ui/Toast';
-import { useApi } from '@/hooks/useApi';
+import { usePollingApi } from '@/hooks/usePollingApi';
 import { useAgent } from '@/store/agent';
 import type { ConversationSummary, ConversationThread, Message, Role } from '@/types';
 
@@ -59,7 +60,7 @@ export function coachLink(conversationId: string, aiReplyId?: string | null): st
 }
 
 export function DialogsScreen() {
-  const { agent } = useAgent();
+  const { agent, role } = useAgent();
   // The selected conversation lives in the URL, so a card on the board opens its thread.
   const [params, setParams] = useSearchParams();
   const selected = params.get('conversation');
@@ -67,7 +68,7 @@ export function DialogsScreen() {
   const select = (conversationId: string) =>
     setParams({ conversation: conversationId }, { replace: true });
 
-  const list = useApi<ConversationSummary[]>(
+  const list = usePollingApi<ConversationSummary[]>(
     (signal) => api.listConversations(agent.id, signal),
     [agent.id],
   );
@@ -78,8 +79,20 @@ export function DialogsScreen() {
   const [aiNonce, setAiNonce] = useState(0);
 
   return (
-    <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+    <>
+      <div style={{ marginBottom: 16 }}>
+        <HistoryImportPanel agentId={agent.id} readOnly={role !== 'owner'} />
+      </div>
+      <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start', flexWrap: 'wrap' }}>
       <div style={{ width: 320, maxWidth: '100%', flex: '1 1 280px', minWidth: 0 }}>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
+          <button type="button" className="btn-sm" onClick={list.reload} disabled={list.refreshing}>
+            {list.refreshing && list.data !== undefined ? 'Обновляем…' : 'Обновить список'}
+          </button>
+        </div>
+        {list.error !== undefined && list.data !== undefined && <div role="alert" style={{ color: 'var(--danger)', fontSize: 12, marginBottom: 8 }}>
+          Не удалось обновить список: {api.humanError(list.error)}
+        </div>}
         <Async state={list} skeleton={<Skeleton height={220} />}>
           {(conversations) =>
             conversations.length === 0 ? (
@@ -175,7 +188,8 @@ export function DialogsScreen() {
           </div>
         )}
       </div>
-    </div>
+      </div>
+    </>
   );
 }
 
@@ -199,20 +213,30 @@ function Thread({
   // loaded. Null means nobody has touched it and the loaded thread still speaks for it.
   const [ai, setAi] = useState<boolean | null>(null);
   const bottom = useRef<HTMLDivElement>(null);
+  const messageList = useRef<HTMLDivElement>(null);
+  const stickToBottom = useRef(true);
+  const initialScrollDone = useRef(false);
+  const scrolledTarget = useRef<string | null>(null);
 
-  const thread = useApi<ConversationThread>(
+  const thread = usePollingApi<ConversationThread>(
     (signal) => api.getConversation(agentId, conversationId, signal),
     [agentId, conversationId],
   );
 
-  // A source link names an exact stored message; ordinary dialog opens still start at the end.
+  // A source link names an exact stored message; ordinary opens start at the end. Background
+  // refreshes only follow new messages when the operator was already near the bottom.
   useEffect(() => {
-    const target = targetMessageId ? document.getElementById(`message-${targetMessageId}`) : null;
+    const target = targetMessageId && scrolledTarget.current !== targetMessageId
+      ? document.getElementById(`message-${targetMessageId}`)
+      : null;
     if (target) {
       target.scrollIntoView({ block: 'center' });
       target.focus({ preventScroll: true });
-    } else {
+      scrolledTarget.current = targetMessageId;
+      initialScrollDone.current = true;
+    } else if (!initialScrollDone.current || stickToBottom.current) {
       bottom.current?.scrollIntoView();
+      initialScrollDone.current = true;
     }
   }, [thread.data, targetMessageId]);
 
@@ -285,6 +309,13 @@ function Thread({
           </div>
 
           <div
+            ref={messageList}
+            onScroll={() => {
+              const element = messageList.current;
+              if (!element) return;
+              stickToBottom.current =
+                element.scrollHeight - element.scrollTop - element.clientHeight < 48;
+            }}
             style={{
               display: 'flex',
               flexDirection: 'column',

@@ -68,6 +68,7 @@ export function fakeLinked(overrides: Partial<LinkedClient> = {}): FakeLinked {
       counter += 1;
       return { messageId: `linked.${counter}` };
     }),
+    requestHistory: record('requestHistory', async () => 'history-session'),
     downloadMedia: record('downloadMedia', async (_id: string, _message: RawLinkedMessage) =>
       Promise.resolve(fake.media),
     ),

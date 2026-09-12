@@ -86,6 +86,33 @@ export type LinkedPairingEvent =
   | { type: 'open' }
   | { type: 'failed'; reason: string };
 
+export type WhatsappHistoryStatus =
+  | 'requesting'
+  | 'waiting'
+  | 'completed'
+  | 'partial'
+  | 'failed';
+
+export interface WhatsappHistoryRun {
+  id: string;
+  status: WhatsappHistoryStatus;
+  limit: 100 | 200;
+  totalChats: number;
+  requestedChats: number;
+  receivedChats: number;
+  receivedMessages: number;
+  failedChats: number;
+  startedAt: string;
+  finishedAt: string | null;
+  error: string | null;
+}
+
+export interface WhatsappHistoryOverview {
+  connectedNumbers: number;
+  availableChats: number;
+  run: WhatsappHistoryRun | null;
+}
+
 /** What to paste into the Meta application's webhook settings. */
 export interface WebhookSetup {
   url: string;

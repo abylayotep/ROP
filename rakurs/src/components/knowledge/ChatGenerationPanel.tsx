@@ -5,6 +5,8 @@ import { GenerationReview } from '@/components/knowledge/GenerationReview';
 import { Card } from '@/components/ui/primitives';
 import { Async, EmptyState, Skeleton } from '@/components/ui/states';
 import { useApi } from '@/hooks/useApi';
+import { usePollingApi } from '@/hooks/usePollingApi';
+import { latestConversationIds } from './history-selection';
 import type { ConversationSummary, KbGenerationRunDetail } from '@/types';
 import { generationView, initialGenerationState, isCurrentGenerationResponse, mergeRefreshedGenerationDetail, reduceGenerationState } from './generation-state';
 
@@ -42,7 +44,7 @@ export function ChatGenerationPanel({
   const loadingMore = useRef(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const conversations = useApi<ConversationSummary[]>((signal) => api.listConversations(agentId, signal), [agentId]);
+  const conversations = usePollingApi<ConversationSummary[]>((signal) => api.listConversations(agentId, signal), [agentId]);
   const runs = useApi((signal) => api.listKnowledgeGenerationRuns(agentId, undefined, signal), [agentId]);
   const view = generationView(state);
 
@@ -209,6 +211,20 @@ export function ChatGenerationPanel({
             <label>С <input type="date" disabled={busy} value={from} onChange={(event) => setFrom(event.target.value)} /></label>
             <label>До <input type="date" disabled={busy} value={to} onChange={(event) => setTo(event.target.value)} /></label>
           </div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10, alignItems: 'center' }}>
+            {([100, 200] as const).map((limit) => <button key={limit} type="button" className="btn-sm"
+              disabled={busy || !conversations.data?.length} onClick={() => dispatch({ type: 'selection',
+                selection: { ...selection, conversationIds: latestConversationIds(conversations.data ?? [], limit) },
+              })}>Выбрать последние {limit}</button>)}
+            <button type="button" className="btn-sm" disabled={busy || !state.selection.conversationIds.length}
+              onClick={() => dispatch({ type: 'selection', selection: { ...selection, conversationIds: [] } })}>Снять выбор</button>
+            <button type="button" className="btn-sm" disabled={conversations.refreshing} onClick={conversations.reload}>Обновить список</button>
+            <span style={{ fontSize: 12 }}>Выбрано: {state.selection.conversationIds.length}</span>
+          </div>
+          <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 6 }}>
+            Для подготовки базы знаний и скрипта используются сохранённые сообщения за выбранный период.
+            Сначала проверьте объём: лимиты сообщений и расходов действуют и для 200 чатов.
+          </div>
           <Async state={conversations} skeleton={<Skeleton height={100} />} compactError>
             {(items) => items.length === 0 ? <EmptyState>Сохранённых диалогов пока нет.</EmptyState> : (
               <div style={{ maxHeight: 190, overflowY: 'auto', marginTop: 10 }}>
@@ -221,6 +237,8 @@ export function ChatGenerationPanel({
               </div>
             )}
           </Async>
+          {conversations.error !== undefined && conversations.data !== undefined &&
+            <div role="alert" style={{ fontSize: 12, color: 'var(--danger)' }}>Не удалось обновить список: {api.humanError(conversations.error)}</div>}
           <div style={{ fontSize: 11.5, color: 'var(--text-dim)', marginTop: 8 }}>Перед отправкой телефоны, email, платёжные реквизиты, адреса и номера заказов скрываются автоматически. Автоматическое скрытие не гарантирует полную анонимизацию.</div>
           {state.preview && (
             <div className="sunken-box" style={{ marginTop: 10, padding: 10, fontSize: 12 }}>

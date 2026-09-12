@@ -2,6 +2,10 @@
 
 Status: implementation specification. Planning owner: GPT-6 Astra. Implementation workers: GPT-5.6 Sol.
 
+Amendment (2026-09-12): the conversation selection cap is now 200; all other safety
+caps remain unchanged. See [on-demand history](../../whatsapp-on-demand-history.md) for
+the manual history request and background refresh behavior added after this specification.
+
 ## Outcome and scope
 
 An owner sees the WhatsApp history actually stored for their agent, selects conversations and dates, runs bounded extraction, reviews source-backed suggestions, and publishes approved knowledge through the existing draft workflow. Existing knowledge remains usable throughout.

@@ -1,5 +1,5 @@
 export const GENERATION_LIMITS = {
-  maxConversations: 100,
+  maxConversations: 200,
   maxEligibleMessages: 5_000,
   maxInputCharacters: 200_000,
   maxBatches: 20,

@@ -144,6 +144,7 @@ export function createLinkedSocket(db: Db, key: Buffer): LinkedSessionFactory {
         messages: (chunk.messages ?? []) as unknown as RawLinkedMessage[],
         contacts: (chunk.contacts ?? []) as RawLinkedHistory['contacts'],
         progress: chunk.progress ?? null,
+        peerDataRequestSessionId: chunk.peerDataRequestSessionId ?? null,
       };
       emit({ type: 'history', numberId, chunk: history });
     });
@@ -174,6 +175,10 @@ export function createLinkedSocket(db: Db, key: Buffer): LinkedSessionFactory {
           // WhatsApp's servers has expired — which is most of what history holds.
           { logger: logger as never, reuploadRequest: sock.updateMediaMessage },
         )) as Buffer;
+      },
+
+      requestHistory(count, oldestMsgKey, oldestMsgTimestamp) {
+        return sock.fetchMessageHistory(count, oldestMsgKey as never, oldestMsgTimestamp);
       },
 
       async close() {

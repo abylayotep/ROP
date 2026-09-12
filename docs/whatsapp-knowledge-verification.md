@@ -8,7 +8,7 @@ The knowledge screen lets owners select stored conversations and a local-date in
 
 Members can read runs, proposals, and conversation sources but cannot start or modify generation. Applied notes retain authorized links to their source messages. Historical WhatsApp imports do not advance the live reply window. Linked account-ID resolution is scoped to the connected number; history learns known phone mappings before processing outgoing messages.
 
-Extraction handles stored text only. Each run is limited to 100 conversations, 5,000 eligible messages, 200,000 characters, and 20 calls on its first attempt. Each batch is limited to 100 messages and 10,000 characters, with 2,000 output tokens. Explicit retries are limited to two attempts per batch. Reported cost can be incomplete after a provider timeout or missing usage response.
+Extraction handles stored text only. Each run is limited to 200 conversations, 5,000 eligible messages, 200,000 characters, and 20 calls on its first attempt. Each batch is limited to 100 messages and 10,000 characters, with 2,000 output tokens. Explicit retries are limited to two attempts per batch. Reported cost can be incomplete after a provider timeout or missing usage response.
 
 ## Local evidence
 

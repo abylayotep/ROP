@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   GenerationExtractionError,
   extractGenerationBatch,
+  hasBothConversationSides,
   type GenerationExtractionMessage,
 } from '../src/lib/knowledge/generation-extract.js';
 import { redactGenerationText } from '../src/lib/knowledge/generation-redact.js';
@@ -27,7 +28,10 @@ const customer = (over: Partial<GenerationExtractionMessage> = {}): GenerationEx
 });
 
 const answer = (sources = ['seller-1'], body = 'Delivery costs 1,500 tenge.') =>
-  JSON.stringify({ proposals: [{ path: 'База знаний/Доставка', body, sources, warnings: [] }] });
+  JSON.stringify({
+    classification: { value: 'customer', reason: 'The client asks about delivery and the seller answers.' },
+    proposals: [{ path: 'База знаний/Доставка', body, sources, warnings: [] }],
+  });
 
 const deps = (model: ReturnType<typeof fakeModel>) => ({
   model,
@@ -59,12 +63,48 @@ describe('generation redaction', () => {
 });
 
 describe('generation extraction', () => {
+  it('detects whether redacted input contains both conversation sides', () => {
+    expect(hasBothConversationSides([customer(), seller()])).toBe(true);
+    expect(hasBothConversationSides([customer()])).toBe(false);
+    expect(hasBothConversationSides([seller()])).toBe(false);
+  });
+
+  it.each([
+    ['friend', 'irrelevant'],
+    ['self', 'irrelevant'],
+    ['staff', 'irrelevant'],
+    ['supplier', 'irrelevant'],
+    ['unrelated_business', 'uncertain'],
+  ] as const)('%s produces no proposals', async (_fixture, classification) => {
+    const model = fakeModel(JSON.stringify({
+      classification: { value: classification, reason: 'Not a confirmed customer conversation.' },
+      proposals: [{ path: 'База знаний/Доставка', body: 'Delivery costs 1,500 tenge.', sources: ['seller-1'], warnings: [] }],
+    }));
+
+    await expect(extractGenerationBatch(deps(model), [customer(), seller()])).resolves.toMatchObject({
+      classification,
+      proposals: [],
+    });
+  });
+
+  it('does not call the provider without both customer and seller messages', async () => {
+    const model = fakeModel(answer());
+
+    await expect(extractGenerationBatch(deps(model), [seller()])).resolves.toMatchObject({
+      classification: 'uncertain',
+      proposals: [],
+    });
+    expect(model.calls).toHaveLength(0);
+  });
+
   it('returns grounded proposals and provider usage in one call', async () => {
     const model = fakeModel(answer());
 
     const result = await extractGenerationBatch(deps(model), [customer(), seller()]);
 
     expect(result).toEqual({
+      classification: 'customer',
+      classificationReason: 'The client asks about delivery and the seller answers.',
       proposals: [
         {
           path: 'База знаний/Доставка',
@@ -86,6 +126,8 @@ describe('generation extraction', () => {
     const model = fakeModel(answer(['customer-1']));
 
     expect(await extractGenerationBatch(deps(model), [customer()])).toEqual({
+      classification: 'uncertain',
+      classificationReason: 'Conversation does not contain usable messages from both customer and seller.',
       proposals: [],
       usage: { promptTokens: 0, completionTokens: 0, cost: '0' },
     });
@@ -141,6 +183,8 @@ describe('generation extraction', () => {
     const model = fakeModel(response);
 
     await expect(extractGenerationBatch(deps(model), [customer(), seller()])).resolves.toEqual({
+      classification: 'customer',
+      classificationReason: 'The client asks about delivery and the seller answers.',
       proposals: [],
       usage: { promptTokens: 100, completionTokens: 20, cost: '0.00010000' },
     });
@@ -168,7 +212,7 @@ describe('generation extraction', () => {
   it('rejects malformed JSON without retrying and retains charged usage', async () => {
     const model = fakeModel('not json', answer());
 
-    const error = await extractGenerationBatch(deps(model), [seller()]).catch(
+    const error = await extractGenerationBatch(deps(model), [customer(), seller()]).catch(
       (caught: unknown) => caught,
     );
 
@@ -188,7 +232,7 @@ describe('generation extraction', () => {
       }),
     );
 
-    const error = await extractGenerationBatch(deps(model), [seller()]).catch(
+    const error = await extractGenerationBatch(deps(model), [customer(), seller()]).catch(
       (caught: unknown) => caught,
     );
 

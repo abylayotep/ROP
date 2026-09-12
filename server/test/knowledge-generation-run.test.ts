@@ -15,6 +15,11 @@ let userId: string;
 let conversationId: string;
 let messageId: string;
 const key = Buffer.alloc(32, 7);
+const classified = (
+  proposals: unknown[] = [],
+  classification: 'customer' | 'irrelevant' | 'uncertain' = 'customer',
+  reason = 'The client asks about delivery and the seller answers.',
+) => JSON.stringify({ classification: { value: classification, reason }, proposals });
 
 beforeEach(async () => {
   db = await withDb();
@@ -28,6 +33,7 @@ beforeEach(async () => {
   const [contact] = await db.insert(contacts).values({ agentId, phone: '77000000003' }).returning();
   const [conversation] = await db.insert(conversations).values({ agentId, contactId: contact!.id, whatsappNumberId: number!.id }).returning();
   conversationId = conversation!.id;
+  await db.insert(messages).values({ conversationId, direction: 'in', author: 'client', kind: 'text', body: 'How long does delivery take?', sentAt: new Date('2026-09-01T09:59:00Z') });
   const [message] = await db.insert(messages).values({ conversationId, direction: 'out', author: 'operator', kind: 'text', body: 'Delivery takes two days', sentAt: new Date('2026-09-01T10:00:00Z') }).returning();
   messageId = message!.id;
 });
@@ -51,7 +57,7 @@ describe('generation runs', () => {
 
   it('claims a queued run once under concurrent executors', async () => {
     const run = await admitted();
-    const model = fakeModel('{"proposals":[{"path":"Delivery","body":"Two days","sources":[],"warnings":[]}]}');
+    const model = fakeModel(classified([{ path: 'Delivery', body: 'Two days', sources: [], warnings: [] }]));
     await Promise.all([
       executeGenerationRun({ db, model, credentialsKey: key }, run.id),
       executeGenerationRun({ db, model, credentialsKey: key }, run.id),
@@ -76,7 +82,10 @@ describe('generation runs', () => {
       ordinal: 1,
       manifest: { ...firstBatch!.manifest, ordinal: 1 },
     });
-    const model = fakeModel('{"proposals":"invalid"}', '{"proposals":[]}');
+    const model = fakeModel(
+      JSON.stringify({ classification: { value: 'customer', reason: 'Customer conversation.' }, proposals: 'invalid' }),
+      classified(),
+    );
 
     await executeGenerationRun({ db, model, credentialsKey: key }, run.id);
 
@@ -98,7 +107,7 @@ describe('generation runs', () => {
     model.complete = async (input) => {
       model.calls.push(input);
       await waiting;
-      return { text: '{"proposals":[]}', promptTokens: 9, completionTokens: 3, cost: '0.01000000' };
+      return { text: classified(), promptTokens: 9, completionTokens: 3, cost: '0.01000000' };
     };
     const execution = executeGenerationRun({ db, model, credentialsKey: key }, run.id);
     while (model.calls.length === 0) await new Promise((resolve) => setTimeout(resolve, 1));
@@ -143,7 +152,7 @@ describe('generation runs', () => {
     const model = fakeModel();
     model.complete = async (input) => {
       model.calls.push(input);
-      return { text: '{"proposals":[]}', promptTokens: 11, completionTokens: 4, cost: '0.04000000' };
+      return { text: classified(), promptTokens: 11, completionTokens: 4, cost: '0.04000000' };
     };
     await executeGenerationRun({ db, model, credentialsKey: key }, run.id);
 
@@ -170,7 +179,7 @@ describe('generation runs', () => {
     await db.insert(kbGenerationProposals).values({ runId: first.id, batchId: firstBatch!.id, fingerprint, path, body, sources: [], status: 'applied' });
     await db.update(kbGenerationRuns).set({ status: 'completed' }).where(eq(kbGenerationRuns.id, first.id));
     const second = await admitted('new');
-    const model = fakeModel(JSON.stringify({ proposals: [{ path, body, sources: [messageId], warnings: [] }] }));
+    const model = fakeModel(classified([{ path, body, sources: [messageId], warnings: [] }]));
 
     await executeGenerationRun({ db, model, credentialsKey: key }, second.id);
 
@@ -179,10 +188,10 @@ describe('generation runs', () => {
 
   it('finishes a successful run with categorized review drafts without applying them', async () => {
     const run = await admitted('categorized-drafts');
-    const model = fakeModel(JSON.stringify({ proposals: [
+    const model = fakeModel(classified([
       { path: 'База знаний/Доставка', body: 'Доставка занимает два дня.', sources: [messageId], warnings: [] },
       { path: 'Скрипт/Срок доставки', body: 'Сообщите срок и уточните адрес.', sources: [messageId], warnings: [] },
-    ] }));
+    ]));
 
     await executeGenerationRun({ db, model, credentialsKey: key }, run.id);
 
@@ -193,5 +202,19 @@ describe('generation runs', () => {
         expect.objectContaining({ path: 'Скрипт/Срок доставки', status: 'drafted', draftOpIndex: 0, noteId: null }),
       ]));
     expect((await db.select().from(kbGenerationRuns).where(eq(kbGenerationRuns.id, run.id)))[0]?.status).toBe('completed');
+  });
+
+  it('persists classification and excludes proposals from an irrelevant batch', async () => {
+    const run = await admitted('irrelevant-classification');
+    const reason = 'The conversation is with a supplier, not a customer.';
+    const model = fakeModel(classified([
+      { path: 'База знаний/Доставка', body: 'Два дня.', sources: [messageId], warnings: [] },
+    ], 'irrelevant', reason));
+
+    await executeGenerationRun({ db, model, credentialsKey: key }, run.id);
+
+    expect((await db.select().from(kbGenerationBatches).where(eq(kbGenerationBatches.runId, run.id)))[0])
+      .toMatchObject({ status: 'done', classification: 'irrelevant', classificationReason: reason });
+    expect(await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.runId, run.id))).toHaveLength(0);
   });
 });

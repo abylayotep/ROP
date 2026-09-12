@@ -31,9 +31,10 @@ beforeEach(async () => {
   const [contact] = await db.insert(contacts).values({ agentId, phone: '77000000004' }).returning();
   const [conversation] = await db.insert(conversations).values({ agentId, contactId: contact!.id, whatsappNumberId: number!.id }).returning();
   conversationId = conversation!.id;
+  await db.insert(messages).values({ conversationId, direction: 'in', author: 'client', kind: 'text', body: 'How long does delivery take?', sentAt: new Date('2026-09-01T09:59:00Z') });
   const [message] = await db.insert(messages).values({ conversationId, direction: 'out', author: 'operator', kind: 'text', body: 'Delivery takes two days', sentAt: new Date('2026-09-01T10:00:00Z') }).returning();
   messageId = message!.id;
-  model = fakeModel('{"proposals":[]}');
+  model = fakeModel('{"classification":{"value":"customer","reason":"Customer asks about delivery."},"proposals":[]}');
   app = buildServer(env, db, { graph: fakeGraph(), model });
   await app.ready();
   const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { email: 'generation-api@example.test', password: PASSWORD } });
@@ -69,7 +70,7 @@ describe('knowledge generation API', () => {
     model.complete = async (input) => {
       model.calls.push(input);
       return {
-        text: JSON.stringify({ proposals: [{ path: 'Delivery', body: 'Two days', sources: [messageId], warnings: [] }] }),
+        text: JSON.stringify({ classification: { value: 'customer', reason: 'Customer asks about delivery.' }, proposals: [{ path: 'Delivery', body: 'Two days', sources: [messageId], warnings: [] }] }),
         promptTokens: 10, completionTokens: 4, cost: '0.00100000',
       };
     };
@@ -100,7 +101,7 @@ describe('knowledge generation API', () => {
     model.complete = async (input) => {
       model.calls.push(input);
       return {
-        text: JSON.stringify({ proposals: [
+        text: JSON.stringify({ classification: { value: 'customer', reason: 'Customer asks about delivery.' }, proposals: [
           { path: 'База знаний/Доставка', body: 'Два дня.', sources: [messageId], warnings: [] },
           { path: 'Скрипт/Доставка', body: 'Уточните адрес.', sources: [messageId], warnings: [] },
         ] }),

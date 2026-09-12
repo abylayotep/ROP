@@ -1,3 +1,10 @@
+import type { KbGenerationClassification } from '@rakurs/contract';
+
+export interface GenerationBatchClassification {
+  classification: KbGenerationClassification;
+  classificationReason: string;
+}
+
 export interface GenerationManifestEntry {
   messageId: string;
   conversationId: string;

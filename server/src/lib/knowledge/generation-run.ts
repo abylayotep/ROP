@@ -244,7 +244,12 @@ async function executeClaimedGenerationRun(deps: GenerationRunDeps, runId: strin
           return true;
         }
         if (proposals.length > 0) await tx.insert(kbGenerationProposals).values(proposals).onConflictDoNothing();
-        await tx.update(kbGenerationBatches).set({ status: 'done', updatedAt: new Date() }).where(eq(kbGenerationBatches.id, batch.id));
+        await tx.update(kbGenerationBatches).set({
+          status: 'done',
+          classification: result.classification,
+          classificationReason: result.classificationReason,
+          updatedAt: new Date(),
+        }).where(eq(kbGenerationBatches.id, batch.id));
         return false;
       });
       if (cancelled) return;

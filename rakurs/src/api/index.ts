@@ -173,9 +173,8 @@ export const connectCoexistenceNumber = (agentId: string, body: CoexistenceConne
 // ── Диалоги ──────────────────────────────────────────────────────────────────
 
 export const listConversations = (
-  agentId: string, signal?: AbortSignal, page?: { limit: number; offset: number },
-) => request<ConversationSummary[]>(`/agents/${agentId}/conversations${page
-  ? `?limit=${page.limit}&offset=${page.offset}` : ''}`, { signal });
+  agentId: string, signal?: AbortSignal, page?: { limit: number; offset: number; q?: string },
+) => request<ConversationSummary[]>(`/agents/${agentId}/conversations`, { signal, query: page });
 
 export const getConversation = (
   agentId: string, conversationId: string, signal?: AbortSignal,

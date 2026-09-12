@@ -16,6 +16,8 @@ import { Card } from '@/components/ui/primitives';
 import { Async, EmptyState, Skeleton } from '@/components/ui/states';
 import { useToast } from '@/components/ui/Toast';
 import { usePollingApi } from '@/hooks/usePollingApi';
+import { useDebounced } from '@/hooks/useApi';
+import { formatPhone } from '@/lib/phone';
 import { useAgent } from '@/store/agent';
 import { CONVERSATION_PAGE_SIZE, MESSAGE_PAGE_SIZE, messageWindow } from './dialog-window';
 import type { ConversationSummary, ConversationThread, Message, Role } from '@/types';
@@ -68,18 +70,20 @@ export function DialogsScreen() {
     setParams({ conversation: conversationId }, { replace: true });
 
   const [conversationStart, setConversationStart] = useState(0);
+  const [query, setQuery] = useState('');
+  const search = useDebounced(query).trim();
   const list = usePollingApi<ConversationSummary[]>(
     (signal) => api.listConversations(agent.id, signal, {
-      limit: CONVERSATION_PAGE_SIZE + 1, offset: conversationStart,
+      limit: CONVERSATION_PAGE_SIZE + 1, offset: conversationStart, q: search || undefined,
     }),
-    [agent.id, conversationStart],
+    [agent.id, conversationStart, search],
   );
 
   // The same switch lives above the messages and in the lead card. Bumping this remounts
   // the card, which refetches the lead — otherwise the two would disagree until something
   // else reloaded the panel.
   const [aiNonce, setAiNonce] = useState(0);
-  useEffect(() => setConversationStart(0), [agent.id]);
+  useEffect(() => setConversationStart(0), [agent.id, search]);
 
   return (
     <>
@@ -90,7 +94,12 @@ export function DialogsScreen() {
       </div>
       <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start', flexWrap: 'wrap' }}>
       <div style={{ width: 320, maxWidth: '100%', flex: '1 1 280px', minWidth: 0 }}>
-        <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
+        <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+          <label className="funnel-search" style={{ flex: 1, width: 'auto' }}>
+            <span aria-hidden="true">⌕</span>
+            <input type="search" inputMode="tel" aria-label="Поиск диалогов по номеру" placeholder="+7 777 777 77 77" value={query} onChange={(event) => setQuery(event.target.value)} />
+            {query && <button type="button" aria-label="Очистить поиск" onClick={() => setQuery('')}>×</button>}
+          </label>
           <button type="button" className="btn-sm" onClick={list.reload} disabled={list.refreshing}>
             {list.refreshing && list.data !== undefined ? 'Обновляем…' : 'Обновить список'}
           </button>
@@ -103,8 +112,7 @@ export function DialogsScreen() {
             conversations.length === 0 ? (
               <Card>
                 <EmptyState>
-                  Переписок пока нет. Они появятся, как только клиент напишет на подключённый
-                  номер.
+                  {search ? 'Диалогов с таким номером не найдено.' : 'Переписок пока нет. Они появятся, как только клиент напишет на подключённый номер.'}
                 </EmptyState>
               </Card>
             ) : (
@@ -130,7 +138,7 @@ export function DialogsScreen() {
                   >
                     <div style={{ display: 'flex', gap: 8, alignItems: 'baseline' }}>
                       <span className="ellipsis" style={{ fontSize: 13.5, fontWeight: 600 }}>
-                        {conversation.contactName ?? conversation.contactPhone}
+                        {formatPhone(conversation.contactPhone)}
                       </span>
                       <span
                         style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text-dim)' }}
@@ -322,11 +330,10 @@ function Thread({
           <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
             <div style={{ minWidth: 0 }}>
               <div style={{ fontSize: 13.5, fontWeight: 650 }}>
-                {data.contactName ?? data.contactPhone}
+                {formatPhone(data.contactPhone)}
               </div>
               <div style={{ fontSize: 11.5, color: 'var(--text-dim)', marginTop: 2 }}>
-                {data.contactPhone}
-                {data.adHeadline ? ` · из рекламы «${data.adHeadline}»` : ''}
+                {data.adHeadline ? `Из рекламы «${data.adHeadline}»` : ''}
               </div>
             </div>
             {/* Over the messages, where an operator reading a reply they dislike already

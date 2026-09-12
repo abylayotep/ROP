@@ -19,6 +19,8 @@ describe('verified orders', () => {
     expect(html).toContain('Курс английского');
     expect(html).toContain('kaspi-42');
     expect(html).toContain('Kaspi · оплачено');
+    expect(html).toContain('+7 701 234 56 78');
+    expect(html).not.toContain('Анна');
   });
   it('explains why an empty paid-orders list has no manual payment button', () => {
     fixture.orders = [];

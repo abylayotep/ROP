@@ -13,8 +13,8 @@ vi.mock('@/store/agent', () => ({ useAgent: () => ({ agent: { id: 'agent' }, rol
 vi.mock('@/components/lead/LeadPanel', () => ({ LeadPanel: () => null }));
 vi.mock('@/components/lead/AiSwitch', () => ({ AiSwitch: () => null }));
 vi.mock('@/components/ui/Toast', () => ({ useToast: () => ({ ok: vi.fn(), fail: vi.fn() }) }));
-vi.mock('@/hooks/usePollingApi', () => ({ usePollingApi: (_fetcher: unknown, deps: string[]) => ({
-  data: deps.length === 2 ? fixtures.conversations : {
+vi.mock('@/hooks/usePollingApi', () => ({ usePollingApi: (_fetcher: unknown, deps: unknown[]) => ({
+  data: typeof deps[1] === 'number' ? fixtures.conversations : {
     contactPhone: 'Customer', aiEnabled: true, windowOpen: true, messages: fixtures.messages,
   }, loading: false, refreshing: false, error: undefined, reload: () => undefined,
 }) }));

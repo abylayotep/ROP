@@ -206,6 +206,40 @@ describe('reading conversations', () => {
     });
   });
 
+  it('searches every conversation by formatted or raw phone within the current agent before pagination', async () => {
+    const [otherContact] = await db.insert(contacts)
+      .values({ agentId, phone: '77009990000', name: 'Другой клиент' }).returning();
+    await db.insert(conversations).values({
+      agentId,
+      contactId: otherContact!.id,
+      whatsappNumberId: numberId,
+      lastInboundAt: new Date(),
+      lastMessageAt: new Date(),
+    });
+    const [otherAgent] = await db.insert(agents).values({ accountId, name: 'Другой агент' }).returning();
+    const [samePhoneElsewhere] = await db.insert(contacts)
+      .values({ agentId: otherAgent!.id, phone: '77771234567', name: 'Другой кабинет' }).returning();
+    await db.insert(conversations).values({
+      agentId: otherAgent!.id,
+      contactId: samePhoneElsewhere!.id,
+      whatsappNumberId: numberId,
+      lastInboundAt: new Date(),
+      lastMessageAt: new Date(),
+    });
+
+    for (const query of ['+7 777 123 45 67', '77771234567']) {
+      const res = await app.inject({
+        method: 'GET',
+        url: `/api/agents/${agentId}/conversations?q=${encodeURIComponent(query)}&limit=1&offset=0`,
+        cookies: jar,
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toHaveLength(1);
+      expect(res.json()[0]).toMatchObject({ id: conversationId, contactPhone: '77771234567' });
+    }
+  });
+
   it('puts the most recently active conversation first', async () => {
     const [older] = await db
       .insert(contacts)

@@ -424,6 +424,20 @@ describe('a turn that answers', () => {
     expect(last?.content).toContain('Сколько стоит доставка?');
   });
 
+  it('reads the current agent communication style into each new live prompt', async () => {
+    await db
+      .update(agents)
+      .set({ communicationStyle: 'friendly' })
+      .where(eq(agents.id, agentId));
+    const model = fakeModel(answer());
+
+    await turn(model);
+
+    const system = model.calls[0]?.messages[0]?.content ?? '';
+    expect(system).toContain('Пиши дружелюбно и естественно');
+    expect(system).not.toContain('Пиши живо и тепло');
+  });
+
   it('drops a used id the model was never given', async () => {
     // A record belonging to another agent was not in this turn's prompt, so naming it is a
     // citation of nothing. Stored, it would send an owner to a record they cannot see.

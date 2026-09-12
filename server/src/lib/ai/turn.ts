@@ -558,6 +558,7 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
       timezone: agent.timezone,
       instructions,
       replyLanguage: agent.replyLanguage,
+      communicationStyle: agent.communicationStyle,
     },
     stages: stageRows.map((stage) => ({
       id: stage.id,

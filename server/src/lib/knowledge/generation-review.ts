@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { KbGenerationDraftRequest, KbGenerationDraftResponse, KbGenerationProposalUpdateRequest } from '@rakurs/contract';
-import { and, asc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, notLike, sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import { kbDrafts, kbGenerationProposals, kbGenerationRuns, kbNotes } from '../../db/schema.js';
 import { baseOf, type DraftOp } from '../drafts/ops.js';
@@ -8,6 +8,7 @@ import { ApiError, isDuplicate } from '../errors.js';
 import { BODY_MAX } from './note.js';
 import { GENERATION_LIMITS } from './generation-limits.js';
 import { isValidGenerationPath } from './generation-path.js';
+import { LEGACY_RAW_FINGERPRINT_PATTERN } from './generation-types.js';
 
 const fingerprint = (path: string, body: string): string =>
   createHash('sha256')
@@ -27,6 +28,7 @@ export async function updateGenerationProposal(
     .from(kbGenerationProposals).innerJoin(kbGenerationRuns, eq(kbGenerationProposals.runId, kbGenerationRuns.id)).where(and(
     eq(kbGenerationProposals.id, proposalId),
     eq(kbGenerationRuns.agentId, agentId),
+    notLike(kbGenerationProposals.fingerprint, LEGACY_RAW_FINGERPRINT_PATTERN),
     inArray(kbGenerationProposals.status, allowedStatuses),
     eq(kbGenerationProposals.revision, input.revision),
   ));
@@ -45,6 +47,7 @@ export async function updateGenerationProposal(
       eq(kbGenerationProposals.id, proposalId),
       eq(kbGenerationProposals.runId, kbGenerationRuns.id),
       eq(kbGenerationRuns.agentId, agentId),
+      notLike(kbGenerationProposals.fingerprint, LEGACY_RAW_FINGERPRINT_PATTERN),
       inArray(kbGenerationProposals.status, allowedStatuses),
       eq(kbGenerationProposals.revision, input.revision),
     )).returning({ id: kbGenerationProposals.id });
@@ -73,7 +76,11 @@ export async function createGenerationDraft(
     if (!run) throw new ApiError(404, 'Запуск не найден');
     const proposals = await tx.select({ proposal: kbGenerationProposals }).from(kbGenerationProposals)
       .innerJoin(kbGenerationRuns, and(eq(kbGenerationRuns.id, kbGenerationProposals.runId), eq(kbGenerationRuns.agentId, agentId)))
-      .where(and(eq(kbGenerationProposals.runId, runId), inArray(kbGenerationProposals.id, ids)))
+      .where(and(
+        eq(kbGenerationProposals.runId, runId),
+        inArray(kbGenerationProposals.id, ids),
+        notLike(kbGenerationProposals.fingerprint, LEGACY_RAW_FINGERPRINT_PATTERN),
+      ))
       .for('update');
     if (proposals.length !== ids.length) throw new ApiError(404, 'Предложение не найдено');
     const rows = proposals.map((row) => row.proposal);
@@ -81,7 +88,10 @@ export async function createGenerationDraft(
     if (existingDraftIds.length === 1 && rows.every((row) => row.status === 'drafted' && row.draftId === existingDraftIds[0])) {
       const [draft] = await tx.select({ ops: kbDrafts.ops }).from(kbDrafts).where(eq(kbDrafts.id, existingDraftIds[0]!));
       const allDrafted = await tx.select({ id: kbGenerationProposals.id, revision: kbGenerationProposals.revision, draftOpIndex: kbGenerationProposals.draftOpIndex })
-        .from(kbGenerationProposals).where(eq(kbGenerationProposals.draftId, existingDraftIds[0]!));
+        .from(kbGenerationProposals).where(and(
+          eq(kbGenerationProposals.draftId, existingDraftIds[0]!),
+          notLike(kbGenerationProposals.fingerprint, LEGACY_RAW_FINGERPRINT_PATTERN),
+        ));
       const sameIds = allDrafted.length === ids.length && allDrafted.every((row) => ids.includes(row.id));
       const sameRevisions = allDrafted.every((row) => input.revisions[row.id] === row.revision);
       const sameTargets = allDrafted.every((row) => {
@@ -120,7 +130,10 @@ export async function createGenerationDraft(
     for (let index = 0; index < rows.length; index += 1) {
       await tx.update(kbGenerationProposals).set({
         status: 'drafted', draftId: draft!.id, draftOpIndex: index, updatedAt: new Date(),
-      }).where(eq(kbGenerationProposals.id, rows[index]!.id));
+      }).where(and(
+        eq(kbGenerationProposals.id, rows[index]!.id),
+        notLike(kbGenerationProposals.fingerprint, LEGACY_RAW_FINGERPRINT_PATTERN),
+      ));
     }
     return { draftId: draft!.id };
   });
@@ -151,7 +164,11 @@ export async function createGenerationCategoryDrafts(
     if (!['running', 'completed'].includes(run.status) || run.cancelRequestedAt !== null) return [];
 
     const pending = await tx.select({ proposal: kbGenerationProposals }).from(kbGenerationProposals)
-      .where(and(eq(kbGenerationProposals.runId, runId), eq(kbGenerationProposals.status, 'pending')))
+      .where(and(
+        eq(kbGenerationProposals.runId, runId),
+        eq(kbGenerationProposals.status, 'pending'),
+        notLike(kbGenerationProposals.fingerprint, LEGACY_RAW_FINGERPRINT_PATTERN),
+      ))
       .orderBy(asc(kbGenerationProposals.createdAt), asc(kbGenerationProposals.id))
       .for('update');
     const created: string[] = [];
@@ -190,6 +207,7 @@ export async function createGenerationCategoryDrafts(
           }).where(and(
             eq(kbGenerationProposals.id, proposal.id),
             eq(kbGenerationProposals.status, 'pending'),
+            notLike(kbGenerationProposals.fingerprint, LEGACY_RAW_FINGERPRINT_PATTERN),
           ));
         }
       }

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { KbGenerationRun } from '@rakurs/contract';
-import { and, asc, count, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, count, eq, inArray, notLike, sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import {
   agents,
@@ -31,6 +31,7 @@ import {
 } from './generation-extract.js';
 import { GENERATION_LIMITS } from './generation-limits.js';
 import { generationContentHash, loadPreview } from './generation-selection.js';
+import { LEGACY_RAW_FINGERPRINT_PATTERN } from './generation-types.js';
 
 export interface GenerationRunDeps {
   db: Db;
@@ -47,7 +48,10 @@ async function summary(db: Db, runId: string): Promise<KbGenerationRun> {
   const [run] = await db.select().from(kbGenerationRuns).where(eq(kbGenerationRuns.id, runId));
   if (!run) throw new ApiError(404, 'Запуск не найден');
   const batches = await db.select({ status: kbGenerationBatches.status }).from(kbGenerationBatches).where(eq(kbGenerationBatches.runId, runId));
-  const [proposalCount] = await db.select({ value: count() }).from(kbGenerationProposals).where(eq(kbGenerationProposals.runId, runId));
+  const [proposalCount] = await db.select({ value: count() }).from(kbGenerationProposals).where(and(
+    eq(kbGenerationProposals.runId, runId),
+    notLike(kbGenerationProposals.fingerprint, LEGACY_RAW_FINGERPRINT_PATTERN),
+  ));
   return {
     id: run.id,
     status: run.status as KbGenerationRun['status'],
@@ -326,6 +330,7 @@ async function executeClaimedGenerationRun(deps: GenerationRunDeps, runId: strin
       .where(and(
         inArray(kbGenerationProposals.fingerprint, candidateFingerprints),
         inArray(kbGenerationProposals.status, ['pending', 'drafted']),
+        notLike(kbGenerationProposals.fingerprint, LEGACY_RAW_FINGERPRINT_PATTERN),
       ));
     const seen = new Set([
       ...existingNotes.map((note) => fingerprint(note.path, note.body)),

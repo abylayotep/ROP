@@ -4,7 +4,7 @@ import type {
   KbGenerationRunPage,
   KbGenerationRunDetail,
 } from '@rakurs/contract';
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray, notLike } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
@@ -29,6 +29,7 @@ import {
 } from '../lib/knowledge/generation-run.js';
 import { createGenerationDraft, updateGenerationProposal } from '../lib/knowledge/generation-review.js';
 import { previewSelection } from '../lib/knowledge/generation-selection.js';
+import { LEGACY_RAW_FINGERPRINT_PATTERN } from '../lib/knowledge/generation-types.js';
 import { isUuid } from '../lib/uuid.js';
 import { requireAgent } from './require-agent.js';
 
@@ -62,7 +63,10 @@ const after = (offset: number, count: number): string | null => count > PAGE_SIZ
 async function proposalPage(db: Db, agentId: string, runId: string, offset: number): Promise<KbGenerationProposalPage> {
   const rows = await db.select({ proposal: kbGenerationProposals }).from(kbGenerationProposals)
     .innerJoin(kbGenerationRuns, and(eq(kbGenerationRuns.id, kbGenerationProposals.runId), eq(kbGenerationRuns.agentId, agentId)))
-    .where(eq(kbGenerationProposals.runId, runId))
+    .where(and(
+      eq(kbGenerationProposals.runId, runId),
+      notLike(kbGenerationProposals.fingerprint, LEGACY_RAW_FINGERPRINT_PATTERN),
+    ))
     .orderBy(desc(kbGenerationProposals.createdAt), desc(kbGenerationProposals.id))
     .limit(PAGE_SIZE + 1).offset(offset);
   const visible = rows.slice(0, PAGE_SIZE).map((row) => row.proposal);
@@ -112,7 +116,10 @@ async function proposalPage(db: Db, agentId: string, runId: string, offset: numb
 async function oneProposal(db: Db, agentId: string, proposalId: string): Promise<KbGenerationProposal> {
   const rows = await db.select({ proposal: kbGenerationProposals }).from(kbGenerationProposals)
     .innerJoin(kbGenerationRuns, and(eq(kbGenerationRuns.id, kbGenerationProposals.runId), eq(kbGenerationRuns.agentId, agentId)))
-    .where(eq(kbGenerationProposals.id, proposalId));
+    .where(and(
+      eq(kbGenerationProposals.id, proposalId),
+      notLike(kbGenerationProposals.fingerprint, LEGACY_RAW_FINGERPRINT_PATTERN),
+    ));
   if (!rows[0]) throw new ApiError(404, 'Предложение не найдено');
   const proposal = rows[0].proposal;
   const sourceIds = proposal.sources.map((source) => source.messageId);
@@ -196,7 +203,10 @@ export function registerKnowledgeGenerationRoutes(
         eq(kbGenerationRuns.agentId, req.agent!.id),
       ))
       .innerJoin(kbDrafts, eq(kbDrafts.id, kbGenerationProposals.draftId))
-      .where(eq(kbGenerationProposals.runId, runId));
+      .where(and(
+        eq(kbGenerationProposals.runId, runId),
+        notLike(kbGenerationProposals.fingerprint, LEGACY_RAW_FINGERPRINT_PATTERN),
+      ));
     return {
       run,
       proposals: await proposalPage(db, req.agent!.id, runId, cursorOffset((req.query as { cursor?: unknown }).cursor)),

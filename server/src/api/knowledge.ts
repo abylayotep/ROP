@@ -9,7 +9,7 @@ import type {
   KbSection,
   KbSource,
 } from '@rakurs/contract';
-import { and, asc, desc, eq, inArray, isNotNull } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNotNull, notLike } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
@@ -33,6 +33,7 @@ import {
   type PageMarkdown,
 } from '../lib/knowledge/fetch-page.js';
 import { BODY_MAX } from '../lib/knowledge/note.js';
+import { LEGACY_RAW_FINGERPRINT_PATTERN } from '../lib/knowledge/generation-types.js';
 import { deleteNote, deleteNotes, saveNote, type SaveNoteInput } from '../lib/knowledge/notes.js';
 import { kbChunkColumns, searchKnowledge, type KbRow } from '../lib/knowledge/search.js';
 // pleep's own limits, and they are the right shape: a fact, not an essay. They live beside
@@ -334,7 +335,11 @@ export function registerKnowledgeRoutes(
 
     const generated = await db.select({ sources: kbGenerationProposals.sources })
       .from(kbGenerationProposals)
-      .where(and(eq(kbGenerationProposals.noteId, noteId), eq(kbGenerationProposals.status, 'applied')));
+      .where(and(
+        eq(kbGenerationProposals.noteId, noteId),
+        eq(kbGenerationProposals.status, 'applied'),
+        notLike(kbGenerationProposals.fingerprint, LEGACY_RAW_FINGERPRINT_PATTERN),
+      ));
     const storedSources = generated.flatMap((row) => row.sources);
     const sourceIds = [...new Set(storedSources.map((source) => source.messageId))];
     const currentSources = sourceIds.length === 0 ? [] : await db.select({

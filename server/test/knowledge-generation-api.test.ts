@@ -2,7 +2,7 @@ import { eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildServer } from '../src/api/server.js';
-import { agents, contacts, conversations, kbGenerationRawFindings, messages, whatsappNumbers } from '../src/db/schema.js';
+import { agents, contacts, conversations, kbGenerationBatches, kbGenerationProposals, kbGenerationRawFindings, kbGenerationRuns, messages, whatsappNumbers } from '../src/db/schema.js';
 import { keyAad } from '../src/lib/ai/turn.js';
 import { encryptSecret } from '../src/lib/secret-box.js';
 import { createAccountWithOwner } from '../src/lib/provision.js';
@@ -78,6 +78,60 @@ function useConsolidatingModel(proposals: { path: string; body: string }[]): voi
 }
 
 describe('knowledge generation API', () => {
+  it('hides legacy raw proposal rows from reads and mutation routes', async () => {
+    const [run] = await db.insert(kbGenerationRuns).values({
+      agentId,
+      requestedPreviewId: crypto.randomUUID(),
+      requestKey: 'legacy-raw-defense',
+      selection: { conversationIds: [], from: '2026-09-01T00:00:00Z', to: '2026-09-02T00:00:00Z' },
+      manifest: { messages: [], batches: [] },
+      counts: {
+        selectedConversations: 0,
+        selectedMessages: 0,
+        eligibleMessages: 0,
+        eligibleCharacters: 0,
+        skippedAiOrSystem: 0,
+        skippedUnsupported: 0,
+        skippedEmpty: 0,
+        skippedSensitive: 0,
+        skippedOversize: 0,
+        skippedNoSeller: 0,
+      },
+      modelId: 'model',
+      temperature: '0.30',
+      status: 'completed',
+    }).returning();
+    const [batch] = await db.insert(kbGenerationBatches).values({
+      runId: run!.id,
+      ordinal: 0,
+      manifest: { ordinal: 0, conversationId, messages: [], characterCount: 0 },
+      status: 'done',
+    }).returning();
+    const [legacyRaw] = await db.insert(kbGenerationProposals).values({
+      runId: run!.id,
+      batchId: batch!.id,
+      fingerprint: 'raw:legacy:0:hash',
+      path: 'База знаний/Legacy raw',
+      body: 'Immutable evidence.',
+      sources: [],
+      status: 'rejected',
+    }).returning();
+    const base = `/api/agents/${agentId}/knowledge/generation`;
+
+    const detail = await app.inject({ method: 'GET', url: `${base}/runs/${run!.id}`, cookies: jar });
+    expect(detail.statusCode).toBe(200);
+    expect(detail.json().proposals.items).toEqual([]);
+    expect(detail.json().run.proposalCount).toBe(0);
+    expect((await app.inject({
+      method: 'PATCH', url: `${base}/proposals/${legacyRaw!.id}`, cookies: jar,
+      payload: { revision: 1, status: 'pending' },
+    })).statusCode).toBe(409);
+    expect((await app.inject({
+      method: 'POST', url: `${base}/runs/${run!.id}/draft`, cookies: jar,
+      payload: { proposalIds: [legacyRaw!.id], revisions: { [legacyRaw!.id]: 1 } },
+    })).statusCode).toBe(404);
+  });
+
   it('previews without a model call and starts asynchronously', async () => {
     const base = `/api/agents/${agentId}/knowledge/generation`;
     const preview = await app.inject({

@@ -113,6 +113,66 @@ describe('generation proposal consolidation', () => {
     expect(result.items[0]!.sourceProposalIds).toEqual(['p0', `p${GENERATION_LIMITS.maxConsolidationItems}`]);
   });
 
+  it('rotates a stable boundary after a merge pass does not reduce the item count', async () => {
+    const proposals = Array.from({ length: GENERATION_LIMITS.maxConsolidationItems + 1 }, (_, index) =>
+      raw(`p${index}`, `Подтверждённое условие ${index}.`));
+    const unchanged = (ids: string[]) => answer(ids.map((id) => ({
+      path: `База знаний/${id}`,
+      body: `Подтверждённое условие ${id.slice(1)}.`,
+      confidence: 'high',
+      sourceProposalIds: [id],
+    })));
+    const firstIds = proposals.slice(0, GENERATION_LIMITS.maxConsolidationItems).map((proposal) => proposal.id);
+    const model = fakeModel(
+      unchanged(firstIds),
+      unchanged(['p40']),
+      unchanged(firstIds),
+      unchanged(['p40']),
+      answer([
+        ...firstIds.slice(1, -1).map((id) => ({
+          path: `База знаний/${id}`,
+          body: `Подтверждённое условие ${id.slice(1)}.`,
+          confidence: 'high',
+          sourceProposalIds: [id],
+        })),
+        {
+          path: 'База знаний/Граница',
+          body: 'Граничное условие объединено.',
+          confidence: 'high',
+          sourceProposalIds: ['p39', 'p40'],
+        },
+      ]),
+      unchanged(['p0']),
+      answer([
+        ...firstIds.slice(0, -1).map((id) => ({
+          path: `База знаний/${id}`,
+          body: `Подтверждённое условие ${id.slice(1)}.`,
+          confidence: 'high',
+          sourceProposalIds: [id],
+        })),
+        {
+          path: 'База знаний/Граница',
+          body: 'Граничное условие объединено.',
+          confidence: 'high',
+          sourceProposalIds: ['p39'],
+        },
+      ]),
+    );
+
+    const result = await consolidateGenerationProposals(deps(model), input(proposals));
+
+    expect(model.calls).toHaveLength(7);
+    const boundaryPass = JSON.parse(model.calls[4]!.messages[1]!.content) as {
+      proposals: { exactDuplicateIds: string[] }[];
+    };
+    expect(boundaryPass.proposals.flatMap((proposal) => proposal.exactDuplicateIds))
+      .toEqual(expect.arrayContaining(['p39', 'p40']));
+    expect(result.items).toContainEqual(expect.objectContaining({
+      path: 'База знаний/Граница',
+      sourceProposalIds: ['p39', 'p40'],
+    }));
+  });
+
   it.each([
     ['personal address', 'Адрес: улица Абая, 10'],
     ['phone number', 'Позвоните по телефону +7 701 123 45 67'],
@@ -135,6 +195,7 @@ describe('generation proposal consolidation', () => {
   });
 
   it.each([
+    ' База знаний/Доставка ',
     'База знаний/Доставка/',
     'База знаний//Доставка',
     'База знаний/1/2/3/4/5/6/7/8/9/10',

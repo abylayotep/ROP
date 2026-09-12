@@ -70,7 +70,7 @@ export class GenerationConsolidationError extends Error {
 
 const outputSchema = z.object({
   items: z.array(z.object({
-    path: z.string().trim().min(1).max(400),
+    path: z.string().min(1).max(400),
     body: z.string().trim().min(1).max(BODY_MAX),
     confidence: z.enum(['high', 'review']),
     sourceProposalIds: z.array(z.string().min(1)).min(1),
@@ -324,16 +324,17 @@ export async function consolidateGenerationProposals(
     let items = await consolidateChunks(kind, initialChunks);
     if (initialChunks.length > 1) {
       for (let pass = 0; pass < GENERATION_LIMITS.maxConsolidationMergePasses; pass += 1) {
-        const groups = groupsFromItems(items)
+        const unrotated = groupsFromItems(items)
           .filter((group) => inputCharacters(group) <= GENERATION_LIMITS.maxConsolidationCharacters);
+        const offset = pass === 0 || unrotated.length === 0 ? 0 : pass % unrotated.length;
+        const groups = [...unrotated.slice(offset), ...unrotated.slice(0, offset)];
         const chunks = chunksOf(groups);
         if (chunks.length === 0) {
           items = [];
           break;
         }
-        const previousCount = items.length;
         items = await consolidateChunks(kind, chunks);
-        if (chunks.length === 1 || items.length >= previousCount) break;
+        if (chunks.length === 1) break;
       }
     }
     finalItems.push(...items);

@@ -1,5 +1,8 @@
 import type { KbGenerationClassification } from '@rakurs/contract';
 
+/** Defense-in-depth filter for audit rows created before migration 0029. */
+export const LEGACY_RAW_FINGERPRINT_PATTERN = 'raw:%';
+
 export interface GenerationBatchClassification {
   classification: KbGenerationClassification;
   classificationReason: string;

@@ -43,6 +43,30 @@ describe('generation review', () => {
     expect(proposal).toMatchObject({ status: 'pending', revision: 3 });
   });
 
+  it('never mutates, restores, or drafts a legacy raw proposal', async () => {
+    const [batch] = await db.select().from(kbGenerationBatches).where(eq(kbGenerationBatches.runId, runId));
+    const [legacyRaw] = await db.insert(kbGenerationProposals).values({
+      runId,
+      batchId: batch!.id,
+      fingerprint: 'raw:legacy:0:hash',
+      path: 'База знаний/Legacy raw',
+      body: 'Immutable evidence.',
+      sources: [],
+      status: 'rejected',
+    }).returning();
+
+    await expect(updateGenerationProposal(db, agentId, legacyRaw!.id, { revision: 1, status: 'pending' }))
+      .rejects.toMatchObject({ statusCode: 409 });
+    await expect(createGenerationDraft(db, agentId, userId, runId, {
+      proposalIds: [legacyRaw!.id], revisions: { [legacyRaw!.id]: 1 },
+    })).rejects.toMatchObject({ statusCode: 404 });
+    await db.update(kbGenerationProposals).set({ status: 'pending' })
+      .where(eq(kbGenerationProposals.id, legacyRaw!.id));
+    expect(await createGenerationCategoryDrafts(db, agentId, userId, runId)).toHaveLength(1);
+    expect((await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.id, legacyRaw!.id)))[0])
+      .toMatchObject({ status: 'pending', revision: 1, draftId: null });
+  });
+
   it('recomputes the fingerprint and atomically refuses a duplicate after an edit', async () => {
     const path = 'Returns';
     const body = 'Within fourteen days';

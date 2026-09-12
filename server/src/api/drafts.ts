@@ -225,7 +225,7 @@
  * after that instant, before the draft is ever written.
  */
 import type { TestRun } from '@rakurs/contract';
-import { and, asc, desc, eq, gte, inArray, isNull, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, isNull, notLike, sql } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
@@ -250,6 +250,7 @@ import { applyOps, baseOf, MissingDraftRowError, staleOps, type DraftBase, type 
 import { replayCase, type AiDeps, type ReplayResult } from '../lib/drafts/replay.js';
 import { bumpConfigVersion } from '../lib/drafts/version.js';
 import { ApiError, isDuplicate } from '../lib/errors.js';
+import { LEGACY_RAW_FINGERPRINT_PATTERN } from '../lib/knowledge/generation-types.js';
 import { clampTitle } from '../lib/knowledge/split.js';
 import { credentialsKey, decryptSecret } from '../lib/secret-box.js';
 import { isUuid } from '../lib/uuid.js';
@@ -1151,6 +1152,7 @@ export function registerDraftRoutes(
             }).where(and(
               eq(kbGenerationProposals.draftId, draft.id),
               eq(kbGenerationProposals.draftOpIndex, opIndex),
+              notLike(kbGenerationProposals.fingerprint, LEGACY_RAW_FINGERPRINT_PATTERN),
             ));
           });
         } catch (error) {
@@ -1192,7 +1194,11 @@ export function registerDraftRoutes(
           draftOpIndex: null,
           revision: sql`${kbGenerationProposals.revision} + 1`,
           updatedAt: new Date(),
-        }).where(and(eq(kbGenerationProposals.draftId, draft.id), eq(kbGenerationProposals.status, 'drafted')));
+        }).where(and(
+          eq(kbGenerationProposals.draftId, draft.id),
+          eq(kbGenerationProposals.status, 'drafted'),
+          notLike(kbGenerationProposals.fingerprint, LEGACY_RAW_FINGERPRINT_PATTERN),
+        ));
         const [discarded] = await tx.update(kbDrafts).set({ status: 'discarded' }).where(eq(kbDrafts.id, draft.id)).returning();
         return discarded!;
       });

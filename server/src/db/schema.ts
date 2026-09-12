@@ -31,7 +31,14 @@ import type {
   GenerationStoredCounts,
   GenerationStoredSource,
 } from '../lib/knowledge/generation-types.js';
-import type { KbGenerationSelection, KbGenerationWarning } from '@rakurs/contract';
+import type {
+  CommunicationStyle,
+  KbGenerationClassification,
+  KbGenerationConfidence,
+  KbGenerationProposalKind,
+  KbGenerationSelection,
+  KbGenerationWarning,
+} from '@rakurs/contract';
 
 /**
  * Tenancy plus authentication, plus WhatsApp: connected numbers, contacts,
@@ -123,6 +130,7 @@ export const agents = pgTable(
     // 'auto' answers in the language the customer wrote in. Anything else is a language name
     // the prompt carries verbatim.
     replyLanguage: text('reply_language').notNull().default('auto'),
+    communicationStyle: text('communication_style').$type<CommunicationStyle>().notNull().default('warm'),
     // Encrypted with the credentials key, the same way a WhatsApp token is. Never selected
     // into an API response.
     openrouterKey: text('openrouter_key'),
@@ -964,6 +972,8 @@ export const kbGenerationBatches = pgTable(
     runId: uuid('run_id').notNull().references(() => kbGenerationRuns.id, { onDelete: 'cascade' }),
     ordinal: integer('ordinal').notNull(),
     manifest: jsonb('manifest').$type<GenerationBatchManifest>().notNull(),
+    classification: text('classification').$type<KbGenerationClassification>(),
+    classificationReason: text('classification_reason'),
     // 'pending' | 'running' | 'done' | 'failed' | 'cancelled'
     status: text('status').notNull().default('pending'),
     attempts: integer('attempts').notNull().default(0),
@@ -986,8 +996,11 @@ export const kbGenerationProposals = pgTable(
     batchId: uuid('batch_id').notNull().references(() => kbGenerationBatches.id, { onDelete: 'cascade' }),
     fingerprint: text('fingerprint').notNull(),
     revision: integer('revision').notNull().default(1),
+    kind: text('kind').$type<KbGenerationProposalKind>().notNull().default('knowledge'),
     path: text('path').notNull(),
     body: text('body').notNull(),
+    confidence: text('confidence').$type<KbGenerationConfidence>().notNull().default('review'),
+    selected: boolean('selected').notNull().default(false),
     warnings: text('warnings').array().$type<KbGenerationWarning[]>().notNull().default(sql`'{}'::text[]`),
     sources: jsonb('sources').$type<GenerationStoredSource[]>().notNull(),
     // 'pending' | 'rejected' | 'drafted' | 'applied'
@@ -1003,6 +1016,20 @@ export const kbGenerationProposals = pgTable(
     index('kb_generation_proposals_run_status_idx').on(t.runId, t.status, t.createdAt),
     index('kb_generation_proposals_draft_idx').on(t.draftId),
     index('kb_generation_proposals_note_idx').on(t.noteId),
+  ],
+);
+
+/** Every draft assembled from one generation run; a run may produce more than one draft. */
+export const kbGenerationDrafts = pgTable(
+  'kb_generation_drafts',
+  {
+    runId: uuid('run_id').notNull().references(() => kbGenerationRuns.id, { onDelete: 'cascade' }),
+    draftId: uuid('draft_id').notNull().references(() => kbDrafts.id, { onDelete: 'cascade' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique('kb_generation_drafts_run_draft').on(t.runId, t.draftId),
+    index('kb_generation_drafts_draft_idx').on(t.draftId),
   ],
 );
 

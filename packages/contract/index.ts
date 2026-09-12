@@ -433,6 +433,10 @@ export type KbGenerationStatus = 'queued' | 'running' | 'completed' | 'failed' |
 export type KbGenerationBatchStatus = 'pending' | 'running' | 'done' | 'failed' | 'cancelled';
 export type KbGenerationProposalStatus = 'pending' | 'rejected' | 'drafted' | 'applied';
 export type KbGenerationWarning = 'dated' | 'conflict' | 'context_limited';
+export type CommunicationStyle = 'warm' | 'calm' | 'friendly';
+export type KbGenerationClassification = 'customer' | 'irrelevant' | 'uncertain';
+export type KbGenerationProposalKind = 'knowledge' | 'script';
+export type KbGenerationConfidence = 'high' | 'review';
 
 export interface KbGenerationSelection {
   conversationIds: string[];
@@ -521,8 +525,11 @@ export interface KbGenerationMatch {
 export interface KbGenerationProposal {
   id: string;
   revision: number;
+  kind?: KbGenerationProposalKind;
   path: string;
   body: string;
+  confidence?: KbGenerationConfidence;
+  selected?: boolean;
   sources: KbGenerationSource[];
   warnings: KbGenerationWarning[];
   matches: KbGenerationMatch[];
@@ -545,6 +552,7 @@ export interface KbGenerationProposalUpdateRequest {
   revision: number;
   path?: string;
   body?: string;
+  selected?: boolean;
   status?: Extract<KbGenerationProposalStatus, 'pending' | 'rejected'>;
 }
 

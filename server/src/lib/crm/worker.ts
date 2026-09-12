@@ -167,7 +167,12 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
       leaseToken:null,leaseUntil:null,updatedAt:new Date(),error:null,
     }).where(ownLease);
     return checkedOut ? 'checkout' : 'ready';
-  } catch {
+  } catch (error) {
+    // Log validation metadata only: model output and customer text never belong in logs.
+    const detail = error as { name?: string; issues?: { code: string; path: PropertyKey[] }[]; cause?: { code?: string } };
+    console.warn(JSON.stringify({event:'crm_analysis_failed',conversationId:conversation.id,
+      errorType:detail?.name??'unknown',databaseCode:detail?.cause?.code,
+      issues:detail?.issues?.slice(0,5).map((issue)=>({code:issue.code,path:issue.path}))}));
     await db.update(crmAnalyses).set({status:'failed',error:'Не удалось завершить ИИ-разбор. Повторим автоматически.',
       leaseToken:null,leaseUntil:null,updatedAt:new Date()}).where(ownLease);
     return 'failed';

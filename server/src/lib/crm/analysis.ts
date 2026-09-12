@@ -14,9 +14,9 @@ const evidenceMap = z.record(z.string(), z.unknown()).nullish().transform((items
 });
 const schema = z.object({
   stageId: z.string().nullable(), summary: z.string().max(500), confidence: z.number().int().min(0).max(100),
-  profile: evidenceMap, fields: evidenceMap,
+  profile: evidenceMap.catch({}), fields: evidenceMap.catch({}),
   checkout: z.object({ method: z.enum(['invoice', 'qr']), messageId: z.string(), quote: z.string().min(1),
-    amount: z.string().regex(/^\d{1,9}$/), amountMessageId: z.string() }).nullable().default(null),
+    amount: z.string().regex(/^\d{1,9}$/), amountMessageId: z.string() }).nullable().default(null).catch(null),
 });
 export type CheckoutIntent = NonNullable<z.infer<typeof schema>['checkout']>;
 export interface CrmAnalysis {

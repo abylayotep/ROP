@@ -68,3 +68,11 @@ it('preserves classification and grounded fields when the model returns malforme
   expect(result.profile).toEqual({city:'Алматы'});
   expect(result.fields).toEqual({known:'Алматы'});
 });
+
+it('ignores malformed optional checkout without discarding a valid stage', () => {
+  const result=parseCrmAnalysis(output({profile:[],fields:'unknown',checkout:{method:'qr'}}),history,[]);
+  expect(result.stageId).toBe('ordered');
+  expect(result.profile).toEqual({});
+  expect(result.fields).toEqual({});
+  expect(result.checkout).toBeNull();
+});

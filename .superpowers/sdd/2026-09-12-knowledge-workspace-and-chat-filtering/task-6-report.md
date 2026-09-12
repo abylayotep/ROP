@@ -140,3 +140,28 @@ Completed. The Task 6 implementation is contained in the `feat: redesign the kno
 ### Remaining Concern
 
 - Authenticated visual smoke testing remains unavailable; this round changes state coordination and reuses the already-tested loading/error UI.
+
+## Fix Round 4
+
+### Diagnosis and Correction
+
+- The passive `run_requested` effect could not prevent the first committed render for route B from showing reducer detail A. The earlier reducer-only regression skipped that component lifecycle boundary.
+- The panel now derives its usable state synchronously: detail is available only when its run ID matches `initialRunId`. Rendering, action handlers, view selection, and the polling snapshot all consume that derived state.
+- Added a mounted React component regression using `react-test-renderer` and a layout-effect probe. It inspects the first B commit before passive effects, verifies that A's details/drafts are absent, suppresses an in-flight A poll error and further polling, fails B, clicks the explicit retry, verifies both B requests, and confirms that the successful B detail reaches the proposal UI/draft links and clears all error alerts.
+- Added the React 18 test renderer and its types as development dependencies; synchronized the workspace and standalone frontend lockfiles. No Task 7 source-card code was changed.
+
+### Exact Verification Commands and Results
+
+All commands ran from `/Users/admin/ProjectsVibeCoding/ROP/.claude/worktrees/obsidian-knowledge-base-f66bf4`.
+
+- RED: `npm --prefix rakurs test -- ChatGenerationPanel.test.tsx` — 1 test failed because the first B commit still contained `Draft from run-a`.
+- GREEN: `npm --prefix rakurs test -- ChatGenerationPanel.test.tsx` — 1 file, 1 test passed after the component fix.
+- `npm --prefix rakurs test -- ChatGenerationPanel.test.tsx KnowledgeWorkspace.test.tsx ProposalWorkspace.test.tsx CommunicationStyleCard.test.tsx GenerationDraftLinks.test.ts RecentHistoryPreparation.test.ts generation-state.test.ts generation-polling.test.ts` — 8 files, 50 tests passed.
+- `npm --prefix rakurs test` — 27 files, 156 tests passed.
+- `npm --prefix rakurs run typecheck` — passed, exit 0.
+- `npm --prefix rakurs run build` — passed, exit 0; Vite built 181 modules.
+- `git diff --check` — passed, exit 0.
+
+### Remaining Concern
+
+- Authenticated visual smoke testing remains unavailable. The regression now exercises actual React commits and effects, including the previously untested pre-passive-effect render boundary.

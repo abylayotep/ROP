@@ -97,7 +97,11 @@ export function ChatGenerationPanel({
   readOnly?: boolean;
   mode?: 'drafts' | 'runs';
 }) {
-  const [state, dispatch] = useReducer(reduceGenerationState, initialGenerationState({ conversationIds: [], from: '', to: '' }));
+  const [storedState, dispatch] = useReducer(reduceGenerationState, initialGenerationState({ conversationIds: [], from: '', to: '' }));
+  // Route changes must hide stale detail before the passive run_requested effect.
+  const state = storedState.detail && storedState.detail.run.id !== initialRunId
+    ? { ...storedState, detail: null }
+    : storedState;
   const requestKey = useRef<{ previewId: string; key: string } | null>(null);
   const epoch = useRef(0);
   const actionAbort = useRef<AbortController | null>(null);

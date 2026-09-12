@@ -295,10 +295,13 @@
 .knowledge-source-card__header:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
 .knowledge-source-card__mark { display: inline-flex; align-items: center; justify-content: center; width: 38px; height: 38px; border: 1px solid var(--line); border-radius: 9px; background: var(--sunken-2); color: var(--text-3); font: 700 9px 'JetBrains Mono', monospace; letter-spacing: .03em; }
 .knowledge-source-card__copy { min-width: 0; }
-.knowledge-source-card__copy strong,
-.knowledge-source-card__copy span { display: block; }
+.knowledge-source-card__copy > strong,
+.knowledge-source-card__description { display: block; }
 .knowledge-source-card__copy strong { font-size: 12.5px; }
-.knowledge-source-card__copy span { margin-top: 3px; overflow: hidden; color: var(--text-dim); font-size: 11px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.knowledge-source-card__description { margin-top: 3px; overflow: hidden; color: var(--text-dim); font-size: 11px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.knowledge-source-card__status { display: flex; flex-wrap: wrap; gap: 2px 9px; margin-top: 3px; overflow: visible; color: var(--text-dim); font-size: 11px; line-height: 1.35; white-space: normal; }
+.knowledge-source-card__status-item { position: relative; overflow: visible; white-space: normal; }
+.knowledge-source-card__status-item + .knowledge-source-card__status-item::before { position: absolute; right: calc(100% + 3px); content: '·'; }
 .knowledge-source-card__chevron { justify-self: end; color: var(--text-dim); font-size: 17px; transform: rotate(-90deg); transition: transform 140ms ease; }
 .knowledge-source-card--expanded .knowledge-source-card__chevron { transform: rotate(0); }
 .knowledge-source-card__body { padding: 15px 16px 17px; border-top: 1px solid var(--line-soft); }
@@ -342,6 +345,8 @@
   .proposal-card__check { min-height: 44px; }
   .knowledge-source-seam { padding: 13px; }
   .knowledge-source-card__header { min-height: 64px; padding: 10px; }
+  .knowledge-source-card__status { overflow: visible; white-space: normal; }
+  .knowledge-source-card__status-item { overflow-wrap: anywhere; white-space: normal; }
   .knowledge-source-card__body { padding: 13px 11px 15px; }
   .knowledge-source-card__shortcut { align-items: stretch; flex-direction: column; }
   .knowledge-source-card__shortcut .btn-sm { width: 100%; }

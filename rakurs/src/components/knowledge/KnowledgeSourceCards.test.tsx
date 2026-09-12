@@ -37,13 +37,18 @@ import { KnowledgeSourceCards } from './KnowledgeSourceCards';
 const text = (node: { children?: unknown[] }): string =>
   (node.children ?? []).map((child) => typeof child === 'string' ? child : text(child as { children?: unknown[] })).join('');
 
-function render(onOpenRecentHistory = vi.fn()) {
+function render(onOpenRecentHistory = vi.fn(), onFocus = vi.fn()) {
   let renderer: ReactTestRenderer | undefined;
   act(() => {
     renderer = create(
       <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <KnowledgeSourceCards agentId="agent-1" onChanged={() => undefined} onOpenRecentHistory={onOpenRecentHistory} />
       </MemoryRouter>,
+      {
+        createNodeMock: (element) => element.type === 'button'
+          ? { focus: () => onFocus(element.props.id) }
+          : null,
+      },
     );
   });
   return renderer!;
@@ -86,6 +91,37 @@ describe('KnowledgeSourceCards', () => {
     expect(text(whatsapp)).toContain('Обработано');
   });
 
+  it('keeps the WhatsApp name concise and exposes its live status as an accessible description', () => {
+    const renderer = render();
+    const header = renderer.root.findByProps({ 'aria-label': 'WhatsApp' });
+    expect(header.props['aria-describedby']).toBe('knowledge-source-summary-whatsapp');
+    const description = renderer.root.findByProps({ id: header.props['aria-describedby'] });
+    expect(text(description)).toContain('Подключений: 1');
+    expect(text(description)).toContain('Обработано');
+  });
+
+  it('renders WhatsApp status as wrapping items instead of one truncating line', () => {
+    const renderer = render();
+    const status = renderer.root.findByProps({ className: 'knowledge-source-card__status' });
+    const items = status.findAllByProps({ className: 'knowledge-source-card__status-item' });
+    expect(items.map((item) => text(item))).toEqual(['Подключений: 1', '42 чата', 'Обработано']);
+  });
+
+  it('only points aria-controls at the mounted active panel', () => {
+    const renderer = render();
+    const header = (label: string) => renderer.root.findByProps({ 'aria-label': label });
+    const textHeader = header('Текст');
+    expect(textHeader.props['aria-controls']).toBe('knowledge-source-panel-text');
+    expect(renderer.root.findByProps({ id: textHeader.props['aria-controls'] })).toBeDefined();
+    expect(header('WhatsApp').props['aria-controls']).toBeUndefined();
+
+    act(() => header('WhatsApp').props.onClick());
+    const whatsappHeader = header('WhatsApp');
+    expect(whatsappHeader.props['aria-controls']).toBe('knowledge-source-panel-whatsapp');
+    expect(renderer.root.findByProps({ id: whatsappHeader.props['aria-controls'] })).toBeDefined();
+    expect(header('Текст').props['aria-controls']).toBeUndefined();
+  });
+
   it('does not present stale WhatsApp status as freshly checked after polling fails', () => {
     fixture.refreshError = new Error('Status refresh failed');
     const whatsapp = render().root.findByProps({ 'data-source-card': 'whatsapp' });
@@ -125,12 +161,14 @@ describe('KnowledgeSourceCards', () => {
   });
 
   it('moves the expanded card with arrow keys without leaving two panels open', () => {
-    const renderer = render();
+    const onFocus = vi.fn();
+    const renderer = render(vi.fn(), onFocus);
     const textHeader = renderer.root.findByProps({ 'aria-label': 'Текст' });
     act(() => textHeader.props.onKeyDown({ key: 'ArrowRight', preventDefault: vi.fn() }));
 
     const headers = renderer.root.findAllByType('button').filter((button) => button.props['aria-expanded'] !== undefined);
     expect(headers.filter((button) => button.props['aria-expanded'] === true)).toHaveLength(1);
     expect(renderer.root.findByProps({ 'aria-label': 'Веб-страница' }).props['aria-expanded']).toBe(true);
+    expect(onFocus).toHaveBeenCalledWith('knowledge-source-header-page');
   });
 });

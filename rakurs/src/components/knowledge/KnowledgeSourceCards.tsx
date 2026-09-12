@@ -72,6 +72,8 @@ export function KnowledgeSourceCards({
       const expanded = source.id === active;
       const panelId = `knowledge-source-panel-${source.id}`;
       const headerId = `knowledge-source-header-${source.id}`;
+      const summaryId = `knowledge-source-summary-${source.id}`;
+      const summary = source.id === 'whatsapp' ? whatsappHistorySummary(history) : source.description;
       return <article key={source.id} className={`knowledge-source-card${expanded ? ' knowledge-source-card--expanded' : ''}`} data-source-card={source.id}>
         <button
           ref={(node) => { headers.current[source.id] = node ?? undefined; }}
@@ -79,15 +81,20 @@ export function KnowledgeSourceCards({
           type="button"
           className="knowledge-source-card__header"
           aria-label={source.label}
+          aria-describedby={summaryId}
           aria-expanded={expanded}
-          aria-controls={panelId}
+          aria-controls={expanded ? panelId : undefined}
           onClick={() => setActive(source.id)}
           onKeyDown={(event) => move(event, source.id)}
         >
           <span className="knowledge-source-card__mark" aria-hidden="true">{source.mark}</span>
           <span className="knowledge-source-card__copy">
             <strong>{source.title}</strong>
-            <span>{source.id === 'whatsapp' ? whatsappHistorySummary(history) : source.description}</span>
+            {source.id === 'whatsapp' ? (
+              <span id={summaryId} className="knowledge-source-card__status">
+                {summary.split(' · ').map((item) => <span key={item} className="knowledge-source-card__status-item">{item}</span>)}
+              </span>
+            ) : <span id={summaryId} className="knowledge-source-card__description">{summary}</span>}
           </span>
           <span className="knowledge-source-card__chevron" aria-hidden="true">⌄</span>
         </button>

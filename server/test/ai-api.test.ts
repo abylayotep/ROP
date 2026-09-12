@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildServer } from '../src/api/server.js';
 import type { Db } from '../src/db/client.js';
@@ -32,6 +32,30 @@ const settingsUrl = () => `/api/agents/${agentId}/ai`;
 
 const patchSettings = (payload: Record<string, unknown>, cookies = ownerJar) =>
   app.inject({ method: 'PATCH', url: settingsUrl(), cookies, payload });
+
+async function waitForDatabaseState(check: () => Promise<boolean>): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (await check()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('Timed out while forcing the settings update race');
+}
+
+async function queryWaitsOn(
+  table: 'agents' | 'contacts',
+  lock: 'share' | 'update',
+): Promise<boolean> {
+  const rows = await db.execute(sql`
+    select exists (
+      select 1 from pg_stat_activity
+      where datname = current_database()
+        and state = 'active'
+        and wait_event_type = 'Lock'
+        and query like ${`%from "${table}"%for ${lock}%`}
+    ) as waiting
+  `);
+  return Boolean([...rows][0]?.waiting);
+}
 
 beforeEach(async () => {
   db = await withDb();
@@ -134,6 +158,92 @@ describe('AI response mode settings', () => {
       testContact: { id: contact!.id },
     });
   });
+
+  it('serializes concurrent mode and contact updates against the latest agent row', async () => {
+    const [contact] = await db
+      .insert(contacts)
+      .values({ agentId, name: 'Айгуль', phone: '77001234567' })
+      .returning();
+    await db
+      .update(agents)
+      .set({ responseMode: 'off', testContactId: contact!.id })
+      .where(eq(agents.id, agentId));
+
+    let releaseContact!: () => void;
+    let contactLocked!: () => void;
+    const release = new Promise<void>((resolve) => {
+      releaseContact = resolve;
+    });
+    const locked = new Promise<void>((resolve) => {
+      contactLocked = resolve;
+    });
+    const holder = db.transaction(async (tx) => {
+      await tx
+        .select({ id: contacts.id })
+        .from(contacts)
+        .where(eq(contacts.id, contact!.id))
+        .for('update');
+      contactLocked();
+      await release;
+    });
+
+    await locked;
+    let enableTest: ReturnType<typeof patchSettings> | undefined;
+    let clearContact: ReturnType<typeof patchSettings> | undefined;
+    try {
+      enableTest = patchSettings({ responseMode: 'test' });
+      await waitForDatabaseState(() => queryWaitsOn('contacts', 'share'));
+      clearContact = patchSettings({ testContactId: null });
+      await waitForDatabaseState(async () => {
+        const [stored] = await db
+          .select({ testContactId: agents.testContactId })
+          .from(agents)
+          .where(eq(agents.id, agentId));
+        return stored!.testContactId === null || queryWaitsOn('agents', 'update');
+      });
+    } finally {
+      releaseContact();
+    }
+
+    await holder;
+    const [enabled, cleared] = await Promise.all([enableTest!, clearContact!]);
+    expect(enabled.statusCode).toBe(200);
+    expect(cleared.statusCode).toBe(400);
+    const [stored] = await db.select().from(agents).where(eq(agents.id, agentId));
+    expect(stored).toMatchObject({ responseMode: 'test', testContactId: contact!.id });
+  });
+
+  it.each([
+    { aiEnabled: true, before: 'off' as const, responseMode: 'live' as const },
+    { aiEnabled: false, before: 'live' as const, responseMode: 'off' as const },
+  ])('maps legacy aiEnabled=$aiEnabled to $responseMode', async ({ aiEnabled, before, responseMode }) => {
+    await db
+      .update(agents)
+      .set({ aiEnabled: !aiEnabled, responseMode: before })
+      .where(eq(agents.id, agentId));
+
+    const response = await patchSettings({ aiEnabled });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ aiEnabled, responseMode });
+    const [stored] = await db.select().from(agents).where(eq(agents.id, agentId));
+    expect(stored).toMatchObject({ aiEnabled, responseMode });
+  });
+
+  it.each([
+    { aiEnabled: false, responseMode: 'live' as const, expectedEnabled: true },
+    { aiEnabled: true, responseMode: 'off' as const, expectedEnabled: false },
+  ])(
+    'lets explicit $responseMode mode override legacy aiEnabled=$aiEnabled',
+    async ({ aiEnabled, responseMode, expectedEnabled }) => {
+      const response = await patchSettings({ aiEnabled, responseMode });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({ aiEnabled: expectedEnabled, responseMode });
+      const [stored] = await db.select().from(agents).where(eq(agents.id, agentId));
+      expect(stored).toMatchObject({ aiEnabled: expectedEnabled, responseMode });
+    },
+  );
 
   it('lists only contacts owned by the agent for the selector', async () => {
     const [owned] = await db

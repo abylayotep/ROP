@@ -204,14 +204,14 @@ export function registerAiRoutes(
       }
 
       const changes: Partial<typeof agents.$inferInsert> = {};
-      if (aiEnabled !== undefined) changes.aiEnabled = aiEnabled;
-      if (responseMode !== undefined) {
-        changes.responseMode = responseMode;
+      const requestedMode =
+        responseMode ?? (aiEnabled === undefined ? undefined : aiEnabled ? 'live' : 'off');
+      if (requestedMode !== undefined) {
+        changes.responseMode = requestedMode;
         // Kept in sync while the legacy boolean remains in the turn pipeline. The explicit
-        // mode is the owner-facing source of truth; this compatibility write prevents a new
-        // agent (whose old boolean defaults false) from staying silent after selecting test
-        // or live mode.
-        changes.aiEnabled = responseMode !== 'off';
+        // mode wins when both fields arrive; an older client that sends only the boolean is
+        // mapped back into the same source of truth instead of creating contradictory state.
+        changes.aiEnabled = requestedMode !== 'off';
       }
       if (testContactId !== undefined) changes.testContactId = testContactId;
       if (model !== undefined) changes.model = model;
@@ -227,22 +227,6 @@ export function registerAiRoutes(
               encryptSecret(openrouterKey, credentialsKey(env), keyAad(req.agent!.id));
       }
 
-      // An agent left on with no key skips every message in silence, and the only place that
-      // silence shows is the reply log. Refused here — in the words of what the owner just
-      // asked for, because «добавьте ключ» in answer to «удалите ключ» tells them to do the
-      // opposite of what they wanted.
-      const keyAfter =
-        openrouterKey !== undefined ? changes.openrouterKey : req.agent!.openrouterKey;
-      const enabledAfter = changes.aiEnabled ?? req.agent!.aiEnabled;
-      if (enabledAfter && !keyAfter) {
-        throw new ApiError(
-          400,
-          openrouterKey === null
-            ? 'Сначала выключите агента: без ключа он не сможет отвечать'
-            : 'Сначала добавьте ключ OpenRouter',
-        );
-      }
-
       // `temperature` and `replyLanguage` change what the agent would say for the same
       // input — the former through sampling, the latter through `rulesSection` in
       // `prompt.ts` — so either one has to bump `configVersion` the same way a knowledge
@@ -253,9 +237,34 @@ export function registerAiRoutes(
       // version can never land ahead of — or behind — the row it is meant to describe.
       const bumps = temperature !== undefined || replyLanguage !== undefined;
       const result = await db.transaction(async (tx) => {
-        const effectiveMode = responseMode ?? req.agent!.responseMode;
+        // Every partial PATCH derives its omitted fields from the same locked row it updates.
+        // Without this lock, two valid requests can both validate stale state and commit the
+        // invalid combination `responseMode = 'test', testContactId = null`.
+        const [current] = await tx
+          .select()
+          .from(agents)
+          .where(eq(agents.id, req.agent!.id))
+          .for('update');
+        if (!current) throw new ApiError(404, 'Агент не найден');
+
+        // An agent left on with no key skips every message in silence, and the only place that
+        // silence shows is the reply log. This validation also uses the locked current row, so
+        // a concurrent key update cannot make it approve a stale combination.
+        const keyAfter =
+          openrouterKey !== undefined ? changes.openrouterKey : current.openrouterKey;
+        const enabledAfter = changes.aiEnabled ?? current.aiEnabled;
+        if (enabledAfter && !keyAfter) {
+          throw new ApiError(
+            400,
+            openrouterKey === null
+              ? 'Сначала выключите агента: без ключа он не сможет отвечать'
+              : 'Сначала добавьте ключ OpenRouter',
+          );
+        }
+
+        const effectiveMode = requestedMode ?? current.responseMode;
         const effectiveContactId =
-          testContactId !== undefined ? testContactId : req.agent!.testContactId;
+          testContactId !== undefined ? testContactId : current.testContactId;
         const [selected] = effectiveContactId
           ? await tx
               .select()
@@ -263,7 +272,7 @@ export function registerAiRoutes(
               .where(
                 and(
                   eq(contacts.id, effectiveContactId),
-                  eq(contacts.agentId, req.agent!.id),
+                  eq(contacts.agentId, current.id),
                 ),
               )
               .for('share')
@@ -279,9 +288,9 @@ export function registerAiRoutes(
         const [updated] = await tx
           .update(agents)
           .set(changes)
-          .where(eq(agents.id, req.agent!.id))
+          .where(eq(agents.id, current.id))
           .returning();
-        if (bumps) await bumpConfigVersion(tx as unknown as Db, req.agent!.id);
+        if (bumps) await bumpConfigVersion(tx as unknown as Db, current.id);
         return { updated: updated!, selected };
       });
       return toApi(result.updated, result.selected);

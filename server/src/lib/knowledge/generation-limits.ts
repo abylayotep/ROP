@@ -8,6 +8,7 @@ export const GENERATION_LIMITS = {
   maxProposalsPerBatch: 20,
   maxConsolidationItems: 40,
   maxConsolidationCharacters: 20_000,
+  maxConsolidationMergePasses: 4,
   previewTtlMs: 15 * 60 * 1_000,
   slotAcquisitionTimeoutMs: 60 * 1_000,
   maxOutputTokens: 2_000,

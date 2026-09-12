@@ -204,6 +204,13 @@
       "when": 1789189643882,
       "tag": "0028_knowledge_review_workspace",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1789193955635,
+      "tag": "0029_knowledge_generation_raw_findings",
+      "breakpoints": true
     }
   ]
 }

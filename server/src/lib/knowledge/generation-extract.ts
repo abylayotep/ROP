@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { ModelError, type Completion, type ModelClient } from '../ai/openrouter.js';
 import { BODY_MAX } from './note.js';
 import { GENERATION_LIMITS } from './generation-limits.js';
+import { generationPathSchema } from './generation-path.js';
 import { redactGenerationText } from './generation-redact.js';
 import type { GenerationBatchClassification } from './generation-types.js';
 
@@ -57,14 +58,7 @@ export class GenerationExtractionError extends Error {
 }
 
 const proposalSchema = z.object({
-  path: z
-    .string()
-    .trim()
-    .min(1)
-    .max(400)
-    .refine((path) => !path.startsWith('/') && !path.endsWith('/'))
-    .refine((path) => path.split('/').every((part) => part.trim() !== ''))
-    .refine((path) => path.split('/').length <= 10),
+  path: generationPathSchema,
   body: z.string().trim().min(1).max(BODY_MAX),
   sources: z.array(z.string().min(1)).min(1),
   warnings: z.array(z.enum(['dated', 'conflict', 'context_limited'])).default([]),

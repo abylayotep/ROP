@@ -14,6 +14,7 @@ import {
   kbGenerationBatches,
   kbGenerationDrafts,
   kbGenerationProposals,
+  kbGenerationRawFindings,
 } from '../src/db/schema.js';
 
 describe('knowledge generation workspace schema', () => {
@@ -47,6 +48,20 @@ describe('knowledge generation workspace schema', () => {
     expect(getTableConfig(kbGenerationDrafts).uniqueConstraints.map((constraint) =>
       constraint.columns.map((column) => column.name),
     )).toContainEqual(['run_id', 'draft_id']);
+
+    expect(getTableColumns(kbGenerationRawFindings)).toMatchObject({
+      runId: expect.objectContaining({ notNull: true }),
+      batchId: expect.objectContaining({ notNull: true }),
+      fingerprint: expect.objectContaining({ notNull: true }),
+      path: expect.objectContaining({ notNull: true }),
+      body: expect.objectContaining({ notNull: true }),
+      warnings: expect.objectContaining({ notNull: true }),
+      sources: expect.objectContaining({ notNull: true }),
+      createdAt: expect.objectContaining({ notNull: true }),
+    });
+    expect(getTableColumns(kbGenerationRawFindings)).not.toHaveProperty('revision');
+    expect(getTableColumns(kbGenerationRawFindings)).not.toHaveProperty('status');
+    expect(getTableColumns(kbGenerationRawFindings)).not.toHaveProperty('draftId');
   });
 
   it('shares the review workspace contract', () => {

@@ -92,6 +92,7 @@ describe('generation redaction', () => {
     ['Заказ №12345 доставим завтра.', '№12345'],
     ['Адрес: Абая 10.\nДоставка завтра.', 'Абая 10'],
     ['Адрес: ул. Абая 12\nДоставка завтра.', 'Абая 12'],
+    ['Напишите Алексею по вопросу доставки.', 'Алексею'],
   ])('removes supported sensitive text from %s', (text, secret) => {
     const redacted = redactGenerationText(text);
     expect(redacted).not.toContain(secret);

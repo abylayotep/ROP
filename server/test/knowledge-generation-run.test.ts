@@ -1,9 +1,8 @@
 import { eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { agents, contacts, conversations, kbDrafts, kbGenerationBatches, kbGenerationProposals, kbGenerationRuns, messages, users, whatsappNumbers, accounts } from '../src/db/schema.js';
+import { agents, contacts, conversations, kbDrafts, kbGenerationBatches, kbGenerationProposals, kbGenerationRawFindings, kbGenerationRuns, messages, users, whatsappNumbers, accounts } from '../src/db/schema.js';
 import { keyAad } from '../src/lib/ai/turn.js';
 import { cancelGenerationRun, executeGenerationRun, reconcileGenerationRuns, retryGenerationRun, startGenerationRun } from '../src/lib/knowledge/generation-run.js';
-import { RAW_PROPOSAL_FINGERPRINT_PREFIX } from '../src/lib/knowledge/generation-consolidate.js';
 import { previewSelection } from '../src/lib/knowledge/generation-selection.js';
 import { encryptSecret } from '../src/lib/secret-box.js';
 import { withDb } from './helpers/db.js';
@@ -211,8 +210,7 @@ describe('generation runs', () => {
 
     await executeGenerationRun({ db, model, credentialsKey: key }, second.id);
 
-    const proposals = await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.runId, second.id));
-    expect(proposals.filter((proposal) => !proposal.fingerprint.startsWith(RAW_PROPOSAL_FINGERPRINT_PREFIX)))
+    expect(await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.runId, second.id)))
       .toHaveLength(1);
   });
 
@@ -227,12 +225,12 @@ describe('generation runs', () => {
 
     expect(await db.select().from(kbDrafts)).toHaveLength(0);
     const proposals = await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.runId, run.id));
-    expect(proposals.filter((proposal) => !proposal.fingerprint.startsWith(RAW_PROPOSAL_FINGERPRINT_PREFIX)))
-      .toEqual(expect.arrayContaining([
+    expect(proposals).toEqual(expect.arrayContaining([
         expect.objectContaining({ kind: 'knowledge', path: 'База знаний/Доставка', confidence: 'high', selected: true, status: 'pending', draftId: null }),
         expect.objectContaining({ kind: 'script', path: 'Скрипт/Срок доставки', confidence: 'high', selected: true, status: 'pending', draftId: null }),
       ]));
-    expect(proposals.filter((proposal) => proposal.fingerprint.startsWith(RAW_PROPOSAL_FINGERPRINT_PREFIX)))
+    expect(proposals).toHaveLength(2);
+    expect(await db.select().from(kbGenerationRawFindings).where(eq(kbGenerationRawFindings.runId, run.id)))
       .toHaveLength(2);
     expect((await db.select().from(kbGenerationRuns).where(eq(kbGenerationRuns.id, run.id)))[0])
       .toMatchObject({ status: 'completed', promptTokens: 300, completionTokens: 60, cost: '0.00030000' });
@@ -247,15 +245,14 @@ describe('generation runs', () => {
 
     await executeGenerationRun({ db, model, credentialsKey: key }, run.id);
 
-    const proposals = await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.runId, run.id));
-    expect(proposals).toEqual([
+    expect(await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.runId, run.id)))
+      .toEqual([]);
+    expect(await db.select().from(kbGenerationRawFindings).where(eq(kbGenerationRawFindings.runId, run.id))).toEqual([
       expect.objectContaining({
         path: 'База знаний/Доставка',
         body: 'Доставка занимает два дня.',
-        status: 'rejected',
       }),
     ]);
-    expect(proposals[0]!.fingerprint).toMatch(/^raw:/);
     expect(await db.select().from(kbDrafts)).toHaveLength(0);
     expect((await db.select().from(kbGenerationRuns).where(eq(kbGenerationRuns.id, run.id)))[0])
       .toMatchObject({ status: 'failed', errorCode: 'consolidation_failed', promptTokens: 100, completionTokens: 20 });

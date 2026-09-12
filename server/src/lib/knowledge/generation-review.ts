@@ -7,10 +7,7 @@ import { baseOf, type DraftOp } from '../drafts/ops.js';
 import { ApiError, isDuplicate } from '../errors.js';
 import { BODY_MAX } from './note.js';
 import { GENERATION_LIMITS } from './generation-limits.js';
-
-const validPath = (path: string): boolean =>
-  path.trim() !== '' && path.length <= 400 && !path.startsWith('/') && !path.endsWith('/') &&
-  path.split('/').length <= 10 && path.split('/').every((part) => part.trim() !== '');
+import { isValidGenerationPath } from './generation-path.js';
 
 const fingerprint = (path: string, body: string): string =>
   createHash('sha256')
@@ -23,7 +20,7 @@ export async function updateGenerationProposal(
   proposalId: string,
   input: KbGenerationProposalUpdateRequest,
 ): Promise<void> {
-  if (input.path !== undefined && !validPath(input.path)) throw new ApiError(400, 'Проверьте название заметки');
+  if (input.path !== undefined && !isValidGenerationPath(input.path)) throw new ApiError(400, 'Проверьте название заметки');
   if (input.body !== undefined && (input.body.trim() === '' || input.body.length > BODY_MAX)) throw new ApiError(400, 'Проверьте текст заметки');
   const allowedStatuses = input.status === 'pending' ? ['pending', 'rejected'] : ['pending'];
   const [current] = await db.select({ path: kbGenerationProposals.path, body: kbGenerationProposals.body })

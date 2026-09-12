@@ -89,21 +89,26 @@ describe('generation proposal consolidation', () => {
     ]))).items).toEqual([]);
   });
 
-  it('removes duplicate final items returned by separate bounded calls', async () => {
+  it('semantically merges paraphrases returned by separate bounded calls', async () => {
     const proposals = Array.from({ length: GENERATION_LIMITS.maxConsolidationItems + 1 }, (_, index) =>
       raw(`p${index}`, `Подтверждённое условие ${index}.`));
-    const duplicate = {
-      path: 'База знаний/Условия',
-      body: 'Единое подтверждённое условие.',
-      confidence: 'high',
-    };
     const model = fakeModel(
-      answer([{ ...duplicate, sourceProposalIds: ['p0'] }]),
-      answer([{ ...duplicate, sourceProposalIds: [`p${GENERATION_LIMITS.maxConsolidationItems}`] }]),
+      answer([{
+        path: 'База знаний/Доставка', body: 'Доставка занимает два дня.', confidence: 'high', sourceProposalIds: ['p0'],
+      }]),
+      answer([{
+        path: 'База знаний/Срок доставки', body: 'Срок доставки — двое суток.', confidence: 'high',
+        sourceProposalIds: [`p${GENERATION_LIMITS.maxConsolidationItems}`],
+      }]),
+      answer([{
+        path: 'База знаний/Доставка', body: 'Доставка занимает два дня.', confidence: 'high',
+        sourceProposalIds: ['p0', `p${GENERATION_LIMITS.maxConsolidationItems}`],
+      }]),
     );
 
     const result = await consolidateGenerationProposals(deps(model), input(proposals));
 
+    expect(model.calls).toHaveLength(3);
     expect(result.items).toHaveLength(1);
     expect(result.items[0]!.sourceProposalIds).toEqual(['p0', `p${GENERATION_LIMITS.maxConsolidationItems}`]);
   });
@@ -112,6 +117,7 @@ describe('generation proposal consolidation', () => {
     ['personal address', 'Адрес: улица Абая, 10'],
     ['phone number', 'Позвоните по телефону +7 701 123 45 67'],
     ['profanity', 'Это, блядь, лучший вариант'],
+    ['personal name', 'Напишите Алексею'],
   ])('drops unsafe %s returned by the model', async (_name, body) => {
     const model = fakeModel(answer([{
       path: 'Скрипт/Ответ',
@@ -126,6 +132,23 @@ describe('generation proposal consolidation', () => {
 
     expect(result.items).toEqual([]);
     expect(JSON.stringify(result)).not.toContain(body);
+  });
+
+  it.each([
+    'База знаний/Доставка/',
+    'База знаний//Доставка',
+    'База знаний/1/2/3/4/5/6/7/8/9/10',
+  ])('drops an invalid generated path: %s', async (path) => {
+    const model = fakeModel(answer([{
+      path,
+      body: 'Доставка занимает два дня.',
+      confidence: 'high',
+      sourceProposalIds: ['p1'],
+    }]));
+
+    expect((await consolidateGenerationProposals(deps(model), input([
+      raw('p1', 'Доставка занимает два дня.'),
+    ]))).items).toEqual([]);
   });
 
   it('applies communication style only to script calls and keeps warning-backed items unselected', async () => {
@@ -174,5 +197,15 @@ describe('generation proposal consolidation', () => {
     ]));
 
     expect(model.calls).toHaveLength(2);
+  });
+
+  it('drops an exact group that cannot fit inside one bounded call', async () => {
+    const model = fakeModel(answer([]));
+    const oversized = raw('p1', 'Д'.repeat(GENERATION_LIMITS.maxConsolidationCharacters + 1));
+
+    const result = await consolidateGenerationProposals(deps(model), input([oversized]));
+
+    expect(model.calls).toHaveLength(0);
+    expect(result.items).toEqual([]);
   });
 });

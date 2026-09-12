@@ -10,6 +10,7 @@ import { ModelError, type Completion, type ModelClient } from '../ai/openrouter.
 import { communicationStyleInstruction } from '../ai/communication-style.js';
 import { BODY_MAX } from './note.js';
 import { GENERATION_LIMITS } from './generation-limits.js';
+import { isValidGenerationPath } from './generation-path.js';
 import { redactGenerationText } from './generation-redact.js';
 
 export interface RawGenerationProposal {
@@ -20,9 +21,6 @@ export interface RawGenerationProposal {
   warnings: KbGenerationWarning[];
   sources: GenerationStoredSource[];
 }
-
-/** Internal marker Task 4 uses to keep audit findings out of the primary review list. */
-export const RAW_PROPOSAL_FINGERPRINT_PREFIX = 'raw:';
 
 export interface ConsolidatedProposal {
   kind: KbGenerationProposalKind;
@@ -247,7 +245,7 @@ async function consolidateChunk(
     const cited = sourceProposalIds.map((id) => proposalsById.get(id)!);
     const path = safeGeneratedText(item.path);
     const body = safeGeneratedText(item.body);
-    if (path === null || body === null || !path.startsWith(expectedPrefix)) continue;
+    if (path === null || body === null || !isValidGenerationPath(path) || !path.startsWith(expectedPrefix)) continue;
     const warnings = uniqueWarnings(cited);
     items.push({
       kind,
@@ -268,11 +266,31 @@ export async function consolidateGenerationProposals(
   deps: ConsolidationDeps,
   input: ConsolidationInput,
 ): Promise<ConsolidationResult> {
-  const items: ConsolidatedProposal[] = [];
   let usage = emptyUsage();
-  for (const kind of ['knowledge', 'script'] as const) {
-    const proposals = input.proposals.filter((proposal) => proposal.kind === kind);
-    for (const chunk of chunksOf(exactGroups(proposals))) {
+  const deduplicated = new Map<string, ConsolidatedProposal>();
+  const mergeItems = (items: readonly ConsolidatedProposal[]): ConsolidatedProposal[] => {
+    deduplicated.clear();
+    for (const item of items) {
+      const key = `${item.kind}\n${fingerprint(item)}`;
+      const existing = deduplicated.get(key);
+      if (!existing) {
+        deduplicated.set(key, { ...item });
+        continue;
+      }
+      existing.sourceProposalIds = [...new Set([...existing.sourceProposalIds, ...item.sourceProposalIds])];
+      existing.warnings = [...new Set([...existing.warnings, ...item.warnings])];
+      existing.sources = uniqueSources([existing, item]);
+      if (item.confidence === 'review') existing.confidence = 'review';
+      existing.selected = existing.confidence === 'high' && existing.warnings.length === 0;
+    }
+    return [...deduplicated.values()];
+  };
+  const consolidateChunks = async (
+    kind: KbGenerationProposalKind,
+    chunks: readonly ExactGroup[][],
+  ): Promise<ConsolidatedProposal[]> => {
+    const items: ConsolidatedProposal[] = [];
+    for (const chunk of chunks) {
       try {
         const result = await consolidateChunk(deps, input, kind, chunk);
         items.push(...result.items);
@@ -284,20 +302,41 @@ export async function consolidateGenerationProposals(
         throw error;
       }
     }
-  }
-  const deduplicated = new Map<string, ConsolidatedProposal>();
-  for (const item of items) {
-    const key = `${item.kind}\n${fingerprint(item)}`;
-    const existing = deduplicated.get(key);
-    if (!existing) {
-      deduplicated.set(key, item);
-      continue;
+    return mergeItems(items);
+  };
+  const groupsFromItems = (items: readonly ConsolidatedProposal[]): ExactGroup[] => items.map((item) => ({
+    representative: {
+      id: item.sourceProposalIds[0]!,
+      kind: item.kind,
+      path: item.path,
+      body: item.body,
+      warnings: item.warnings,
+      sources: item.sources,
+    },
+    proposalIds: item.sourceProposalIds,
+  }));
+
+  const finalItems: ConsolidatedProposal[] = [];
+  for (const kind of ['knowledge', 'script'] as const) {
+    const initialGroups = exactGroups(input.proposals.filter((proposal) => proposal.kind === kind))
+      .filter((group) => inputCharacters(group) <= GENERATION_LIMITS.maxConsolidationCharacters);
+    const initialChunks = chunksOf(initialGroups);
+    let items = await consolidateChunks(kind, initialChunks);
+    if (initialChunks.length > 1) {
+      for (let pass = 0; pass < GENERATION_LIMITS.maxConsolidationMergePasses; pass += 1) {
+        const groups = groupsFromItems(items)
+          .filter((group) => inputCharacters(group) <= GENERATION_LIMITS.maxConsolidationCharacters);
+        const chunks = chunksOf(groups);
+        if (chunks.length === 0) {
+          items = [];
+          break;
+        }
+        const previousCount = items.length;
+        items = await consolidateChunks(kind, chunks);
+        if (chunks.length === 1 || items.length >= previousCount) break;
+      }
     }
-    existing.sourceProposalIds = [...new Set([...existing.sourceProposalIds, ...item.sourceProposalIds])];
-    existing.warnings = [...new Set([...existing.warnings, ...item.warnings])];
-    existing.sources = uniqueSources([existing, item]);
-    if (item.confidence === 'review') existing.confidence = 'review';
-    existing.selected = existing.confidence === 'high' && existing.warnings.length === 0;
+    finalItems.push(...items);
   }
-  return { items: [...deduplicated.values()], usage };
+  return { items: mergeItems(finalItems), usage };
 }

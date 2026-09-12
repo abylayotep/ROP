@@ -1010,6 +1010,26 @@ export const kbGenerationBatches = pgTable(
   (t) => [unique('kb_generation_batches_run_ordinal').on(t.runId, t.ordinal)],
 );
 
+/** Immutable grounded findings retained for audit and consolidation recovery. */
+export const kbGenerationRawFindings = pgTable(
+  'kb_generation_raw_findings',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    runId: uuid('run_id').notNull().references(() => kbGenerationRuns.id, { onDelete: 'cascade' }),
+    batchId: uuid('batch_id').notNull().references(() => kbGenerationBatches.id, { onDelete: 'cascade' }),
+    fingerprint: text('fingerprint').notNull(),
+    path: text('path').notNull(),
+    body: text('body').notNull(),
+    warnings: text('warnings').array().$type<KbGenerationWarning[]>().notNull().default(sql`'{}'::text[]`),
+    sources: jsonb('sources').$type<GenerationStoredSource[]>().notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('kb_generation_raw_findings_run_created_idx').on(t.runId, t.createdAt),
+    index('kb_generation_raw_findings_run_fingerprint_idx').on(t.runId, t.fingerprint),
+  ],
+);
+
 /** A source-backed suggestion waiting for explicit review and draft conversion. */
 export const kbGenerationProposals = pgTable(
   'kb_generation_proposals',

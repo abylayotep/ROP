@@ -1,12 +1,13 @@
 import { createHash } from 'node:crypto';
 import type { KbGenerationRun } from '@rakurs/contract';
-import { and, asc, count, eq, inArray, notLike, sql } from 'drizzle-orm';
+import { and, asc, count, eq, inArray, sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import {
   agents,
   conversations,
   kbGenerationBatches,
   kbGenerationProposals,
+  kbGenerationRawFindings,
   kbGenerationRuns,
   kbNotes,
   messages,
@@ -19,7 +20,6 @@ import { decryptSecret } from '../secret-box.js';
 import {
   consolidateGenerationProposals,
   GenerationConsolidationError,
-  RAW_PROPOSAL_FINGERPRINT_PREFIX,
   type ConsolidationUsage,
   type RawGenerationProposal,
 } from './generation-consolidate.js';
@@ -47,10 +47,7 @@ async function summary(db: Db, runId: string): Promise<KbGenerationRun> {
   const [run] = await db.select().from(kbGenerationRuns).where(eq(kbGenerationRuns.id, runId));
   if (!run) throw new ApiError(404, 'Запуск не найден');
   const batches = await db.select({ status: kbGenerationBatches.status }).from(kbGenerationBatches).where(eq(kbGenerationBatches.runId, runId));
-  const [proposalCount] = await db.select({ value: count() }).from(kbGenerationProposals).where(and(
-    eq(kbGenerationProposals.runId, runId),
-    notLike(kbGenerationProposals.fingerprint, `${RAW_PROPOSAL_FINGERPRINT_PREFIX}%`),
-  ));
+  const [proposalCount] = await db.select({ value: count() }).from(kbGenerationProposals).where(eq(kbGenerationProposals.runId, runId));
   return {
     id: run.id,
     status: run.status as KbGenerationRun['status'],
@@ -230,22 +227,18 @@ async function executeClaimedGenerationRun(deps: GenerationRunDeps, runId: strin
       const result = await extractGenerationBatch({ model: deps.model, key, modelId: run.modelId, temperature: run.temperature }, input);
       await addUsage(db, runId, batch.id, result.usage);
       const sourceById = new Map(input.map((message) => [message.id, message]));
-      const proposals = result.proposals.map((proposal, index) => ({
+      const proposals = result.proposals.map((proposal) => ({
         runId,
         batchId: batch.id,
-        fingerprint: `${RAW_PROPOSAL_FINGERPRINT_PREFIX}${batch.id}:${index}:${fingerprint(proposal.path, proposal.body)}`,
-        kind: proposal.path.startsWith('Скрипт/') ? 'script' as const : 'knowledge' as const,
+        fingerprint: fingerprint(proposal.path, proposal.body),
         path: proposal.path,
         body: proposal.body,
-        confidence: 'review' as const,
-        selected: false,
         warnings: proposal.warnings,
         sources: proposal.sourceMessageIds.map((id) => ({
           conversationId: sourceById.get(id)!.conversationId,
           messageId: id,
           sentAt: sourceById.get(id)!.sentAt.toISOString(),
         })),
-        status: 'rejected',
       }));
       const cancelled = await db.transaction(async (tx) => {
         const [locked] = await tx.select({ at: kbGenerationRuns.cancelRequestedAt }).from(kbGenerationRuns).where(eq(kbGenerationRuns.id, runId)).for('update');
@@ -254,7 +247,7 @@ async function executeClaimedGenerationRun(deps: GenerationRunDeps, runId: strin
           await tx.update(kbGenerationRuns).set({ status: 'cancelled', updatedAt: new Date() }).where(eq(kbGenerationRuns.id, runId));
           return true;
         }
-        if (proposals.length > 0) await tx.insert(kbGenerationProposals).values(proposals).onConflictDoNothing();
+        if (proposals.length > 0) await tx.insert(kbGenerationRawFindings).values(proposals);
         await tx.update(kbGenerationBatches).set({
           status: 'done',
           classification: result.classification,
@@ -280,11 +273,9 @@ async function executeClaimedGenerationRun(deps: GenerationRunDeps, runId: strin
       releaseTurnSlot();
     }
   }
-  const rawRows = await db.select().from(kbGenerationProposals).where(and(
-    eq(kbGenerationProposals.runId, runId),
-    eq(kbGenerationProposals.status, 'rejected'),
-    sql`${kbGenerationProposals.fingerprint} like ${`${RAW_PROPOSAL_FINGERPRINT_PREFIX}%`}`,
-  )).orderBy(asc(kbGenerationProposals.createdAt), asc(kbGenerationProposals.id));
+  const rawRows = await db.select().from(kbGenerationRawFindings)
+    .where(eq(kbGenerationRawFindings.runId, runId))
+    .orderBy(asc(kbGenerationRawFindings.createdAt), asc(kbGenerationRawFindings.id));
   const finishWithoutItems = async () => {
     const completed = await db.update(kbGenerationRuns).set({ status: 'completed', updatedAt: new Date() }).where(and(
       eq(kbGenerationRuns.id, runId),
@@ -310,7 +301,7 @@ async function executeClaimedGenerationRun(deps: GenerationRunDeps, runId: strin
   try {
     const raw: RawGenerationProposal[] = rawRows.map((proposal) => ({
       id: proposal.id,
-      kind: proposal.kind,
+      kind: proposal.path.startsWith('Скрипт/') ? 'script' : 'knowledge',
       path: proposal.path,
       body: proposal.body,
       warnings: proposal.warnings,

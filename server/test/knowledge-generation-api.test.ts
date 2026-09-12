@@ -2,7 +2,7 @@ import { eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildServer } from '../src/api/server.js';
-import { agents, contacts, conversations, messages, whatsappNumbers } from '../src/db/schema.js';
+import { agents, contacts, conversations, kbGenerationRawFindings, messages, whatsappNumbers } from '../src/db/schema.js';
 import { keyAad } from '../src/lib/ai/turn.js';
 import { encryptSecret } from '../src/lib/secret-box.js';
 import { createAccountWithOwner } from '../src/lib/provision.js';
@@ -44,6 +44,39 @@ beforeEach(async () => {
 
 afterEach(async () => app.close());
 
+const consolidated = (items: unknown[]) => JSON.stringify({ items });
+
+function useConsolidatingModel(proposals: { path: string; body: string }[]): void {
+  model.complete = async (input) => {
+    model.calls.push(input);
+    if (model.calls.length === 1) {
+      return {
+        text: JSON.stringify({
+          classification: { value: 'customer', reason: 'Customer asks about delivery.' },
+          proposals: proposals.map((proposal) => ({ ...proposal, sources: [messageId], warnings: [] })),
+        }),
+        promptTokens: 10,
+        completionTokens: 4,
+        cost: '0.00100000',
+      };
+    }
+    const payload = JSON.parse(input.messages[1]!.content) as {
+      proposals: { id: string; path: string; body: string }[];
+    };
+    return {
+      text: consolidated(payload.proposals.map((proposal) => ({
+        path: proposal.path,
+        body: proposal.body,
+        confidence: 'high',
+        sourceProposalIds: [proposal.id],
+      }))),
+      promptTokens: 10,
+      completionTokens: 4,
+      cost: '0.00100000',
+    };
+  };
+}
+
 describe('knowledge generation API', () => {
   it('previews without a model call and starts asynchronously', async () => {
     const base = `/api/agents/${agentId}/knowledge/generation`;
@@ -67,13 +100,7 @@ describe('knowledge generation API', () => {
   });
 
   it('returns generated proposals for explicit review and draft conversion', async () => {
-    model.complete = async (input) => {
-      model.calls.push(input);
-      return {
-        text: JSON.stringify({ classification: { value: 'customer', reason: 'Customer asks about delivery.' }, proposals: [{ path: 'Delivery', body: 'Two days', sources: [messageId], warnings: [] }] }),
-        promptTokens: 10, completionTokens: 4, cost: '0.00100000',
-      };
-    };
+    useConsolidatingModel([{ path: 'База знаний/Доставка', body: 'Доставка занимает два дня.' }]);
     const base = `/api/agents/${agentId}/knowledge/generation`;
     const preview = await app.inject({ method: 'POST', url: `${base}/preview`, cookies: jar, payload: {
       conversationIds: [conversationId], from: '2026-09-01T00:00:00.000Z', to: '2026-09-02T00:00:00.000Z',
@@ -86,9 +113,21 @@ describe('knowledge generation API', () => {
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
     const proposal = detail!.json().proposals.items[0];
+    expect(detail!.json().proposals.items).toHaveLength(1);
     expect(proposal.sources[0]).toMatchObject({ messageId, available: true });
 
-    const edited = await app.inject({ method: 'PATCH', url: `${base}/proposals/${proposal.id}`, cookies: jar, payload: { revision: proposal.revision, body: 'Two business days' } });
+    const [rawFinding] = await db.select().from(kbGenerationRawFindings);
+    expect(rawFinding).toBeTruthy();
+    expect((await app.inject({
+      method: 'PATCH', url: `${base}/proposals/${rawFinding!.id}`, cookies: jar,
+      payload: { revision: 1, body: 'Mutated raw finding' },
+    })).statusCode).toBe(409);
+    expect((await app.inject({
+      method: 'POST', url: `${base}/runs/${started.json().id}/draft`, cookies: jar,
+      payload: { proposalIds: [rawFinding!.id], revisions: { [rawFinding!.id]: 1 } },
+    })).statusCode).toBe(404);
+
+    const edited = await app.inject({ method: 'PATCH', url: `${base}/proposals/${proposal.id}`, cookies: jar, payload: { revision: proposal.revision, body: 'Доставка занимает два рабочих дня.' } });
     expect(edited.statusCode).toBe(200);
     const draft = await app.inject({ method: 'POST', url: `${base}/runs/${started.json().id}/draft`, cookies: jar, payload: {
       proposalIds: [proposal.id], revisions: { [proposal.id]: edited.json().revision },
@@ -97,17 +136,11 @@ describe('knowledge generation API', () => {
     expect(draft.json().draftId).toBeTruthy();
   });
 
-  it('returns every generated category draft independently of proposal pagination', async () => {
-    model.complete = async (input) => {
-      model.calls.push(input);
-      return {
-        text: JSON.stringify({ classification: { value: 'customer', reason: 'Customer asks about delivery.' }, proposals: [
-          { path: 'База знаний/Доставка', body: 'Два дня.', sources: [messageId], warnings: [] },
-          { path: 'Скрипт/Доставка', body: 'Уточните адрес.', sources: [messageId], warnings: [] },
-        ] }),
-        promptTokens: 10, completionTokens: 4, cost: '0.00100000',
-      };
-    };
+  it('creates no automatic drafts and returns an explicit draft independently of proposal pagination', async () => {
+    useConsolidatingModel([
+      { path: 'База знаний/Доставка', body: 'Доставка занимает два дня.' },
+      { path: 'Скрипт/Доставка', body: 'Доставка займёт два дня. Подскажите, пожалуйста, адрес.' },
+    ]);
     const base = `/api/agents/${agentId}/knowledge/generation`;
     const preview = await app.inject({ method: 'POST', url: `${base}/preview`, cookies: jar, payload: {
       conversationIds: [conversationId], from: '2026-09-01T00:00:00.000Z', to: '2026-09-02T00:00:00.000Z',
@@ -117,16 +150,29 @@ describe('knowledge generation API', () => {
     } });
     let detail;
     for (let attempt = 0; attempt < 100; attempt += 1) {
-      detail = await app.inject({ method: 'GET', url: `${base}/runs/${started.json().id}?cursor=20`, cookies: jar });
+      detail = await app.inject({ method: 'GET', url: `${base}/runs/${started.json().id}`, cookies: jar });
       if (detail.json().run.status === 'completed') break;
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
 
-    expect(detail!.json().proposals.items).toEqual([]);
-    expect(detail!.json().drafts).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: expect.any(String), title: 'База знаний из WhatsApp' }),
-      expect.objectContaining({ id: expect.any(String), title: 'Скрипт продаж из WhatsApp' }),
-    ]));
-    expect(detail!.json().drafts).toHaveLength(2);
+    expect(detail!.json().proposals.items).toHaveLength(2);
+    expect(detail!.json().drafts).toEqual([]);
+    const items = detail!.json().proposals.items as { id: string; revision: number }[];
+    const explicit = await app.inject({
+      method: 'POST', url: `${base}/runs/${started.json().id}/draft`, cookies: jar,
+      payload: {
+        proposalIds: items.map((item) => item.id),
+        revisions: Object.fromEntries(items.map((item) => [item.id, item.revision])),
+      },
+    });
+    expect(explicit.statusCode).toBe(200);
+
+    const paged = await app.inject({
+      method: 'GET', url: `${base}/runs/${started.json().id}?cursor=20`, cookies: jar,
+    });
+    expect(paged.json().proposals.items).toEqual([]);
+    expect(paged.json().drafts).toEqual([
+      expect.objectContaining({ id: explicit.json().draftId, title: 'Знания из WhatsApp · 2' }),
+    ]);
   });
 });

@@ -10,6 +10,7 @@ import { z } from 'zod';
 import type { Db } from '../db/client.js';
 import {
   conversations,
+  kbDrafts,
   kbGenerationProposals,
   kbGenerationRuns,
   kbNotes,
@@ -188,7 +189,19 @@ export function registerKnowledgeGenerationRoutes(
       throw new ApiError(404, 'Запуск не найден');
     }
     const run = await generationRunSummary(db, runId);
-    return { run, proposals: await proposalPage(db, req.agent!.id, runId, cursorOffset((req.query as { cursor?: unknown }).cursor)) };
+    const drafts = await db.selectDistinct({ id: kbDrafts.id, title: kbDrafts.title })
+      .from(kbGenerationProposals)
+      .innerJoin(kbGenerationRuns, and(
+        eq(kbGenerationRuns.id, kbGenerationProposals.runId),
+        eq(kbGenerationRuns.agentId, req.agent!.id),
+      ))
+      .innerJoin(kbDrafts, eq(kbDrafts.id, kbGenerationProposals.draftId))
+      .where(eq(kbGenerationProposals.runId, runId));
+    return {
+      run,
+      proposals: await proposalPage(db, req.agent!.id, runId, cursorOffset((req.query as { cursor?: unknown }).cursor)),
+      drafts,
+    };
   });
 
   app.post(`${base}/runs/:runId/cancel`, { preHandler: [guard, owner] }, async (req) => {

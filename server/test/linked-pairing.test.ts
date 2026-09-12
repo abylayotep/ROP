@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildServer } from '../src/api/server.js';
 import {
   accountMembers,
@@ -18,6 +18,7 @@ import { linkedAuthState } from '../src/lib/whatsapp/linked/auth-state.js';
 import { clearStalePairings } from '../src/lib/whatsapp/linked/lifecycle.js';
 import { withDb } from './helpers/db.js';
 import { testEnv } from './helpers/env.js';
+import { fakeGraph } from './helpers/fake-graph.js';
 import { fakeLinked, type FakeLinked } from './helpers/fake-linked.js';
 
 /**
@@ -57,6 +58,39 @@ const pair = () =>
   });
 
 const numbers = () => db.select().from(whatsappNumbers);
+
+async function existingPhone() {
+  const [number] = await db.insert(whatsappNumbers).values({ agentId, connectionKind: 'linked',
+    displayPhone: '+77011234567', linkedJid: '77011234567@s.whatsapp.net', linkedState: 'logged_out',
+    createdAt: new Date('2020-01-01'), enabled: false }).returning();
+  const [contact] = await db.insert(contacts).values({ agentId, phone: '77017654321' }).returning();
+  const [conversation] = await db.insert(conversations).values({ agentId, contactId: contact!.id,
+    whatsappNumberId: number!.id }).returning();
+  await db.insert(messages).values({ conversationId: conversation!.id, direction: 'in', author: 'client',
+    kind: 'text', body: 'Preserve this message', sentAt: new Date() });
+  return number!;
+}
+
+describe('reconnecting an existing phone', () => {
+  it('reuses its row and preserves history after the pairing deadline', async () => {
+    const number = await existingPhone();
+    const response = await app.inject({ method: 'POST', url: `/api/agents/${agentId}/whatsapp/linked/${number.id}/reconnect`, cookies: jar });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().id).toBe(number.id);
+    expect((await numbers())[0]?.linkedState).toBe('pairing');
+    await new Promise(resolve => setTimeout(resolve, 750));
+    expect((await numbers())[0]).toMatchObject({ id: number.id, linkedState: 'logged_out', enabled: false });
+    expect(await db.select().from(messages)).toHaveLength(1);
+  });
+
+  it('preserves an interrupted reconnect during startup cleanup', async () => {
+    const number = await existingPhone();
+    await db.update(whatsappNumbers).set({ linkedState: 'pairing' }).where(eq(whatsappNumbers.id, number.id));
+    await clearStalePairings(db);
+    expect((await numbers())[0]).toMatchObject({ id: number.id, linkedState: 'logged_out' });
+    expect(await db.select().from(messages)).toHaveLength(1);
+  });
+});
 
 beforeEach(async () => {
   db = await withDb();
@@ -456,13 +490,18 @@ describe('sending a file', () => {
     });
   });
 
-  it('says plainly that a Cloud API number cannot take a file yet', async () => {
+  it.each([true, false])('sends Cloud media only inside the reply window (open=%s)', async (open) => {
+    const sendMedia = vi.fn(async () => ({ messageId: 'wamid.cloud-media' }));
+    await app.close();
+    app = buildServer(env, db, { linked, graph: { ...fakeGraph(), sendMedia }, pairingTimeoutMs: 600 });
+    await app.ready();
     const [number] = await db
       .insert(whatsappNumbers)
       .values({
         agentId,
         displayPhone: '+7 708 580 79 32',
         connectionKind: 'manual',
+        enabled: true,
         phoneNumberId: '136',
         wabaId: '932',
         accessToken: encryptSecret('EAAB', Buffer.from(env.CREDENTIALS_KEY, 'base64'), '136'),
@@ -478,7 +517,7 @@ describe('sending a file', () => {
         agentId,
         contactId: contact!.id,
         whatsappNumberId: number!.id,
-        lastInboundAt: new Date(),
+        lastInboundAt: new Date(Date.now() - (open ? 0 : 25 * 60 * 60 * 1000)),
       })
       .returning();
 
@@ -494,10 +533,20 @@ describe('sending a file', () => {
       payload: body.payload,
     });
 
-    expect(res.statusCode).toBe(501);
-    expect(res.json().message).toBe(
-      'Отправка файлов пока работает только для номера, подключённого по QR.',
-    );
-    expect(await db.select().from(messages)).toEqual([]);
+    if (!open) {
+      expect(res.statusCode).toBe(409);
+      expect(res.json().message).toContain('Окно ответа закрыто');
+      expect(sendMedia).not.toHaveBeenCalled();
+      expect(await db.select().from(messages)).toEqual([]);
+      return;
+    }
+    expect(res.statusCode).toBe(200);
+    expect(sendMedia).toHaveBeenCalledWith('136', 'EAAB', '77001234567', expect.objectContaining({
+      path: expect.any(String), mime: 'image/png', filename: 'stamp.png',
+    }));
+    expect(res.json()).toMatchObject({ kind: 'image', author: 'operator', mediaMime: 'image/png' });
+    expect(await db.select().from(messages)).toEqual([expect.objectContaining({
+      waMessageId: 'wamid.cloud-media', kind: 'image', mediaMime: 'image/png', direction: 'out',
+    })]);
   });
 });

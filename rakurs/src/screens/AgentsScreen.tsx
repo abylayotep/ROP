@@ -52,7 +52,7 @@ export function AgentsScreen() {
 
   // One company, one agent: the picker would be a page with a single button on it.
   const only = query.data?.length === 1 && query.data[0]!.agents.length === 1;
-  if (only) return <Navigate to={`/a/${query.data![0]!.agents[0]!.id}/orders`} replace />;
+  if (only) return <Navigate to={`/a/${query.data![0]!.agents[0]!.id}/funnel`} replace />;
 
   return (
     <div style={{ minHeight: '100vh', background: 'var(--page)', padding: '40px 26px' }}>
@@ -175,7 +175,7 @@ export function AgentsScreen() {
                         {agents.map((agent) => (
                           <Link
                             key={agent.id}
-                            to={`/a/${agent.id}/orders`}
+                            to={`/a/${agent.id}/funnel`}
                             className="card card-pad"
                             style={{ textDecoration: 'none', color: 'inherit', display: 'block' }}
                           >

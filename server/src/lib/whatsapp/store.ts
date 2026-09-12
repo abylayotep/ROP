@@ -170,6 +170,7 @@ export async function runTurns(db: Db, deps: TurnDeps, touched: Touched): Promis
   const errors: string[] = [];
   for (const [conversationId, agentId] of touched) {
     try {
+      if (deps.crm && await deps.crm(agentId, conversationId)) continue;
       await runTurn(db, deps, { agentId, conversationId });
     } catch (error) {
       // One conversation's failure must not cost the others theirs: the next entry in the

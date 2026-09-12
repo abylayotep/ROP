@@ -1,3 +1,4 @@
+import { seedOrders } from './helpers/kaspi.js';
 import { eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -149,8 +150,8 @@ describe('the board', () => {
       'Квалифицирован',
       'Предложение отправлено',
       'Готов к покупке',
-      'Счёт отправлен',
-      'Продажа',
+      'Заказано',
+      'Оплачено',
       'Отказ',
     ]);
     expect(body.currency).toBe('KZT');
@@ -159,7 +160,7 @@ describe('the board', () => {
   });
 
   it('puts a card in its stage with its last line and its paid total', async () => {
-    const stage = await stageNamed('Счёт отправлен');
+    const stage = await stageNamed('Заказано');
     const conversationId = await seedConversation('77000000002', 'Аян', {
       stageId: stage.id,
       adHeadline: 'Ремонт под ключ',
@@ -182,7 +183,7 @@ describe('the board', () => {
       body: 'Отправил счёт',
       sentAt: new Date(Date.now() - 60_000),
     });
-    await db.insert(orders).values([
+    await seedOrders(db, [
       { agentId, conversationId, amount: '100000', currency: 'KZT', status: 'paid' },
       { agentId, conversationId, amount: '900000', currency: 'KZT', status: 'pending' },
     ]);
@@ -229,7 +230,7 @@ describe('the board', () => {
     // Two orders at the very top of numeric(14,2). Their sum needs thirteen digits before
     // the point, so casting the total back to numeric(14,2) would raise `numeric field
     // overflow` and fail the whole request rather than this one card.
-    await db.insert(orders).values([
+    await seedOrders(db, [
       { agentId, conversationId, amount: '999999999999.99', currency: 'KZT', status: 'paid' },
       { agentId, conversationId, amount: '999999999999.99', currency: 'KZT', status: 'paid' },
     ]);
@@ -286,9 +287,9 @@ describe('the board', () => {
 
 describe('the customers table', () => {
   it('names the stage and counts the orders', async () => {
-    const stage = await stageNamed('Продажа');
+    const stage = await stageNamed('Оплачено');
     const conversationId = await seedConversation('77000000007', 'Айгуль', { stageId: stage.id });
-    await db.insert(orders).values([
+    await seedOrders(db, [
       { agentId, conversationId, amount: '150000.50', currency: 'KZT', status: 'paid' },
       { agentId, conversationId, amount: '20000.50', currency: 'KZT', status: 'paid' },
       { agentId, conversationId, amount: '1', currency: 'KZT', status: 'cancelled' },
@@ -299,7 +300,7 @@ describe('the customers table', () => {
     expect(res.statusCode).toBe(200);
     const row = res.json()[0];
     expect(row.contactName).toBe('Айгуль');
-    expect(row.stageName).toBe('Продажа');
+    expect(row.stageName).toBe('Оплачено');
     expect(row.stageKind).toBe('success');
     expect(row.paidTotal).toBe('170001.00');
     // Every order, not only the paid ones: three were recorded against this customer.
@@ -311,7 +312,7 @@ describe('the customers table', () => {
     const conversationId = await seedConversation('77000000013', 'Айгуль');
     // Written straight into the table: the order form only ever offers the agent's own
     // currency, and this is the row that proves the sum does not merely assume that.
-    await db.insert(orders).values([
+    await seedOrders(db, [
       { agentId, conversationId, amount: '100000', currency: 'KZT', status: 'paid' },
       { agentId, conversationId, amount: '500', currency: 'USD', status: 'paid' },
     ]);
@@ -336,14 +337,12 @@ describe('the customers table', () => {
   });
 
   it('exports a CSV Excel opens with the Russian intact', async () => {
-    const stage = await stageNamed('Продажа');
+    const stage = await stageNamed('Оплачено');
     const conversationId = await seedConversation('77000000009', 'Айгуль', {
       stageId: stage.id,
       assignedTo: ownerId,
     });
-    await db
-      .insert(orders)
-      .values({ agentId, conversationId, amount: '150000', currency: 'KZT', status: 'paid' });
+    await seedOrders(db, { agentId, conversationId, amount: '150000', currency: 'KZT', status: 'paid' });
 
     const res = await app.inject({ url: `/api/agents/${agentId}/customers.csv`, cookies: jar });
 
@@ -364,7 +363,7 @@ describe('the customers table', () => {
     const cells = rows[0]!.split(';');
     expect(cells[0]).toBe('Айгуль');
     expect(cells[1]).toBe('77000000009');
-    expect(cells[2]).toBe('Продажа');
+    expect(cells[2]).toBe('Оплачено');
     // A comma, not a dot: the Russian-locale Excel this file is written for reads a
     // dotted number as text, and a column of text cannot be summed.
     expect(cells[3]).toBe('150000,00');

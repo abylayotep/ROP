@@ -12,14 +12,25 @@ import { createSendQueue, type SendQueue } from './queue.js';
 /** A `Long` from protobuf, or the plain number Baileys sometimes hands over instead. */
 export type Timestamp = number | { toNumber(): number } | null | undefined;
 
+/** The attribution fields supplied by Baileys ContextInfo.externalAdReply. */
+export interface RawLinkedContext {
+  externalAdReply?: {
+    sourceId?: string | null;
+    sourceType?: string | null;
+    title?: string | null;
+    body?: string | null;
+    ctwaClid?: string | null;
+  } | null;
+}
+
 export interface RawLinkedContent {
   conversation?: string | null;
-  extendedTextMessage?: { text?: string | null } | null;
-  imageMessage?: { caption?: string | null; mimetype?: string | null } | null;
-  videoMessage?: { caption?: string | null; mimetype?: string | null } | null;
-  audioMessage?: { mimetype?: string | null } | null;
-  documentMessage?: { caption?: string | null; mimetype?: string | null; fileName?: string | null } | null;
-  stickerMessage?: { mimetype?: string | null } | null;
+  extendedTextMessage?: { text?: string | null; contextInfo?: RawLinkedContext | null } | null;
+  imageMessage?: { caption?: string | null; mimetype?: string | null; contextInfo?: RawLinkedContext | null } | null;
+  videoMessage?: { caption?: string | null; mimetype?: string | null; contextInfo?: RawLinkedContext | null } | null;
+  audioMessage?: { mimetype?: string | null; contextInfo?: RawLinkedContext | null } | null;
+  documentMessage?: { caption?: string | null; mimetype?: string | null; fileName?: string | null; contextInfo?: RawLinkedContext | null } | null;
+  stickerMessage?: { mimetype?: string | null; contextInfo?: RawLinkedContext | null } | null;
   /** A delivery receipt, a revoke, an ephemeral setting change — never a line in a chat. */
   protocolMessage?: unknown;
   reactionMessage?: unknown;
@@ -42,7 +53,12 @@ export interface RawLinkedMessage {
 /** One chunk of `messaging-history.set`, reduced to what the import writes. */
 export interface RawLinkedHistory {
   messages: RawLinkedMessage[];
-  contacts: { id: string; name?: string | null; notify?: string | null }[];
+  contacts: { id: string; name?: string | null; notify?: string | null; lid?: string | null; jid?: string | null }[];
+  chats?: { id: string; pnJid?: string | null; lidJid?: string | null }[];
+  /** The complete phone-to-LID directory carried by a raw HistorySync packet. */
+  phoneNumberToLidMappings?: { pnJid?: string | null; lidJid?: string | null }[];
+  /** The archive worker already wrote this chunk; downstream listeners may only observe it. */
+  alreadyStored?: boolean;
   /** 0..100 while the phone is still sending, absent when the library does not say. */
   progress?: number | null;
   /** Correlates an on-demand request with the phone's eventual response. */

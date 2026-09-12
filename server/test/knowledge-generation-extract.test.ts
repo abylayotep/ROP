@@ -27,7 +27,7 @@ const customer = (over: Partial<GenerationExtractionMessage> = {}): GenerationEx
 });
 
 const answer = (sources = ['seller-1'], body = 'Delivery costs 1,500 tenge.') =>
-  JSON.stringify({ proposals: [{ path: 'Policies/Delivery', body, sources, warnings: [] }] });
+  JSON.stringify({ proposals: [{ path: 'База знаний/Доставка', body, sources, warnings: [] }] });
 
 const deps = (model: ReturnType<typeof fakeModel>) => ({
   model,
@@ -67,7 +67,7 @@ describe('generation extraction', () => {
     expect(result).toEqual({
       proposals: [
         {
-          path: 'Policies/Delivery',
+          path: 'База знаний/Доставка',
           body: 'Delivery costs 1,500 tenge.',
           sourceMessageIds: ['seller-1'],
           warnings: [],
@@ -77,6 +77,9 @@ describe('generation extraction', () => {
     });
     expect(model.calls).toHaveLength(1);
     expect(model.calls[0]!.maxTokens).toBe(2_000);
+    expect(model.calls[0]!.messages[0]!.content).toContain('База знаний/');
+    expect(model.calls[0]!.messages[0]!.content).toContain('Скрипт/');
+    expect(model.calls[0]!.messages[0]!.content).toContain('do not invent');
   });
 
   it('makes no model call when a batch has no seller evidence', async () => {
@@ -132,8 +135,19 @@ describe('generation extraction', () => {
   });
 
   it.each([
-    ['invented source', answer(['missing-id']), 'invalid_sources'],
-    ['customer-only source', answer(['customer-1']), 'invalid_sources'],
+    ['invented source', answer(['missing-id'])],
+    ['customer-only source', answer(['customer-1'])],
+  ])('drops %s without stopping the paid batch', async (_name, response) => {
+    const model = fakeModel(response);
+
+    await expect(extractGenerationBatch(deps(model), [customer(), seller()])).resolves.toEqual({
+      proposals: [],
+      usage: { promptTokens: 100, completionTokens: 20, cost: '0.00010000' },
+    });
+    expect(model.calls).toHaveLength(1);
+  });
+
+  it.each([
     ['unsafe output', answer(['seller-1'], 'Email buyer@example.com.'), 'unsafe_output'],
     ['unsafe Russian output', answer(['seller-1'], 'Адрес: Абая 10.'), 'unsafe_output'],
   ])('rejects %s and retains charged usage', async (_name, response, code) => {

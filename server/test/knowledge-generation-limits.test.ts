@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { GENERATION_LIMITS } from '../src/lib/knowledge/generation-limits.js';
-import { accounts, agents, contacts, conversations, whatsappNumbers } from '../src/db/schema.js';
+import { accounts, agents, contacts, conversations, messages, whatsappNumbers } from '../src/db/schema.js';
 import { previewSelection } from '../src/lib/knowledge/generation-selection.js';
 import { withDb } from './helpers/db.js';
 
@@ -10,7 +10,6 @@ describe('knowledge generation limits', () => {
       maxConversations: 200,
       maxEligibleMessages: 5_000,
       maxInputCharacters: 200_000,
-      maxBatches: 20,
     });
   });
 
@@ -30,8 +29,15 @@ describe('knowledge generation limits', () => {
     }))).returning();
     const selection = { conversationIds: chats.slice(0, 200).map(({ id }) => id),
       from: '2026-08-01T00:00:00Z', to: '2026-09-01T00:00:00Z' };
+    await db.insert(messages).values(chats.slice(0, 200).map(chat => ({
+      conversationId: chat.id, direction: 'out', author: 'phone', kind: 'text',
+      body: 'Delivery takes two days.', sentAt: new Date('2026-08-15T12:00:00Z'),
+    })));
     const preview = await previewSelection(db, agent!.id, selection);
     expect(preview.counts.selectedConversations).toBe(200);
+    expect(preview.counts.eligibleMessages).toBe(200);
+    expect(preview.batchCount).toBe(200);
+    expect(preview.maxCalls).toBe(200);
     await expect(previewSelection(db, agent!.id, {
       ...selection, conversationIds: chats.map(({ id }) => id),
     })).rejects.toMatchObject({ statusCode: 400 });

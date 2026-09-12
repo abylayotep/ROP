@@ -1,10 +1,10 @@
 import { randomBytes } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { agents, contacts, conversations, messages, whatsappNumbers } from '../src/db/schema.js';
+import { agents, contacts, conversations, linkedHistoryMappings, messages, whatsappNumbers } from '../src/db/schema.js';
 import { createAccountWithOwner } from '../src/lib/provision.js';
 import type { RawLinkedHistory, RawLinkedMessage } from '../src/lib/whatsapp/linked/client.js';
-import { applyHistoryChunk } from '../src/lib/whatsapp/linked/history.js';
+import { applyHistoryChunk, applyHistoryChunkWithReport } from '../src/lib/whatsapp/linked/history.js';
 import { registerLinkedHistory } from '../src/lib/whatsapp/linked/history.js';
 import { forgetLids } from '../src/lib/whatsapp/linked/lid-directory.js';
 import { fakeLinked } from './helpers/fake-linked.js';
@@ -72,6 +72,110 @@ beforeEach(async () => {
 });
 
 describe('history import', () => {
+  it('imports inbound ad metadata once without attributing the owner reply', async () => {
+    const ad = (id: string, fromMe = false): RawLinkedMessage => raw({
+      key: { id, remoteJid: JID, fromMe },
+      message: { imageMessage: { caption: 'Ad response', contextInfo: {
+        externalAdReply: { sourceId: id, sourceType: 'ad', title: 'History ad' },
+      } } },
+    });
+    await applyHistoryChunk(db, numberId, chunk({ messages: [ad('owner', true)] }));
+    expect((await db.select().from(conversations))[0]?.referralSeenAt).toBeNull();
+    await applyHistoryChunk(db, numberId, chunk({ messages: [ad('first'), ad('second')] }));
+    await applyHistoryChunk(db, numberId, chunk({ messages: [ad('first')] }));
+    expect((await db.select().from(conversations))[0]).toMatchObject({
+      adSourceId: 'first', adSourceType: 'ad', adHeadline: 'History ad',
+      ctwaClid: null, referralSeenAt: expect.any(Date),
+    });
+  });
+
+  it('persists the complete history mapping table and restores it after restart', async () => {
+    await applyHistoryChunk(db, numberId, chunk({
+      phoneNumberToLidMappings: [{ pnJid: JID, lidJid: LID }],
+      messages: [],
+    }));
+    expect(await db.select().from(linkedHistoryMappings)).toMatchObject([
+      { numberId, lid: '47536731594988', phone: '77085807932' },
+    ]);
+
+    forgetLids();
+    await applyHistoryChunk(db, numberId, chunk({
+      messages: [raw({ key: { id: 'after.restart', remoteJid: LID, fromMe: true } })],
+    }));
+
+    expect((await db.select().from(messages))[0]?.waMessageId).toBe('after.restart');
+  });
+
+  it('keeps persisted LID mappings isolated between linked numbers', async () => {
+    const OTHER_JID = '77010000001@s.whatsapp.net';
+    const [otherNumber] = await db.insert(whatsappNumbers).values({
+      agentId,
+      displayPhone: '+7 701 000 00 01',
+      connectionKind: 'linked',
+      linkedJid: OTHER_JID,
+      linkedState: 'open',
+    }).returning();
+    await applyHistoryChunk(db, numberId, chunk({
+      phoneNumberToLidMappings: [{ pnJid: JID, lidJid: LID }],
+      messages: [],
+    }));
+    await applyHistoryChunk(db, otherNumber!.id, chunk({
+      phoneNumberToLidMappings: [{ pnJid: OTHER_JID, lidJid: LID }],
+      messages: [],
+    }));
+
+    forgetLids();
+    await applyHistoryChunk(db, numberId, chunk({
+      messages: [raw({ key: { id: 'tenant.one', remoteJid: LID, fromMe: true } })],
+    }));
+    await applyHistoryChunk(db, otherNumber!.id, chunk({
+      messages: [raw({ key: { id: 'tenant.two', remoteJid: LID, fromMe: true } })],
+    }));
+
+    expect((await db.select().from(contacts)).map((row) => row.phone).sort()).toEqual([
+      '77010000001',
+      '77085807932',
+    ]);
+  });
+
+  it('reports stored, duplicate, excluded and unresolved messages separately', async () => {
+    const input = chunk({ messages: [
+      raw({ key: { id: 'count.saved', remoteJid: JID, fromMe: false } }),
+      raw({ key: { id: 'count.excluded', remoteJid: '120363@g.us', fromMe: false } }),
+      raw({ key: { id: 'count.unresolved', remoteJid: LID, fromMe: true } }),
+    ] });
+
+    expect(await applyHistoryChunkWithReport(db, numberId, input)).toEqual({
+      received: 3,
+      saved: 1,
+      duplicates: 0,
+      excluded: 1,
+      skippedUnresolved: 1,
+    });
+    expect(await applyHistoryChunkWithReport(db, numberId, input)).toEqual({
+      received: 3,
+      saved: 0,
+      duplicates: 1,
+      excluded: 1,
+      skippedUnresolved: 1,
+    });
+  });
+
+  it('uses chat phone mappings for both directions when individual history messages omit senderPn', async () => {
+    await applyHistoryChunk(db, numberId, chunk({
+      chats: [{ id: LID, pnJid: JID }],
+      messages: [raw({ key: { id: 'mapped.in', remoteJid: LID, fromMe: false } }),
+        raw({ key: { id: 'mapped.out', remoteJid: LID, fromMe: true } })],
+    }));
+    expect((await db.select().from(messages)).map(row => row.waMessageId).sort()).toEqual(['mapped.in', 'mapped.out']);
+    expect((await db.select().from(contacts))[0]?.phone).toBe('77085807932');
+  });
+
+  it('learns the phone and LID pair supplied by history contacts', async () => {
+    await applyHistoryChunk(db, numberId, chunk({ contacts: [{ id: JID, lid: LID }],
+      messages: [raw({ key: { id: 'contact.mapping', remoteJid: LID, fromMe: false } })] }));
+    expect((await db.select().from(messages))[0]?.waMessageId).toBe('contact.mapping');
+  });
   it('writes the contact, the thread and the message', async () => {
     await applyHistoryChunk(db, numberId, chunk());
 
@@ -134,7 +238,7 @@ describe('history import', () => {
 
   it('reports what each chunk carried, so a phone that sent nothing is visible', async () => {
     const client = fakeLinked();
-    const reports: { messages: number; contacts: number; progress: number | null; skippedUnresolved: number }[] = [];
+    const reports: { messages: number; contacts: number; progress: number | null; received: number; saved: number; duplicates: number; excluded: number; skippedUnresolved: number }[] = [];
     registerLinkedHistory(db, { onImported: (report) => reports.push(report) }, client);
 
     client.emit({ type: 'history', numberId, chunk: { ...chunk(), progress: 40 } });
@@ -142,9 +246,21 @@ describe('history import', () => {
     await until(() => reports.length === 2);
 
     expect(reports).toEqual([
-      { messages: 1, contacts: 0, progress: 40, skippedUnresolved: 0 },
-      { messages: 0, contacts: 0, progress: null, skippedUnresolved: 0 },
+      { messages: 1, contacts: 0, progress: 40, received: 1, saved: 1, duplicates: 0, excluded: 0, skippedUnresolved: 0 },
+      { messages: 0, contacts: 0, progress: null, received: 0, saved: 0, duplicates: 0, excluded: 0, skippedUnresolved: 0 },
     ]);
+  });
+
+  it('does not import a chunk already stored by the archive worker', async () => {
+    const client = fakeLinked();
+    const reports: unknown[] = [];
+    registerLinkedHistory(db, { onImported: (report) => reports.push(report) }, client);
+
+    client.emit({ type: 'history', numberId, chunk: chunk({ alreadyStored: true }) });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect(await db.select().from(messages)).toHaveLength(0);
+    expect(reports).toEqual([]);
   });
 
   it('learns LID mappings before importing an earlier outgoing line', async () => {

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ConversationSummary, ConversationThread, Message } from '@rakurs/contract';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, sql } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
@@ -27,6 +27,17 @@ export const WINDOW_MS = 24 * 60 * 60 * 1000;
  */
 export const windowOpen = (lastInboundAt: Date | null, now = new Date()): boolean =>
   lastInboundAt !== null && now.getTime() - lastInboundAt.getTime() < WINDOW_MS;
+
+const listPage = z.object({
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+  offset: z.coerce.number().int().min(0).max(1_000_000).default(0),
+});
+const threadPage = z.object({
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+  before: z.uuid().optional(),
+  after: z.uuid().optional(),
+  around: z.uuid().optional(),
+}).refine((page) => [page.before, page.after, page.around].filter(Boolean).length <= 1);
 
 const outgoing = z.object({ body: z.string() });
 
@@ -73,6 +84,8 @@ export function registerConversationRoutes(
     '/api/agents/:agentId/conversations',
     { preHandler: [guard, agentGuard] },
     async (req): Promise<ConversationSummary[]> => {
+      const parsed = listPage.safeParse(req.query);
+      if (!parsed.success) throw new ApiError(400, 'Некорректные параметры страницы');
       const rows = await db
         .select({
           conversation: conversations,
@@ -87,7 +100,9 @@ export function registerConversationRoutes(
         .from(conversations)
         .innerJoin(contacts, eq(contacts.id, conversations.contactId))
         .where(eq(conversations.agentId, req.agent!.id))
-        .orderBy(sql`${conversations.lastMessageAt} desc nulls last`);
+        .orderBy(sql`${conversations.lastMessageAt} desc nulls last`, desc(conversations.id))
+        .limit(parsed.data.limit ?? 2_147_483_647)
+        .offset(parsed.data.offset);
 
       return rows.map(({ conversation, contact, preview }) => ({
         id: conversation.id,
@@ -108,6 +123,22 @@ export function registerConversationRoutes(
       const { conversationId } = req.params as { conversationId: string };
       const { conversation, contact } = await loadConversation(db, req.agent!.id, conversationId);
 
+      const parsed = threadPage.safeParse(req.query);
+      if (!parsed.success) throw new ApiError(400, 'Некорректные параметры страницы');
+      const page = parsed.data;
+      const anchorId = page.before ?? page.after ?? page.around;
+      const [anchor] = anchorId ? await db.select({ id: messages.id, sentAt: messages.sentAt })
+        .from(messages).where(and(eq(messages.id, anchorId), eq(messages.conversationId, conversation.id))) : [];
+      if (anchorId && !anchor) throw new ApiError(404, 'Сообщение не найдено');
+      const paginated = page.limit !== undefined || anchorId !== undefined;
+      const forward = Boolean(page.after || page.around);
+      const boundary = anchor ? (page.before
+        ? sql`(${messages.sentAt}, ${messages.id}) < (${anchor.sentAt.toISOString()}::timestamptz, ${anchor.id}::uuid)`
+        : page.after
+          ? sql`(${messages.sentAt}, ${messages.id}) > (${anchor.sentAt.toISOString()}::timestamptz, ${anchor.id}::uuid)`
+          : sql`(${messages.sentAt}, ${messages.id}) >= (${anchor.sentAt.toISOString()}::timestamptz, ${anchor.id}::uuid)`
+      ) : undefined;
+
       // A left join, not a second query per message: `ai_replies.message_id` points back at
       // the message it produced (at most one row ever does, since a turn stamps it once,
       // when it sends), so one query already carries every message's reply id, if it has
@@ -116,8 +147,21 @@ export function registerConversationRoutes(
         .select({ message: messages, aiReplyId: aiReplies.id })
         .from(messages)
         .leftJoin(aiReplies, eq(aiReplies.messageId, messages.id))
-        .where(eq(messages.conversationId, conversation.id))
-        .orderBy(messages.sentAt, messages.id);
+        .where(and(eq(messages.conversationId, conversation.id), boundary))
+        .orderBy(
+          paginated && !forward ? desc(messages.sentAt) : asc(messages.sentAt),
+          paginated && !forward ? desc(messages.id) : asc(messages.id),
+        )
+        .limit(paginated ? page.limit ?? 60 : 2_147_483_647);
+      if (paginated && !forward) thread.reverse();
+      const first = thread[0]?.message;
+      const last = thread.at(-1)?.message;
+      const [edges] = paginated && first && last ? await db.select({
+        hasOlder: sql<boolean>`exists(select 1 from messages m where m.conversation_id = ${conversation.id}
+          and (m.sent_at, m.id) < (${first.sentAt.toISOString()}::timestamptz, ${first.id}::uuid))`,
+        hasNewer: sql<boolean>`exists(select 1 from messages m where m.conversation_id = ${conversation.id}
+          and (m.sent_at, m.id) > (${last.sentAt.toISOString()}::timestamptz, ${last.id}::uuid))`,
+      }).from(conversations).where(eq(conversations.id, conversation.id)) : [];
 
       return {
         id: conversation.id,
@@ -129,6 +173,7 @@ export function registerConversationRoutes(
         adHeadline: conversation.adHeadline,
         aiEnabled: conversation.aiEnabled,
         messages: thread.map((row) => toMessage(row.message, row.aiReplyId)),
+        ...(paginated ? { hasOlder: edges?.hasOlder ?? false, hasNewer: edges?.hasNewer ?? false } : {}),
       };
     },
   );

@@ -1,3 +1,4 @@
+import { seedOrders } from './helpers/kaspi.js';
 import { eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -443,7 +444,7 @@ describe('notes', () => {
 
 describe('the lead total', () => {
   it('counts paid orders only', async () => {
-    await db.insert(orders).values([
+    await seedOrders(db, [
       { agentId, conversationId, amount: '150000.50', currency: 'KZT', status: 'paid' },
       { agentId, conversationId, amount: '20000.50', currency: 'KZT', status: 'paid' },
       { agentId, conversationId, amount: '999999', currency: 'KZT', status: 'pending' },
@@ -459,7 +460,7 @@ describe('the lead total', () => {
   it('leaves an order in another currency out', async () => {
     // Written straight into the table: the order form only ever offers the agent's own
     // currency, and this is the row that proves the sum does not merely assume that.
-    await db.insert(orders).values([
+    await seedOrders(db, [
       { agentId, conversationId, amount: '100000', currency: 'KZT', status: 'paid' },
       { agentId, conversationId, amount: '500', currency: 'USD', status: 'paid' },
     ]);

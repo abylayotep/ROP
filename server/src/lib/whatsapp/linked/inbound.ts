@@ -1,4 +1,5 @@
 import { eq } from 'drizzle-orm';
+import { recordReferral } from '../attribution.js';
 import type { Db } from '../../../db/client.js';
 import { messages, whatsappNumbers } from '../../../db/schema.js';
 import type { TurnDeps } from '../../ai/turn.js';
@@ -80,6 +81,7 @@ export async function applyMessage(
     line.fromMe ? undefined : (line.pushName ?? undefined),
   );
   const conversationId = await upsertConversation(db, number.agentId, number.id, contactId);
+  if (!line.fromMe && line.referral) await recordReferral(db, conversationId, line.referral);
 
   // A socket replays after a reconnect, so the same message arrives more than once. The
   // insert below would drop the duplicate anyway; asking first is what stops us downloading

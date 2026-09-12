@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type { KbGenerationDraftRequest, KbGenerationDraftResponse, KbGenerationProposalUpdateRequest } from '@rakurs/contract';
 import { and, asc, eq, inArray, notLike, sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
-import { kbDrafts, kbGenerationProposals, kbGenerationRuns, kbNotes } from '../../db/schema.js';
+import { kbDrafts, kbGenerationDrafts, kbGenerationProposals, kbGenerationRuns, kbNotes } from '../../db/schema.js';
 import { baseOf, type DraftOp } from '../drafts/ops.js';
 import { ApiError, isDuplicate } from '../errors.js';
 import { BODY_MAX } from './note.js';
@@ -40,7 +40,11 @@ export async function updateGenerationProposal(
       ...(input.path === undefined ? {} : { path: input.path }),
       ...(input.body === undefined ? {} : { body: input.body }),
       ...(input.path === undefined && input.body === undefined ? {} : { fingerprint: fingerprint(nextPath, nextBody) }),
-      ...(input.status === undefined ? {} : { status: input.status }),
+      ...(input.selected === undefined ? {} : { selected: input.selected }),
+      ...(input.status === undefined ? {} : {
+        status: input.status,
+        ...(input.status === 'rejected' ? { selected: false } : {}),
+      }),
       revision: sql`${kbGenerationProposals.revision} + 1`,
       updatedAt: new Date(),
     }).from(kbGenerationRuns).where(and(
@@ -72,9 +76,9 @@ export async function createGenerationDraft(
   return db.transaction(async (tx) => {
     const [run] = await tx.select({ id: kbGenerationRuns.id }).from(kbGenerationRuns).where(and(
       eq(kbGenerationRuns.id, runId), eq(kbGenerationRuns.agentId, agentId),
-    ));
+    )).for('update');
     if (!run) throw new ApiError(404, 'Запуск не найден');
-    const proposals = await tx.select({ proposal: kbGenerationProposals }).from(kbGenerationProposals)
+    const requested = await tx.select({ proposal: kbGenerationProposals }).from(kbGenerationProposals)
       .innerJoin(kbGenerationRuns, and(eq(kbGenerationRuns.id, kbGenerationProposals.runId), eq(kbGenerationRuns.agentId, agentId)))
       .where(and(
         eq(kbGenerationProposals.runId, runId),
@@ -82,10 +86,10 @@ export async function createGenerationDraft(
         notLike(kbGenerationProposals.fingerprint, LEGACY_RAW_FINGERPRINT_PATTERN),
       ))
       .for('update');
-    if (proposals.length !== ids.length) throw new ApiError(404, 'Предложение не найдено');
-    const rows = proposals.map((row) => row.proposal);
-    const existingDraftIds = [...new Set(rows.map((row) => row.draftId).filter((id): id is string => id !== null))];
-    if (existingDraftIds.length === 1 && rows.every((row) => row.status === 'drafted' && row.draftId === existingDraftIds[0])) {
+    if (requested.length !== ids.length) throw new ApiError(404, 'Предложение не найдено');
+    const requestedRows = requested.map((row) => row.proposal);
+    const existingDraftIds = [...new Set(requestedRows.map((row) => row.draftId).filter((id): id is string => id !== null))];
+    if (existingDraftIds.length === 1 && requestedRows.every((row) => row.status === 'drafted' && row.draftId === existingDraftIds[0])) {
       const [draft] = await tx.select({ ops: kbDrafts.ops }).from(kbDrafts).where(eq(kbDrafts.id, existingDraftIds[0]!));
       const allDrafted = await tx.select({ id: kbGenerationProposals.id, revision: kbGenerationProposals.revision, draftOpIndex: kbGenerationProposals.draftOpIndex })
         .from(kbGenerationProposals).where(and(
@@ -104,6 +108,21 @@ export async function createGenerationDraft(
       }).length;
       if (sameIds && sameRevisions && sameTargets) return { draftId: existingDraftIds[0]! };
       throw new ApiError(409, 'Эти предложения уже входят в другой запрос черновика');
+    }
+
+    const selected = await tx.select({ proposal: kbGenerationProposals }).from(kbGenerationProposals)
+      .where(and(
+        eq(kbGenerationProposals.runId, runId),
+        eq(kbGenerationProposals.status, 'pending'),
+        eq(kbGenerationProposals.selected, true),
+        notLike(kbGenerationProposals.fingerprint, LEGACY_RAW_FINGERPRINT_PATTERN),
+      ))
+      .orderBy(asc(kbGenerationProposals.createdAt), asc(kbGenerationProposals.id))
+      .for('update');
+    const rows = selected.map((row) => row.proposal);
+    const selectedIds = rows.map((row) => row.id);
+    if (selectedIds.length !== ids.length || selectedIds.some((id) => !ids.includes(id))) {
+      throw new ApiError(409, 'Выбранные предложения уже изменились');
     }
     if (rows.some((row) => row.status !== 'pending' || row.draftId !== null)) throw new ApiError(409, 'Одно из предложений уже обработано');
     if (rows.some((row) => input.revisions[row.id] !== row.revision)) throw new ApiError(409, 'Одно из предложений уже изменилось');
@@ -127,9 +146,10 @@ export async function createGenerationDraft(
       base,
       createdBy: userId,
     }).returning({ id: kbDrafts.id });
+    await tx.insert(kbGenerationDrafts).values({ runId, draftId: draft!.id });
     for (let index = 0; index < rows.length; index += 1) {
       await tx.update(kbGenerationProposals).set({
-        status: 'drafted', draftId: draft!.id, draftOpIndex: index, updatedAt: new Date(),
+        status: 'drafted', selected: false, draftId: draft!.id, draftOpIndex: index, updatedAt: new Date(),
       }).where(and(
         eq(kbGenerationProposals.id, rows[index]!.id),
         notLike(kbGenerationProposals.fingerprint, LEGACY_RAW_FINGERPRINT_PATTERN),
@@ -196,6 +216,7 @@ export async function createGenerationCategoryDrafts(
         base,
         createdBy: userId,
       }).returning({ id: kbDrafts.id });
+      await tx.insert(kbGenerationDrafts).values({ runId, draftId: draft!.id });
       created.push(draft!.id);
       for (let index = 0; index < groups.length; index += 1) {
         for (const proposal of groups[index]![1]) {

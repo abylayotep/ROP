@@ -512,8 +512,34 @@ export interface KbGenerationRun {
   updatedAt: string;
 }
 
+export interface KbGenerationDraftLink {
+  id: string;
+  title: string;
+  status: 'open' | 'applied' | 'discarded';
+  createdAt: string;
+}
+
+export interface KbGenerationRunError {
+  batchId: string | null;
+  ordinal: number | null;
+  code: string;
+}
+
+export interface KbGenerationClassificationCounts {
+  customer: number;
+  irrelevant: number;
+  uncertain: number;
+}
+
+export interface KbGenerationRunSummary extends KbGenerationRun {
+  classificationCounts: KbGenerationClassificationCounts;
+  excludedBatchCount: number;
+  errors: KbGenerationRunError[];
+  drafts: KbGenerationDraftLink[];
+}
+
 export interface KbGenerationRunPage {
-  items: KbGenerationRun[];
+  items: KbGenerationRunSummary[];
   nextCursor: string | null;
 }
 
@@ -535,11 +561,11 @@ export interface KbGenerationMatch {
 export interface KbGenerationProposal {
   id: string;
   revision: number;
-  kind?: KbGenerationProposalKind;
+  kind: KbGenerationProposalKind;
   path: string;
   body: string;
-  confidence?: KbGenerationConfidence;
-  selected?: boolean;
+  confidence: KbGenerationConfidence;
+  selected: boolean;
   sources: KbGenerationSource[];
   warnings: KbGenerationWarning[];
   matches: KbGenerationMatch[];
@@ -553,10 +579,27 @@ export interface KbGenerationProposalPage {
   nextCursor: string | null;
 }
 
+export interface KbGenerationExclusion {
+  batchId: string;
+  ordinal: number;
+  classification: Extract<KbGenerationClassification, 'irrelevant' | 'uncertain'>;
+  reason: string;
+}
+
+export interface KbGenerationRawFinding {
+  id: string;
+  path: string;
+  body: string;
+  warnings: KbGenerationWarning[];
+  sources: KbGenerationSource[];
+}
+
 export interface KbGenerationRunDetail {
-  run: KbGenerationRun;
+  run: KbGenerationRunSummary;
   proposals: KbGenerationProposalPage;
-  drafts?: { id: string; title: string }[];
+  drafts: KbGenerationDraftLink[];
+  exclusions: KbGenerationExclusion[];
+  rawFindings?: KbGenerationRawFinding[];
 }
 
 export interface KbGenerationProposalUpdateRequest {
@@ -575,6 +618,11 @@ export interface KbGenerationDraftRequest {
 
 export interface KbGenerationDraftResponse {
   draftId: string;
+}
+
+export interface CommunicationStyleSettings {
+  preset: CommunicationStyle;
+  preview: string;
 }
 
 /* ── Агент ──────────────────────────────────────────────────────────────────

@@ -327,7 +327,7 @@ describe('applying a draft', () => {
     const counts = { selectedConversations: 0, selectedMessages: 0, eligibleMessages: 0, eligibleCharacters: 0, skippedAiOrSystem: 0, skippedUnsupported: 0, skippedEmpty: 0, skippedSensitive: 0, skippedOversize: 0, skippedNoSeller: 0 };
     const [run] = await db.insert(kbGenerationRuns).values({ agentId, userId: owner!.id, requestedPreviewId: randomUUID(), requestKey: 'discard-stale', selection, manifest: { messages: [], batches: [] }, counts, modelId: 'model', temperature: '0.30', status: 'completed' }).returning();
     const [batch] = await db.insert(kbGenerationBatches).values({ runId: run!.id, ordinal: 0, manifest: { ordinal: 0, conversationId: randomUUID(), messages: [], characterCount: 0 }, status: 'done' }).returning();
-    const [proposal] = await db.insert(kbGenerationProposals).values({ runId: run!.id, batchId: batch!.id, fingerprint: 'discard-stale', path: 'Delivery', body: 'Two days', sources: [] }).returning();
+    const [proposal] = await db.insert(kbGenerationProposals).values({ runId: run!.id, batchId: batch!.id, fingerprint: 'discard-stale', path: 'Delivery', body: 'Two days', sources: [], selected: true }).returning();
     const input = { proposalIds: [proposal!.id], revisions: { [proposal!.id]: 1 } };
     const draft = await createGenerationDraft(db, agentId, owner!.id, run!.id, input);
 

@@ -69,9 +69,9 @@ describe('knowledge generation workspace schema', () => {
     expectTypeOf<KbGenerationClassification>().toEqualTypeOf<'customer' | 'irrelevant' | 'uncertain'>();
     expectTypeOf<KbGenerationProposalKind>().toEqualTypeOf<'knowledge' | 'script'>();
     expectTypeOf<KbGenerationConfidence>().toEqualTypeOf<'high' | 'review'>();
-    expectTypeOf<KbGenerationProposal>().toHaveProperty('kind').toEqualTypeOf<KbGenerationProposalKind | undefined>();
-    expectTypeOf<KbGenerationProposal>().toHaveProperty('confidence').toEqualTypeOf<KbGenerationConfidence | undefined>();
-    expectTypeOf<KbGenerationProposal>().toHaveProperty('selected').toEqualTypeOf<boolean | undefined>();
+    expectTypeOf<KbGenerationProposal>().toHaveProperty('kind').toEqualTypeOf<KbGenerationProposalKind>();
+    expectTypeOf<KbGenerationProposal>().toHaveProperty('confidence').toEqualTypeOf<KbGenerationConfidence>();
+    expectTypeOf<KbGenerationProposal>().toHaveProperty('selected').toEqualTypeOf<boolean>();
     expectTypeOf<KbGenerationProposalUpdateRequest>().toHaveProperty('selected').toEqualTypeOf<boolean | undefined>();
   });
 });

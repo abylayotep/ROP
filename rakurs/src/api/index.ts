@@ -9,6 +9,8 @@ import type {
   Board,
   CapiEvent,
   CapiSettings,
+  CommunicationStyle,
+  CommunicationStyleSettings,
   CoachMessage,
   CoachProposal,
   CoexistenceConnection,
@@ -100,6 +102,15 @@ export const updateAgent = (
   agentId: string,
   body: { name?: string; description?: string; timezone?: string },
 ) => request<Agent>(`/agents/${agentId}`, { method: 'PATCH', body });
+
+export const getCommunicationStyle = (agentId: string, signal?: AbortSignal) =>
+  request<CommunicationStyleSettings>(`/agents/${agentId}/communication-style`, { signal });
+
+export const updateCommunicationStyle = (agentId: string, preset: CommunicationStyle) =>
+  request<CommunicationStyleSettings>(`/agents/${agentId}/communication-style`, {
+    method: 'PATCH',
+    body: { preset },
+  });
 
 // ── WhatsApp ─────────────────────────────────────────────────────────────────
 
@@ -239,8 +250,19 @@ export const startKnowledgeGeneration = (agentId: string, body: KbGenerationStar
 export const listKnowledgeGenerationRuns = (agentId: string, cursor?: string, signal?: AbortSignal) =>
   request<KbGenerationRunPage>(`${generationPath(agentId)}/runs${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`, { signal });
 
-export const getKnowledgeGenerationRun = (agentId: string, runId: string, signal?: AbortSignal, cursor?: string) =>
-  request<KbGenerationRunDetail>(`${generationPath(agentId)}/runs/${runId}${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`, { signal });
+export const getKnowledgeGenerationRun = (
+  agentId: string,
+  runId: string,
+  signal?: AbortSignal,
+  cursor?: string,
+  includeRawFindings = false,
+) => {
+  const query = new URLSearchParams();
+  if (cursor) query.set('cursor', cursor);
+  if (includeRawFindings) query.set('includeRawFindings', 'true');
+  const suffix = query.size > 0 ? `?${query}` : '';
+  return request<KbGenerationRunDetail>(`${generationPath(agentId)}/runs/${runId}${suffix}`, { signal });
+};
 
 export const cancelKnowledgeGenerationRun = (agentId: string, runId: string) =>
   request<KbGenerationRun>(`${generationPath(agentId)}/runs/${runId}/cancel`, { method: 'POST' });

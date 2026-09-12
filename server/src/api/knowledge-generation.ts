@@ -1,17 +1,24 @@
 import type {
+  KbGenerationDraftLink,
+  KbGenerationExclusion,
   KbGenerationProposal,
   KbGenerationProposalPage,
+  KbGenerationRawFinding,
   KbGenerationRunPage,
   KbGenerationRunDetail,
+  KbGenerationRunSummary,
 } from '@rakurs/contract';
-import { and, desc, eq, inArray, notLike } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, notLike } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
 import {
   conversations,
   kbDrafts,
+  kbGenerationBatches,
+  kbGenerationDrafts,
   kbGenerationProposals,
+  kbGenerationRawFindings,
   kbGenerationRuns,
   kbNotes,
   messages,
@@ -43,6 +50,7 @@ const proposalUpdateBody = z.object({
   revision: z.number().int().positive(),
   path: z.string().optional(),
   body: z.string().optional(),
+  selected: z.boolean().optional(),
   status: z.enum(['pending', 'rejected']).optional(),
 });
 const draftBody = z.object({
@@ -51,6 +59,7 @@ const draftBody = z.object({
   updateTargets: z.record(z.string().uuid(), z.string().uuid()).optional(),
 });
 const PAGE_SIZE = 20;
+const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 
 const cursorOffset = (cursor: unknown): number => {
   if (cursor === undefined) return 0;
@@ -59,6 +68,142 @@ const cursorOffset = (cursor: unknown): number => {
 };
 
 const after = (offset: number, count: number): string | null => count > PAGE_SIZE ? String(offset + PAGE_SIZE) : null;
+
+async function generationDraftLinks(db: Db, agentId: string, runId: string): Promise<KbGenerationDraftLink[]> {
+  const fields = {
+    id: kbDrafts.id,
+    title: kbDrafts.title,
+    status: kbDrafts.status,
+    createdAt: kbDrafts.createdAt,
+  };
+  const [related, historical] = await Promise.all([
+    db.select(fields).from(kbGenerationDrafts)
+      .innerJoin(kbGenerationRuns, and(
+        eq(kbGenerationRuns.id, kbGenerationDrafts.runId),
+        eq(kbGenerationRuns.agentId, agentId),
+      ))
+      .innerJoin(kbDrafts, and(
+        eq(kbDrafts.id, kbGenerationDrafts.draftId),
+        eq(kbDrafts.agentId, agentId),
+      ))
+      .where(eq(kbGenerationDrafts.runId, runId)),
+    db.selectDistinct(fields).from(kbGenerationProposals)
+      .innerJoin(kbGenerationRuns, and(
+        eq(kbGenerationRuns.id, kbGenerationProposals.runId),
+        eq(kbGenerationRuns.agentId, agentId),
+      ))
+      .innerJoin(kbDrafts, and(
+        eq(kbDrafts.id, kbGenerationProposals.draftId),
+        eq(kbDrafts.agentId, agentId),
+      ))
+      .where(and(
+        eq(kbGenerationProposals.runId, runId),
+        notLike(kbGenerationProposals.fingerprint, LEGACY_RAW_FINGERPRINT_PATTERN),
+      )),
+  ]);
+  const byId = new Map([...historical, ...related].map((row) => [row.id, row]));
+  return [...byId.values()].sort((left, right) =>
+    right.createdAt.getTime() - left.createdAt.getTime() || right.id.localeCompare(left.id)).map((row) => ({
+    id: row.id,
+    title: row.title,
+    status: row.status as KbGenerationDraftLink['status'],
+    createdAt: row.createdAt.toISOString(),
+  }));
+}
+
+async function reviewRunSummary(db: Db, agentId: string, runId: string): Promise<KbGenerationRunSummary> {
+  const run = await generationRunSummary(db, runId);
+  const [batches, drafts] = await Promise.all([
+    db.select({
+      id: kbGenerationBatches.id,
+      ordinal: kbGenerationBatches.ordinal,
+      status: kbGenerationBatches.status,
+      classification: kbGenerationBatches.classification,
+      errorCode: kbGenerationBatches.errorCode,
+    }).from(kbGenerationBatches)
+      .innerJoin(kbGenerationRuns, and(
+        eq(kbGenerationRuns.id, kbGenerationBatches.runId),
+        eq(kbGenerationRuns.agentId, agentId),
+      ))
+      .where(eq(kbGenerationBatches.runId, runId)),
+    generationDraftLinks(db, agentId, runId),
+  ]);
+  const classificationCounts = { customer: 0, irrelevant: 0, uncertain: 0 };
+  for (const batch of batches) {
+    const classification = batch.classification ?? (TERMINAL_RUN_STATUSES.has(run.status) ? 'uncertain' : null);
+    if (classification) classificationCounts[classification] += 1;
+  }
+  return {
+    ...run,
+    classificationCounts,
+    excludedBatchCount: classificationCounts.irrelevant + classificationCounts.uncertain,
+    errors: [
+      ...(run.errorCode ? [{ batchId: null, ordinal: null, code: run.errorCode }] : []),
+      ...batches.flatMap((batch) => batch.errorCode ? [{
+        batchId: batch.id,
+        ordinal: batch.ordinal,
+        code: batch.errorCode,
+      }] : []),
+    ],
+    drafts,
+  };
+}
+
+async function exclusions(db: Db, agentId: string, runId: string, runStatus: string): Promise<KbGenerationExclusion[]> {
+  const batches = await db.select({
+    id: kbGenerationBatches.id,
+    ordinal: kbGenerationBatches.ordinal,
+    classification: kbGenerationBatches.classification,
+    reason: kbGenerationBatches.classificationReason,
+  }).from(kbGenerationBatches)
+    .innerJoin(kbGenerationRuns, and(
+      eq(kbGenerationRuns.id, kbGenerationBatches.runId),
+      eq(kbGenerationRuns.agentId, agentId),
+    ))
+    .where(eq(kbGenerationBatches.runId, runId))
+    .orderBy(asc(kbGenerationBatches.ordinal));
+  return batches.flatMap((batch): KbGenerationExclusion[] => {
+    const classification = batch.classification ?? (TERMINAL_RUN_STATUSES.has(runStatus) ? 'uncertain' : null);
+    if (classification === null || classification === 'customer') return [];
+    return [{
+      batchId: batch.id,
+      ordinal: batch.ordinal,
+      classification,
+      reason: batch.reason ?? 'Более ранний запуск',
+    }];
+  });
+}
+
+async function rawFindings(db: Db, agentId: string, runId: string): Promise<KbGenerationRawFinding[]> {
+  const rows = await db.select({ finding: kbGenerationRawFindings }).from(kbGenerationRawFindings)
+    .innerJoin(kbGenerationRuns, and(
+      eq(kbGenerationRuns.id, kbGenerationRawFindings.runId),
+      eq(kbGenerationRuns.agentId, agentId),
+    ))
+    .where(eq(kbGenerationRawFindings.runId, runId))
+    .orderBy(asc(kbGenerationRawFindings.createdAt), asc(kbGenerationRawFindings.id));
+  const sourceIds = [...new Set(rows.flatMap(({ finding }) => finding.sources.map((source) => source.messageId)))];
+  const sourceRows = sourceIds.length === 0 ? [] : await db.select({
+    id: messages.id,
+    conversationId: messages.conversationId,
+    body: messages.body,
+  }).from(messages).innerJoin(conversations, and(
+    eq(conversations.id, messages.conversationId),
+    eq(conversations.agentId, agentId),
+  )).where(inArray(messages.id, sourceIds));
+  const sourceById = new Map(sourceRows.map((row) => [row.id, row]));
+  return rows.map(({ finding }) => ({
+    id: finding.id,
+    path: finding.path,
+    body: finding.body,
+    warnings: finding.warnings,
+    sources: finding.sources.map((source) => ({
+      ...source,
+      excerpt: sourceById.get(source.messageId)?.body?.slice(0, 240) ?? null,
+      available: sourceById.get(source.messageId)?.conversationId === source.conversationId,
+    })),
+  }));
+}
 
 async function proposalPage(db: Db, agentId: string, runId: string, offset: number): Promise<KbGenerationProposalPage> {
   const rows = await db.select({ proposal: kbGenerationProposals }).from(kbGenerationProposals)
@@ -87,8 +232,11 @@ async function proposalPage(db: Db, agentId: string, runId: string, offset: numb
   const items: KbGenerationProposal[] = visible.map((proposal) => ({
     id: proposal.id,
     revision: proposal.revision,
+    kind: proposal.kind,
     path: proposal.path,
     body: proposal.body,
+    confidence: proposal.confidence,
+    selected: proposal.selected,
     sources: proposal.sources.map((source) => {
       const current = sourceById.get(source.messageId);
       return {
@@ -130,7 +278,13 @@ async function oneProposal(db: Db, agentId: string, proposalId: string): Promise
   const [matchedNote] = await db.select({ id: kbNotes.id, path: kbNotes.path, title: kbNotes.title, body: kbNotes.body })
     .from(kbNotes).where(and(eq(kbNotes.agentId, agentId), eq(kbNotes.path, proposal.path)));
   return {
-    id: proposal.id, revision: proposal.revision, path: proposal.path, body: proposal.body,
+    id: proposal.id,
+    revision: proposal.revision,
+    kind: proposal.kind,
+    path: proposal.path,
+    body: proposal.body,
+    confidence: proposal.confidence,
+    selected: proposal.selected,
     sources: proposal.sources.map((source) => ({
       ...source,
       excerpt: sourceById.get(source.messageId)?.body?.slice(0, 240) ?? null,
@@ -185,7 +339,7 @@ export function registerKnowledgeGenerationRoutes(
       .where(eq(kbGenerationRuns.agentId, req.agent!.id))
       .orderBy(desc(kbGenerationRuns.createdAt), desc(kbGenerationRuns.id))
       .limit(PAGE_SIZE + 1).offset(offset);
-    const items = await Promise.all(rows.slice(0, PAGE_SIZE).map((row) => generationRunSummary(db, row.id)));
+    const items = await Promise.all(rows.slice(0, PAGE_SIZE).map((row) => reviewRunSummary(db, req.agent!.id, row.id)));
     return { items, nextCursor: after(offset, rows.length) };
   });
 
@@ -195,22 +349,21 @@ export function registerKnowledgeGenerationRoutes(
     if (!(await db.select({ id: kbGenerationRuns.id }).from(kbGenerationRuns).where(and(eq(kbGenerationRuns.id, runId), eq(kbGenerationRuns.agentId, req.agent!.id))))[0]) {
       throw new ApiError(404, 'Запуск не найден');
     }
-    const run = await generationRunSummary(db, runId);
-    const drafts = await db.selectDistinct({ id: kbDrafts.id, title: kbDrafts.title })
-      .from(kbGenerationProposals)
-      .innerJoin(kbGenerationRuns, and(
-        eq(kbGenerationRuns.id, kbGenerationProposals.runId),
-        eq(kbGenerationRuns.agentId, req.agent!.id),
-      ))
-      .innerJoin(kbDrafts, eq(kbDrafts.id, kbGenerationProposals.draftId))
-      .where(and(
-        eq(kbGenerationProposals.runId, runId),
-        notLike(kbGenerationProposals.fingerprint, LEGACY_RAW_FINGERPRINT_PATTERN),
-      ));
+    const query = z.object({
+      cursor: z.string().optional(),
+      includeRawFindings: z.enum(['true', 'false']).optional(),
+    }).safeParse(req.query);
+    if (!query.success) throw new ApiError(400, 'Некорректные параметры запуска');
+    const run = await reviewRunSummary(db, req.agent!.id, runId);
+    const runExclusions = await exclusions(db, req.agent!.id, runId, run.status);
     return {
       run,
-      proposals: await proposalPage(db, req.agent!.id, runId, cursorOffset((req.query as { cursor?: unknown }).cursor)),
-      drafts,
+      proposals: await proposalPage(db, req.agent!.id, runId, cursorOffset(query.data.cursor)),
+      drafts: run.drafts,
+      exclusions: runExclusions,
+      ...(query.data.includeRawFindings === 'true' ? {
+        rawFindings: await rawFindings(db, req.agent!.id, runId),
+      } : {}),
     };
   });
 

@@ -1,6 +1,7 @@
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
 import type { WhatsappHistoryOverview } from '@rakurs/contract';
 import type { WhatsappHistoryArchivePacket } from '@/api';
 
@@ -36,6 +37,13 @@ import { KnowledgeSourceCards } from './KnowledgeSourceCards';
 
 const text = (node: { children?: unknown[] }): string =>
   (node.children ?? []).map((child) => typeof child === 'string' ? child : text(child as { children?: unknown[] })).join('');
+
+const workspaceCss = readFileSync(new URL('../../screens/knowledge-workspace.css', import.meta.url), 'utf8');
+
+function cssRule(source: string, selector: string): string {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return source.match(new RegExp(`${escaped}\\s*\\{([^}]+)\\}`))?.[1] ?? '';
+}
 
 function render(onOpenRecentHistory = vi.fn(), onFocus = vi.fn()) {
   let renderer: ReactTestRenderer | undefined;
@@ -105,6 +113,26 @@ describe('KnowledgeSourceCards', () => {
     const status = renderer.root.findByProps({ className: 'knowledge-source-card__status' });
     const items = status.findAllByProps({ className: 'knowledge-source-card__status-item' });
     expect(items.map((item) => text(item))).toEqual(['Подключений: 1', '42 чата', 'Обработано']);
+  });
+
+  it('keeps WhatsApp status non-truncating at the narrow breakpoint', () => {
+    const baseStatus = cssRule(workspaceCss, '.knowledge-source-card__status');
+    const narrowStart = workspaceCss.indexOf('@media (max-width: 720px)');
+    const narrowEnd = workspaceCss.indexOf('@media (prefers-reduced-motion: reduce)', narrowStart);
+    const narrowCss = workspaceCss.slice(narrowStart, narrowEnd);
+    const narrowStatus = cssRule(narrowCss, '.knowledge-source-card__status');
+    const narrowItem = cssRule(narrowCss, '.knowledge-source-card__status-item');
+    const statusRules = `${baseStatus}\n${narrowStatus}`;
+
+    expect(narrowStart).toBeGreaterThan(-1);
+    expect(baseStatus).toMatch(/display:\s*flex/);
+    expect(baseStatus).toMatch(/flex-wrap:\s*wrap/);
+    expect(statusRules).not.toMatch(/white-space:\s*nowrap/);
+    expect(statusRules).not.toMatch(/overflow:\s*hidden/);
+    expect(statusRules).not.toMatch(/text-overflow:\s*ellipsis/);
+    expect(narrowStatus).toMatch(/white-space:\s*normal/);
+    expect(narrowStatus).toMatch(/overflow:\s*visible/);
+    expect(narrowItem).toMatch(/overflow-wrap:\s*anywhere/);
   });
 
   it('only points aria-controls at the mounted active panel', () => {

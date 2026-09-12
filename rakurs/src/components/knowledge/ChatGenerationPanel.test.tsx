@@ -1,4 +1,4 @@
-import { useLayoutEffect } from 'react';
+import { useLayoutEffect, type ComponentProps } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -8,6 +8,7 @@ import { ChatGenerationPanel } from './ChatGenerationPanel';
 
 vi.mock('@/api', () => ({
   getKnowledgeGenerationRun: vi.fn(),
+  retryKnowledgeGenerationRun: vi.fn(),
   humanError: (error: Error) => error.message,
 }));
 vi.mock('@/hooks/useApi', () => ({
@@ -16,7 +17,13 @@ vi.mock('@/hooks/useApi', () => ({
 vi.mock('./CommunicationStyleCard', () => ({ CommunicationStyleCard: () => null }));
 vi.mock('./RecentHistoryPreparation', () => ({ RecentHistoryPreparation: () => null }));
 vi.mock('./ProposalWorkspace', () => ({
-  ProposalWorkspace: ({ detail }: { detail: KbGenerationRunDetail }) => <div data-reviewed-run={detail.run.id} />,
+  ProposalWorkspace: ({ detail, onLoadMoreProposals, collectionState }: ComponentProps<typeof import('./ProposalWorkspace').ProposalWorkspace>) => (
+    <div data-reviewed-run={detail.run.id}>
+      <button onClick={onLoadMoreProposals} disabled={collectionState?.proposals?.loading}>Load proposals</button>
+      {collectionState?.proposals?.loading && <span role="status">Loading proposals</span>}
+      {collectionState?.proposals?.error && <span role="alert">{collectionState.proposals.error}</span>}
+    </div>
+  ),
 }));
 
 function runDetail(id: string, status: KbGenerationRunDetail['run']['status']): KbGenerationRunDetail {
@@ -52,10 +59,95 @@ function deferred<T>() {
 
 afterEach(() => {
   vi.useRealTimers();
-  vi.clearAllMocks();
+  vi.resetAllMocks();
 });
 
 describe('ChatGenerationPanel run switching', () => {
+  it('isolates action errors, collection errors, and pending collection work across run switches', async () => {
+    const runA = runDetail('run-a', 'failed');
+    runA.draftsNextCursor = 'draft-page-2';
+    runA.proposals.nextCursor = 'proposal-page-2';
+    const runB = runDetail('run-b', 'completed');
+    runB.proposals.nextCursor = 'proposal-page-2';
+    const pendingA = deferred<KbGenerationRunDetail>();
+    const firstB = deferred<KbGenerationRunDetail>();
+    const retryB = deferred<KbGenerationRunDetail>();
+    const pendingB = deferred<KbGenerationRunDetail>();
+    const getRun = vi.mocked(api.getKnowledgeGenerationRun)
+      .mockResolvedValueOnce(runA)
+      .mockRejectedValueOnce(new Error('A drafts failed'))
+      .mockReturnValueOnce(pendingA.promise)
+      .mockReturnValueOnce(firstB.promise)
+      .mockReturnValueOnce(retryB.promise)
+      .mockReturnValueOnce(pendingB.promise)
+      .mockResolvedValueOnce(runB);
+    vi.mocked(api.retryKnowledgeGenerationRun).mockRejectedValueOnce(new Error('A action failed'));
+    let renderer: ReactTestRenderer | undefined;
+    let firstBCommit = '';
+    function CommitProbe({ runId }: { runId: string }) {
+      useLayoutEffect(() => {
+        if (runId === 'run-b') firstBCommit = JSON.stringify(renderer?.toJSON());
+      }, [runId]);
+      return null;
+    }
+    const panel = (runId: string) => (
+      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+        <ChatGenerationPanel agentId="agent-1" initialRunId={runId} onRunId={() => undefined} />
+        <CommitProbe runId={runId} />
+      </MemoryRouter>
+    );
+    const button = (label: string) => renderer!.root.findAllByType('button').find((node) => node.children.includes(label))!;
+    const output = () => JSON.stringify(renderer!.toJSON());
+    const assertNoStaleState = (value: string) => {
+      expect(value).not.toContain('A action failed');
+      expect(value).not.toContain('A drafts failed');
+      expect(value).not.toContain('A proposals failed');
+      expect(value).not.toContain('Draft from run-a');
+      expect(value).not.toContain('Loading proposals');
+      expect(value).not.toContain('Загружаем черновики…');
+    };
+
+    try {
+      await act(async () => { renderer = create(panel('run-a')); });
+      await act(async () => { button('Повторить незавершённые пакеты').props.onClick(); });
+      await act(async () => { button('Показать ещё черновики').props.onClick(); });
+      await act(async () => { button('Load proposals').props.onClick(); });
+      expect(output()).toContain('A action failed');
+      expect(output()).toContain('A drafts failed');
+      expect(output()).toContain('Loading proposals');
+
+      await act(async () => { renderer!.update(panel('run-b')); });
+      assertNoStaleState(firstBCommit);
+      await act(async () => { firstB.reject(new Error('B load failed')); });
+      assertNoStaleState(output());
+      expect(output()).toContain('B load failed');
+      await act(async () => { button('Повторить загрузку').props.onClick(); });
+      await act(async () => { retryB.resolve(runB); });
+      assertNoStaleState(output());
+      expect(output()).toContain('Draft from run-b');
+      expect(renderer!.root.findByProps({ 'data-reviewed-run': 'run-b' })).toBeDefined();
+      expect(renderer!.root.findAllByProps({ role: 'alert' })).toHaveLength(0);
+      expect(renderer!.root.findAllByProps({ role: 'status' })).toHaveLength(0);
+
+      // B can load the same collection while A's request remains unresolved.
+      await act(async () => { button('Load proposals').props.onClick(); });
+      expect(getRun.mock.calls.map(([, runId]) => runId)).toEqual(['run-a', 'run-a', 'run-a', 'run-b', 'run-b', 'run-b']);
+      expect(output()).toContain('Loading proposals');
+      await act(async () => { pendingA.reject(new Error('A proposals failed')); });
+      expect(output()).not.toContain('A proposals failed');
+      expect(output()).toContain('Loading proposals');
+      await act(async () => { pendingB.reject(new Error('B proposals failed')); });
+      expect(output()).toContain('B proposals failed');
+      expect(output()).not.toContain('Loading proposals');
+      await act(async () => { button('Load proposals').props.onClick(); });
+      expect(renderer!.root.findAllByProps({ role: 'alert' })).toHaveLength(0);
+      expect(renderer!.root.findAllByProps({ role: 'status' })).toHaveLength(0);
+      assertNoStaleState(output());
+    } finally {
+      await act(async () => { renderer?.unmount(); });
+    }
+  });
+
   it('hides A before passive effects, suppresses its poll, and installs B after an explicit retry', async () => {
     vi.useFakeTimers();
     const pollA = deferred<KbGenerationRunDetail>();

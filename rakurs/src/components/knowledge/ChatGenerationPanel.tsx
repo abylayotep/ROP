@@ -1,4 +1,4 @@
-import { useEffect, useReducer, useRef, useState } from 'react';
+import { useEffect, useReducer, useRef, useState, type SetStateAction } from 'react';
 import { Link } from 'react-router-dom';
 import * as api from '@/api';
 import { CommunicationStyleCard } from '@/components/knowledge/CommunicationStyleCard';
@@ -84,6 +84,21 @@ export const generationDetailErrorPresentation = (
   return { automatic, retryLabel: automatic ? null : 'Повторить загрузку' };
 };
 
+function useRunScopedState<T>(scope: object, initialValue: T) {
+  const [stored, setStored] = useState({ scope, value: initialValue });
+  const current = stored.scope === scope;
+  // Reset during render so no committed frame exposes another run's UI state.
+  if (!current) setStored({ scope, value: initialValue });
+  const setValue = (value: SetStateAction<T>) => {
+    setStored((previous) => {
+      // Async callbacks retain their original scope, even after A -> B -> A.
+      if (previous.scope !== scope) return previous;
+      return { scope, value: typeof value === 'function' ? (value as (previous: T) => T)(previous.value) : value };
+    });
+  };
+  return [current ? stored.value : initialValue, setValue] as const;
+}
+
 export function ChatGenerationPanel({
   agentId,
   initialRunId,
@@ -107,17 +122,22 @@ export function ChatGenerationPanel({
   const actionAbort = useRef<AbortController | null>(null);
   const runTarget = useRef(new GenerationRunTarget(initialRunId));
   const detailSnapshot = useRef<KbGenerationRunDetail | null>(null);
-  const loadingCollections = useRef(new Set<GenerationDetailCollection>());
-  const [busy, setBusy] = useState(false);
-  const [detailLoading, setDetailLoading] = useState(initialRunId !== null);
-  const [detailError, setDetailError] = useState<string | null>(null);
-  const [actionError, setActionError] = useState<string | null>(null);
+  const runScope = useRef({ agentId, runId: initialRunId, loadingCollections: new Set<GenerationDetailCollection>() });
+  if (runScope.current.agentId !== agentId || runScope.current.runId !== initialRunId) {
+    runScope.current = { agentId, runId: initialRunId, loadingCollections: new Set<GenerationDetailCollection>() };
+  }
+  const scope = runScope.current;
+  const loadingCollections = scope.loadingCollections;
+  const [busy, setBusy] = useRunScopedState(scope, false);
+  const [detailLoading, setDetailLoading] = useRunScopedState(scope, initialRunId !== null);
+  const [detailError, setDetailError] = useRunScopedState<string | null>(scope, null);
+  const [actionError, setActionError] = useRunScopedState<string | null>(scope, null);
   const [loadedRuns, setLoadedRuns] = useState<KbGenerationRunSummary[] | null>(null);
   const [runsCursor, setRunsCursor] = useState<string | null | undefined>(undefined);
   const [loadingRuns, setLoadingRuns] = useState(false);
   const [runPageError, setRunPageError] = useState<string | null>(null);
-  const [collectionLoading, setCollectionLoading] = useState<GenerationDetailCollection[]>([]);
-  const [collectionErrors, setCollectionErrors] = useState<Partial<Record<GenerationDetailCollection, string>>>({});
+  const [collectionLoading, setCollectionLoading] = useRunScopedState<GenerationDetailCollection[]>(scope, []);
+  const [collectionErrors, setCollectionErrors] = useRunScopedState<Partial<Record<GenerationDetailCollection, string>>>(scope, {});
   const runs = useApi((signal) => api.listKnowledgeGenerationRuns(agentId, undefined, signal), [agentId]);
   const view = generationView(state);
   const visibleRuns = loadedRuns ?? runs.data?.items ?? [];
@@ -282,10 +302,10 @@ export function ChatGenerationPanel({
 
   async function loadCollection(collection: GenerationDetailCollection) {
     const current = state.detail;
-    if (!current || loadingCollections.current.has(collection)) return current;
+    if (!current || loadingCollections.has(collection)) return current;
     const cursor = collectionCursor(current, collection);
     if (cursor === null && !(collection === 'rawFindings' && current.rawFindings === undefined)) return current;
-    loadingCollections.current.add(collection);
+    loadingCollections.add(collection);
     setCollectionLoading((items) => items.includes(collection) ? items : [...items, collection]);
     setCollectionErrors((errors) => ({ ...errors, [collection]: undefined }));
     const startedAt = epoch.current;
@@ -298,7 +318,7 @@ export function ChatGenerationPanel({
       if (startedAt === epoch.current) setCollectionErrors((errors) => ({ ...errors, [collection]: api.humanError(caught) }));
       return current;
     } finally {
-      loadingCollections.current.delete(collection);
+      loadingCollections.delete(collection);
       if (startedAt === epoch.current) setCollectionLoading((items) => items.filter((item) => item !== collection));
     }
   }

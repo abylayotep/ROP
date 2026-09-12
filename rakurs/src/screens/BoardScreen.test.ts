@@ -34,11 +34,11 @@ describe('funnel cards', () => {
     expect(html).not.toContain('@@anna_shop');
     expect(html).toContain('aria-label="Этап сделки @anna_shop"');
   });
-  it('keeps a keyboard-accessible conversation link and stage selector', () => {
+  it('keeps a keyboard-accessible conversation button and stage selector', () => {
     fixture.data = { currency: 'KZT', unsorted: [card], columns: [] };
     const html = render();
     expect(html).toContain('Требуют разбора');
-    expect(html).toContain('href="/a/agent/dialogs?conversation=lead-1"');
+    expect(html).toContain('aria-label="Открыть чат с +7 701 234 56 78"');
     expect(html).toContain('+7 701 234 56 78');
     expect(html).not.toContain('Анна');
     expect(html).toContain('aria-label="Этап сделки +7 701 234 56 78"');

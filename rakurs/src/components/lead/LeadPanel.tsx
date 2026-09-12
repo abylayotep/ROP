@@ -565,6 +565,10 @@ const CRM_FIELDS: Record<string,string> = {
 };
 function CrmDetails({lead}:{lead:Lead}) {
   const crm = lead.crm;
+  const payment = crm?.paymentEvidence === 'confirmed' ? 'Подтверждена'
+    : crm?.paymentEvidence === 'needs_verification' ? 'Требует проверки'
+    : crm?.paymentEvidence === 'awaiting_payment' ? 'Ожидается'
+    : 'Нет подтверждённых данных';
   return <section>
     <div style={{fontWeight:650,marginBottom:8}}>Данные клиента · ИИ</div>
     <p style={label}>{crm?.status === 'needs_key' ? 'Добавьте ключ ИИ в настройках агента для автоматического разбора.'
@@ -577,6 +581,7 @@ function CrmDetails({lead}:{lead:Lead}) {
       </div>)}
       <dt style={{color:'var(--text-dim)'}}>Реклама</dt><dd style={{margin:0,overflowWrap:'anywhere'}}>{lead.adHeadline??'Источник не передан'}</dd>
       <dt style={{color:'var(--text-dim)'}}>ID объявления</dt><dd style={{margin:0,overflowWrap:'anywhere'}}>{lead.sourceId??'Не передан'}</dd>
+      <dt style={{color:'var(--text-dim)'}}>Оплата</dt><dd style={{margin:0,overflowWrap:'anywhere'}}><strong>{payment}</strong>{crm?.paymentEvidenceReason ? <><br /><span style={{color:'var(--text-dim)'}}>{crm.paymentEvidenceReason}</span></> : null}</dd>
     </dl>
   </section>;
 }

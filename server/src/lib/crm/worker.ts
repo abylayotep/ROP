@@ -9,7 +9,7 @@ import { queueLead } from '../capi/enqueue.js';
 import { recordStageMove } from '../funnel-history.js';
 import { decryptSecret } from '../secret-box.js';
 import { hasConfirmedKaspiPayment } from '../kaspi/service.js';
-import { crmPrompt, parseCrmAnalysis, resolveCrmStage, type CheckoutIntent } from './analysis.js';
+import { crmPrompt, parseCrmAnalysis, resolveCrmStage, resolvePaymentEvidence, type CheckoutIntent } from './analysis.js';
 
 export interface CrmDeps {
   model: ModelClient; key: Buffer;
@@ -21,7 +21,8 @@ export type AnalysisResult = 'ready' | 'skipped' | 'failed' | 'checkout';
 const PAGE_SIZE = 100;
 const RECENT_SIZE = 50;
 const leaseDeadline = () => new Date(Date.now() + 120_000);
-const messageColumns = { id: messages.id, author: messages.author, body: messages.body, sentAt: messages.sentAt, createdAt: messages.createdAt };
+const messageColumns = { id: messages.id, author: messages.author, body: messages.body, kind: messages.kind,
+  mediaMime: messages.mediaMime, sentAt: messages.sentAt, createdAt: messages.createdAt };
 
 async function automationAllowed(db: Db, input: AnalyzeInput, purpose: AutomationPurpose) {
   const snapshot = await loadAutomationSnapshot(db,input);
@@ -101,7 +102,9 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
     const completion = await deps.model.complete({ key: decryptSecret(agent.openrouterKey!, deps.key, keyAad(agent.id)),
       model: agent.model, temperature: '0', maxTokens: 2200, messages: [
         { role: 'system', content: crmPrompt(funnel, fields) },
-        { role: 'user', content: JSON.stringify({ currentStageId: conversation.stageId, profile: claimed.profile,
+        { role: 'user', content: JSON.stringify({ previousAnalysis: { summary: claimed.summary,
+          stageId: conversation.stageId, payment: resolvePaymentEvidence(claimed.profile.paymentEvidence,
+            claimed.profile.paymentEvidenceReason, null, paid) }, profile: claimed.profile,
           fields: values.map((v) => ({fieldId:v.fieldId,value:v.value})),
           contact: { name: contact.name, phone: contact.phone }, history: inputHistory }) },
       ] });
@@ -153,6 +156,10 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
         const proof = accept(`profile:${key}`,value);
         if (proof) { profile[key] = value; evidence[`profile:${key}`] = proof; }
       }
+      const paymentEvidence = resolvePaymentEvidence(profile.paymentEvidence, profile.paymentEvidenceReason, analysis.payment, paid);
+      profile.paymentEvidence = paymentEvidence.state;
+      if (paymentEvidence.reason) profile.paymentEvidenceReason = paymentEvidence.reason;
+      else delete profile.paymentEvidenceReason;
       for (const [fieldId,value] of Object.entries(analysis.fields)) {
         const proof = accept(`field:${fieldId}`,value);
         if (!proof) continue;

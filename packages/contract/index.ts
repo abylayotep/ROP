@@ -239,7 +239,8 @@ export interface Order {
 }
 
 export interface Lead {
-  crm?: { status: string; summary: string | null; profile: Record<string, string>; error: string | null; analyzedAt: string | null };
+  crm?: { status: string; summary: string | null; profile: Record<string, string>; error: string | null; analyzedAt: string | null;
+    paymentEvidence: 'unknown' | 'awaiting_payment' | 'needs_verification' | 'confirmed'; paymentEvidenceReason: string | null };
   sourceId?: string | null;
   sourceType?: string | null;
   conversationId: string;

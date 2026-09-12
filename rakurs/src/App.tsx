@@ -1,4 +1,4 @@
-import { Navigate, Route, Routes } from 'react-router-dom';
+import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { Layout } from '@/components/layout/Layout';
 import { SECTIONS } from '@/lib/sections';
 import { AgentScreen } from '@/screens/AgentScreen';
@@ -8,7 +8,6 @@ import { OrdersScreen } from '@/screens/OrdersScreen';
 import { BoardScreen } from '@/screens/BoardScreen';
 import { CoachScreen } from '@/screens/CoachScreen';
 import { CustomersScreen } from '@/screens/CustomersScreen';
-import { DialogsScreen } from '@/screens/DialogsScreen';
 import { DraftScreen } from '@/screens/DraftScreen';
 import { IntegrationsScreen } from '@/screens/IntegrationsScreen';
 import { KnowledgeScreen } from '@/screens/KnowledgeScreen';
@@ -63,8 +62,6 @@ function AuthGate() {
                 <AgentSettingsScreen />
               ) : section.path === 'integrations' ? (
                 <IntegrationsScreen />
-              ) : section.path === 'dialogs' ? (
-                <DialogsScreen />
               ) : section.path === 'funnel' ? (
                 <BoardScreen />
               ) : section.path === 'orders' ? (
@@ -85,8 +82,14 @@ function AuthGate() {
             }
           />
         ))}
+        <Route path="dialogs" element={<LegacyDialogsRedirect />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );
+}
+
+function LegacyDialogsRedirect() {
+  const location = useLocation();
+  return <Navigate to={`../funnel${location.search}`} replace />;
 }

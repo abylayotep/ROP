@@ -210,7 +210,7 @@ export function DialogsScreen() {
                   keep the old messages on screen until the new fetch resolves, and any
                   text left in the composer would still be sitting there, ready to be sent
                   to the wrong person. */}
-              <Thread
+              <ConversationThreadView
                 key={`${selected}:${targetMessageId ?? ''}`}
                 agentId={agent.id}
                 conversationId={selected}
@@ -237,7 +237,7 @@ export function DialogsScreen() {
   );
 }
 
-function Thread({
+export function ConversationThreadView({
   agentId,
   conversationId,
   targetMessageId,

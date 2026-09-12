@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseCrmAnalysis, resolveCrmStage } from '../src/lib/crm/analysis.js';
+import { crmPrompt, parseCrmAnalysis, resolveCrmStage, resolvePaymentEvidence } from '../src/lib/crm/analysis.js';
 
 const messageId = '8a81e6fe-95f7-4f90-8314-e83830862921';
 const history = [{ id: messageId, author: 'client', body: 'Меня зовут Айгуль. Алматы. Закажу два фильтра, отправьте счёт.' }];
@@ -75,4 +75,25 @@ it('ignores malformed optional checkout without discarding a valid stage', () =>
   expect(result.profile).toEqual({});
   expect(result.fields).toEqual({});
   expect(result.checkout).toBeNull();
+});
+
+it('grounds unverified payment evidence without treating it as confirmation', () => {
+  const result = parseCrmAnalysis(output({ payment: {
+    state: 'needs_verification', messageId, quote: 'отправьте счёт', reason: 'Клиент сообщил об оплате',
+  } }), history, []);
+  expect(result.payment).toEqual({ state: 'needs_verification', reason: 'Клиент сообщил об оплате', messageId });
+  expect(resolveCrmStage(stages, 'paid', false)?.id).toBe('ordered');
+});
+
+it('describes prior analysis as revisable context and distinguishes attachment metadata', () => {
+  const prompt = crmPrompt(stages, []);
+  expect(prompt).toContain('previous analysis');
+  expect(prompt).toContain('attachment metadata');
+  expect(prompt).toContain('absence of a receipt does not prove nonpayment');
+});
+
+it('never retains a confirmed label without current provider confirmation', () => {
+  expect(resolvePaymentEvidence('confirmed', 'old label', null, false)).toEqual({ state: 'unknown', reason: null });
+  expect(resolvePaymentEvidence('needs_verification', 'Проверьте чек', null, false)).toEqual({ state: 'needs_verification', reason: 'Проверьте чек' });
+  expect(resolvePaymentEvidence('unknown', null, null, true)).toEqual({ state: 'confirmed', reason: 'Оплата подтверждена Kaspi POS.' });
 });

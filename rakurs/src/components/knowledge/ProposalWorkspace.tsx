@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import * as api from '@/api';
+import { tabAfterKey } from '@/components/knowledge/KnowledgeWorkspace';
 import { useToast } from '@/components/ui/Toast';
 import { Async, Skeleton } from '@/components/ui/states';
 import { useApi } from '@/hooks/useApi';
@@ -24,6 +25,51 @@ const CLASSIFICATION: Record<string, string> = {
 type ProposalUpdate = typeof api.updateKnowledgeGenerationProposal;
 type ProposalPatch = { path?: string; body?: string; status?: 'pending' | 'rejected' };
 type DraftCreate = typeof api.createKnowledgeGenerationDraft;
+const MAX_SELECTED_PROPOSALS = 20;
+
+export interface ProposalCollectionState {
+  loading?: boolean;
+  error?: string | null;
+  onRetry?: () => void;
+}
+
+export const reconcileDraftField = (current: string, previousServer: string, nextServer: string): string =>
+  current === previousServer ? nextServer : current;
+
+export const planVisibleSelection = (
+  proposals: readonly KbGenerationProposal[],
+  kind: KbGenerationProposalKind,
+  limit = MAX_SELECTED_PROPOSALS,
+  visibleIds?: ReadonlySet<string>,
+): KbGenerationProposal[] => {
+  const selected = proposals.filter((proposal) => proposal.status === 'pending' && proposal.selected).length;
+  const remaining = Math.max(0, limit - selected);
+  return proposals
+    .filter((proposal) => proposal.kind === kind && proposal.status === 'pending' && !proposal.selected && (!visibleIds || visibleIds.has(proposal.id)))
+    .slice(0, remaining);
+};
+
+export const planClearSelection = (proposals: readonly KbGenerationProposal[]): KbGenerationProposal[] =>
+  proposals.filter((proposal) => proposal.status === 'pending' && proposal.selected);
+
+export const canAddSelection = (
+  proposals: readonly KbGenerationProposal[],
+  proposal: KbGenerationProposal,
+  limit = MAX_SELECTED_PROPOSALS,
+): boolean => proposal.selected || proposals.filter((item) => item.status === 'pending' && item.selected).length < limit;
+
+export class ProposalMutationQueue {
+  private readonly pending = new Map<string, Promise<unknown>>();
+
+  run<T>(proposalId: string, mutation: () => Promise<T>): Promise<T> {
+    const previous = this.pending.get(proposalId);
+    const current = previous ? previous.catch(() => undefined).then(mutation) : mutation();
+    this.pending.set(proposalId, current);
+    return current.finally(() => {
+      if (this.pending.get(proposalId) === current) this.pending.delete(proposalId);
+    });
+  }
+}
 
 export const patchGenerationProposal = (
   agentId: string,
@@ -41,6 +87,9 @@ export function createDraftFromPersistedSelection(
 ) {
   const chosen = proposals.filter((proposal) => proposal.status === 'pending' && proposal.selected);
   if (chosen.length === 0) return Promise.resolve(null);
+  if (chosen.length > MAX_SELECTED_PROPOSALS) {
+    return Promise.reject(new Error(`В один черновик можно добавить не больше ${MAX_SELECTED_PROPOSALS} предложений`));
+  }
   return create(agentId, runId, {
     proposalIds: chosen.map((proposal) => proposal.id),
     revisions: Object.fromEntries(chosen.map((proposal) => [proposal.id, proposal.revision])),
@@ -87,6 +136,7 @@ export function ProposalWorkspace({
   onLoadMoreExclusions,
   onLoadRawFindings,
   onLoadMoreRawFindings,
+  collectionState = {},
   readOnly = false,
 }: {
   agentId: string;
@@ -97,6 +147,7 @@ export function ProposalWorkspace({
   onLoadMoreExclusions?: () => void;
   onLoadRawFindings?: () => void;
   onLoadMoreRawFindings?: () => void;
+  collectionState?: Partial<Record<'proposals' | 'exclusions' | 'rawFindings', ProposalCollectionState>>;
   readOnly?: boolean;
 }) {
   const toast = useToast();
@@ -106,7 +157,16 @@ export function ProposalWorkspace({
   const [updating, setUpdating] = useState<string[]>([]);
   const [blocked, setBlocked] = useState<string[]>([]);
   const [drafting, setDrafting] = useState(false);
-  const proposals = detail.proposals.items;
+  const [selectionBusy, setSelectionBusy] = useState(false);
+  const [optimisticSelections, setOptimisticSelections] = useState<Record<string, boolean>>({});
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const mutationQueue = useRef(new ProposalMutationQueue());
+  const selectionLock = useRef(false);
+  const proposals = useMemo(() => detail.proposals.items.map((proposal) => (
+    optimisticSelections[proposal.id] === undefined
+      ? proposal
+      : { ...proposal, selected: optimisticSelections[proposal.id]! }
+  )), [detail.proposals.items, optimisticSelections]);
   const visible = useMemo(() => proposals.filter((proposal) => proposal.kind === kind), [kind, proposals]);
   const selectedCount = proposals.filter((proposal) => proposal.status === 'pending' && proposal.selected).length;
   const visibleEligible = visible.filter((proposal) => proposal.status === 'pending');
@@ -117,28 +177,86 @@ export function ProposalWorkspace({
       : current.filter((id) => id !== proposalId));
   }, []);
 
-  async function select(proposal: KbGenerationProposal, selected: boolean) {
-    if (readOnly || proposal.status !== 'pending' || updating.includes(proposal.id)) return;
-    setUpdating((current) => [...current, proposal.id]);
+  const setProposalUpdating = useCallback((proposalId: string, isUpdating: boolean) => {
+    setUpdating((current) => isUpdating
+      ? current.includes(proposalId) ? current : [...current, proposalId]
+      : current.filter((id) => id !== proposalId));
+  }, []);
+
+  async function persistSelection(proposal: KbGenerationProposal, selected: boolean) {
+    setProposalUpdating(proposal.id, true);
+    setOptimisticSelections((current) => ({ ...current, [proposal.id]: selected }));
     try {
-      await persistProposalSelection({
-        agentId,
-        proposal,
-        selected,
-        onOptimistic: onChanged,
-        onCommitted: onChanged,
-        onRollback: onChanged,
-      });
+      const committed = await mutationQueue.current.run(proposal.id, () => (
+        api.updateKnowledgeGenerationProposal(agentId, proposal.id, { revision: proposal.revision, selected })
+      ));
+      onChanged(committed);
+      return committed;
     } catch (error) {
       toast.fail(error, 'Не удалось сохранить выбор. Предыдущее состояние восстановлено.');
+      return null;
+    } finally {
+      setOptimisticSelections((current) => {
+        const next = { ...current };
+        delete next[proposal.id];
+        return next;
+      });
+      setProposalUpdating(proposal.id, false);
+    }
+  }
+
+  async function select(proposal: KbGenerationProposal, selected: boolean) {
+    if (readOnly || proposal.status !== 'pending' || updating.includes(proposal.id) || selectionLock.current) return;
+    selectionLock.current = true;
+    setSelectionBusy(true);
+    setUpdating((current) => [...current, proposal.id]);
+    try {
+      const complete = onLoadAllProposals ? await onLoadAllProposals() : proposals;
+      const current = complete.find((item) => item.id === proposal.id) ?? proposal;
+      if (selected && !canAddSelection(complete, current)) {
+        toast.fail(new Error(`Можно выбрать не больше ${MAX_SELECTED_PROPOSALS} предложений`));
+        return;
+      }
+      await persistSelection(current, selected);
+    } catch (error) {
+      toast.fail(error, 'Не удалось проверить сохранённый выбор.');
     } finally {
       setUpdating((current) => current.filter((id) => id !== proposal.id));
+      selectionLock.current = false;
+      setSelectionBusy(false);
     }
   }
 
   async function setVisibleSelection(selected: boolean) {
-    const changes = visibleEligible.filter((proposal) => proposal.selected !== selected);
-    await Promise.all(changes.map((proposal) => select(proposal, selected)));
+    if (readOnly || selectionLock.current) return;
+    selectionLock.current = true;
+    setSelectionBusy(true);
+    try {
+      const complete = onLoadAllProposals ? await onLoadAllProposals() : proposals;
+      const changes = selected
+        ? planVisibleSelection(complete, kind, MAX_SELECTED_PROPOSALS, new Set(visible.map((proposal) => proposal.id)))
+        : planClearSelection(complete);
+      for (const proposal of changes) await persistSelection(proposal, selected);
+    } catch (error) {
+      toast.fail(error, 'Не удалось проверить сохранённый выбор.');
+    } finally {
+      selectionLock.current = false;
+      setSelectionBusy(false);
+    }
+  }
+
+  async function updateProposal(proposal: KbGenerationProposal, values: ProposalPatch): Promise<boolean> {
+    setProposalUpdating(proposal.id, true);
+    try {
+      const current = await mutationQueue.current.run(proposal.id, () => patchGenerationProposal(agentId, proposal, values));
+      onChanged(current);
+      return true;
+    } catch (error) {
+      toast.fail(error);
+      return false;
+    } finally {
+      setProposalUpdating(proposal.id, false);
+    }
   }
 
   async function makeDraft() {
@@ -173,10 +291,20 @@ export function ProposalWorkspace({
         ] as const).map(([id, label]) => (
           <button
             key={id}
+            id={`proposal-tab-${id}`}
             type="button"
             role="tab"
             aria-selected={kind === id}
+            aria-controls={`proposal-panel-${id}`}
+            tabIndex={kind === id ? 0 : -1}
             onClick={() => setKind(id)}
+            onKeyDown={(event: KeyboardEvent<HTMLButtonElement>) => {
+              const next = tabAfterKey(['knowledge', 'script'], id, event.key);
+              if (!next) return;
+              event.preventDefault();
+              setKind(next as KbGenerationProposalKind);
+              document.getElementById(`proposal-tab-${next}`)?.focus();
+            }}
           >
             <span>{label}</span>
             <b>{proposals.filter((proposal) => proposal.kind === id).length}</b>
@@ -184,45 +312,60 @@ export function ProposalWorkspace({
         ))}
       </nav>
 
-      {!readOnly && visibleEligible.length > 0 && (
-        <div className="proposal-workspace__bulk" aria-label="Групповой выбор">
-          <button type="button" className="btn-link" disabled={updating.length > 0} onClick={() => void setVisibleSelection(true)}>
-            Выбрать видимые
-          </button>
-          <button type="button" className="btn-link" disabled={updating.length > 0} onClick={() => void setVisibleSelection(false)}>
-            Очистить выбор
-          </button>
-          <span>Выбор сохраняется сразу</span>
-        </div>
-      )}
+      <div
+        id={`proposal-panel-${kind}`}
+        role="tabpanel"
+        aria-labelledby={`proposal-tab-${kind}`}
+      >
+        {!readOnly && visibleEligible.length > 0 && (
+          <div className="proposal-workspace__bulk" aria-label="Групповой выбор">
+            <button type="button" className="btn-link" disabled={selectionBusy || updating.length > 0 || selectedCount >= MAX_SELECTED_PROPOSALS} onClick={() => void setVisibleSelection(true)}>
+              Выбрать видимые
+            </button>
+            <button type="button" className="btn-link" disabled={selectionBusy || updating.length > 0 || selectedCount === 0} onClick={() => void setVisibleSelection(false)}>
+              Очистить выбор во всём запуске
+            </button>
+            <span>{selectionBusy ? 'Сохраняем выбор…' : `Выбор сохраняется сразу · максимум ${MAX_SELECTED_PROPOSALS}`}</span>
+          </div>
+        )}
 
-      {visible.length === 0 ? (
-        <div className="knowledge-inline-state proposal-workspace__empty">
-          <p>{kind === 'knowledge' ? 'Новых фактов для базы знаний нет.' : 'Новых фраз для скрипта продаж нет.'}</p>
-          <span>Ничего не опубликовано автоматически.</span>
-        </div>
-      ) : (
-        <div className="proposal-list">
-          {visible.map((proposal) => (
-            <ProposalCard
-              key={`${proposal.id}:${proposal.revision}`}
-              agentId={agentId}
-              proposal={proposal}
-              target={targets[proposal.id] ?? ''}
-              updating={updating.includes(proposal.id)}
-              onSelect={(selected) => void select(proposal, selected)}
-              onTarget={(noteId) => setTargets((current) => ({ ...current, [proposal.id]: noteId }))}
-              onChanged={onChanged}
-              onBlocked={setProposalBlocked}
-              readOnly={readOnly}
-            />
-          ))}
-        </div>
-      )}
+        {visible.length === 0 ? (
+          <div className="knowledge-inline-state proposal-workspace__empty">
+            <p>{kind === 'knowledge' ? 'Новых фактов для базы знаний нет.' : 'Новых фраз для скрипта продаж нет.'}</p>
+            <span>Ничего не опубликовано автоматически.</span>
+          </div>
+        ) : (
+          <div className="proposal-list">
+            {visible.map((proposal) => (
+              <ProposalCard
+                key={proposal.id}
+                agentId={agentId}
+                proposal={proposal}
+                target={targets[proposal.id] ?? ''}
+                updating={updating.includes(proposal.id)}
+                selectionDisabled={selectionBusy || (selectedCount >= MAX_SELECTED_PROPOSALS && !proposal.selected)}
+                editing={editingId === proposal.id}
+                editingDisabled={editingId !== null && editingId !== proposal.id}
+                onEdit={(editing) => setEditingId(editing ? proposal.id : null)}
+                onSelect={(selected) => void select(proposal, selected)}
+                onTarget={(noteId) => setTargets((current) => ({ ...current, [proposal.id]: noteId }))}
+                onUpdate={(values) => updateProposal(proposal, values)}
+                onBlocked={setProposalBlocked}
+                readOnly={readOnly}
+              />
+            ))}
+          </div>
+        )}
 
-      {detail.proposals.nextCursor && onLoadMoreProposals && (
-        <button type="button" className="knowledge-load-more" onClick={onLoadMoreProposals}>Показать ещё предложения</button>
-      )}
+        {collectionState.proposals?.error && (
+          <CollectionError message={collectionState.proposals.error} onRetry={collectionState.proposals.onRetry} />
+        )}
+        {detail.proposals.nextCursor && onLoadMoreProposals && (
+          <button type="button" className="knowledge-load-more" disabled={collectionState.proposals?.loading} onClick={onLoadMoreProposals}>
+            {collectionState.proposals?.loading ? 'Загружаем предложения…' : 'Показать ещё предложения'}
+          </button>
+        )}
+      </div>
 
       {!readOnly && (
         <footer className="proposal-workspace__footer">
@@ -233,7 +376,7 @@ export function ProposalWorkspace({
           <button
             type="button"
             className="btn-accent"
-            disabled={drafting || (selectedCount === 0 && detail.proposals.nextCursor === null) || blocked.length > 0 || updating.length > 0}
+            disabled={drafting || selectionBusy || (selectedCount === 0 && detail.proposals.nextCursor === null) || blocked.length > 0 || updating.length > 0}
             onClick={() => void makeDraft()}
           >
             {drafting ? 'Собираем…' : selectedCount > 0 ? `Собрать новый черновик · ${selectedCount}` : 'Собрать новый черновик'}
@@ -246,6 +389,7 @@ export function ProposalWorkspace({
         onLoadMoreExclusions={onLoadMoreExclusions}
         onLoadRawFindings={onLoadRawFindings}
         onLoadMoreRawFindings={onLoadMoreRawFindings}
+        collectionState={collectionState}
       />
     </section>
   );
@@ -256,9 +400,13 @@ function ProposalCard({
   proposal,
   target,
   updating,
+  selectionDisabled,
+  editing,
+  editingDisabled,
+  onEdit,
   onSelect,
   onTarget,
-  onChanged,
+  onUpdate,
   onBlocked,
   readOnly,
 }: {
@@ -266,32 +414,40 @@ function ProposalCard({
   proposal: KbGenerationProposal;
   target: string;
   updating: boolean;
+  selectionDisabled: boolean;
+  editing: boolean;
+  editingDisabled: boolean;
+  onEdit: (editing: boolean) => void;
   onSelect: (selected: boolean) => void;
   onTarget: (noteId: string) => void;
-  onChanged: (proposal: KbGenerationProposal) => void;
+  onUpdate: (values: ProposalPatch) => Promise<boolean>;
   onBlocked: (proposalId: string, blocked: boolean) => void;
   readOnly: boolean;
 }) {
-  const toast = useToast();
   const [path, setPath] = useState(proposal.path);
   const [body, setBody] = useState(proposal.body);
-  const [busy, setBusy] = useState(false);
+  const previousServer = useRef(proposal);
   const rejected = proposal.status === 'rejected';
   const editable = proposal.status === 'pending' && !readOnly;
   const dirty = path !== proposal.path || body !== proposal.body;
 
-  useEffect(() => onBlocked(proposal.id, dirty || busy), [proposal.id, dirty, busy, onBlocked]);
+  useEffect(() => {
+    const previous = previousServer.current;
+    setPath((current) => reconcileDraftField(current, previous.path, proposal.path));
+    setBody((current) => reconcileDraftField(current, previous.body, proposal.body));
+    previousServer.current = proposal;
+  }, [proposal]);
 
-  async function update(values: ProposalPatch) {
-    setBusy(true);
-    try {
-      const updated = await patchGenerationProposal(agentId, proposal, values);
-      onChanged(updated);
-    } catch (error) {
-      toast.fail(error);
-    } finally {
-      setBusy(false);
-    }
+  useEffect(() => onBlocked(proposal.id, editing && dirty), [proposal.id, editing, dirty, onBlocked]);
+
+  async function save(values: ProposalPatch) {
+    if (await onUpdate(values)) onEdit(false);
+  }
+
+  function cancelEdit() {
+    setPath(proposal.path);
+    setBody(proposal.body);
+    onEdit(false);
   }
 
   return (
@@ -304,7 +460,7 @@ function ProposalCard({
                 type="checkbox"
                 aria-label={`Добавить ${proposal.path} в черновик`}
                 checked={proposal.selected}
-                disabled={!editable || updating}
+                disabled={!editable || updating || selectionDisabled}
                 onChange={(event) => onSelect(event.target.checked)}
               />
               <span>{updating ? 'Сохраняем…' : 'Добавить'}</span>
@@ -318,14 +474,23 @@ function ProposalCard({
         <span className="proposal-card__source-count">{proposal.sources.length} {sourceWord(proposal.sources.length)}</span>
       </header>
 
-      <label className="proposal-field">
-        <span>Путь</span>
-        <input aria-label="Путь заметки" value={path} disabled={!editable} onChange={(event) => setPath(event.target.value)} />
-      </label>
-      <label className="proposal-field">
-        <span>Текст</span>
-        <textarea aria-label="Текст предложения" value={body} disabled={!editable} onChange={(event) => setBody(event.target.value)} rows={4} />
-      </label>
+      {editing ? (
+        <div className="proposal-card__editor">
+          <label className="proposal-field">
+            <span>Путь</span>
+            <input aria-label="Путь заметки" value={path} disabled={!editable || updating} onChange={(event) => setPath(event.target.value)} />
+          </label>
+          <label className="proposal-field">
+            <span>Текст</span>
+            <textarea aria-label="Текст предложения" value={body} disabled={!editable || updating} onChange={(event) => setBody(event.target.value)} rows={4} />
+          </label>
+        </div>
+      ) : (
+        <div className="proposal-card__copy">
+          <h3>{proposal.path}</h3>
+          <p>{proposal.body}</p>
+        </div>
+      )}
 
       {proposal.warnings.length > 0 && (
         <div className="proposal-warnings" role="note">
@@ -350,7 +515,7 @@ function ProposalCard({
       {proposal.matches.length > 0 && (
         <label className="proposal-field proposal-field--compact">
           <span>Существующая заметка</span>
-          <select value={target} disabled={!editable} onChange={(event) => onTarget(event.target.value)}>
+          <select value={target} disabled={!editable || updating} onChange={(event) => onTarget(event.target.value)}>
             <option value="">Создать новую</option>
             {proposal.matches.map((match) => <option key={match.noteId} value={match.noteId}>{match.path}{match.exact ? ' · точное совпадение' : ''}</option>)}
           </select>
@@ -360,8 +525,14 @@ function ProposalCard({
 
       {!readOnly && (editable || rejected) && (
         <footer className="proposal-card__actions">
-          {editable && <button type="button" className="btn-sm" disabled={busy || !dirty} onClick={() => void update({ path, body })}>Сохранить правки</button>}
-          <button type="button" className="btn-quiet" disabled={busy} onClick={() => void update({ status: rejected ? 'pending' : 'rejected' })}>
+          {editable && !editing && <button type="button" className="btn-sm" disabled={updating || editingDisabled} onClick={() => onEdit(true)}>Изменить</button>}
+          {editable && editing && (
+            <>
+              <button type="button" className="btn-sm" disabled={updating || !dirty} onClick={() => void save({ path, body })}>Сохранить правки</button>
+              <button type="button" className="btn-quiet" disabled={updating} onClick={cancelEdit}>Отмена</button>
+            </>
+          )}
+          <button type="button" className="btn-quiet" disabled={updating || (editing && dirty)} onClick={() => void save({ status: rejected ? 'pending' : 'rejected' })}>
             {rejected ? 'Вернуть на проверку' : 'Отклонить'}
           </button>
         </footer>
@@ -375,11 +546,13 @@ function AuditSection({
   onLoadMoreExclusions,
   onLoadRawFindings,
   onLoadMoreRawFindings,
+  collectionState,
 }: {
   detail: KbGenerationRunDetail;
   onLoadMoreExclusions?: () => void;
   onLoadRawFindings?: () => void;
   onLoadMoreRawFindings?: () => void;
+  collectionState: Partial<Record<'proposals' | 'exclusions' | 'rawFindings', ProposalCollectionState>>;
 }) {
   return (
     <section className="generation-audit" aria-labelledby="generation-audit-title">
@@ -399,14 +572,21 @@ function AuditSection({
           ))}
         </ol>
       )}
+      {collectionState.exclusions?.error && (
+        <CollectionError message={collectionState.exclusions.error} onRetry={collectionState.exclusions.onRetry} />
+      )}
       {detail.exclusionsNextCursor && onLoadMoreExclusions && (
-        <button type="button" className="knowledge-load-more" onClick={onLoadMoreExclusions}>Показать ещё исключения</button>
+        <button type="button" className="knowledge-load-more" disabled={collectionState.exclusions?.loading} onClick={onLoadMoreExclusions}>
+          {collectionState.exclusions?.loading ? 'Загружаем исключения…' : 'Показать ещё исключения'}
+        </button>
       )}
 
       <details className="raw-findings">
         <summary>Исходные находки</summary>
         {detail.rawFindings === undefined ? (
-          <button type="button" className="btn-sm" onClick={onLoadRawFindings}>Загрузить исходные находки</button>
+          <button type="button" className="btn-sm" disabled={collectionState.rawFindings?.loading} onClick={onLoadRawFindings}>
+            {collectionState.rawFindings?.loading ? 'Загружаем находки…' : 'Загрузить исходные находки'}
+          </button>
         ) : detail.rawFindings.length === 0 ? (
           <p>Исходных находок нет.</p>
         ) : (
@@ -415,16 +595,41 @@ function AuditSection({
               <article key={finding.id}>
                 <b>{finding.path}</b>
                 <p>{finding.body}</p>
-                <span>{finding.sources.length} {sourceWord(finding.sources.length)}</span>
+                {finding.warnings.length > 0 && (
+                  <div className="proposal-warnings" role="note">
+                    {finding.warnings.map((warning) => <span key={warning}>{WARNING[warning] ?? warning}</span>)}
+                  </div>
+                )}
+                <div className="proposal-sources" aria-label="Источники исходной находки">
+                  {finding.sources.map((source, index) => source.available ? (
+                    <Link key={source.messageId} to={`../dialogs?conversation=${encodeURIComponent(source.conversationId)}&message=${encodeURIComponent(source.messageId)}`}>
+                      Источник {index + 1} · {new Date(source.sentAt).toLocaleDateString('ru-RU')}
+                    </Link>
+                  ) : <span key={source.messageId}>Источник {index + 1} недоступен</span>)}
+                </div>
               </article>
             ))}
           </div>
         )}
+        {collectionState.rawFindings?.error && (
+          <CollectionError message={collectionState.rawFindings.error} onRetry={collectionState.rawFindings.onRetry} />
+        )}
         {detail.rawFindingsNextCursor && onLoadMoreRawFindings && (
-          <button type="button" className="knowledge-load-more" onClick={onLoadMoreRawFindings}>Показать ещё находки</button>
+          <button type="button" className="knowledge-load-more" disabled={collectionState.rawFindings?.loading} onClick={onLoadMoreRawFindings}>
+            {collectionState.rawFindings?.loading ? 'Загружаем находки…' : 'Показать ещё находки'}
+          </button>
         )}
       </details>
     </section>
+  );
+}
+
+function CollectionError({ message, onRetry }: { message: string; onRetry?: () => void }) {
+  return (
+    <div className="knowledge-collection-error" role="alert">
+      <span>{message}</span>
+      {onRetry && <button type="button" className="btn-sm" onClick={onRetry}>Повторить</button>}
+    </div>
   );
 }
 

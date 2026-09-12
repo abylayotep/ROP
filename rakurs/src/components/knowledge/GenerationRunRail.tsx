@@ -27,6 +27,8 @@ export function GenerationRunRail({
   onSelect,
   onRetry,
   onLoadMore,
+  loadMoreError,
+  onRetryLoadMore,
 }: {
   runs: readonly KbGenerationRunSummary[];
   activeRunId: string | null;
@@ -37,6 +39,8 @@ export function GenerationRunRail({
   onSelect: (runId: string) => void;
   onRetry: () => void;
   onLoadMore: () => void;
+  loadMoreError?: string | null;
+  onRetryLoadMore?: () => void;
 }) {
   return (
     <aside className="generation-rail" aria-label="История запусков">
@@ -103,8 +107,11 @@ export function GenerationRunRail({
           {loadingMore ? 'Загружаем…' : 'Показать ещё запусков'}
         </button>
       )}
-      {error !== undefined && runs.length > 0 && (
-        <button type="button" className="generation-rail__retry" onClick={onRetry}>Повторить загрузку</button>
+      {loadMoreError && runs.length > 0 && (
+        <div className="generation-rail__page-error" role="alert">
+          <span>{loadMoreError}</span>
+          <button type="button" className="generation-rail__retry" onClick={onRetryLoadMore ?? onLoadMore}>Повторить</button>
+        </div>
       )}
     </aside>
   );

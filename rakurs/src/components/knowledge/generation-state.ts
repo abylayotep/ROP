@@ -60,7 +60,9 @@ export function reduceGenerationState(
           proposals: {
             ...state.detail.proposals,
             items: state.detail.proposals.items.map((proposal) =>
-              proposal.id === action.proposal.id ? action.proposal : proposal),
+              proposal.id === action.proposal.id && action.proposal.revision >= proposal.revision
+                ? action.proposal
+                : proposal),
           },
         },
       };
@@ -100,6 +102,20 @@ export function mergeRefreshedGenerationDetail(
   current: KbGenerationRunDetail,
   refreshed: KbGenerationRunDetail,
 ): KbGenerationRunDetail {
+  const stableTerminal = current.run.status === refreshed.run.status && isTerminalGenerationStatus(current.run.status);
+  if (!stableTerminal) {
+    const currentById = new Map(current.proposals.items.map((proposal) => [proposal.id, proposal]));
+    return {
+      ...refreshed,
+      proposals: {
+        ...refreshed.proposals,
+        items: refreshed.proposals.items.map((proposal) => {
+          const existing = currentById.get(proposal.id);
+          return existing && existing.revision > proposal.revision ? existing : proposal;
+        }),
+      },
+    };
+  }
   return {
     ...refreshed,
     proposals: {
@@ -115,6 +131,10 @@ export function mergeRefreshedGenerationDetail(
       rawFindingsNextCursor: current.rawFindingsNextCursor,
     } : {}),
   };
+}
+
+function isTerminalGenerationStatus(status: KbGenerationRunDetail['run']['status']): boolean {
+  return status === 'completed' || status === 'failed' || status === 'cancelled';
 }
 
 export function appendGenerationDetailPage(

@@ -23,6 +23,35 @@ export const localMidnight = (value: string): string | null => {
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 };
 
+export function scheduleGenerationPolling({
+  poll,
+  isActive,
+  onError = () => undefined,
+  delayMs = 1_500,
+}: {
+  poll: () => Promise<void>;
+  isActive: () => boolean;
+  onError?: (error: unknown) => void;
+  delayMs?: number;
+}): () => void {
+  let stopped = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const schedule = () => {
+    if (stopped || !isActive()) return;
+    timer = setTimeout(() => {
+      if (stopped || !isActive()) return;
+      void poll()
+        .catch(onError)
+        .finally(schedule);
+    }, delayMs);
+  };
+  schedule();
+  return () => {
+    stopped = true;
+    if (timer !== undefined) clearTimeout(timer);
+  };
+}
+
 export function ChatGenerationPanel({
   agentId,
   initialRunId,
@@ -45,10 +74,14 @@ export function ChatGenerationPanel({
   const loadingCollections = useRef(new Set<GenerationDetailCollection>());
   const [busy, setBusy] = useState(false);
   const [detailLoading, setDetailLoading] = useState(initialRunId !== null);
-  const [error, setError] = useState<string | null>(null);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [loadedRuns, setLoadedRuns] = useState<KbGenerationRunSummary[] | null>(null);
   const [runsCursor, setRunsCursor] = useState<string | null | undefined>(undefined);
   const [loadingRuns, setLoadingRuns] = useState(false);
+  const [runPageError, setRunPageError] = useState<string | null>(null);
+  const [collectionLoading, setCollectionLoading] = useState<GenerationDetailCollection[]>([]);
+  const [collectionErrors, setCollectionErrors] = useState<Partial<Record<GenerationDetailCollection, string>>>({});
   const runs = useApi((signal) => api.listKnowledgeGenerationRuns(agentId, undefined, signal), [agentId]);
   const view = generationView(state);
   const visibleRuns = loadedRuns ?? runs.data?.items ?? [];
@@ -71,8 +104,10 @@ export function ChatGenerationPanel({
       const nextDetail = preserveLoadedPages && currentDetail?.run.id === runId
         ? mergeRefreshedGenerationDetail(currentDetail, detail)
         : detail;
+      detailSnapshot.current = nextDetail;
       dispatch({ type: polling ? 'poll' : 'run', detail: nextDetail });
-      setError(null);
+      setLoadedRuns((current) => mergeRunPages(current ?? visibleRuns, [nextDetail.run]));
+      setDetailError(null);
       return detail;
     } finally {
       if (!polling && startedAt === epoch.current) setDetailLoading(false);
@@ -85,11 +120,12 @@ export function ChatGenerationPanel({
     if (!initialRunId) {
       dispatch({ type: 'reset' });
       setDetailLoading(false);
+      setDetailError(null);
       return;
     }
     const controller = new AbortController();
     void loadRun(initialRunId, controller.signal).catch((caught) => {
-      if (!controller.signal.aborted) setError(api.humanError(caught));
+      if (!controller.signal.aborted) setDetailError(api.humanError(caught));
     });
     return () => controller.abort();
   }, [agentId, initialRunId]);
@@ -98,30 +134,26 @@ export function ChatGenerationPanel({
     const run = state.detail?.run;
     if (!run || (run.status !== 'queued' && run.status !== 'running')) return;
     const controller = new AbortController();
-    let timer = 0;
-    const poll = () => {
-      timer = window.setTimeout(() => {
-        void loadRun(run.id, controller.signal, true, true)
-          .then(() => setError(null))
-          .catch((caught) => {
-            if (!controller.signal.aborted) {
-              setError(api.humanError(caught));
-              poll();
-            }
-          });
-      }, 1_500);
-    };
-    poll();
+    const stop = scheduleGenerationPolling({
+      poll: async () => { await loadRun(run.id, controller.signal, true, true); },
+      isActive: () => {
+        const current = detailSnapshot.current?.run;
+        return !controller.signal.aborted && current?.id === run.id && (current.status === 'queued' || current.status === 'running');
+      },
+      onError: (caught) => {
+        if (!controller.signal.aborted) setDetailError(api.humanError(caught));
+      },
+    });
     return () => {
+      stop();
       controller.abort();
-      window.clearTimeout(timer);
     };
-  }, [agentId, state.detail?.run.id, state.detail?.run.status, state.detail?.run.updatedAt]);
+  }, [agentId, state.detail?.run.id]);
 
   async function start(preview: KbGenerationPreview) {
     if (busy || readOnly) return;
     setBusy(true);
-    setError(null);
+    setActionError(null);
     const startedAt = epoch.current;
     actionAbort.current?.abort();
     const controller = new AbortController();
@@ -143,29 +175,34 @@ export function ChatGenerationPanel({
       activeRunId.current = run.id;
       onRunId(run.id);
     } catch (caught) {
-      setError(api.humanError(caught));
+      setActionError(api.humanError(caught));
     } finally {
       setBusy(false);
     }
   }
 
   function selectRun(runId: string) {
-    if (runId === activeRunId.current) return;
+    if (runId === activeRunId.current) {
+      void loadRun(runId).catch((caught) => setDetailError(api.humanError(caught)));
+      return;
+    }
     epoch.current += 1;
     activeRunId.current = runId;
-    setError(null);
+    setDetailError(null);
+    setActionError(null);
     onRunId(runId);
   }
 
   async function loadMoreRuns() {
     if (!nextRunsCursor || loadingRuns) return;
     setLoadingRuns(true);
+    setRunPageError(null);
     try {
       const page = await api.listKnowledgeGenerationRuns(agentId, nextRunsCursor);
       setLoadedRuns((current) => mergeRunPages(current ?? visibleRuns, page.items));
       setRunsCursor(page.nextCursor);
     } catch (caught) {
-      setError(api.humanError(caught));
+      setRunPageError(api.humanError(caught));
     } finally {
       setLoadingRuns(false);
     }
@@ -174,13 +211,14 @@ export function ChatGenerationPanel({
   async function action(kind: 'cancel' | 'retry') {
     if (!state.detail || readOnly) return;
     setBusy(true);
+    setActionError(null);
     try {
       const run = kind === 'cancel'
         ? await api.cancelKnowledgeGenerationRun(agentId, state.detail.run.id)
         : await api.retryKnowledgeGenerationRun(agentId, state.detail.run.id);
       await loadRun(run.id, undefined, false, true);
     } catch (caught) {
-      setError(api.humanError(caught));
+      setActionError(api.humanError(caught));
     } finally {
       setBusy(false);
     }
@@ -192,7 +230,8 @@ export function ChatGenerationPanel({
     const cursor = collectionCursor(current, collection);
     if (cursor === null && !(collection === 'rawFindings' && current.rawFindings === undefined)) return current;
     loadingCollections.current.add(collection);
-    setBusy(true);
+    setCollectionLoading((items) => items.includes(collection) ? items : [...items, collection]);
+    setCollectionErrors((errors) => ({ ...errors, [collection]: undefined }));
     const startedAt = epoch.current;
     try {
       const next = await api.getKnowledgeGenerationRun(agentId, current.run.id, undefined, collectionOptions(collection, cursor ?? undefined));
@@ -200,11 +239,11 @@ export function ChatGenerationPanel({
       dispatch({ type: 'append_page', detail: next, collection });
       return appendGenerationDetailPage(current, next, collection);
     } catch (caught) {
-      if (startedAt === epoch.current) setError(api.humanError(caught));
+      if (startedAt === epoch.current) setCollectionErrors((errors) => ({ ...errors, [collection]: api.humanError(caught) }));
       return current;
     } finally {
       loadingCollections.current.delete(collection);
-      if (startedAt === epoch.current) setBusy(false);
+      if (startedAt === epoch.current) setCollectionLoading((items) => items.filter((item) => item !== collection));
     }
   }
 
@@ -228,6 +267,8 @@ export function ChatGenerationPanel({
     activeRunId.current = null;
     requestKey.current = null;
     dispatch({ type: 'reset' });
+    setDetailError(null);
+    setActionError(null);
     onRunId(null);
   };
 
@@ -243,6 +284,8 @@ export function ChatGenerationPanel({
         onSelect={selectRun}
         onRetry={runs.reload}
         onLoadMore={() => void loadMoreRuns()}
+        loadMoreError={runPageError}
+        onRetryLoadMore={() => void loadMoreRuns()}
       />
 
       <section className="generation-review" aria-label={mode === 'runs' ? 'Сведения о запуске' : 'Проверка черновика'}>
@@ -255,7 +298,14 @@ export function ChatGenerationPanel({
         </header>
 
         {detailLoading && !state.detail && <div className="generation-review__skeleton" role="status" aria-label="Загружаем запуск"><span /><span /><span /></div>}
-        {!detailLoading && !state.detail && (
+        {!detailLoading && !state.detail && detailError && (
+          <div className="knowledge-inline-state knowledge-inline-state--error" role="alert">
+            <p>Не удалось загрузить запуск.</p>
+            <span>{detailError}</span>
+            <button type="button" className="btn-sm" onClick={() => initialRunId && void loadRun(initialRunId).catch((caught) => setDetailError(api.humanError(caught)))}>Повторить загрузку</button>
+          </div>
+        )}
+        {!detailLoading && !state.detail && !detailError && (
           <div className="generation-review__prepare">
             {!readOnly ? <RecentHistoryPreparation agentId={agentId} busy={busy} onStart={(preview) => void start(preview)} />
               : <div className="knowledge-inline-state"><p>Выберите запуск слева.</p><span>Участники могут просматривать предложения, источники и черновики.</span></div>}
@@ -281,18 +331,30 @@ export function ChatGenerationPanel({
                 onLoadMoreExclusions={() => void loadCollection('exclusions')}
                 onLoadRawFindings={() => void loadCollection('rawFindings')}
                 onLoadMoreRawFindings={() => void loadCollection('rawFindings')}
+                collectionState={{
+                  proposals: { loading: collectionLoading.includes('proposals'), error: collectionErrors.proposals, onRetry: () => void loadCollection('proposals') },
+                  exclusions: { loading: collectionLoading.includes('exclusions'), error: collectionErrors.exclusions, onRetry: () => void loadCollection('exclusions') },
+                  rawFindings: { loading: collectionLoading.includes('rawFindings'), error: collectionErrors.rawFindings, onRetry: () => void loadCollection('rawFindings') },
+                }}
               />
             )}
             {view === 'active' && <div className="knowledge-inline-state"><p>Обработка продолжается.</p><span>Новые пакеты и стоимость обновляются автоматически.</span></div>}
             {view === 'cancelled' && state.detail.run.proposalCount === 0 && <div className="knowledge-inline-state"><p>Обработка отменена.</p><span>Ничего не опубликовано.</span></div>}
           </>
         )}
-        {error && <div role="alert" className="generation-review__error">{error}{!readOnly && <> · <Link to="../settings">Настроить AI</Link></>}</div>}
+        {state.detail && detailError && <div role="alert" className="generation-review__error">{detailError} · Повторяем автоматически.</div>}
+        {actionError && <div role="alert" className="generation-review__error">{actionError}</div>}
       </section>
 
       <aside className="knowledge-review-aside" aria-label="Настройки и черновики">
         <CommunicationStyleCard agentId={agentId} readOnly={readOnly} />
-        <RunDraftShortcuts drafts={state.detail?.drafts ?? []} hasMore={state.detail?.draftsNextCursor !== null && state.detail?.draftsNextCursor !== undefined} onLoadMore={() => void loadCollection('drafts')} />
+        <RunDraftShortcuts
+          drafts={state.detail?.drafts ?? []}
+          hasMore={state.detail?.draftsNextCursor !== null && state.detail?.draftsNextCursor !== undefined}
+          loading={collectionLoading.includes('drafts')}
+          error={collectionErrors.drafts}
+          onLoadMore={() => void loadCollection('drafts')}
+        />
       </aside>
     </div>
   );
@@ -316,7 +378,7 @@ function RunStatus({ detail }: { detail: KbGenerationRunDetail }) {
   );
 }
 
-function RunDraftShortcuts({ drafts, hasMore, onLoadMore }: { drafts: KbGenerationRunDetail['drafts']; hasMore: boolean; onLoadMore: () => void }) {
+function RunDraftShortcuts({ drafts, hasMore, loading, error, onLoadMore }: { drafts: KbGenerationRunDetail['drafts']; hasMore: boolean; loading: boolean; error?: string; onLoadMore: () => void }) {
   return (
     <section className="generation-drafts" aria-labelledby="generation-drafts-title">
       <p className="knowledge-kicker">Результаты запуска</p>
@@ -326,7 +388,8 @@ function RunDraftShortcuts({ drafts, hasMore, onLoadMore }: { drafts: KbGenerati
           {drafts.map((draft) => <li key={draft.id}><Link to={`../drafts/${draft.id}`}><b>{draft.title}</b><span>{new Date(draft.createdAt).toLocaleDateString('ru-RU')} · {draftStatus(draft.status)}</span></Link></li>)}
         </ol>
       )}
-      {hasMore && <button type="button" className="knowledge-load-more" onClick={onLoadMore}>Показать ещё черновики</button>}
+      {error && <div className="knowledge-collection-error" role="alert"><span>{error}</span><button type="button" className="btn-sm" onClick={onLoadMore}>Повторить</button></div>}
+      {hasMore && <button type="button" className="knowledge-load-more" disabled={loading} onClick={onLoadMore}>{loading ? 'Загружаем черновики…' : 'Показать ещё черновики'}</button>}
     </section>
   );
 }

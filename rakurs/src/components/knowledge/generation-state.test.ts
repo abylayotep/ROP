@@ -60,11 +60,11 @@ describe('generation UI state', () => {
     const current = {
       ...detail('completed', 2),
       proposals: { items: [{ id: 'first', revision: 1 }, { id: 'second', revision: 1 }], nextCursor: null },
-    } as KbGenerationRunDetail;
+    } as unknown as KbGenerationRunDetail;
     const refreshed = {
       ...detail('completed', 2),
       proposals: { items: [{ id: 'first', revision: 2 }], nextCursor: 'page-2' },
-    } as KbGenerationRunDetail;
+    } as unknown as KbGenerationRunDetail;
 
     const merged = mergeRefreshedGenerationDetail(current, refreshed);
     expect(merged.proposals.items.map((item) => [item.id, item.revision])).toEqual([
@@ -89,7 +89,7 @@ describe('generation UI state', () => {
     ]);
   });
 
-  it('preserves exhausted independent cursors and loaded audit pages during polling', () => {
+  it('rebases active collection pages so an early null cursor cannot hide later pages', () => {
     const current = {
       ...detail('running', 1),
       drafts: [{ id: 'draft-later' }], draftsNextCursor: null,
@@ -103,10 +103,31 @@ describe('generation UI state', () => {
     } as KbGenerationRunDetail;
 
     const merged = mergeRefreshedGenerationDetail(current, refreshed);
-    expect(merged.drafts.map((item) => item.id)).toEqual(['draft-later', 'draft-first']);
-    expect(merged.exclusions.map((item) => item.batchId)).toEqual(['excluded-later', 'excluded-first']);
-    expect(merged.rawFindings?.map((item) => item.id)).toEqual(['raw-later']);
-    expect([merged.draftsNextCursor, merged.exclusionsNextCursor, merged.rawFindingsNextCursor]).toEqual([null, null, null]);
+    expect(merged.drafts.map((item) => item.id)).toEqual(['draft-first']);
+    expect(merged.exclusions.map((item) => item.batchId)).toEqual(['excluded-first']);
+    expect(merged.rawFindings).toBeUndefined();
+    expect([merged.draftsNextCursor, merged.exclusionsNextCursor, merged.rawFindingsNextCursor]).toEqual(['20', '20', undefined]);
+  });
+
+  it('rebases first pages and accepts terminal cursors when an active run finishes', () => {
+    const current = {
+      ...detail('running', 1),
+      proposals: { items: [{ id: 'early', revision: 1 }], nextCursor: null },
+      drafts: [], draftsNextCursor: null,
+      exclusions: [], exclusionsNextCursor: null,
+    } as unknown as KbGenerationRunDetail;
+    const terminal = {
+      ...detail('completed', 24),
+      proposals: { items: [{ id: 'final', revision: 1 }], nextCursor: '20' },
+      drafts: [{ id: 'draft-final' }], draftsNextCursor: '20',
+      exclusions: [{ batchId: 'excluded-final' }], exclusionsNextCursor: '20',
+    } as unknown as KbGenerationRunDetail;
+
+    const merged = mergeRefreshedGenerationDetail(current, terminal);
+    expect(merged.proposals.items.map((item) => item.id)).toEqual(['final']);
+    expect(merged.proposals.nextCursor).toBe('20');
+    expect(merged.draftsNextCursor).toBe('20');
+    expect(merged.exclusionsNextCursor).toBe('20');
   });
 
   it('updates an edited proposal from a loaded later page without losing selections', () => {
@@ -129,6 +150,25 @@ describe('generation UI state', () => {
       ['second', 2, 'rejected'],
     ]);
     expect(updated.selectedProposalIds).toEqual(['first', 'second']);
+  });
+
+  it('ignores an older proposal response after a newer mutation has committed', () => {
+    const current = {
+      ...initialGenerationState(selection),
+      detail: {
+        ...detail('completed', 1),
+        proposals: { items: [{ id: 'first', revision: 5, selected: true, body: 'new' }], nextCursor: null },
+      } as KbGenerationRunDetail,
+    };
+
+    const stale = reduceGenerationState(current, {
+      type: 'proposal_updated',
+      proposal: { id: 'first', revision: 4, selected: false, body: 'old' } as never,
+    });
+
+    expect(stale.detail!.proposals.items).toEqual([
+      expect.objectContaining({ id: 'first', revision: 5, selected: true, body: 'new' }),
+    ]);
   });
 
   it('does not let a late page overwrite a proposal patched while that page loaded', () => {

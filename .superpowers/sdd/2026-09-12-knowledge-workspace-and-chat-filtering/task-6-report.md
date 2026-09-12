@@ -50,3 +50,36 @@ Completed. The Task 6 implementation is contained in the `feat: redesign the kno
 
 - The local browser smoke check reached the authentication gate. No account credentials were used, so responsive verification is covered by the compiled CSS breakpoints and component tests rather than an authenticated screenshot.
 - Task 7 still needs to replace the temporary sources-tab seam with single-expanded source cards.
+
+## Fix Round 1
+
+### Diagnosis
+
+- Polling scheduled a retry only after failures, so the first successful response stopped all further updates.
+- A running response with an early `null` cursor could be merged as if pagination were exhausted and hide pages produced when the run completed.
+- Selection limits and bulk clearing were calculated from rendered rows instead of the complete persisted run selection.
+- Independent proposal mutations could commit out of revision order, and revision-keyed cards remounted away unsaved field edits.
+- Proposal fields were always expanded, tab semantics lacked keyboard behavior, and pagination errors shared a generic AI-settings error.
+
+### Corrections
+
+- Polling now schedules the next tick after success or failure, stops on terminal state/disposal/run switch, and refreshes the matching run rail summary.
+- Active detail refreshes rebase collection first pages and cursors while preserving a newer local proposal revision. Only a stable terminal run keeps loaded later pages.
+- Selection loads the complete proposal collection before mutation, enforces a run-wide persisted limit of 20, fills only remaining visible slots, and clears selected proposals across every kind and page. Draft creation rejects an oversized persisted selection before calling the API.
+- Per-proposal mutations are serialized, older reducer responses are ignored, and optimistic selection rollback is isolated from newer committed revisions.
+- Proposal cards use stable IDs, preserve dirty fields across server revisions, and expose one explicit editor at a time. Read-only/default rows remain compact.
+- Both tab systems now expose linked tab/tab-panel IDs and wrapped ArrowLeft/ArrowRight/Home/End navigation.
+- Run/detail and collection pagination now show scoped loading, disabled, failure, and retry states. Reloading the selected run is allowed, and generic failures no longer imply AI configuration is the cause.
+- Raw audit rows now expose warnings and available source evidence. Mobile controls use practical 44px targets and readable minimum supporting text.
+
+### Verification
+
+- Focused polling/state/workspace suite: 4 files, 35 tests passed.
+- Full Rakurs frontend suite: 26 files, 150 tests passed.
+- `npm --prefix rakurs run typecheck` passed.
+- `npm --prefix rakurs run build` passed.
+- `git diff --check` passed.
+
+### Remaining Concern
+
+- Authenticated visual smoke testing remains unavailable in this worktree; responsive behavior is verified through component markup, compiled CSS breakpoints, and the production build.

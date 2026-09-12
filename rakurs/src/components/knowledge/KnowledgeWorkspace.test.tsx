@@ -2,8 +2,8 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import type { KbGenerationRunSummary } from '@/types';
-import { GenerationRunRail } from './GenerationRunRail';
-import { KnowledgeWorkspace, knowledgeTabFromSearch } from './KnowledgeWorkspace';
+import { GenerationRunRail, mergeRunPages } from './GenerationRunRail';
+import { KnowledgeWorkspace, knowledgeTabFromSearch, tabAfterKey } from './KnowledgeWorkspace';
 
 describe('KnowledgeWorkspace', () => {
   it('keeps four page-level tabs instead of stacking every knowledge tool', () => {
@@ -63,5 +63,23 @@ describe('KnowledgeWorkspace', () => {
     expect(html).toContain('aria-pressed="true"');
     expect(html).toContain('Показать ещё запусков');
     expect(html).toContain('8');
+  });
+
+  it('moves tab selection with arrows, Home, and End', () => {
+    const ids = ['knowledge', 'drafts', 'runs', 'sources'] as const;
+    expect(tabAfterKey(ids, 'drafts', 'ArrowRight')).toBe('runs');
+    expect(tabAfterKey(ids, 'knowledge', 'ArrowLeft')).toBe('sources');
+    expect(tabAfterKey(ids, 'runs', 'Home')).toBe('knowledge');
+    expect(tabAfterKey(ids, 'drafts', 'End')).toBe('sources');
+    expect(tabAfterKey(ids, 'drafts', 'Enter')).toBeNull();
+  });
+
+  it('refreshes the active run summary without losing the rest of the rail', () => {
+    const previous = { id: 'run-1', proposalCount: 1 } as KbGenerationRunSummary;
+    const other = { id: 'run-2', proposalCount: 2 } as KbGenerationRunSummary;
+    const refreshed = { ...previous, proposalCount: 9 };
+    expect(mergeRunPages([previous, other], [refreshed]).map((run) => [run.id, run.proposalCount])).toEqual([
+      ['run-1', 9], ['run-2', 2],
+    ]);
   });
 });

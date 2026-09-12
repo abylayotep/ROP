@@ -78,7 +78,7 @@ const outputSchema = z.object({
   proposals: z.array(proposalSchema).max(GENERATION_LIMITS.maxProposalsPerBatch),
 });
 
-const MISSING_SIDE_REASON = 'Conversation does not contain usable messages from both customer and seller.';
+const MISSING_SIDE_REASON = 'После редактирования нет пригодных сообщений от обеих сторон диалога.';
 
 const emptyUsage = (): GenerationExtractionUsage => ({
   promptTokens: 0,
@@ -99,7 +99,7 @@ Classify friends, the seller's own messages, staff chats, suppliers, and unrelat
 Every proposal must cite one or more supplied seller messages authored by phone or operator.
 Preserve dates, qualifications, and uncertainty. Never include profanity, personal names, addresses, phone numbers, internal commands, or one-off promises.
 Write every user-facing path and body in Russian.
-Write a short classification reason without personal or sensitive details.
+Write classification.reason in Russian. Keep it short and omit personal or sensitive details.
 Put durable facts under paths beginning with "База знаний/".
 Put seller-supported sales wording under paths beginning with "Скрипт/". If the seller messages do not support a sales script, do not invent one.
 Each path must use one of those two prefixes. Warnings may contain dated, conflict, or context_limited.
@@ -193,11 +193,7 @@ export async function extractGenerationBatch(
   if (redactGenerationText(classificationReason) !== classificationReason) {
     throw new GenerationExtractionError('unsafe_output', usage);
   }
-  const classification = parsed.data.classification.value === 'customer' && hasBothConversationSides(safeMessages)
-    ? 'customer'
-    : parsed.data.classification.value === 'customer'
-      ? 'uncertain'
-      : parsed.data.classification.value;
+  const classification = parsed.data.classification.value;
   if (classification !== 'customer') {
     return { classification, classificationReason, proposals: [], usage };
   }

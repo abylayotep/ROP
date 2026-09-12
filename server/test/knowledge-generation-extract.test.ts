@@ -29,9 +29,50 @@ const customer = (over: Partial<GenerationExtractionMessage> = {}): GenerationEx
 
 const answer = (sources = ['seller-1'], body = 'Delivery costs 1,500 tenge.') =>
   JSON.stringify({
-    classification: { value: 'customer', reason: 'The client asks about delivery and the seller answers.' },
+    classification: { value: 'customer', reason: 'Клиент спрашивает о доставке, продавец отвечает.' },
     proposals: [{ path: 'База знаний/Доставка', body, sources, warnings: [] }],
   });
+
+const conversation = (clientBody: string, sellerBody: string): GenerationExtractionMessage[] => [
+  customer({ body: clientBody }),
+  seller({ body: sellerBody }),
+];
+
+const irrelevantFixtures = [
+  {
+    name: 'friend',
+    messages: conversation('Are we still meeting for coffee on Saturday?', 'Yes, I will see you at noon.'),
+    reason: 'Это личная переписка со знакомым.',
+  },
+  {
+    name: 'self',
+    messages: conversation('Testing my own WhatsApp number.', 'The test message arrived.'),
+    reason: 'Владелец проверяет свой рабочий номер.',
+  },
+  {
+    name: 'staff',
+    messages: conversation('I swapped tomorrow morning\'s shift.', 'Approved, update the staff rota.'),
+    reason: 'Это внутренняя переписка сотрудников.',
+  },
+  {
+    name: 'supplier',
+    messages: conversation('Our wholesale catalog for your shop is ready.', 'Send the updated purchase prices.'),
+    reason: 'Это переписка с поставщиком.',
+  },
+  {
+    name: 'unrelated_business',
+    messages: conversation('We offer office cleaning contracts.', 'We are not looking for cleaning services.'),
+    reason: 'Это предложение стороннего бизнеса.',
+  },
+] as const;
+
+const customerFixtures = [
+  ['product', 'Do you have this jacket in a larger size?', 'The jacket is available in sizes S through XL.', 'База знаний/Товар'],
+  ['order', 'Can I buy it today?', 'Yes, we can reserve the item today.', 'База знаний/Заказ'],
+  ['payment', 'Can I pay when I collect it?', 'Payment is accepted when the order is collected.', 'База знаний/Оплата'],
+  ['delivery', 'How long does delivery take?', 'Delivery takes two business days.', 'База знаний/Доставка'],
+  ['support', 'Can you help configure the product?', 'Support is available every day from 9:00 to 18:00.', 'База знаний/Поддержка'],
+] as const;
 
 const deps = (model: ReturnType<typeof fakeModel>) => ({
   model,
@@ -69,22 +110,38 @@ describe('generation extraction', () => {
     expect(hasBothConversationSides([seller()])).toBe(false);
   });
 
-  it.each([
-    ['friend', 'irrelevant'],
-    ['self', 'irrelevant'],
-    ['staff', 'irrelevant'],
-    ['supplier', 'irrelevant'],
-    ['unrelated_business', 'uncertain'],
-  ] as const)('%s produces no proposals', async (_fixture, classification) => {
+  it.each(irrelevantFixtures)('$name context produces no proposals', async (fixture) => {
     const model = fakeModel(JSON.stringify({
-      classification: { value: classification, reason: 'Not a confirmed customer conversation.' },
+      classification: { value: 'irrelevant', reason: fixture.reason },
       proposals: [{ path: 'База знаний/Доставка', body: 'Delivery costs 1,500 tenge.', sources: ['seller-1'], warnings: [] }],
     }));
 
-    await expect(extractGenerationBatch(deps(model), [customer(), seller()])).resolves.toMatchObject({
-      classification,
+    await expect(extractGenerationBatch(deps(model), fixture.messages)).resolves.toMatchObject({
+      classification: 'irrelevant',
+      classificationReason: fixture.reason,
       proposals: [],
     });
+    const prompt = model.calls[0]!.messages.find((message) => message.role === 'user')!.content;
+    expect(JSON.parse(prompt).messages.map((message: { body: string }) => message.body))
+      .toEqual(fixture.messages.map((message) => message.body));
+    expect(model.calls).toHaveLength(1);
+  });
+
+  it.each(customerFixtures)('%s customer context accepts grounded proposals', async (_name, clientBody, sellerBody, path) => {
+    const model = fakeModel(JSON.stringify({
+      classification: { value: 'customer', reason: 'Клиент обсуждает товар или условия покупки.' },
+      proposals: [{ path, body: sellerBody, sources: ['seller-1'], warnings: [] }],
+    }));
+
+    const result = await extractGenerationBatch(deps(model), conversation(clientBody, sellerBody));
+
+    expect(result).toMatchObject({
+      classification: 'customer',
+      proposals: [{ path, body: sellerBody, sourceMessageIds: ['seller-1'] }],
+    });
+    const prompt = model.calls[0]!.messages.find((message) => message.role === 'user')!.content;
+    expect(JSON.parse(prompt).messages.map((message: { body: string }) => message.body))
+      .toEqual([clientBody, sellerBody]);
   });
 
   it('does not call the provider without both customer and seller messages', async () => {
@@ -92,6 +149,7 @@ describe('generation extraction', () => {
 
     await expect(extractGenerationBatch(deps(model), [seller()])).resolves.toMatchObject({
       classification: 'uncertain',
+      classificationReason: 'После редактирования нет пригодных сообщений от обеих сторон диалога.',
       proposals: [],
     });
     expect(model.calls).toHaveLength(0);
@@ -104,7 +162,7 @@ describe('generation extraction', () => {
 
     expect(result).toEqual({
       classification: 'customer',
-      classificationReason: 'The client asks about delivery and the seller answers.',
+      classificationReason: 'Клиент спрашивает о доставке, продавец отвечает.',
       proposals: [
         {
           path: 'База знаний/Доставка',
@@ -120,6 +178,7 @@ describe('generation extraction', () => {
     expect(model.calls[0]!.messages[0]!.content).toContain('База знаний/');
     expect(model.calls[0]!.messages[0]!.content).toContain('Скрипт/');
     expect(model.calls[0]!.messages[0]!.content).toContain('do not invent');
+    expect(model.calls[0]!.messages[0]!.content).toContain('Write classification.reason in Russian.');
   });
 
   it('makes no model call when a batch has no seller evidence', async () => {
@@ -127,7 +186,7 @@ describe('generation extraction', () => {
 
     expect(await extractGenerationBatch(deps(model), [customer()])).toEqual({
       classification: 'uncertain',
-      classificationReason: 'Conversation does not contain usable messages from both customer and seller.',
+      classificationReason: 'После редактирования нет пригодных сообщений от обеих сторон диалога.',
       proposals: [],
       usage: { promptTokens: 0, completionTokens: 0, cost: '0' },
     });
@@ -184,7 +243,7 @@ describe('generation extraction', () => {
 
     await expect(extractGenerationBatch(deps(model), [customer(), seller()])).resolves.toEqual({
       classification: 'customer',
-      classificationReason: 'The client asks about delivery and the seller answers.',
+      classificationReason: 'Клиент спрашивает о доставке, продавец отвечает.',
       proposals: [],
       usage: { promptTokens: 100, completionTokens: 20, cost: '0.00010000' },
     });

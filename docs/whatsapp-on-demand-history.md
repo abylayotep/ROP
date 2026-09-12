@@ -70,3 +70,22 @@ by these fixture results.
   regression edits and is explicitly not the final gate.
 - Protected database/frontend backups and the previous API image were retained before
   switching. This release requires no schema migration.
+
+## Production rollout
+
+Release code: `ab0f466`. API and frontend were switched after the final gates.
+API image: `sha256:ff35c1a72a0f8cca3b0ee52c3662bb4aecae5c422bd5ae2f4a475a92a9de80d1`.
+Frontend entry SHA-256: `fad89fa61505d5f7f6872449543a89b6af0f484b8727319053a7b6d80132d375`.
+The running image and public entry matched; API health passed and restart count was zero.
+
+The signed-in production UI showed one live linked number and one available conversation.
+The database independently contained one conversation and three real inbound messages
+(sent between `2026-09-12T01:19:39Z` and `01:20:09Z`). Thus live reception now has evidence,
+unlike the earlier zero-message baseline.
+
+The owner-authorized history button was exercised with limit 200; only the one available
+conversation was requested. WhatsApp returned no correlated history response within the
+90-second response budget. The UI displayed the timeout as a failure and re-enabled retry.
+This proves the deployed request/status flow, not successful retrieval of older history.
+Historical delivery remains unresolved. No production AI generation, customer-facing
+message, logout, or credential reset was performed for this check.

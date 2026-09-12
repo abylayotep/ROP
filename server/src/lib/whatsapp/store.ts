@@ -2,6 +2,7 @@ import { eq, sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import { contacts, conversations, messages } from '../../db/schema.js';
 import { runTurn, type TurnDeps } from '../ai/turn.js';
+import { decideAutomation, loadAutomationSnapshot } from '../automation/policy.js';
 
 /**
  * Writing a conversation down, whichever transport brought it.
@@ -170,6 +171,9 @@ export async function runTurns(db: Db, deps: TurnDeps, touched: Touched): Promis
   const errors: string[] = [];
   for (const [conversationId, agentId] of touched) {
     try {
+      const snapshot = await loadAutomationSnapshot(db, { agentId, conversationId });
+      const purpose = deps.crm ? 'crm' : 'reply';
+      if (!snapshot || !decideAutomation(snapshot, purpose).allowed) continue;
       if (deps.crm && await deps.crm(agentId, conversationId)) continue;
       await runTurn(db, deps, { agentId, conversationId });
     } catch (error) {

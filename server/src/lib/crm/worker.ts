@@ -4,6 +4,7 @@ import type { Db } from '../../db/client.js';
 import { agents, aiReplies, contacts, conversations, crmAnalyses, leadFields, leadValues, messages, stages } from '../../db/schema.js';
 import type { ModelClient } from '../ai/openrouter.js';
 import { keyAad } from '../ai/turn.js';
+import { decideAutomation, loadAutomationSnapshot, type AutomationPurpose } from '../automation/policy.js';
 import { queueLead } from '../capi/enqueue.js';
 import { recordStageMove } from '../funnel-history.js';
 import { decryptSecret } from '../secret-box.js';
@@ -22,8 +23,14 @@ const RECENT_SIZE = 50;
 const leaseDeadline = () => new Date(Date.now() + 120_000);
 const messageColumns = { id: messages.id, author: messages.author, body: messages.body, sentAt: messages.sentAt, createdAt: messages.createdAt };
 
+async function automationAllowed(db: Db, input: AnalyzeInput, purpose: AutomationPurpose) {
+  const snapshot = await loadAutomationSnapshot(db,input);
+  return snapshot !== null && decideAutomation(snapshot,purpose).allowed;
+}
+
 /** Page imported data by arrival order, but resolve evidence conflicts by message chronology. */
 export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeInput): Promise<AnalysisResult> {
+  if (!await automationAllowed(db,input,'crm')) return 'skipped';
   const [row] = await db.select({ conversation: conversations, agent: agents, contact: contacts })
     .from(conversations).innerJoin(agents, eq(agents.id, conversations.agentId))
     .innerJoin(contacts, eq(contacts.id, conversations.contactId))
@@ -76,6 +83,10 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
       hasConfirmedKaspiPayment(db, agent.id, conversation.id),
     ]);
     const inputHistory = history.map((m) => ({ ...m, body: m.body?.slice(0, Math.min(4000, Math.floor(60_000 / Math.max(1, history.length)))) ?? null }));
+    if (!await automationAllowed(db,input,'crm')) {
+      await db.update(crmAnalyses).set({status:'pending',leaseToken:null,leaseUntil:null,updatedAt:new Date()}).where(ownLease);
+      return 'skipped';
+    }
     const completion = await deps.model.complete({ key: decryptSecret(agent.openrouterKey!, deps.key, keyAad(agent.id)),
       model: agent.model, temperature: '0', maxTokens: 2200, messages: [
         { role: 'system', content: crmPrompt(funnel, fields) },
@@ -85,6 +96,10 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
       ] });
     const analysis = parseCrmAnalysis(completion.text, inputHistory, fields);
     const target = resolveCrmStage(funnel, analysis.confidence >= 65 ? analysis.stageId : null, paid);
+    if (!await automationAllowed(db,input,'crm')) {
+      await db.update(crmAnalyses).set({status:'pending',leaseToken:null,leaseUntil:null,updatedAt:new Date()}).where(ownLease);
+      return 'skipped';
+    }
     let moved = false;
     let applied = false;
     await db.transaction(async (tx) => {
@@ -147,18 +162,23 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
     // Only a persisted live delivery authorizes customer side effects, never a backfill flag.
     if (liveId && last?.id === liveId && last.author === 'client' && Date.now()-last.sentAt.getTime() >= 0
       && Date.now()-last.sentAt.getTime() < 5*60_000) {
-      if (moved) await queueLead(db,{agentId:agent.id,conversationId:conversation.id});
+      if (moved && await automationAllowed(db,input,'crm')) {
+        await queueLead(db,{agentId:agent.id,conversationId:conversation.id});
+      }
       const [current] = await db.select({agentEnabled:agents.aiEnabled,conversationEnabled:conversations.aiEnabled})
         .from(conversations).innerJoin(agents,eq(agents.id,conversations.agentId)).where(eq(conversations.id,conversation.id));
       const [latest] = await db.select({id:messages.id}).from(messages).where(eq(messages.conversationId,conversation.id))
         .orderBy(desc(messages.sentAt),desc(messages.id)).limit(1);
       if (current?.agentEnabled && current.conversationEnabled && latest?.id === liveId) {
         if (deps.checkout && analysis.checkout?.messageId === liveId && analysis.confidence >= 85
-          && !await hasConfirmedKaspiPayment(db,agent.id,conversation.id)) {
+          && !await hasConfirmedKaspiPayment(db,agent.id,conversation.id)
+          && await automationAllowed(db,input,'checkout')) {
           await deps.checkout({agentId:agent.id,conversationId:conversation.id,phone:contact.phone,
             intent:analysis.checkout,summary:analysis.summary});
           checkedOut = true;
-        } else if (deps.reply) await deps.reply(agent.id,conversation.id);
+        } else if (deps.reply && await automationAllowed(db,input,'reply')) {
+          await deps.reply(agent.id,conversation.id);
+        }
       }
     }
     await db.update(crmAnalyses).set({

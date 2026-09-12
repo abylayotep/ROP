@@ -14,7 +14,7 @@ const model = { complete: vi.fn() };
 beforeEach(async () => {
   db = await withDb(); model.complete.mockReset();
   const { accountId } = await createAccountWithOwner(db, { company: 'CRM test', email: 'crm@example.com', name: 'Owner', initials: 'CR', password: 'test-password-crm' });
-  const [agent] = await db.insert(agents).values({ accountId, name: 'CRM' }).returning();
+  const [agent] = await db.insert(agents).values({ accountId, name: 'CRM', responseMode: 'live' }).returning();
   agentId = agent!.id;
   await db.update(agents).set({ aiEnabled: false, openrouterKey: encryptSecret('model-key', key, agentId) }).where(eq(agents.id, agentId));
   await seedFunnel(db, agentId);
@@ -22,7 +22,7 @@ beforeEach(async () => {
   targetId = target!.id;
   const [number] = await db.insert(whatsappNumbers).values({ agentId, phoneNumberId: 'crm', wabaId: 'crm', displayPhone: '77010000000', accessToken: 'x' }).returning();
   const [contact] = await db.insert(contacts).values({ agentId, phone: '77011234567' }).returning();
-  const [conversation] = await db.insert(conversations).values({ agentId, contactId: contact!.id, whatsappNumberId: number!.id, aiEnabled: false }).returning();
+  const [conversation] = await db.insert(conversations).values({ agentId, contactId: contact!.id, whatsappNumberId: number!.id, aiEnabled: true }).returning();
   conversationId = conversation!.id;
   const [message] = await db.insert(messages).values({ conversationId, direction: 'in', author: 'client', kind: 'text', body: 'Меня зовут Айгуль. Алматы.', sentAt: new Date('2026-01-01') }).returning();
   messageId = message!.id;
@@ -32,17 +32,53 @@ beforeEach(async () => {
 });
 
 describe('independent CRM analysis', () => {
-  it('classifies old conversations with auto-replies disabled without customer side effects', async () => {
+  it('classifies old conversations without customer side effects', async () => {
     const checkout = vi.fn();
     await analyzeConversation(db, { model, key, checkout }, { agentId, conversationId });
     const [conversation] = await db.select().from(conversations).where(eq(conversations.id, conversationId));
     const [analysis] = await db.select().from(crmAnalyses).where(eq(crmAnalyses.conversationId, conversationId));
     expect(conversation?.stageId).toBe(targetId);
-    expect(conversation?.aiEnabled).toBe(false);
+    expect(conversation?.aiEnabled).toBe(true);
     expect(analysis?.profile).toEqual({ name:'Айгуль',city:'Алматы' });
     expect(analysis?.status).toBe('ready');
     expect(checkout).not.toHaveBeenCalled();
     expect(await db.select().from(messages)).toHaveLength(1);
+  });
+  it('skips queued CRM analysis before calling the model when automation is denied', async () => {
+    await db.update(agents).set({responseMode:'off'}).where(eq(agents.id,agentId));
+
+    expect(await analyzeConversation(db,{model,key},{agentId,conversationId})).toBe('skipped');
+
+    expect(model.complete).not.toHaveBeenCalled();
+    expect(await db.select().from(crmAnalyses)).toHaveLength(0);
+    expect((await db.select().from(conversations))[0]?.stageId).toBeNull();
+    expect((await db.select().from(contacts))[0]?.name).toBeNull();
+    expect(await db.select().from(leadValues)).toHaveLength(0);
+  });
+  it('applies no CRM or checkout effects when response mode changes during analysis', async () => {
+    const [field] = await db.insert(leadFields).values({agentId,name:'City',kind:'text',position:99}).returning();
+    await db.update(agents).set({aiEnabled:true}).where(eq(agents.id,agentId));
+    await db.update(messages).set({sentAt:new Date()}).where(eq(messages.id,messageId));
+    await db.insert(crmAnalyses).values({conversationId,pendingLiveMessageId:messageId});
+    model.complete.mockImplementationOnce(async () => {
+      await db.update(agents).set({responseMode:'off'}).where(eq(agents.id,agentId));
+      return {text:JSON.stringify({stageId:targetId,summary:'Denied',confidence:95,
+        profile:{name:{value:'Айгуль',messageId,quote:'Айгуль'}},
+        fields:{[field!.id]:{value:'Алматы',messageId,quote:'Алматы'}},
+        checkout:{method:'invoice',messageId,quote:'Отправьте счёт',amount:'5000',amountMessageId:messageId}}),
+        promptTokens:1,completionTokens:1,cost:'0'};
+    });
+    const checkout = vi.fn();
+    const reply = vi.fn();
+
+    expect(await analyzeConversation(db,{model,key,checkout,reply},{agentId,conversationId,live:true})).toBe('skipped');
+
+    expect(model.complete).toHaveBeenCalledTimes(1);
+    expect((await db.select().from(conversations))[0]?.stageId).toBeNull();
+    expect((await db.select().from(contacts))[0]?.name).toBeNull();
+    expect(await db.select().from(leadValues)).toHaveLength(0);
+    expect(checkout).not.toHaveBeenCalled();
+    expect(reply).not.toHaveBeenCalled();
   });
   it('does not reanalyze unchanged conversations', async () => {
     await drainCrmAnalyses(db, {model,key});

@@ -168,6 +168,7 @@ beforeEach(async () => {
     accountId,
     name: 'Сафина',
     aiEnabled: true,
+    responseMode: 'live',
     openrouterKey: encryptSecret(OPENROUTER_KEY, key, agentId),
   });
   // Replaces the old `instructions: 'Продавай двери. Будь краток.'` column value: one rule
@@ -570,6 +571,32 @@ describe('a model that refuses', () => {
 });
 
 describe('applying what the model asked for', () => {
+  it('applies nothing when response mode changes while the model is running', async () => {
+    const target = await stageNamed('В диалоге');
+    const model = racingModel(
+      async () => {
+        await db.update(agents).set({ responseMode: 'off' }).where(eq(agents.id, agentId));
+      },
+      answer({
+        reply: 'Уточню у коллеги.',
+        stageId: target.id,
+        fields: { [cityFieldId]: 'Алматы' },
+        handoff: { reason: 'клиент просит человека' },
+      }),
+    );
+
+    const result = await turn(model);
+
+    expect(result.outcome).toBe('skipped');
+    expect(model.calls).toHaveLength(1);
+    expect((await conversationRow()).stageId).toBeNull();
+    expect((await conversationRow()).aiEnabled).toBe(true);
+    expect(await db.select().from(leadValues)).toHaveLength(0);
+    expect(await noteRows()).toHaveLength(0);
+    expect(await replyLog()).toHaveLength(0);
+    expect(graph.calls.filter((call) => call.method === 'sendText')).toHaveLength(0);
+  });
+
   it('fills a known field and drops an unknown one without costing the reply', async () => {
     const model = fakeModel(
       answer({ fields: { [cityFieldId]: 'Алматы', [randomUUID()]: 'что-то' } }),
@@ -846,9 +873,10 @@ describe('a send that fails', () => {
 
     const result = await turn(model);
 
-    expect(result.outcome).toBe('failed');
+    expect(result.outcome).toBe('skipped');
+    expect(model.calls).toHaveLength(0);
     expect(graph.calls.filter((call) => call.method === 'sendText')).toHaveLength(0);
-    expect(result.detail).toContain('омер');
+    expect(result.detail).toContain('выключена');
   });
 });
 

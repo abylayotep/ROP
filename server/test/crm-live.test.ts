@@ -20,7 +20,7 @@ beforeEach(async()=>{
   db=await withDb();vi.mocked(createKaspiCheckout).mockReset();model.complete.mockReset();linked.calls.length=0;
   dir=await mkdtemp(join(tmpdir(),'rop-crm-live-'));
   const {accountId}=await createAccountWithOwner(db,{company:'Live test',email:'live@example.com',name:'Owner',initials:'LT',password:'password-live-test'});
-  const [agent]=await db.insert(agents).values({accountId,name:'Live',aiEnabled:true,openrouterKey:'configured'}).returning();agentId=agent!.id;
+  const [agent]=await db.insert(agents).values({accountId,name:'Live',aiEnabled:true,responseMode:'live',openrouterKey:'configured'}).returning();agentId=agent!.id;
   const [number]=await db.insert(whatsappNumbers).values({agentId,connectionKind:'linked',linkedState:'open',linkedJid:'77010000000@s.whatsapp.net',displayPhone:'77010000000',enabled:true}).returning();numberId=number!.id;linked.setOpen(numberId,true);
   const [contact]=await db.insert(contacts).values({agentId,phone:'77011234567'}).returning();
   const [conversation]=await db.insert(conversations).values({agentId,contactId:contact!.id,whatsappNumberId:numberId,aiEnabled:true,lastInboundAt:new Date()}).returning();conversationId=conversation!.id;
@@ -31,6 +31,23 @@ beforeEach(async()=>{
 });
 afterEach(async()=>{await rm(dir,{recursive:true,force:true});});
 const input=(method:'invoice'|'qr'='invoice')=>({agentId,conversationId,phone:'77019999999',summary:'Два фильтра',intent:{method,messageId,quote:'Отправьте счёт',amount:'5000',amountMessageId:'seller'}});
+it('does not create a checkout or send when automation is denied',async()=>{
+  await db.update(agents).set({responseMode:'off'}).where(eq(agents.id,agentId));
+
+  await createCrmDeps(db,testEnv({MEDIA_DIR:dir}),deps).checkout!(input());
+
+  expect(createKaspiCheckout).not.toHaveBeenCalled();
+  expect(linked.calls.filter(c=>c.method==='sendText'||c.method==='sendMedia')).toHaveLength(0);
+  expect((await db.select().from(messages)).filter(m=>m.author==='ai')).toHaveLength(0);
+});
+it('does not queue live CRM work when automation is denied',async()=>{
+  await db.update(agents).set({responseMode:'off'}).where(eq(agents.id,agentId));
+
+  expect(await createLiveCrmHandler(db,testEnv({MEDIA_DIR:dir}),deps)(agentId,conversationId)).toBe(false);
+
+  expect(await db.select().from(crmAnalyses)).toHaveLength(0);
+  expect(model.complete).not.toHaveBeenCalled();
+});
 it('issues a phone invoice to the actual contact and records one text notification',async()=>{
   await createCrmDeps(db,testEnv({MEDIA_DIR:dir}),deps).checkout!(input());
   expect(vi.mocked(createKaspiCheckout).mock.calls[0]?.[2]).toMatchObject({phone:'77011234567',method:'invoice',requestKey:`crm:${messageId}`});

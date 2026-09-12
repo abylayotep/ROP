@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { and, asc, desc, eq, isNull, isNotNull, lt, or, sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
-import { agents, aiReplies, contacts, conversations, crmAnalyses, leadFields, leadValues, messages, stages } from '../../db/schema.js';
+import { agents, aiReplies, contacts, conversations, crmAnalyses, leadFields, leadValues, messages, stages, whatsappNumbers } from '../../db/schema.js';
 import type { ModelClient } from '../ai/openrouter.js';
 import { keyAad } from '../ai/turn.js';
 import { decideAutomation, loadAutomationSnapshot, type AutomationPurpose } from '../automation/policy.js';
@@ -26,6 +26,18 @@ const messageColumns = { id: messages.id, author: messages.author, body: message
 async function automationAllowed(db: Db, input: AnalyzeInput, purpose: AutomationPurpose) {
   const snapshot = await loadAutomationSnapshot(db,input);
   return snapshot !== null && decideAutomation(snapshot,purpose).allowed;
+}
+
+async function lockAutomationPolicy(
+  tx: Parameters<Parameters<Db['transaction']>[0]>[0],
+  input: AnalyzeInput,
+) {
+  const [locked] = await tx.select({id:conversations.id}).from(conversations)
+    .innerJoin(agents,and(eq(agents.id,conversations.agentId),eq(agents.id,input.agentId)))
+    .innerJoin(contacts,and(eq(contacts.id,conversations.contactId),eq(contacts.agentId,agents.id)))
+    .innerJoin(whatsappNumbers,and(eq(whatsappNumbers.id,conversations.whatsappNumberId),eq(whatsappNumbers.agentId,agents.id)))
+    .where(eq(conversations.id,input.conversationId)).for('update');
+  return locked !== undefined && await automationAllowed(tx as unknown as Db,input,'crm');
 }
 
 /** Page imported data by arrival order, but resolve evidence conflicts by message chronology. */
@@ -102,9 +114,15 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
     }
     let moved = false;
     let applied = false;
+    let policyDenied = false;
     await db.transaction(async (tx) => {
       const [lease] = await tx.select().from(crmAnalyses).where(ownLease).for('update');
       if (!lease) return;
+      if (!await lockAutomationPolicy(tx,input)) {
+        policyDenied = true;
+        await tx.update(crmAnalyses).set({status:'pending',leaseToken:null,leaseUntil:null,updatedAt:new Date()}).where(ownLease);
+        return;
+      }
       const [newest] = await tx.select({id:messages.id}).from(messages).where(eq(messages.conversationId, conversation.id))
         .orderBy(desc(messages.createdAt),desc(messages.id)).limit(1);
       if (newest?.id !== version.id) {
@@ -157,13 +175,15 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
         outcome:'applied',detail:'CRM analysis completed',usedItemIds:[]});
       applied = true;
     });
+    if (policyDenied) return 'skipped';
     if (!applied) return 'skipped';
     let checkedOut = false;
     // Only a persisted live delivery authorizes customer side effects, never a backfill flag.
     if (liveId && last?.id === liveId && last.author === 'client' && Date.now()-last.sentAt.getTime() >= 0
       && Date.now()-last.sentAt.getTime() < 5*60_000) {
       if (moved && await automationAllowed(db,input,'crm')) {
-        await queueLead(db,{agentId:agent.id,conversationId:conversation.id});
+        await queueLead(db,{agentId:agent.id,conversationId:conversation.id,
+          canQueue:()=>automationAllowed(db,input,'crm')});
       }
       const [current] = await db.select({agentEnabled:agents.aiEnabled,conversationEnabled:conversations.aiEnabled})
         .from(conversations).innerJoin(agents,eq(agents.id,conversations.agentId)).where(eq(conversations.id,conversation.id));
@@ -205,8 +225,12 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
 export async function drainCrmAnalyses(db: Db, deps: CrmDeps): Promise<void> {
   const retryBefore = new Date(Date.now()-5*60_000);
   const pending = await db.select({conversationId:conversations.id,agentId:conversations.agentId}).from(conversations)
-    .innerJoin(agents,eq(agents.id,conversations.agentId)).leftJoin(crmAnalyses,eq(crmAnalyses.conversationId,conversations.id))
-    .where(and(isNotNull(agents.openrouterKey),
+    .innerJoin(agents,eq(agents.id,conversations.agentId))
+    .innerJoin(contacts,and(eq(contacts.id,conversations.contactId),eq(contacts.agentId,agents.id)))
+    .innerJoin(whatsappNumbers,and(eq(whatsappNumbers.id,conversations.whatsappNumberId),eq(whatsappNumbers.agentId,agents.id)))
+    .leftJoin(crmAnalyses,eq(crmAnalyses.conversationId,conversations.id))
+    .where(and(isNotNull(agents.openrouterKey),eq(conversations.aiEnabled,true),
+      or(eq(agents.responseMode,'live'),and(eq(agents.responseMode,'test'),eq(agents.testContactId,contacts.id))),
       sql`exists (select 1 from messages m where m.conversation_id = ${conversations.id} and m.author <> 'system')`,
       or(sql`${crmAnalyses.analyzedMessageId} is distinct from (select m.id from messages m where m.conversation_id = ${conversations.id} order by m.created_at desc, m.id desc limit 1)`,
         sql`${crmAnalyses.pendingLiveMessageId} is not null and ${crmAnalyses.pendingLiveMessageId} is distinct from ${crmAnalyses.handledLiveMessageId}`),

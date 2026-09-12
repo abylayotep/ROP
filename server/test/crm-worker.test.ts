@@ -1,11 +1,13 @@
+import { randomUUID } from 'node:crypto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { withDb } from './helpers/db.js';
 import { createAccountWithOwner } from '../src/lib/provision.js';
-import { agents, contacts, conversations, crmAnalyses, leadFields, leadValues, messages, stages, whatsappNumbers } from '../src/db/schema.js';
+import { agents, aiReplies, capiEvents, contacts, conversations, crmAnalyses, leadFields, leadValues, messages, stages, whatsappNumbers } from '../src/db/schema.js';
 import { seedFunnel } from '../src/lib/funnel.js';
 import { encryptSecret } from '../src/lib/secret-box.js';
 import { analyzeConversation, drainCrmAnalyses } from '../src/lib/crm/worker.js';
+import * as automationPolicy from '../src/lib/automation/policy.js';
 
 let db: Awaited<ReturnType<typeof withDb>>;
 let agentId: string; let conversationId: string; let messageId: string; let targetId: string;
@@ -79,6 +81,90 @@ describe('independent CRM analysis', () => {
     expect(await db.select().from(leadValues)).toHaveLength(0);
     expect(checkout).not.toHaveBeenCalled();
     expect(reply).not.toHaveBeenCalled();
+  });
+  it('rechecks policy inside the CRM transaction before committing model effects', async () => {
+    const [field] = await db.insert(leadFields).values({agentId,name:'City',kind:'text',position:99}).returning();
+    model.complete.mockResolvedValueOnce({text:JSON.stringify({stageId:targetId,summary:'Denied',confidence:95,
+      profile:{name:{value:'Айгуль',messageId,quote:'Айгуль'}},
+      fields:{[field!.id]:{value:'Алматы',messageId,quote:'Алматы'}},checkout:null}),
+      promptTokens:1,completionTokens:1,cost:'0'});
+    const originalLoad = automationPolicy.loadAutomationSnapshot;
+    let changed = false;
+    const load = vi.spyOn(automationPolicy, 'loadAutomationSnapshot').mockImplementation(async (...args) => {
+      const snapshot = await originalLoad(...args);
+      if (!changed && model.complete.mock.calls.length === 1) {
+        changed = true;
+        await db.update(agents).set({responseMode:'off'}).where(eq(agents.id,agentId));
+      }
+      return snapshot;
+    });
+
+    let result;
+    try {
+      result = await analyzeConversation(db,{model,key},{agentId,conversationId});
+    } finally {
+      load.mockRestore();
+    }
+
+    expect(result).toBe('skipped');
+    expect((await db.select().from(conversations))[0]?.stageId).toBeNull();
+    expect((await db.select().from(contacts))[0]?.name).toBeNull();
+    expect(await db.select().from(leadValues)).toHaveLength(0);
+    expect(await db.select().from(aiReplies)).toHaveLength(0);
+  });
+  it('rechecks policy at the queueLead insert site', async () => {
+    const [qualified] = (await db.select().from(stages).where(eq(stages.agentId,agentId)))
+      .filter((stage) => stage.kind === 'qualified');
+    await db.update(agents).set({aiEnabled:true}).where(eq(agents.id,agentId));
+    await db.update(conversations).set({ctwaClid:'click-1'}).where(eq(conversations.id,conversationId));
+    await db.update(messages).set({sentAt:new Date()}).where(eq(messages.id,messageId));
+    await db.insert(crmAnalyses).values({conversationId,pendingLiveMessageId:messageId});
+    model.complete.mockResolvedValueOnce({text:JSON.stringify({stageId:qualified!.id,summary:'Qualified',confidence:95,
+      profile:{},fields:{},checkout:null}),promptTokens:1,completionTokens:1,cost:'0'});
+    const originalLoad = automationPolicy.loadAutomationSnapshot;
+    let changed = false;
+    const load = vi.spyOn(automationPolicy, 'loadAutomationSnapshot').mockImplementation(async (...args) => {
+      const snapshot = await originalLoad(...args);
+      const [current] = await db.select({stageId:conversations.stageId}).from(conversations)
+        .where(eq(conversations.id,conversationId));
+      if (!changed && snapshot?.responseMode === 'live' && current?.stageId === qualified!.id) {
+        changed = true;
+        await db.update(agents).set({responseMode:'off'}).where(eq(agents.id,agentId));
+      }
+      return snapshot;
+    });
+
+    try {
+      await analyzeConversation(db,{model,key},{agentId,conversationId,live:true});
+    } finally {
+      load.mockRestore();
+    }
+
+    expect(changed).toBe(true);
+    expect(await db.select().from(capiEvents)).toHaveLength(0);
+  });
+  it('does not let denied CRM jobs starve an allowed conversation and processes them later', async () => {
+    const [base] = await db.select().from(agents).where(eq(agents.id,agentId));
+    const deniedAgentId = randomUUID();
+    await db.insert(agents).values({id:deniedAgentId,accountId:base!.accountId,name:'Denied',responseMode:'off',
+      openrouterKey:encryptSecret('denied-key',key,deniedAgentId)});
+    const [number] = await db.insert(whatsappNumbers).values({agentId:deniedAgentId,phoneNumberId:'denied-crm',
+      wabaId:'denied-crm',displayPhone:'77010000001',accessToken:'x'}).returning();
+    for (let index=0;index<8;index++) {
+      const [contact] = await db.insert(contacts).values({agentId:deniedAgentId,phone:`7702000000${index}`}).returning();
+      const [conversation] = await db.insert(conversations).values({agentId:deniedAgentId,contactId:contact!.id,
+        whatsappNumberId:number!.id,aiEnabled:true}).returning();
+      const [message] = await db.insert(messages).values({conversationId:conversation!.id,direction:'in',author:'client',
+        kind:'text',body:`Denied ${index}`,sentAt:new Date()}).returning();
+      await db.insert(crmAnalyses).values({conversationId:conversation!.id,pendingLiveMessageId:message!.id});
+    }
+
+    await drainCrmAnalyses(db,{model,key});
+
+    expect(model.complete).toHaveBeenCalledTimes(1);
+    await db.update(agents).set({responseMode:'live'}).where(eq(agents.id,deniedAgentId));
+    await drainCrmAnalyses(db,{model,key});
+    expect(model.complete).toHaveBeenCalledTimes(9);
   });
   it('does not reanalyze unchanged conversations', async () => {
     await drainCrmAnalyses(db, {model,key});

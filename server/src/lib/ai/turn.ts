@@ -257,7 +257,12 @@ async function automationAllowed(
   return snapshot !== null && decideAutomation(snapshot, purpose).allowed;
 }
 
-async function handoffReplyAllowed(db: Db, input: Pick<TurnInput, 'agentId' | 'conversationId'>) {
+async function handoffReplyAllowed(
+  db: Db,
+  input: Pick<TurnInput, 'agentId' | 'conversationId'>,
+  ownsHandoff: boolean,
+) {
+  if (!ownsHandoff) return false;
   const snapshot = await loadAutomationSnapshot(db, input);
   if (!snapshot) return false;
   // This turn has just disabled the conversation as its handoff effect. Reload every other
@@ -706,7 +711,8 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
     if (!dryRun && !await automationAllowed(db, input, 'crm')) {
       return empty('skipped', AUTOMATION_DISABLED);
     }
-    await handOff(db, { conversation, reason: detail, dryRun });
+    const ownsHandoff = await handOff(db, { conversation, reason: detail, dryRun });
+    if (!ownsHandoff) return empty('skipped', 'Оператор взял диалог на себя.');
     if (!dryRun) {
       await db.insert(aiReplies).values({ ...spend(), outcome: 'handoff', detail });
     }
@@ -750,6 +756,7 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
   // else has landed — and an exception on the way there means nothing is sent at all.
   let applied: Record<string, string> = {};
   let movedTo: string | null = null;
+  let ownsHandoff = false;
 
   try {
     const known = new Set(fieldRows.map((field) => field.id));
@@ -867,7 +874,11 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
             if (await automationAllowed(db, input, 'reply')) {
               await sendStageMessage(
                 db,
-                { graph: deps.graph, key: deps.key },
+                {
+                  graph: deps.graph,
+                  key: deps.key,
+                  canSend: () => automationAllowed(db, input, 'reply'),
+                },
                 { agentId: agent.id, conversationId: conversation.id, stageId: target.id },
               );
             }
@@ -880,7 +891,8 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
       if (!dryRun && !await automationAllowed(db, input, 'crm')) {
         return empty('skipped', AUTOMATION_DISABLED);
       }
-      await handOff(db, { conversation, reason: handoffReason, dryRun });
+      ownsHandoff = await handOff(db, { conversation, reason: handoffReason, dryRun });
+      if (!ownsHandoff) return empty('skipped', 'Оператор взял диалог на себя.');
     }
   } catch (error) {
     // The lead is half applied and the reply has not gone. Saying nothing to the customer
@@ -924,7 +936,7 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
     } else {
       const allowed = handoffReason === null
         ? await automationAllowed(db, input, 'reply')
-        : await handoffReplyAllowed(db, input);
+        : await handoffReplyAllowed(db, input, ownsHandoff);
       if (!allowed) {
         return empty('skipped', AUTOMATION_DISABLED);
       }
@@ -992,13 +1004,15 @@ async function handOff(
     reason: string;
     dryRun: boolean;
   },
-): Promise<void> {
-  if (input.dryRun) return;
+): Promise<boolean> {
+  if (input.dryRun) return true;
 
-  await db
+  const [owned] = await db
     .update(conversations)
     .set({ aiEnabled: false })
-    .where(eq(conversations.id, input.conversation.id));
+    .where(and(eq(conversations.id, input.conversation.id), eq(conversations.aiEnabled, true)))
+    .returning({ id: conversations.id });
+  if (!owned) return false;
   await db.insert(notes).values({
     conversationId: input.conversation.id,
     authorId: null,
@@ -1006,6 +1020,7 @@ async function handOff(
       `Агент передал диалог человеку: ${input.reason}. ` +
       'Ответы агента в этом диалоге выключены.',
   });
+  return true;
 }
 
 type Ready = { ok: true; transport: MessageTransport } | { ok: false; detail: string };

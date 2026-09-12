@@ -185,7 +185,7 @@ export async function queuePurchase(
  */
 export async function queueLead(
   db: Db,
-  input: { agentId: string; conversationId: string },
+  input: { agentId: string; conversationId: string; canQueue?: () => Promise<boolean> },
 ): Promise<void> {
   try {
     const [row] = await db
@@ -206,6 +206,7 @@ export async function queueLead(
 
     const ctwaClid = row.conversation.ctwaClid;
     const reason = await skipReason(db, input.agentId, ctwaClid);
+    if (input.canQueue && !await input.canQueue()) return;
 
     await insertEvent(db, {
       agentId: input.agentId,

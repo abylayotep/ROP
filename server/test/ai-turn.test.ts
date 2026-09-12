@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { and, asc, eq } from 'drizzle-orm';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   agentRules,
   agents,
@@ -17,6 +17,7 @@ import {
 } from '../src/db/schema.js';
 import type { Db } from '../src/db/client.js';
 import { seedFunnel } from '../src/lib/funnel.js';
+import * as automationPolicy from '../src/lib/automation/policy.js';
 import { deleteNote, saveNote } from '../src/lib/knowledge/notes.js';
 import { createAccountWithOwner } from '../src/lib/provision.js';
 import { encryptSecret } from '../src/lib/secret-box.js';
@@ -734,9 +735,67 @@ describe('applying what the model asked for', () => {
 
     expect(atSendTime).toHaveLength(1);
   });
+
++  it('rechecks policy inside a stage message immediately before transport send', async () => {
+    const first = await stageNamed('Новый лид');
+    const second = await stageNamed('В диалоге');
+    await db.update(stages).set({ autoMessage: 'Мы на связи!' }).where(eq(stages.id, second.id));
+    await db.update(conversations).set({ stageId: first.id }).where(eq(conversations.id, conversationId));
+    const model = fakeModel(answer({ stageId: second.id, reply: 'Уточняю детали.' }));
+    const originalLoad = automationPolicy.loadAutomationSnapshot;
+    let checksAfterMove = 0;
+    const load = vi.spyOn(automationPolicy, 'loadAutomationSnapshot').mockImplementation(async (...args) => {
+      const snapshot = await originalLoad(...args);
+      const [current] = await db.select({ stageId: conversations.stageId }).from(conversations)
+        .where(eq(conversations.id, conversationId));
+      if (snapshot?.responseMode === 'live' && current?.stageId === second.id && ++checksAfterMove === 2) {
+        await db.update(agents).set({ responseMode: 'off' }).where(eq(agents.id, agentId));
+      }
+      return snapshot;
+    });
+
+    try {
+      expect((await turn(model)).outcome).toBe('skipped');
+    } finally {
+      load.mockRestore();
+    }
+
+    expect((await conversationRow()).stageId).toBe(second.id);
+    expect(graph.calls.filter((call) => call.method === 'sendText')).toHaveLength(0);
+  });
 });
 
 describe('handing off', () => {
+  it('does not claim or answer a handoff after an operator takes the conversation', async () => {
+    const model = fakeModel(answer({
+      reply: 'Позову коллегу.',
+      handoff: { reason: 'клиент просит человека' },
+    }));
+    const originalLoad = automationPolicy.loadAutomationSnapshot;
+    let checksAfterModel = 0;
+    const load = vi.spyOn(automationPolicy, 'loadAutomationSnapshot').mockImplementation(async (...args) => {
+      const snapshot = await originalLoad(...args);
+      if (model.calls.length === 1 && ++checksAfterModel === 2) {
+        await say('operator', 'Уже отвечаю сам.');
+        await db.update(conversations).set({ aiEnabled: false }).where(eq(conversations.id, conversationId));
+      }
+      return snapshot;
+    });
+
+    let result;
+    try {
+      result = await turn(model);
+    } finally {
+      load.mockRestore();
+    }
+
+    expect(result!.outcome).toBe('skipped');
+    expect(graph.calls.filter((call) => call.method === 'sendText')).toHaveLength(0);
+    expect(await noteRows()).toHaveLength(0);
+    expect(await replyLog()).toHaveLength(0);
+    expect((await thread()).filter((message) => message.author === 'operator')).toHaveLength(1);
+  });
+
   it('turns the conversation off, leaves a note and still sends the reply', async () => {
     const model = fakeModel(
       answer({

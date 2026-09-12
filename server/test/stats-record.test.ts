@@ -110,6 +110,7 @@ beforeEach(async () => {
     accountId,
     name: 'Сафина',
     aiEnabled: true,
+    responseMode: 'live',
     openrouterKey: encryptSecret(OPENROUTER_KEY, key, agentId),
   });
   await seedFunnel(db, agentId);

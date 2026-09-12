@@ -1,5 +1,8 @@
+import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
-import { describe, expect, it } from 'vitest';
+import type { AiSettings } from '@rakurs/contract';
+import postgres from 'postgres';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   accounts,
   agents,
@@ -10,6 +13,9 @@ import {
   whatsappNumbers,
 } from '../src/db/schema.js';
 import { withDb } from './helpers/db.js';
+import { ADMIN_URL, runMigration, tagsBefore, withDatabase } from './helpers/migration-db.js';
+
+const RESPONSE_MODE_MIGRATION = '0028_sparkling_vampiro';
 
 /** An agent with one conversation on it — the fixture every case here starts from. */
 async function seed(db: Awaited<ReturnType<typeof withDb>>) {
@@ -41,7 +47,7 @@ async function seed(db: Awaited<ReturnType<typeof withDb>>) {
     })
     .returning();
 
-  return { agentId: agent!.id, conversationId: conversation!.id };
+  return { agentId: agent!.id, contactId: contact!.id, conversationId: conversation!.id };
 }
 
 describe('ai schema', () => {
@@ -52,11 +58,55 @@ describe('ai schema', () => {
     const [row] = await db.select().from(agents).where(eq(agents.id, agentId));
 
     expect(row?.aiEnabled).toBe(false);
+    expect(row?.responseMode).toBe('off');
+    expect(row?.testContactId).toBeNull();
     expect(row?.model).toBe('openai/gpt-4o-mini');
     // numeric arrives as a string on purpose: a temperature must not drift through a float.
     expect(row?.temperature).toBe('0.30');
     expect(row?.replyLanguage).toBe('auto');
     expect(row?.openrouterKey).toBeNull();
+  });
+
+  it.each(['off', 'test', 'live'] as const)('round-trips the %s response mode', async (responseMode) => {
+    const db = await withDb();
+    const { agentId } = await seed(db);
+
+    const [updated] = await db
+      .update(agents)
+      .set({ responseMode })
+      .where(eq(agents.id, agentId))
+      .returning();
+
+    expect(updated?.responseMode).toBe(responseMode);
+  });
+
+  it('clears the selected test contact when the contact is deleted', async () => {
+    const db = await withDb();
+    const { agentId, contactId } = await seed(db);
+    await db.update(agents).set({ testContactId: contactId }).where(eq(agents.id, agentId));
+
+    await db.delete(contacts).where(eq(contacts.id, contactId));
+
+    const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
+    expect(agent?.testContactId).toBeNull();
+  });
+
+  it('exposes the selected contact summary through the AI settings contract', () => {
+    const settings = {
+      aiEnabled: false,
+      responseMode: 'test',
+      testContact: { id: 'contact-id', name: 'Tester', phone: '77001234567' },
+      model: 'openai/gpt-4o-mini',
+      temperature: 0.3,
+      replyLanguage: 'auto',
+      keySet: false,
+    } satisfies AiSettings;
+
+    expect(settings.testContact).toEqual({
+      id: 'contact-id',
+      name: 'Tester',
+      phone: '77001234567',
+    });
   });
 
   it('starts a conversation with the AI on', async () => {
@@ -154,5 +204,60 @@ describe('ai schema', () => {
     await db.delete(agents).where(eq(agents.id, agentId));
 
     expect(await db.select().from(aiReplies)).toHaveLength(0);
+  });
+});
+
+describe('response mode migration', () => {
+  const dbName = `rakurs_response_mode_${randomUUID().replace(/-/g, '')}`;
+  let adminSql: postgres.Sql;
+  let scratchSql: postgres.Sql;
+
+  beforeAll(async () => {
+    adminSql = postgres(ADMIN_URL, { max: 1 });
+    await adminSql.unsafe(`CREATE DATABASE "${dbName}"`);
+    scratchSql = postgres(withDatabase(ADMIN_URL, dbName), { max: 1 });
+
+    for (const tag of tagsBefore(RESPONSE_MODE_MIGRATION)) {
+      await runMigration(scratchSql, tag);
+    }
+
+    const [account] = await scratchSql`
+      INSERT INTO accounts (name) VALUES ('Existing account') RETURNING id
+    `;
+    await scratchSql`
+      INSERT INTO agents (account_id, name, ai_enabled)
+      VALUES (${account!.id}, 'Disabled agent', false), (${account!.id}, 'Enabled agent', true)
+    `;
+
+    await runMigration(scratchSql, RESPONSE_MODE_MIGRATION);
+  });
+
+  afterAll(async () => {
+    await scratchSql?.end();
+    await adminSql?.unsafe(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`);
+    await adminSql?.end();
+  });
+
+  it('preserves existing agent behavior while new agents default to off', async () => {
+    const existing = await scratchSql`
+      SELECT name, response_mode FROM agents ORDER BY name
+    `;
+    const [created] = await scratchSql`
+      INSERT INTO agents (account_id, name)
+      SELECT account_id, 'New agent' FROM agents LIMIT 1
+      RETURNING response_mode
+    `;
+
+    expect(existing).toMatchObject([
+      { name: 'Disabled agent', response_mode: 'off' },
+      { name: 'Enabled agent', response_mode: 'live' },
+    ]);
+    expect(created!.response_mode).toBe('off');
+  });
+
+  it('rejects response modes outside the supported set', async () => {
+    await expect(
+      scratchSql`UPDATE agents SET response_mode = 'staging'`,
+    ).rejects.toThrow(/agents_response_mode_check/);
   });
 });

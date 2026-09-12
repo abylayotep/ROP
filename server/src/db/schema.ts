@@ -1,6 +1,7 @@
 import { sql } from 'drizzle-orm';
 import {
   boolean,
+  check,
   customType,
   index,
   integer,
@@ -53,6 +54,8 @@ import type {
   GenerationStoredSource,
 } from '../lib/knowledge/generation-types.js';
 import type { KbGenerationSelection, KbGenerationWarning } from '@rakurs/contract';
+
+export type AgentResponseMode = 'off' | 'test' | 'live';
 
 /**
  * Tenancy plus authentication, plus WhatsApp: connected numbers, contacts,
@@ -136,6 +139,10 @@ export const agents = pgTable(
     // in: an owner writes the instructions first and turns it on when the sandbox convinces
     // them, not before.
     aiEnabled: boolean('ai_enabled').notNull().default(false),
+    responseMode: text('response_mode').$type<AgentResponseMode>().notNull().default('off'),
+    testContactId: uuid('test_contact_id').references((): AnyPgColumn => contacts.id, {
+      onDelete: 'set null',
+    }),
     // An OpenRouter model id, exactly as OpenRouter spells it.
     model: text('model').notNull().default('openai/gpt-4o-mini'),
     // numeric, not real: a temperature read back as a string cannot drift through a float,
@@ -164,7 +171,10 @@ export const agents = pgTable(
     configVersion: integer('config_version').notNull().default(1),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index('agents_account_id_idx').on(t.accountId)],
+  (t) => [
+    index('agents_account_id_idx').on(t.accountId),
+    check('agents_response_mode_check', sql`${t.responseMode} in ('off', 'test', 'live')`),
+  ],
 );
 
 /**

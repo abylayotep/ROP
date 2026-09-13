@@ -493,10 +493,15 @@ describe('the coaching conversation', () => {
     expect(rows[0]!.revision).toBe(1);
     expect(rows[0]!.snapshot).toEqual(snapshot);
     await expect(db.execute(sql`update response_feedback set snapshot = '{}'::jsonb where id = ${rows[0]!.id}`)).rejects.toThrow();
+    const [coachMessage] = await db.insert(coachMessages).values({
+      agentId, role: 'owner', text: 'Correct this', sourceSnapshot: snapshot,
+    }).returning();
+    await expect(db.execute(sql`update coach_messages set source_snapshot = ${JSON.stringify({ ...snapshot, responseText: 'Changed' })}::jsonb
+      where id = ${coachMessage!.id}`)).rejects.toMatchObject({ cause: { message: 'Coach message source snapshot is immutable' } });
     await expect(db.execute(sql`insert into response_feedback (account_id, agent_id, ai_reply_id, sandbox_turn_id, correction_type, note, snapshot)
-      values (${accountId}, ${agentId}, ${aiReplyId}, ${randomUUID()}, 'fact', 'Wrong', '{}'::jsonb)`)).rejects.toThrow();
-    await expect(db.execute(sql`insert into response_feedback (account_id, agent_id, ai_reply_id, correction_type, note, snapshot)
-      values (${randomUUID()}, ${agentId}, ${aiReplyId}, 'fact', 'Wrong tenant', '{}'::jsonb)`)).rejects.toThrow();
+      values (${accountId}, ${agentId}, ${aiReplyId}, ${randomUUID()}, 'fact', 'Wrong', ${JSON.stringify(snapshot)}::jsonb)`)).rejects.toMatchObject({ cause: { code: '23514', constraint_name: 'response_feedback_one_source_check' } });
+    await expect(db.execute(sql`insert into response_feedback (account_id, agent_id, conversation_id, ai_reply_id, correction_type, note, snapshot)
+      values (${randomUUID()}, ${agentId}, ${conversationId}, ${aiReplyId}, 'fact', 'Wrong tenant', ${JSON.stringify(snapshot)}::jsonb)`)).rejects.toMatchObject({ cause: { code: '23503', constraint_name: 'response_feedback_agent_scope_fk' } });
     await expect(db.execute(sql`insert into response_feedback (account_id, agent_id, conversation_id, ai_reply_id, correction_type, note, snapshot)
       values (${accountId}, ${randomUUID()}, ${conversationId}, ${aiReplyId}, 'fact', 'Wrong agent', ${JSON.stringify(snapshot)}::jsonb)`)).rejects.toThrow();
     await expect(db.execute(sql`insert into response_feedback (account_id, agent_id, conversation_id, ai_reply_id, correction_type, note, snapshot)

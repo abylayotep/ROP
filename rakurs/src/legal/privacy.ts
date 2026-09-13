@@ -4,7 +4,7 @@ export const privacy: LegalTranslations = {
   ru: {
     title: 'Политика конфиденциальности',
     intro: [
-      'Эта политика объясняет, какие данные собирает и обрабатывает сервис «Ракурс» (rop.tasbaqa.ru), зачем они нужны, кому передаются и как их удалить.',
+      'Эта политика объясняет, какие данные собирает и обрабатывает сервис «Ракурс» (rop.tasbaqa.ru; в Facebook, Instagram и WhatsApp приложение называется «Tasbaqa»), зачем они нужны, кому передаются и как их удалить.',
     ],
     sections: [
       {
@@ -141,7 +141,7 @@ export const privacy: LegalTranslations = {
   en: {
     title: 'Privacy Policy',
     intro: [
-      'This policy explains what data the Rakurs service (rop.tasbaqa.ru) collects and processes, why, who it is shared with, and how to have it deleted.',
+      'This policy explains what data the Rakurs service (rop.tasbaqa.ru; shown as "Tasbaqa" in Facebook, Instagram and WhatsApp) collects and processes, why, who it is shared with, and how to have it deleted.',
     ],
     sections: [
       {

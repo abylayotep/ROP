@@ -27,8 +27,8 @@ export const dataDeletion: LegalTranslations = {
           p('После этого приложение больше не сможет получать новые данные из вашего аккаунта. Уже сохранённые данные при этом не удаляются — для этого используйте способ 1 или 3.'),
           steps(
             'Facebook: откройте «Настройки и конфиденциальность» → «Настройки» → «Безопасность» → «Бизнес-интеграции» (или «Приложения и сайты»).',
-            'Найдите приложение «Ракурс» и нажмите «Удалить».',
-            'WhatsApp: в WhatsApp Manager (business.facebook.com) откройте настройки аккаунта WhatsApp Business → «Партнёры» и удалите партнёра.',
+            'Найдите приложение «Tasbaqa» (так «Ракурс» называется в Meta) и нажмите «Удалить».',
+            'WhatsApp: в WhatsApp Manager (business.facebook.com) откройте настройки аккаунта WhatsApp Business → «Партнёры» и удалите партнёра «Tasbaqa».',
           ),
         ],
       },
@@ -92,8 +92,8 @@ export const dataDeletion: LegalTranslations = {
           p('After this the app can no longer receive new data from your account. Data already stored is not deleted by this step; use option 1 or 3 for that.'),
           steps(
             'Facebook: open Settings & privacy → Settings → Security → Business Integrations (or Apps and Websites).',
-            'Find the Rakurs app and click Remove.',
-            'WhatsApp: in WhatsApp Manager (business.facebook.com), open your WhatsApp Business Account settings → Partners and remove the partner.',
+            'Find the app named "Tasbaqa" (the name Rakurs uses in Meta) and click Remove.',
+            'WhatsApp: in WhatsApp Manager (business.facebook.com), open your WhatsApp Business Account settings → Partners and remove the partner "Tasbaqa".',
           ),
         ],
       },

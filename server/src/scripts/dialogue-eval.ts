@@ -58,8 +58,8 @@ const { values: args } = parseArgs({
     turns: { type: 'string', default: '8' },
     offset: { type: 'string', default: '0' },
     out: { type: 'string', default: 'dialogue-eval.md' },
-    'actor-model': { type: 'string', default: 'anthropic/claude-sonnet-4.5' },
-    'judge-model': { type: 'string', default: 'anthropic/claude-sonnet-4.5' },
+    'actor-model': { type: 'string', default: 'openai/gpt-4.1-mini' },
+    'judge-model': { type: 'string', default: 'openai/gpt-4.1' },
     concurrency: { type: 'string', default: '3' },
     // Seed stages exactly as exported, without the texts migration 0046 fills in.
     baseline: { type: 'boolean', default: false },
@@ -68,6 +68,8 @@ const { values: args } = parseArgs({
   },
 });
 
+// Actor and judge stay on OpenAI models: the run bills the agent's own OpenRouter key, and
+// Claude as actor and judge cost more than every reply it graded.
 const URL = process.env.EVAL_DATABASE_URL ?? 'postgres://rakurs:rakurs@localhost:55432/rakurs_eval';
 const snapshot = JSON.parse(readFileSync(args.snapshot!, 'utf8')) as Snapshot;
 const conversations = JSON.parse(readFileSync(args.conversations!, 'utf8')) as RealConversation[];

@@ -1,27 +1,25 @@
 import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useSearchParams } from 'react-router-dom';
 import * as api from '@/api';
 import { ProposalCard } from '@/components/coach/ProposalCard';
-import { RuleList } from '@/components/coach/RuleList';
-import { Card, CardHead } from '@/components/ui/primitives';
+import { Card } from '@/components/ui/primitives';
 import { Async, EmptyState, Skeleton } from '@/components/ui/states';
 import { useToast } from '@/components/ui/Toast';
 import { useApi } from '@/hooks/useApi';
 import { withoutCorrectionParams } from '@/lib/training-routes';
-import { useAgent } from '@/store/agent';
-import type { AgentRule, CoachMessage, ConversationThread, KbDraft } from '@/types';
+import type { AgentRule, CoachMessage, ConversationThread } from '@/types';
 import { clearPendingCorrection, correctionSource, correctionText, readPendingCorrection,
-  savePendingCorrection, type CorrectionTarget, type PendingCorrection } from './response-feedback';
+  savePendingCorrection, type CorrectionTarget, type PendingCorrection } from '@/screens/response-feedback';
 
 /**
- * Обучение: a chat where the owner teaches the agent, and the rules that chat has already
- * produced or that the owner typed by hand — side by side, because a proposal is read
- * against the rule it would change.
+ * «Научить» → «Спросить тренера»: a chat where the owner teaches the agent, or corrects one
+ * reply «Так нельзя» was clicked on. The rules themselves live in «Как отвечает»; this column
+ * only links there, and still loads them because a proposal is read against the rule it
+ * would change (`ProposalCard`).
  *
- * Every route this screen calls is owner-only on the server, the read included (see
- * `server/src/api/rules.ts` and `server/src/api/coach.ts`) — a rule shapes what the agent
- * costs to run, and a coaching turn spends real money. A non-owner gets a plain message
- * instead of a screen that would fail every request it made.
+ * Every route this component calls is owner-only on the server, the read included (see
+ * `server/src/api/rules.ts` and `server/src/api/coach.ts`). `TrainingScreen` mounts it only
+ * inside «Научить», a tab a non-owner never sees.
  */
 
 const control: CSSProperties = {
@@ -43,47 +41,33 @@ interface Loaded {
   rules: AgentRule[];
 }
 
-export function CoachScreen() {
-  const { agent, role } = useAgent();
-  const owner = role === 'owner';
-
-  // Called unconditionally — a hook cannot be skipped by an early return — but the fetcher
-  // itself never calls an owner-only route for anyone but the owner.
+export function CoachChat({ agentId, onOpenRules }: { agentId: string; onOpenRules: () => void }) {
   const query = useApi<Loaded>(
     async (signal) => {
-      if (!owner) return { messages: [], rules: [] };
       const [messages, rules] = await Promise.all([
-        api.listCoachMessages(agent.id, signal),
-        api.listRules(agent.id, signal),
+        api.listCoachMessages(agentId, signal),
+        api.listRules(agentId, signal),
       ]);
       return { messages, rules };
     },
-    [agent.id, owner],
+    [agentId],
   );
-
-  if (!owner) {
-    return (
-      <Card>
-        <EmptyState>Обучение агента — дело владельца компании. У вас нет доступа к этому разделу.</EmptyState>
-      </Card>
-    );
-  }
 
   return (
     <Async state={query} skeleton={<Skeleton height={480} />}>
       {(loaded) => (
-        // Keyed on the agent: a coaching chat and its rules must not survive under an agent
-        // the URL moved on to.
-        <Coach key={agent.id} agentId={agent.id} loaded={loaded} />
+        // Keyed on the agent: a coaching chat must not survive under an agent the URL moved on to.
+        <Coach key={agentId} agentId={agentId} loaded={loaded} onOpenRules={onOpenRules} />
       )}
     </Async>
   );
 }
 
-function Coach({ agentId, loaded }: { agentId: string; loaded: Loaded }) {
+function Coach({ agentId, loaded, onOpenRules }: { agentId: string; loaded: Loaded; onOpenRules: () => void }) {
   const toast = useToast();
   const [messages, setMessages] = useState<CoachMessage[]>(loaded.messages);
-  const [rules, setRules] = useState<AgentRule[]>(loaded.rules);
+  const rules = loaded.rules;
+  const activeRules = rules.filter((rule) => rule.enabled).length;
   const [text, setText] = useState('');
   const [correctionType, setCorrectionType] = useState<'fact' | 'behavior'>('fact');
   const [sending, setSending] = useState(false);
@@ -119,7 +103,7 @@ function Coach({ agentId, loaded }: { agentId: string; loaded: Loaded }) {
     ? { key: previewKey, snapshot: await api.previewResponseFeedback(agentId, correctionSource(correctionTarget), signal) }
     : null, [agentId, previewKey]);
   const previewReady = !correctionTarget || (preview.data?.key === previewKey && !preview.error);
-  const detach = () => setParams((prev) => withoutCorrectionParams(prev), { replace: true });
+  const detach = () => setParams(withoutCorrectionParams(params), { replace: true });
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ block: 'nearest' });
@@ -252,184 +236,123 @@ function Coach({ agentId, loaded }: { agentId: string; loaded: Loaded }) {
   }
 
   return (
-    <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
-      <div style={{ flex: '1 1 54%', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 12 }}>
-        {conversationId !== null && (
-          <AttachedDialog agentId={agentId} conversationId={conversationId} onDetach={detach} />
-        )}
-        {correctionTarget && <CorrectionContext agentId={agentId} target={correctionTarget} messageId={params.get('message')} preview={preview} previewKey={previewKey} />}
-        <Card pad={false}>
-          <div
-            style={{
-              padding: 16,
-              display: 'flex',
-              flexDirection: 'column',
-              gap: 14,
-              minHeight: 320,
-              maxHeight: 600,
-              overflowY: 'auto',
-            }}
-          >
-            {messages.length === 0 ? (
-              <EmptyState>
-                Расскажите, как агенту говорить, о чём спрашивать и что никогда не обещать.
-                Коуч предложит правило — оно ничего не меняет, пока вы не согласитесь.
-              </EmptyState>
-            ) : (
-              messages.map((message) => (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12, minWidth: 0 }}>
+      {conversationId !== null && (
+        <AttachedDialog agentId={agentId} conversationId={conversationId} onDetach={detach} />
+      )}
+      {correctionTarget && <CorrectionContext agentId={agentId} target={correctionTarget} messageId={params.get('message')} preview={preview} previewKey={previewKey} />}
+      <Card pad={false}>
+        <div
+          style={{
+            padding: 16,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 14,
+            minHeight: 320,
+            maxHeight: 600,
+            overflowY: 'auto',
+          }}
+        >
+          {messages.length === 0 ? (
+            <EmptyState>
+              Расскажите, как агенту говорить, о чём спрашивать и что никогда не обещать.
+              Коуч предложит правило — оно ничего не меняет, пока вы не согласитесь.
+            </EmptyState>
+          ) : (
+            messages.map((message) => (
+              <div
+                key={message.id}
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 6,
+                  alignItems: message.role === 'owner' ? 'flex-end' : 'flex-start',
+                }}
+              >
                 <div
-                  key={message.id}
+                  className={message.role === 'model' ? 'sunken-box' : undefined}
                   style={{
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: 6,
-                    alignItems: message.role === 'owner' ? 'flex-end' : 'flex-start',
+                    maxWidth: '85%',
+                    padding: '9px 12px',
+                    borderRadius: 10,
+                    fontSize: 12.5,
+                    lineHeight: 1.5,
+                    whiteSpace: 'pre-wrap',
+                    background: message.role === 'owner' ? 'var(--accent-2)' : undefined,
+                    color: message.role === 'owner' ? 'var(--on-accent)' : undefined,
                   }}
                 >
-                  <div
-                    className={message.role === 'model' ? 'sunken-box' : undefined}
-                    style={{
-                      maxWidth: '85%',
-                      padding: '9px 12px',
-                      borderRadius: 10,
-                      fontSize: 12.5,
-                      lineHeight: 1.5,
-                      whiteSpace: 'pre-wrap',
-                      background: message.role === 'owner' ? 'var(--accent-2)' : undefined,
-                      color: message.role === 'owner' ? 'var(--on-accent)' : undefined,
-                    }}
-                  >
-                    {message.text}
-                  </div>
-                  {message.role === 'model' && message.proposal && (
-                    <>
-                      {message.sourceSnapshot && <div className="sunken-box" style={{ maxWidth: '85%', fontSize: 12 }}>
-                        <strong>Исходный ответ</strong><p>{message.sourceSnapshot.responseText}</p>
-                        <strong>Проверенные источники</strong>
-                        {message.sourceSnapshot.sourceRecords.length
-                          ? <ul>{message.sourceSnapshot.sourceRecords.map((source) =>
-                            <li key={source.id}>{source.title}: {source.content}</li>)}</ul>
-                          : <p>Источники не использовались.</p>}
-                      </div>}
-                      <ProposalCard agentId={agentId} message={message} rules={rules} onRejected={onRejected} />
-                    </>
-                  )}
+                  {message.text}
                 </div>
-              ))
-            )}
-            <div ref={bottomRef} />
-          </div>
-        </Card>
-
-        <form onSubmit={send} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {pendingCorrection && <div role="alert">{pendingStatus === 'failed'
-            ? 'Исправление завершилось с ошибкой. Этот запрос не будет повторно запускать модель.'
-            : pendingStatus === 'pending' ? 'Коуч ещё обрабатывает исправление. Повторная отправка заблокирована.'
-              : 'Статус исправления неизвестен: коуч мог сохранить предложение. Повторная отправка заблокирована.'}
-            <button type="button" className="btn btn-sm" onClick={() => void checkFeedbackStatus()}>Проверить статус</button>
-            <button type="button" className="btn btn-sm" onClick={() => {
-              clearPendingCorrection(window.localStorage, agentId);
-              pendingRef.current = null;
-              setPendingCorrection(null);
-              setText(pendingCorrection.note);
-              setMessages((prev) => prev.filter((item) => !item.id.startsWith('local-')));
-            }}>Я понимаю риск и начну новое исправление</button>
-          </div>}
-          {correctionTarget && !previewReady && <p role="status">{preview.error
-            ? 'Не удалось проверить источники. Повторите загрузку страницы перед отправкой.'
-            : 'Проверяем источники перед отправкой…'}</p>}
-          {correctionTarget && <>
-            <label htmlFor="correction-type">Тип исправления</label>
-            <select id="correction-type" value={correctionType} onChange={(event) => setCorrectionType(event.target.value as 'fact' | 'behavior')}>
-              <option value="fact">Неверная информация</option>
-              <option value="behavior">Неверное поведение</option>
-            </select>
-            <label htmlFor="correction-note">Как нужно исправить ответ</label>
-          </>}
-          <textarea
-            id={correctionTarget ? 'correction-note' : undefined}
-            ref={textRef}
-            style={{ ...control, minHeight: 72 }}
-            value={text}
-            disabled={sending || !!pendingCorrection}
-            placeholder="Например: мы продаём мебель на заказ, всегда спрашиваем город и срок"
-            onChange={(e) => setText(e.target.value)}
-          />
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <button type="submit" className="btn" disabled={sending || !!pendingCorrection || !previewReady || correctionText(text) === null}>
-              {sending ? 'Коуч отвечает…' : correctionTarget ? 'Создать предложение' : 'Отправить'}
-            </button>
-            {/* Every turn is a real OpenRouter call, the same money a sandbox run spends —
-                said next to the button that spends it, not buried in a tooltip. */}
-            <span style={{ fontSize: 11.5, color: 'var(--text-dim)' }}>
-              Каждое сообщение коучу оплачивается с вашего счёта в OpenRouter.
-            </span>
-          </div>
-        </form>
-      </div>
-
-      <div style={{ flex: '1 1 46%', minWidth: 340, display: 'flex', flexDirection: 'column', gap: 16 }}>
-        <OpenDrafts agentId={agentId} />
-        <RuleList agentId={agentId} rules={rules} onChanged={setRules} />
-      </div>
-    </div>
-  );
-}
-
-/**
- * The way back into a draft an owner left before deciding — «В черновик» already lands on one
- * directly, but leaving `DraftScreen` used to lose it for good: nothing named where to find it
- * again. Shown only when there is something to show; an owner with no open draft sees nothing
- * extra here.
- */
-function OpenDrafts({ agentId }: { agentId: string }) {
-  const navigate = useNavigate();
-  const drafts = useApi<KbDraft[]>((signal) => api.listOpenDrafts(agentId, signal), [agentId]);
-  const list = drafts.data ?? [];
-
-  // A failed list must not read as «черновиков нет»: an owner who left one here would believe
-  // it had been applied or thrown away, and stop looking for it.
-  if (drafts.error) {
-    return (
-      <Card>
-        <CardHead title="Черновики на проверке" />
-        <div className="muted">Не удалось загрузить список. Обновите страницу.</div>
+                {message.role === 'model' && message.proposal && (
+                  <>
+                    {message.sourceSnapshot && <div className="sunken-box" style={{ maxWidth: '85%', fontSize: 12 }}>
+                      <strong>Исходный ответ</strong><p>{message.sourceSnapshot.responseText}</p>
+                      <strong>Проверенные источники</strong>
+                      {message.sourceSnapshot.sourceRecords.length
+                        ? <ul>{message.sourceSnapshot.sourceRecords.map((source) =>
+                          <li key={source.id}>{source.title}: {source.content}</li>)}</ul>
+                        : <p>Источники не использовались.</p>}
+                    </div>}
+                    <ProposalCard agentId={agentId} message={message} rules={rules} onRejected={onRejected} />
+                  </>
+                )}
+              </div>
+            ))
+          )}
+          <div ref={bottomRef} />
+        </div>
       </Card>
-    );
-  }
 
-  if (list.length === 0) return null;
-
-  return (
-    <Card>
-      <CardHead title="Черновики на проверке" />
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-        {list.map((draft) => (
-          <button
-            key={draft.id}
-            type="button"
-            className="sunken-box"
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              gap: 8,
-              padding: '9px 10px',
-              border: 0,
-              cursor: 'pointer',
-              font: 'inherit',
-              fontSize: 12.5,
-              color: 'var(--text)',
-              textAlign: 'left',
-            }}
-            onClick={() => navigate(`../drafts/${draft.id}`)}
-          >
-            <span className="ellipsis">{draft.title}</span>
-            <span style={{ fontSize: 11, color: 'var(--text-dim)', flex: '0 0 auto' }}>Открыть →</span>
+      <form onSubmit={send} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {pendingCorrection && <div role="alert">{pendingStatus === 'failed'
+          ? 'Исправление завершилось с ошибкой. Этот запрос не будет повторно запускать модель.'
+          : pendingStatus === 'pending' ? 'Коуч ещё обрабатывает исправление. Повторная отправка заблокирована.'
+            : 'Статус исправления неизвестен: коуч мог сохранить предложение. Повторная отправка заблокирована.'}
+          <button type="button" className="btn btn-sm" onClick={() => void checkFeedbackStatus()}>Проверить статус</button>
+          <button type="button" className="btn btn-sm" onClick={() => {
+            clearPendingCorrection(window.localStorage, agentId);
+            pendingRef.current = null;
+            setPendingCorrection(null);
+            setText(pendingCorrection.note);
+            setMessages((prev) => prev.filter((item) => !item.id.startsWith('local-')));
+          }}>Я понимаю риск и начну новое исправление</button>
+        </div>}
+        {correctionTarget && !previewReady && <p role="status">{preview.error
+          ? 'Не удалось проверить источники. Повторите загрузку страницы перед отправкой.'
+          : 'Проверяем источники перед отправкой…'}</p>}
+        {correctionTarget && <>
+          <label htmlFor="correction-type">Тип исправления</label>
+          <select id="correction-type" value={correctionType} onChange={(event) => setCorrectionType(event.target.value as 'fact' | 'behavior')}>
+            <option value="fact">Неверная информация</option>
+            <option value="behavior">Неверное поведение</option>
+          </select>
+          <label htmlFor="correction-note">Как нужно исправить ответ</label>
+        </>}
+        <textarea
+          id={correctionTarget ? 'correction-note' : undefined}
+          ref={textRef}
+          style={{ ...control, minHeight: 72 }}
+          value={text}
+          disabled={sending || !!pendingCorrection}
+          placeholder="Например: мы продаём мебель на заказ, всегда спрашиваем город и срок"
+          onChange={(e) => setText(e.target.value)}
+        />
+        <button type="button" className="btn-sm" onClick={onOpenRules} style={{ alignSelf: 'flex-start' }}>
+          Правила: {activeRules} активных →
+        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <button type="submit" className="btn" disabled={sending || !!pendingCorrection || !previewReady || correctionText(text) === null}>
+            {sending ? 'Коуч отвечает…' : correctionTarget ? 'Создать предложение' : 'Отправить'}
           </button>
-        ))}
-      </div>
-    </Card>
+          {/* Every turn is a real OpenRouter call, the same money a sandbox run spends —
+              said next to the button that spends it, not buried in a tooltip. */}
+          <span style={{ fontSize: 11.5, color: 'var(--text-dim)' }}>
+            Каждое сообщение коучу оплачивается с вашего счёта в OpenRouter.
+          </span>
+        </div>
+      </form>
+    </div>
   );
 }
 

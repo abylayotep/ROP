@@ -1,9 +1,11 @@
 import { useState, type KeyboardEvent, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import * as api from '@/api';
+import { CoachChat } from '@/components/coach/CoachChat';
 import { ChatGenerationPanel } from '@/components/knowledge/ChatGenerationPanel';
 import { KnowledgeSourceCards, recentHistorySearch } from '@/components/knowledge/KnowledgeSourceCards';
 import { KnowledgeTab } from '@/components/training/KnowledgeTab';
+import { RepliesTab } from '@/components/training/RepliesTab';
 import { Card } from '@/components/ui/primitives';
 import { EmptyState } from '@/components/ui/states';
 import { useApi } from '@/hooks/useApi';
@@ -17,7 +19,6 @@ import {
   type TrainingTab,
 } from '@/lib/training-routes';
 import { tabAfterKey } from '@/lib/training-state';
-import { CoachScreen } from '@/screens/CoachScreen';
 import { useAgent } from '@/store/agent';
 import type { KbDraft, KbNote } from '@/types';
 import './training-workspace.css';
@@ -136,7 +137,7 @@ export function TrainingScreen() {
       )}
 
       {activeTab === 'replies' && (
-        <Card><EmptyState>Стиль общения и правила скоро появятся здесь.</EmptyState></Card>
+        <RepliesTab key={agent.id} agentId={agent.id} owner={owner} onOpenCoach={() => go('teach', 'coach')} />
       )}
 
       {activeTab === 'teach' && (
@@ -153,6 +154,7 @@ export function TrainingScreen() {
           }}
           onOpenRecentHistory={() => setParams(recentHistorySearch(params), { replace: true })}
           onKnowledgeChanged={notes.reload}
+          onOpenRules={() => go('replies')}
         />
       )}
 
@@ -164,7 +166,7 @@ export function TrainingScreen() {
 }
 
 /**
- * Temporary «Научить» body: the existing generation panel, coach screen and source cards
+ * Temporary «Научить» body: the existing generation panel, coach chat and source cards
  * behind a plain mode switch. The chooser and wizard replace it.
  */
 function TeachPlaceholder({
@@ -175,6 +177,7 @@ function TeachPlaceholder({
   onRunId,
   onOpenRecentHistory,
   onKnowledgeChanged,
+  onOpenRules,
 }: {
   agentId: string;
   mode: TeachMode | null;
@@ -183,6 +186,7 @@ function TeachPlaceholder({
   onRunId: (runId: string | null) => void;
   onOpenRecentHistory: () => void;
   onKnowledgeChanged: () => void;
+  onOpenRules: () => void;
 }) {
   return (
     <>
@@ -210,7 +214,7 @@ function TeachPlaceholder({
           readOnly={false}
         />
       )}
-      {mode === 'coach' && <CoachScreen />}
+      {mode === 'coach' && <CoachChat key={`${agentId}:coach`} agentId={agentId} onOpenRules={onOpenRules} />}
       {mode === 'import' && (
         <KnowledgeSourceCards
           key={`sources-${agentId}`}

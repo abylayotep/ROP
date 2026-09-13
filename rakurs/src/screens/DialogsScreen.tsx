@@ -52,7 +52,7 @@ const bubble = (mine: boolean): CSSProperties => ({
 
 /**
  * Whether «Так нельзя» belongs on this message: only the agent's own answer, and only for
- * the owner. «Обучение» refuses everyone else on the server (see `CoachScreen`'s own
+ * the owner. «Обучение» refuses everyone else on the server (see `CoachChat`'s own
  * comment), so a member offered this button would only ever land on a screen that tells
  * them so — worse than a button that is not there at all.
  */

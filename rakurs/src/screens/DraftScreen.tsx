@@ -18,7 +18,7 @@ import type { KbDraft, KbDraftDetail, TestCase, TestRun } from '@/types';
  * at, not a section you browse.
  *
  * Owner-only on the server, the read included (`server/src/api/drafts.ts`,
- * `server/src/api/test-cases.ts`) — the same standing `CoachScreen` already gives its own
+ * `server/src/api/test-cases.ts`) — the same standing `CoachChat` already gives its own
  * gate, copied here rather than shared, since the two screens have nothing else in common.
  *
  * How long a poll lives is bounded by how long the run itself runs, not by this component:

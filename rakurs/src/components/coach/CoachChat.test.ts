@@ -22,12 +22,12 @@ vi.mock('@/hooks/useApi', () => ({ useApi: (fetcher: Function, deps: unknown[]) 
   return { data, error: undefined, loading: false, reload: () => {} };
 } }));
 
-import { CoachScreen } from './CoachScreen';
+import { CoachChat } from './CoachChat';
 
 function renderCorrection() {
   fixture.calls = 0;
-  return renderToStaticMarkup(createElement(MemoryRouter, { initialEntries: ['/a/agent-1/coach?session=session-1&turn=turn-1'] },
-    createElement(Routes, null, createElement(Route, { path: '/a/:agentId/coach', element: createElement(CoachScreen) }))));
+  return renderToStaticMarkup(createElement(MemoryRouter, { initialEntries: ['/a/agent-1/training?tab=teach&teach=coach&session=session-1&turn=turn-1'] },
+    createElement(Routes, null, createElement(Route, { path: '/a/:agentId/training', element: createElement(CoachChat, { agentId: 'agent-1', onOpenRules: () => undefined }) }))));
 }
 
 it('shows the exact sandbox reply, verified evidence, required correction input, editable proposal and draft handoff', () => {
@@ -52,8 +52,8 @@ it('does not claim source verification while preview is still loading', () => {
 
 it('shows the verified live reply source before accepting an operator note', () => {
   fixture.calls = 0;
-  const html = renderToStaticMarkup(createElement(MemoryRouter, { initialEntries: ['/a/agent-1/coach?conversation=dialog-1&reply=reply-1&message=message-2'] },
-    createElement(Routes, null, createElement(Route, { path: '/a/:agentId/coach', element: createElement(CoachScreen) }))));
+  const html = renderToStaticMarkup(createElement(MemoryRouter, { initialEntries: ['/a/agent-1/training?tab=teach&teach=coach&conversation=dialog-1&reply=reply-1&message=message-2'] },
+    createElement(Routes, null, createElement(Route, { path: '/a/:agentId/training', element: createElement(CoachChat, { agentId: 'agent-1', onOpenRules: () => undefined }) }))));
   expect(html).toContain('Клиент: Когда доставка?');
   expect(html).toContain('Агент: Доставка завтра.');
   expect(html).toContain('Проверенная доставка: Три дня.');

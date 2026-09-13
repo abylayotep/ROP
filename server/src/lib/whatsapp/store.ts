@@ -1,6 +1,6 @@
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
-import { contacts, conversations, messages } from '../../db/schema.js';
+import { agents, contacts, conversations, messages } from '../../db/schema.js';
 import { runTurn, type TurnDeps } from '../ai/turn.js';
 import { decideAutomation, loadAutomationSnapshot } from '../automation/policy.js';
 
@@ -68,6 +68,49 @@ export async function upsertContact(
   return created!.id;
 }
 
+/** The agent's operator alert number, for the echo check below. One read per delivery. */
+export async function operatorPhoneOf(db: Db, agentId: string): Promise<string | null> {
+  const [row] = await db
+    .select({ phone: agents.operatorNotifyPhone })
+    .from(agents)
+    .where(eq(agents.id, agentId));
+  return row?.phone ?? null;
+}
+
+/**
+ * True for our own outgoing line to the operator's phone when no thread with that phone exists.
+ *
+ * A linked device hears its own sends back: Baileys appends every message the socket sent,
+ * and a later history sync carries them again. For a reply to a client that is harmless — the
+ * thread exists and the row deduplicates on its id — but the handoff alert goes to a phone
+ * that is usually not a client, and mirroring it would create a contact and a conversation
+ * for the operator: a lead card nobody asked for, holding a message about someone else.
+ *
+ * Narrow on purpose. Only an outgoing line, only to the configured number, and only when it
+ * would *create* the thread: an operator who is also a real conversation on this number keeps
+ * every line of it, alerts included, and anything the operator writes back is an ordinary
+ * inbound message.
+ */
+export async function isOperatorAlertEcho(
+  db: Db,
+  number: { id: string; agentId: string },
+  operatorPhone: string | null,
+  line: { fromMe: boolean; from: string },
+): Promise<boolean> {
+  if (!line.fromMe || operatorPhone === null || line.from !== operatorPhone) return false;
+  const [existing] = await db
+    .select({ id: conversations.id })
+    .from(conversations)
+    .innerJoin(contacts, eq(contacts.id, conversations.contactId))
+    .where(and(
+      eq(conversations.whatsappNumberId, number.id),
+      eq(contacts.agentId, number.agentId),
+      eq(contacts.phone, operatorPhone),
+    ))
+    .limit(1);
+  return existing === undefined;
+}
+
 export async function upsertConversation(
   db: Db,
   agentId: string,
@@ -76,7 +119,12 @@ export async function upsertConversation(
 ): Promise<string> {
   const [created] = await db
     .insert(conversations)
-    .values({ agentId, contactId, whatsappNumberId })
+    // A thread with the agent's own operator number starts with the agent off, so the cabinet
+    // shows it as a person's conversation from its first line. Only on insert: an existing
+    // thread keeps its switch, and the automation policy refuses it regardless.
+    .values({ agentId, contactId, whatsappNumberId, aiEnabled: sql`not exists (
+      select 1 from agents a join contacts c on c.id = ${contactId}
+      where a.id = ${agentId} and a.operator_notify_phone = c.phone)` })
     .onConflictDoUpdate({
       target: [conversations.whatsappNumberId, conversations.contactId],
       set: { contactId },

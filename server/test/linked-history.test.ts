@@ -387,3 +387,20 @@ describe('history import', () => {
     expect(randomBytes(1).length).toBe(1);
   });
 });
+
+describe('the operator alert echo in history', () => {
+  it("skips the socket's own appended alert to the operator and still imports the rest", async () => {
+    await db.update(agents).set({ operatorNotifyPhone: '77716944499' }).where(eq(agents.id, agentId));
+    const alert = raw({
+      key: { id: 'alert.1', remoteJid: '77716944499@s.whatsapp.net', fromMe: true },
+      message: { conversation: 'Нужен оператор' },
+    });
+
+    const report = await applyHistoryChunkWithReport(db, numberId, chunk({ messages: [alert, raw()] }));
+
+    expect(report).toMatchObject({ received: 2, saved: 1, excluded: 1 });
+    const phones = (await db.select().from(contacts)).map((contact) => contact.phone);
+    expect(phones).toEqual(['77085807932']);
+    expect(await db.select().from(conversations)).toHaveLength(1);
+  });
+});

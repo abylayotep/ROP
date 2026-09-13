@@ -4,6 +4,8 @@ import type { Db } from '../../../db/client.js';
 import { contacts, linkedHistoryMappings, messages, whatsappNumbers } from '../../../db/schema.js';
 import {
   advanceConversation,
+  isOperatorAlertEcho,
+  operatorPhoneOf,
   storeLine,
   upsertContact,
   upsertConversation,
@@ -160,6 +162,7 @@ export async function applyHistoryChunkWithReport(
   // owner reply tries to resolve the same LID.
   for (const raw of rawMessages) learnLid(number.id, raw);
 
+  const operatorPhone = await operatorPhoneOf(db, number.agentId);
   let skippedUnresolved = 0;
   let saved = 0;
   let duplicates = 0;
@@ -173,6 +176,11 @@ export async function applyHistoryChunkWithReport(
         : jidToPhone(raw.key?.senderPn) === null && phoneForLid(number.id, lid) === null);
       if (unresolved) skippedUnresolved += 1;
       else excluded += 1;
+      continue;
+    }
+    // See `isOperatorAlertEcho`: the socket's own handoff alerts come back through here.
+    if (await isOperatorAlertEcho(db, number, operatorPhone, line)) {
+      excluded += 1;
       continue;
     }
 

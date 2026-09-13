@@ -6,11 +6,12 @@
  * here, so one place decides which parameters belong to which tab.
  */
 
-export type TrainingTab = 'knowledge' | 'replies' | 'teach' | 'review';
+export type TrainingTab = 'knowledge' | 'products' | 'replies' | 'teach' | 'review';
 export type TeachMode = 'chats' | 'coach' | 'import';
 
 export const TRAINING_TABS: ReadonlyArray<{ id: TrainingTab; label: string; ownerOnly: boolean }> = [
   { id: 'knowledge', label: 'Знания', ownerOnly: false },
+  { id: 'products', label: 'Товары', ownerOnly: false },
   { id: 'replies', label: 'Как отвечает', ownerOnly: false },
   { id: 'teach', label: 'Научить', ownerOnly: true },
   { id: 'review', label: 'На проверке', ownerOnly: true },

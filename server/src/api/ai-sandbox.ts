@@ -5,7 +5,7 @@ import { and, asc, desc, eq, inArray } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
-import { aiSandboxSessions, aiSandboxTurns, kbChunks } from '../db/schema.js';
+import { aiSandboxSessions, aiSandboxTurns, kbChunks, productPhotos, products } from '../db/schema.js';
 import { runSimulatorTurn } from '../lib/ai/simulator.js';
 import type { TurnDeps } from '../lib/ai/turn.js';
 import { ApiError } from '../lib/errors.js';
@@ -82,6 +82,12 @@ export function registerAiSandboxRoutes(
       const chunks = ids.length === 0 ? [] : await db.select({ id: kbChunks.id, title: kbChunks.title })
         .from(kbChunks).where(and(eq(kbChunks.agentId, req.agent!.id), inArray(kbChunks.id, ids)));
       const titles = new Map(chunks.map((chunk) => [chunk.id, chunk.title]));
+      const photoIds = [...new Set(turns.flatMap((turn) => turn.photoIds))];
+      const photoRows = photoIds.length === 0 ? [] : await db
+        .select({ id: productPhotos.id, productId: products.id, productName: products.name })
+        .from(productPhotos).innerJoin(products, eq(products.id, productPhotos.productId))
+        .where(and(eq(products.agentId, req.agent!.id), inArray(productPhotos.id, photoIds)));
+      const photoNames = new Map(photoRows.map((row) => [row.id, row]));
       const toTurn = (turn: TurnRow): AiSandboxTurn => ({
         id: turn.id, revision: turn.revision, userText: turn.userText,
         reply: turn.reply, configVersion: turn.configVersion, model: turn.model,
@@ -92,6 +98,9 @@ export function registerAiSandboxRoutes(
         }),
         stageId: turn.stageId, stageName: turn.stageName, fields: turn.fields,
         effectSource: turn.effectSource, checkout: turn.checkout,
+        // A photo deleted since keeps its place in the rehearsal, nameless.
+        photos: turn.photoIds.map((photoId) => photoNames.get(photoId)
+          ?? { id: photoId, productId: null, productName: '' }),
         handoff: turn.handoff, outcome: turn.outcome, detail: turn.detail,
         createdAt: turn.createdAt.toISOString(),
       });

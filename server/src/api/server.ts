@@ -29,6 +29,8 @@ import { registerKaspiRoutes } from './kaspi.js';
 import { createLiveCrmHandler } from '../lib/crm/live.js';
 import { registerOrderRoutes } from './orders.js';
 import { requireSession } from './require-session.js';
+import { registerProductRoutes } from './products.js';
+import { registerPromotionRoutes } from './promotions.js';
 import { registerRuleRoutes } from './rules.js';
 import { registerStageRoutes } from './stages.js';
 import { registerStatsRoutes } from './stats.js';
@@ -153,6 +155,8 @@ export function buildServer(env: Env, db: Db, deps: ServerDeps = {}): FastifyIns
     registerKnowledgeRoutes(app, db, env, guard, { pageFetcher, graph, instagram });
     registerKnowledgeGenerationRoutes(app, db, env, guard, { model });
     registerRuleRoutes(app, db, guard);
+    registerProductRoutes(app, db, env, guard);
+    registerPromotionRoutes(app, db, guard);
     registerAiRoutes(app, db, env, guard, { model, graph, linked });
     registerAiSandboxRoutes(app, db, guard, { ...turnDeps, crm });
     // The coach writes only `coach_messages` — see the file's own comment for why a

@@ -1,9 +1,15 @@
-import type { Agent, CommunicationStyle, CommunicationStyleSettings } from '@rakurs/contract';
+import type {
+  Agent,
+  CommunicationStyle,
+  CommunicationStyleSettings,
+  OperatorNotifySettings,
+} from '@rakurs/contract';
 import { and, eq } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
 import { agents } from '../db/schema.js';
+import { normalizeOperatorPhone } from '../lib/ai/operator-alert.js';
 import { bumpConfigVersion } from '../lib/drafts/version.js';
 import { ApiError } from '../lib/errors.js';
 import { ensureSealhousePaymentPolicy } from '../lib/payment-policy.js';
@@ -25,6 +31,10 @@ const patch = z.object({
 
 const communicationStylePatch = z.object({
   preset: z.enum(['warm', 'calm', 'friendly']),
+});
+
+const operatorNotifyPatch = z.object({
+  phone: z.string().max(64),
 });
 
 const communicationStylePreview: Record<CommunicationStyle, string> = {
@@ -153,6 +163,32 @@ export function registerAgentRoutes(
         await bumpConfigVersion(tx as unknown as Db, req.agent!.id);
       });
       return styleToApi(parsed.data.preset);
+    },
+  );
+  // Read by any member, like the style: the card shows who gets the alerts to everyone who
+  // works the conversations, and only the owner may change where they go.
+  app.get(
+    '/api/agents/:agentId/operator-notify',
+    { preHandler: [guard, requireAgent(db)] },
+    async (req): Promise<OperatorNotifySettings> => ({ phone: req.agent!.operatorNotifyPhone }),
+  );
+
+  app.patch(
+    '/api/agents/:agentId/operator-notify',
+    { preHandler: [guard, requireAgent(db, { role: 'owner' })] },
+    async (req): Promise<OperatorNotifySettings> => {
+      const parsed = operatorNotifyPatch.safeParse(req.body);
+      if (!parsed.success) throw new ApiError(400, 'Укажите номер WhatsApp оператора');
+      const normalized = normalizeOperatorPhone(parsed.data.phone);
+      if (!normalized.ok) throw new ApiError(400, normalized.message);
+
+      // No `configVersion` bump: the number never reaches the prompt, so no answer changes.
+      const [updated] = await db
+        .update(agents)
+        .set({ operatorNotifyPhone: normalized.phone })
+        .where(eq(agents.id, req.agent!.id))
+        .returning({ phone: agents.operatorNotifyPhone });
+      return { phone: updated?.phone ?? null };
     },
   );
 }

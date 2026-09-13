@@ -74,6 +74,7 @@
 
 .generation-rail,
 .communication-style,
+.operator-notify,
 .knowledge-source-seam,
 .knowledge-notes-shell {
   border: 1px solid var(--line);
@@ -242,6 +243,14 @@
 .communication-style__message { margin: 8px 0 0; color: var(--accent); font-size: 10.5px; }
 .communication-style__message--error { color: var(--danger); }
 .communication-style__loading { display: grid; gap: 7px; margin-top: 12px; }
+.operator-notify { padding: 16px; }
+.operator-notify__form { display: grid; gap: 7px; margin-top: 12px; }
+.operator-notify__label { color: var(--text-2); font-size: 11px; font-weight: 650; }
+.operator-notify__note { margin: 2px 0 0; color: var(--text-dim); font-size: 9.5px; line-height: 1.4; }
+.operator-notify__save { width: 100%; margin-top: 4px; }
+.operator-notify__message { margin: 1px 0 0; color: var(--accent); font-size: 10.5px; }
+.operator-notify__message--error { color: var(--danger); }
+.operator-notify__loading { margin-top: 12px; }
 .generation-drafts__list { display: grid; gap: 6px; margin: 11px 0 0; padding: 0; list-style: none; }
 .generation-drafts__list a { display: block; padding: 9px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--sunken); color: var(--text-3); transition: border-color 160ms ease, color 160ms ease; }
 .generation-drafts__list a:hover { border-color: var(--accent-a45); color: var(--accent); }
@@ -364,8 +373,81 @@
 .training-replies > .training-tab__intro { margin-bottom: 0; }
 .training-replies .communication-style__options { grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); }
 .training-replies .communication-style__save { width: auto; }
+.training-replies .operator-notify__save { width: auto; justify-self: start; }
+.training-replies .operator-notify .knowledge-control { max-width: 320px; }
 .training-replies__note { margin: 0; color: var(--text-dim); font-size: 11.5px; }
 .training-replies > .btn { align-self: flex-start; }
+
+/* «Товары». */
+.training-products { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.training-products__head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.training-products__head .training-tab__intro { margin: 0; max-width: 640px; }
+.training-products__head .btn-accent { flex: 0 0 auto; }
+.training-products__layout { display: grid; gap: 14px; min-width: 0; }
+.training-products__layout--open { grid-template-columns: minmax(220px, 320px) minmax(0, 1fr); align-items: start; }
+.products-empty { border: 1px solid var(--line); border-radius: 14px; background: var(--card); }
+.products-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; margin: 0; padding: 0; list-style: none; }
+.training-products__layout--open .products-list { grid-template-columns: 1fr; }
+.products-card { display: flex; align-items: center; gap: 11px; width: 100%; padding: 9px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); color: var(--text-3); font: inherit; text-align: left; cursor: pointer; transition: border-color 160ms ease, background 160ms ease; }
+.products-card:hover { border-color: var(--accent-a45); }
+.products-card[aria-pressed='true'] { border-color: var(--accent-a36); background: var(--accent-a08); color: var(--text); }
+.products-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.products-card__thumb { flex: 0 0 auto; width: 56px; height: 56px; border-radius: 8px; object-fit: cover; background: var(--sunken); }
+.products-card__thumb--empty { display: grid; place-items: center; color: var(--text-dim); font-size: 9.5px; }
+.products-card__body { display: grid; gap: 3px; min-width: 0; }
+.products-card__name { overflow: hidden; color: var(--text); font-size: 12.5px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.products-card__price { font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.products-card__badge { color: var(--warn); font-size: 10px; font-weight: 650; }
+.products-editor { display: grid; gap: 14px; padding: 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--card); min-width: 0; }
+.products-editor__form { display: grid; gap: 7px; }
+.products-editor__label { margin: 6px 0 0; padding: 0; color: var(--text-2); font-size: 11px; font-weight: 650; }
+.products-editor__check { display: flex; align-items: center; gap: 8px; margin-top: 6px; color: var(--text-3); font-size: 12px; }
+.products-editor__note { margin: 0; color: var(--text-dim); font-size: 10.5px; line-height: 1.4; }
+.products-editor__problem { margin: 0; color: var(--danger); font-size: 11px; }
+.products-editor__actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.products-variants { display: grid; gap: 6px; margin: 0; padding: 0; border: 0; min-width: 0; }
+.products-variants table { width: 100%; border-collapse: collapse; }
+.products-variants th { padding: 0 6px 4px 0; color: var(--text-dim); font-size: 10.5px; font-weight: 600; text-align: left; }
+.products-variants td { padding: 0 6px 6px 0; }
+.products-variants td:nth-child(2) { width: 34%; }
+.products-variants td:nth-child(3) { width: 1%; }
+.products-variants > .btn-link { justify-self: start; }
+.products-photos { display: grid; gap: 8px; }
+.products-photos__grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; margin: 0; padding: 0; list-style: none; }
+.products-photos__item { display: grid; gap: 5px; padding: 6px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--sunken); }
+.products-photos__item img { width: 100%; aspect-ratio: 1; border-radius: 7px; object-fit: cover; }
+.products-photos__caption { overflow: hidden; color: var(--text-3); font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }
+.products-photos__tools { display: flex; gap: 4px; }
+.products-photos__tools .btn-sm { flex: 1; padding-inline: 0; }
+.products-photos__drop { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 14px; border: 1px dashed var(--line-2); border-radius: 10px; color: var(--text-3); font-size: 12px; transition: border-color 160ms ease, background 160ms ease; }
+.products-photos__drop--active { border-color: var(--accent); background: var(--accent-a08); }
+.products-photos__drop .products-editor__note { flex-basis: 100%; }
+.products-photos__pick { cursor: pointer; }
+
+/* «Акции», at the top of «Товары». */
+.promotions { display: grid; gap: 10px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--card); min-width: 0; }
+.promotions__head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.promotions__head .training-tab__intro { margin: 4px 0 0; max-width: 640px; }
+.promotions__head .btn { flex: 0 0 auto; }
+.promotions__title { margin: 0; color: var(--text); font-size: 14px; font-weight: 650; }
+.promotions-list { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.promotions-row { display: flex; align-items: center; gap: 10px; padding: 7px 9px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--sunken); }
+.promotions-row[aria-current='true'] { border-color: var(--accent-a36); background: var(--accent-a08); }
+.promotions-row__open { display: grid; flex: 1; gap: 2px; min-width: 0; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.promotions-row__open:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.promotions-row__name { overflow: hidden; color: var(--text); font-size: 12.5px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.promotions-row__meta { color: var(--text-dim); font-size: 11px; }
+.promotions-badge { flex: 0 0 auto; padding: 2px 8px; border-radius: 999px; background: var(--card); color: var(--text-3); font-size: 10.5px; font-weight: 650; }
+.promotions-badge--active { background: var(--accent-a08); color: var(--accent); }
+.promotions-badge--expired { color: var(--warn); }
+.promotions-editor { border-color: var(--line-soft); }
+.promotions-editor__ends { max-width: 240px; }
+.promotions-picker { display: grid; gap: 10px; margin: 0; padding: 0; border: 0; min-width: 0; }
+.promotions-picker__product { display: grid; gap: 4px; }
+.promotions-picker__name { margin: 0; color: var(--text-2); font-size: 12px; font-weight: 650; }
+.promotions-picker__row { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(110px, 160px); align-items: center; gap: 8px; }
+.promotions-picker__row .products-editor__check { margin-top: 0; }
+.promotions-picker__regular { color: var(--text-dim); font-size: 11.5px; font-variant-numeric: tabular-nums; }
 
 /* «На проверке». */
 .training-review { min-width: 0; }
@@ -482,6 +564,11 @@
   .training-strip__open,
   .training-chooser__pick,
   .training-replies > .btn { width: 100%; }
+  .training-products__head { flex-direction: column; }
+  .promotions__head { flex-direction: column; }
+  .promotions-picker__row { grid-template-columns: minmax(0, 1fr) auto; }
+  .promotions-picker__row .knowledge-control { grid-column: 1 / -1; }
+  .training-products__layout--open { grid-template-columns: 1fr; }
   .training-steps { gap: 2px; padding: 4px; }
   .training-steps__item { flex-direction: column; gap: 4px; padding: 6px 2px; font-size: 11px; text-align: center; }
   .training-steps__label { max-width: 100%; }

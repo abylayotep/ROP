@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import * as api from '@/api';
 import { KnowledgeTab } from '@/components/training/KnowledgeTab';
 import { NextStepStrip } from '@/components/training/NextStepStrip';
+import { ProductsTab } from '@/components/training/ProductsTab';
 import { RepliesTab } from '@/components/training/RepliesTab';
 import { ReviewList } from '@/components/training/ReviewList';
 import { TeachTab } from '@/components/training/TeachTab';
@@ -160,6 +161,10 @@ export function TrainingScreen() {
           reviewCount={drafts.data?.length ?? 0}
           onOpenReview={() => go('review')}
         />
+      )}
+
+      {activeTab === 'products' && (
+        <ProductsTab key={agent.id} agentId={agent.id} owner={owner} currency={agent.currency} timezone={agent.timezone} />
       )}
 
       {activeTab === 'replies' && (

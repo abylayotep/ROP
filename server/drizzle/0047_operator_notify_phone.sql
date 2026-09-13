@@ -1,0 +1,1 @@
+ALTER TABLE "agents" ADD COLUMN "operator_notify_phone" text;

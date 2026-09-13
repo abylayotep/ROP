@@ -48,7 +48,14 @@ import type {
   Me,
   Member,
   Message,
+  OperatorNotifySettings,
   Period,
+  Product,
+  ProductCreateRequest,
+  ProductUpdateRequest,
+  ProductVariantInput,
+  Promotion,
+  PromotionSaveRequest,
   RuleCategory,
   Stage,
   StatsCurrent,
@@ -119,6 +126,71 @@ export const updateCommunicationStyle = (agentId: string, preset: CommunicationS
     method: 'PATCH',
     body: { preset },
   });
+
+export const getOperatorNotify = (agentId: string, signal?: AbortSignal) =>
+  request<OperatorNotifySettings>(`/agents/${agentId}/operator-notify`, { signal });
+
+export const updateOperatorNotify = (agentId: string, phone: string) =>
+  request<OperatorNotifySettings>(`/agents/${agentId}/operator-notify`, {
+    method: 'PATCH',
+    body: { phone },
+  });
+
+// ── Товары ───────────────────────────────────────────────────────────────────
+
+export const listProducts = (agentId: string, signal?: AbortSignal) =>
+  request<Product[]>(`/agents/${agentId}/products`, { signal });
+
+export const createProduct = (agentId: string, body: ProductCreateRequest) =>
+  request<Product>(`/agents/${agentId}/products`, { method: 'POST', body });
+
+export const updateProduct = (agentId: string, productId: string, body: ProductUpdateRequest) =>
+  request<Product>(`/agents/${agentId}/products/${productId}`, { method: 'PATCH', body });
+
+export const deleteProduct = (agentId: string, productId: string) =>
+  request<{ ok: true }>(`/agents/${agentId}/products/${productId}`, { method: 'DELETE' });
+
+export const replaceProductVariants = (agentId: string, productId: string, variants: ProductVariantInput[]) =>
+  request<Product>(`/agents/${agentId}/products/${productId}/variants`, { method: 'PUT', body: { variants } });
+
+export const uploadProductPhoto = (agentId: string, productId: string, file: File) => {
+  const form = new FormData();
+  form.append('file', file);
+  return request<Product>(`/agents/${agentId}/products/${productId}/photos`, { method: 'POST', form });
+};
+
+export const updateProductPhoto = (agentId: string, productId: string, photoId: string, caption: string) =>
+  request<Product>(`/agents/${agentId}/products/${productId}/photos/${photoId}`, { method: 'PATCH', body: { caption } });
+
+export const deleteProductPhoto = (agentId: string, productId: string, photoId: string) =>
+  request<Product>(`/agents/${agentId}/products/${productId}/photos/${photoId}`, { method: 'DELETE' });
+
+export const reorderProductPhotos = (agentId: string, productId: string, photoIds: string[]) =>
+  request<Product>(`/agents/${agentId}/products/${productId}/photos/order`, { method: 'PUT', body: { photoIds } });
+
+/** Served with the session cookie, like a message's file, so it works as an `<img src>`. */
+export const productPhotoUrl = (agentId: string, productId: string, photoId: string) =>
+  `${API_URL}/agents/${agentId}/products/${productId}/photos/${photoId}/file`;
+
+// ── Акции ────────────────────────────────────────────────────────────────────
+
+export const listPromotions = (agentId: string, signal?: AbortSignal) =>
+  request<Promotion[]>(`/agents/${agentId}/promotions`, { signal });
+
+export const createPromotion = (agentId: string, body: PromotionSaveRequest) =>
+  request<Promotion>(`/agents/${agentId}/promotions`, { method: 'POST', body });
+
+export const updatePromotion = (agentId: string, promotionId: string, body: PromotionSaveRequest) =>
+  request<Promotion>(`/agents/${agentId}/promotions/${promotionId}`, { method: 'PUT', body });
+
+export const deletePromotion = (agentId: string, promotionId: string) =>
+  request<{ ok: true }>(`/agents/${agentId}/promotions/${promotionId}`, { method: 'DELETE' });
+
+export const activatePromotion = (agentId: string, promotionId: string) =>
+  request<Promotion>(`/agents/${agentId}/promotions/${promotionId}/activate`, { method: 'POST' });
+
+export const deactivatePromotion = (agentId: string, promotionId: string) =>
+  request<Promotion>(`/agents/${agentId}/promotions/${promotionId}/deactivate`, { method: 'POST' });
 
 // ── WhatsApp ─────────────────────────────────────────────────────────────────
 

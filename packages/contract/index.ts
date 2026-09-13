@@ -683,6 +683,140 @@ export interface CommunicationStyleSettings {
   preview: string;
 }
 
+/** Who hears about a handoff on WhatsApp. `phone` is digits in international form, or null. */
+export interface OperatorNotifySettings {
+  phone: string | null;
+}
+
+/** An empty string clears the number. */
+export interface OperatorNotifyPatch {
+  phone: string;
+}
+
+/* ── Товары ─────────────────────────────────────────────────────────────────
+ * The agent's catalog: what it sells, at which prices, with which photos. Every id is
+ * stable, so a later promotion can name a product and one of its variants. */
+
+/** One price of a product. A product with a single price has one variant with an empty label. */
+export interface ProductVariant {
+  id: string;
+  label: string;
+  /** Whole units of the agent's currency. */
+  price: number;
+  position: number;
+}
+
+export interface ProductPhoto {
+  id: string;
+  mime: string;
+  sizeBytes: number;
+  filename: string;
+  /** For the agent to pick the right photo. Never sent to the customer. */
+  caption: string | null;
+  position: number;
+  createdAt: string;
+}
+
+export interface Product {
+  id: string;
+  name: string;
+  description: string;
+  position: number;
+  /** Off hides the product from the agent. */
+  active: boolean;
+  variants: ProductVariant[];
+  photos: ProductPhoto[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProductVariantInput {
+  /**
+   * The existing variant this row edits. Kept, so a promotion that names the variant survives
+   * the owner saving the product; a row without one is a new variant, and a variant the list
+   * no longer names is removed — from every promotion too.
+   */
+  id?: string;
+  label: string;
+  price: number;
+}
+
+export interface ProductCreateRequest {
+  name: string;
+  description?: string;
+  active?: boolean;
+  variants?: ProductVariantInput[];
+}
+
+export interface ProductUpdateRequest {
+  name?: string;
+  description?: string;
+  active?: boolean;
+  /** Replaces every variant in the same transaction as the fields. */
+  variants?: ProductVariantInput[];
+}
+
+/** Replaces every variant: the editor saves the table as a whole. */
+export interface ProductVariantsRequest {
+  variants: ProductVariantInput[];
+}
+
+/** Every photo of the product, in the new order. */
+export interface ProductPhotoOrderRequest {
+  photoIds: string[];
+}
+
+export interface ProductPhotoUpdateRequest {
+  /** Empty clears it. */
+  caption: string;
+}
+
+/* ── Акции ──────────────────────────────────────────────────────────────────
+ * Promotion presets: promotional prices for some catalog variants, prepared ahead and
+ * switched on one at a time. */
+
+/** One variant in a promotion, with what the catalog says about it now. */
+export interface PromotionItem {
+  variantId: string;
+  productId: string;
+  productName: string;
+  variantLabel: string;
+  /** The catalog price, which the promotion replaces while it is in effect. */
+  regularPrice: number;
+  /** The final price while the promotion is in effect — not a discount. */
+  promoPrice: number;
+}
+
+export interface Promotion {
+  id: string;
+  name: string;
+  description: string;
+  /** Switched on by the owner. Only one per agent. */
+  active: boolean;
+  /** ISO instant, or null for «until switched off». */
+  endsAt: string | null;
+  /** `active` and not past `endsAt`: what the agent is quoting right now. */
+  effective: boolean;
+  position: number;
+  items: PromotionItem[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PromotionItemInput {
+  variantId: string;
+  promoPrice: number;
+}
+
+/** Create and update take the same body: the items are replaced as a whole. */
+export interface PromotionSaveRequest {
+  name: string;
+  description?: string;
+  /** ISO instant, or null for no end date. */
+  endsAt?: string | null;
+  items: PromotionItemInput[];
+}
+
 /* ── Агент ──────────────────────────────────────────────────────────────────
  * What the owner may set about the model, what they may pick, and what one
  * sandbox turn answers back. The key is not here: it goes in and never out. */
@@ -878,7 +1012,16 @@ export interface AiSandboxTurn extends AiTurn {
   effectSource: 'ai' | 'crm';
   /** A grounded checkout intent only; no payment or order has been created. */
   checkout: AiSandboxCheckout | null;
+  /** Catalog photos a live reply would have sent after the text. Nothing was sent. */
+  photos: AiTurnPhoto[];
   createdAt: string;
+}
+
+/** A catalog photo a turn picked. `productName` is empty when the photo has since been deleted. */
+export interface AiTurnPhoto {
+  id: string;
+  productId: string | null;
+  productName: string;
 }
 
 /** Browser-only state carried into the next simulated exchange. */

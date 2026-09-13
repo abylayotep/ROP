@@ -183,6 +183,10 @@ export const agents = pgTable(
     // at. That is what lets «было» be reused across runs and what makes a draft tested against
     // a store that has since moved refuse to apply.
     configVersion: integer('config_version').notNull().default(1),
+    // Where the handoff alert goes: digits only, international form, null when nobody is
+    // told. Deliberately outside `configVersion` — it never reaches the prompt, so changing
+    // it changes no answer.
+    operatorNotifyPhone: text('operator_notify_phone'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
@@ -247,6 +251,9 @@ export const aiSandboxTurns = pgTable(
     fields: jsonb('fields').$type<AiTurnField[]>().notNull().default([]),
     effectSource: text('effect_source').$type<'ai' | 'crm'>().notNull().default('ai'),
     checkout: jsonb('checkout').$type<AiSandboxCheckout | null>(),
+    // Catalog photos the reply would have sent. Ids, not foreign keys, for the same reason
+    // `sourceIds` is: a rehearsal stays readable after the owner deletes the photo.
+    photoIds: jsonb('photo_ids').$type<string[]>().notNull().default([]),
     handoff: text('handoff'),
     outcome: text('outcome').notNull(),
     detail: text('detail'),
@@ -549,6 +556,12 @@ export const messages = pgTable(
     // fetched the first time someone opens it, and that fetch needs the message's own keys.
     // Null once the file is on disk, and for every message that never had one.
     mediaRef: jsonb('media_ref'),
+    // Set on a catalog photo the agent sent, so the next turn knows not to send it again.
+    // Set null when the photo is deleted: the message keeps its own copy of the file, and a
+    // photo that no longer exists cannot be offered twice anyway.
+    productPhotoId: uuid('product_photo_id').references((): AnyPgColumn => productPhotos.id, {
+      onDelete: 'set null',
+    }),
     // Outbound only: sent, delivered, read, failed.
     status: text('status'),
     sentAt: timestamp('sent_at', { withTimezone: true }).notNull(),
@@ -853,6 +866,120 @@ export const kbLinks = pgTable(
   },
   (t) => [index('kb_links_agent_target_idx').on(t.agentId, t.toNoteId),
           index('kb_links_from_idx').on(t.fromNoteId)],
+);
+
+/**
+ * One thing the business sells, as the agent quotes it.
+ *
+ * Separate from the knowledge base on purpose: a price is structured data an owner edits in
+ * a table, not a sentence retrieval may or may not surface. The whole active catalog travels
+ * with every turn, so the agent never answers «уточню» about something the shop lists.
+ */
+export const products = pgTable(
+  'products',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    agentId: uuid('agent_id').notNull().references(() => agents.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    description: text('description').notNull().default(''),
+    position: integer('position').notNull().default(0),
+    // Off hides the product from the agent without losing its prices and photos.
+    active: boolean('active').notNull().default(true),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('products_agent_position_idx').on(t.agentId, t.position)],
+);
+
+/**
+ * One price of a product: a size, a thickness, a colour. A product sold at a single price has
+ * one variant with an empty label. A row with its own id, not a jsonb list, so a later
+ * promotion can point at «this product, 40 мм» and survive the owner renaming the label.
+ */
+export const productVariants = pgTable(
+  'product_variants',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    productId: uuid('product_id').notNull().references(() => products.id, { onDelete: 'cascade' }),
+    label: text('label').notNull().default(''),
+    // Whole units of the agent's currency — tenge have no minor unit anyone quotes.
+    price: integer('price').notNull(),
+    position: integer('position').notNull().default(0),
+  },
+  (t) => [
+    index('product_variants_product_position_idx').on(t.productId, t.position),
+    check('product_variants_price_check', sql`${t.price} >= 0`),
+  ],
+);
+
+/**
+ * One product photo, stored under `MEDIA_DIR` exactly like a message's file: `mediaPath` is
+ * relative to it and is the only path ever read.
+ */
+export const productPhotos = pgTable(
+  'product_photos',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    productId: uuid('product_id').notNull().references(() => products.id, { onDelete: 'cascade' }),
+    mediaPath: text('media_path').notNull(),
+    mediaMime: text('media_mime').notNull(),
+    sizeBytes: integer('size_bytes').notNull(),
+    filename: text('filename').notNull().default(''),
+    // Read by the agent to pick the right photo; never sent to the customer.
+    caption: text('caption'),
+    position: integer('position').notNull().default(0),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('product_photos_product_position_idx').on(t.productId, t.position)],
+);
+
+/**
+ * A promotion preset («акция»): promotional prices for some catalog variants, prepared ahead
+ * and switched on with a click.
+ *
+ * In effect while `active` and before `ends_at` (never, when null). Nothing flips the row when
+ * the date passes; every reader evaluates it, and `settleExpiredPromotions` turns an expired
+ * active row off — bumping `config_version` — the first time a request or a turn sees it.
+ * At most one active row per agent: the partial unique index is the guarantee, the activate
+ * route's own «switch the others off» is only what keeps it from ever firing.
+ */
+export const promotions = pgTable(
+  'promotions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    agentId: uuid('agent_id').notNull().references(() => agents.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    // Extra conditions the agent may mention, «упаковка в подарок». Data, never a rule.
+    description: text('description').notNull().default(''),
+    active: boolean('active').notNull().default(false),
+    endsAt: timestamp('ends_at', { withTimezone: true }),
+    position: integer('position').notNull().default(0),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('promotions_agent_position_idx').on(t.agentId, t.position),
+    uniqueIndex('promotions_one_active_per_agent').on(t.agentId).where(sql`${t.active}`),
+  ],
+);
+
+/**
+ * One variant's price while its promotion is in effect. The final price, not a discount: the
+ * owner thinks «6990», and the agent quotes exactly what the owner typed. Removing the variant
+ * from the catalog removes it from every promotion.
+ */
+export const promotionItems = pgTable(
+  'promotion_items',
+  {
+    promotionId: uuid('promotion_id').notNull().references(() => promotions.id, { onDelete: 'cascade' }),
+    variantId: uuid('variant_id').notNull().references(() => productVariants.id, { onDelete: 'cascade' }),
+    promoPrice: integer('promo_price').notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.promotionId, t.variantId] }),
+    index('promotion_items_variant_idx').on(t.variantId),
+    check('promotion_items_promo_price_check', sql`${t.promoPrice} >= 0`),
+  ],
 );
 
 /**

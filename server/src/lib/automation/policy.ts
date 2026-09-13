@@ -19,6 +19,16 @@ export interface AutomationSnapshot {
   contactId: string;
   conversationAiEnabled: boolean;
   numberEnabled: boolean;
+  /**
+   * The contact is the agent's own operator alert number.
+   *
+   * That phone belongs to staff: it receives the handoff alerts, and on the Cloud API it has to
+   * write to the number first to open the window they arrive in. Nothing automated may answer
+   * it — not a reply, not CRM analysis moving it through the funnel, not a stage template.
+   * Read from the agent on every decision rather than stamped once, so setting the number
+   * later silences a conversation that already exists.
+   */
+  operatorContact: boolean;
 }
 
 export interface AutomationDecision {
@@ -35,6 +45,8 @@ export function decideAutomation(
   snapshot: AutomationSnapshot,
   purpose: AutomationPurpose,
 ): AutomationDecision {
+  // First, ahead of independent CRM: the operator is not a lead in any mode.
+  if (snapshot.operatorContact) return { allowed: false, reason: 'operator_contact' };
   if (purpose === 'crm' && snapshot.crmAnalysisMode === 'independent') {
     return { allowed: true, reason: 'independent_crm' };
   }
@@ -68,6 +80,7 @@ export async function loadAutomationSnapshot(
       conversationAiEnabled: conversations.aiEnabled,
       numberEnabled: sql<boolean>`coalesce(${whatsappNumbers.enabled},
         (${instagramAccounts.enabled} and ${instagramAccounts.subscribedAt} is not null), false)`,
+      operatorContact: sql<boolean>`coalesce(${contacts.phone} = ${agents.operatorNotifyPhone}, false)`,
     })
     .from(agents)
     .innerJoin(

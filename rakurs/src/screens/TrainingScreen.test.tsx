@@ -14,10 +14,11 @@ const render = (owner: boolean, reviewCount: number | null = null) => renderToSt
 }));
 
 describe('TrainingWorkspace', () => {
-  it('shows the owner four tabs with the review count and marks the active one', () => {
+  it('shows the owner five tabs with the review count and marks the active one', () => {
     const html = render(true, 3);
-    expect(html.match(/role="tab"/g)).toHaveLength(4);
+    expect(html.match(/role="tab"/g)).toHaveLength(5);
     expect(html).toContain('Знания');
+    expect(html).toContain('Товары');
     expect(html).toContain('Как отвечает');
     expect(html).toContain('Научить');
     expect(html).toContain('На проверке (3)');
@@ -25,9 +26,10 @@ describe('TrainingWorkspace', () => {
     expect(html).toContain('role="tabpanel"');
   });
 
-  it('shows a non-owner only the two read-only tabs', () => {
+  it('shows a non-owner only the three read-only tabs', () => {
     const html = render(false);
-    expect(html.match(/role="tab"/g)).toHaveLength(2);
+    expect(html.match(/role="tab"/g)).toHaveLength(3);
+    expect(html).toContain('Товары');
     expect(html).not.toContain('Научить');
     expect(html).not.toContain('На проверке');
   });

@@ -67,6 +67,9 @@ export async function runSimulatorTurn(
       agent, history, stageId: crmStageId, stageName: crmStageName,
       values: crmFields.map(({ id, name, value }) => ({ fieldId: id, name, value })),
       allowProposedCrm: crm === null,
+      // A rehearsal remembers its own photos, so it answers «уже отправлял» the way a live
+      // conversation would.
+      sentPhotoIds: previous.flatMap((turn) => turn.photoIds),
       // A browser rehearsal has no paid order or live conversation to confirm.
       canMoveToSuccess: async () => false,
     });
@@ -74,6 +77,8 @@ export async function runSimulatorTurn(
     const body = core?.kind === 'ready' ? core.reply?.reply.trim() ?? '' : '';
     const withheld = core?.kind === 'ready' && core.invented !== null;
     const reply = body === '' || withheld ? null : body;
+    // Photos go out only after a reply that goes out, so a withheld reply shows none.
+    const photos = core?.kind === 'ready' && reply !== null ? core.photos : [];
     const handoff = core?.kind === 'ready' ? core.handoffReason : null;
     const stage = crm?.stage ?? (core?.kind === 'ready' ? core.targetStage : null);
     const fields: AiTurnField[] = crm?.fields ?? (core?.kind === 'ready'
@@ -127,6 +132,7 @@ export async function runSimulatorTurn(
         stageId: stage?.id ?? null, stageName: stage?.name ?? null,
         fields, handoff, outcome, detail, effectSource: crm ? 'crm' : 'ai',
         checkout: crm?.checkout ?? null,
+        photoIds: photos.map((photo) => photo.id),
       }).returning();
       return turn!;
     });
@@ -138,6 +144,7 @@ export async function runSimulatorTurn(
       usedItems: core?.kind === 'ready' ? core.usedItems : [],
       stageId: stored.stageId, stageName: stored.stageName, fields: stored.fields,
       effectSource: stored.effectSource, checkout: stored.checkout,
+      photos: photos.map(({ id, productId, productName }) => ({ id, productId, productName })),
       handoff: stored.handoff, outcome: stored.outcome, detail: stored.detail,
       createdAt: stored.createdAt.toISOString(),
     };

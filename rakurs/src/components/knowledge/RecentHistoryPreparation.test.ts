@@ -9,7 +9,7 @@ vi.mock('@/hooks/usePollingApi', () => ({ usePollingApi: () => ({
   data: fixture.data, error: fixture.error, loading: false, refreshing: false, reload: () => undefined,
 }) }));
 import { RecentHistoryPreparation, loadRecentHistoryPreparation } from './RecentHistoryPreparation';
-import { ChatGenerationPanel } from './ChatGenerationPanel';
+import { GenerationWizard } from '@/components/training/GenerationWizard';
 
 const preview = { previewId: 'preview', counts: { selectedMessages: 2807, eligibleMessages: 2100,
   skippedAiOrSystem: 0, skippedUnsupported: 707, skippedEmpty: 0, skippedSensitive: 0,
@@ -21,7 +21,8 @@ beforeEach(() => { fixture.error = undefined; fixture.data = { preview, conversa
 
 it('shows one preparation action and clear coverage instead of manual chat selection', () => {
   const html = render();
-  expect(html).toContain('Подготовить базу знаний и скрипт');
+  expect(html).toContain('Начать разбор');
+  expect(html).not.toContain('Подготовить базу знаний и скрипт');
   expect(html).toContain('2');
   expect(html).toContain('707');
   expect(html).not.toContain('type="checkbox"');
@@ -31,10 +32,10 @@ it('shows one preparation action and clear coverage instead of manual chat selec
 
 it('does not allow a failed or truncated preview to start paid generation', () => {
   fixture.error = new Error('Preview unavailable');
-  expect(render()).toMatch(/disabled=""[^>]*>Подготовить/);
+  expect(render()).toMatch(/disabled=""[^>]*>Начать разбор/);
   fixture.error = undefined;
   fixture.data = { preview: { ...preview, truncated: true }, conversations: 78, from: '2026-08-30', to: '2026-09-13' };
-  expect(render()).toMatch(/disabled=""[^>]*>Подготовить/);
+  expect(render()).toMatch(/disabled=""[^>]*>Начать разбор/);
 });
 
 it('includes every returned conversation without silently slicing to 100 or 200', async () => {
@@ -49,11 +50,10 @@ it('includes every returned conversation without silently slicing to 100 or 200'
   expect(result.to).toBe('2026-09-13');
 });
 
-it('uses the simplified flow in the actual generation panel and preserves read-only access', () => {
-  const panel = (readOnly: boolean) => renderToStaticMarkup(createElement(StaticRouter, { location: '/' },
-    createElement(ChatGenerationPanel, { agentId: 'agent', initialRunId: null, onRunId: () => undefined, readOnly })));
-  expect(panel(false)).toContain('Подготовить базу знаний и скрипт');
-  expect(panel(false)).not.toContain('Выбрать последние');
-  expect(panel(false)).not.toContain('Проверить объём');
-  expect(panel(true)).not.toContain('Подготовить базу знаний и скрипт');
+it('uses the simplified flow as the wizard\'s first step', () => {
+  const html = renderToStaticMarkup(createElement(StaticRouter, { location: '/' },
+    createElement(GenerationWizard, { agentId: 'agent', initialRunId: null, onRunId: () => undefined, onOpenReplies: () => undefined })));
+  expect(html).toContain('Начать разбор');
+  expect(html).not.toContain('Выбрать последние');
+  expect(html).not.toContain('Проверить объём');
 });

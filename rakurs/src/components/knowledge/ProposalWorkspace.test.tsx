@@ -220,7 +220,7 @@ describe('ProposalWorkspace', () => {
       },
     })));
 
-    expect(html).toMatch(/disabled=""[^>]*>Загружаем предложения…/);
+    expect(html).toMatch(/disabled=""[^>]*>Загружаем найденные факты…/);
     expect(html).toContain('Не загрузились исключения');
     expect(html).toContain('Загружаем находки…');
   });

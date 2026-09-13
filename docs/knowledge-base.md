@@ -1,16 +1,42 @@
 # База знаний
 
 Инструкция для владельца компании и для менеджера. Она не требует чтения кода — только
-раздела «База знаний» в кабинете.
+раздела «Обучение агента» в кабинете, вкладки «Знания» и «Научить».
 
 **Из базы знаний отвечает клиенту ИИ-агент, и только из неё.** Он не берёт факты из своей
 памяти и не рассуждает «по опыту»: чего нет в базе, того он клиенту не скажет. Поэтому
 качество ответов — это качество этой базы, а не настроек агента. Как он ей пользуется и что
 делает, когда ответа нет, описано в [docs/ai-agent.md](ai-agent.md).
 
-Кто что делает: **загружает и удаляет источники владелец**, а заводить, править и удалять
-отдельные заметки может любой сотрудник компании. Так и задумано: тот, кто увидит неверный
-ответ агента, сможет тут же его исправить, не дожидаясь владельца.
+Кто что делает: **загружает источники, заводит новые заметки и учит агента владелец**, а
+править и удалять уже существующие заметки может любой сотрудник компании. Так и задумано:
+тот, кто увидит неверный ответ агента, сможет тут же его исправить, не дожидаясь владельца.
+
+## Where things live: «Обучение агента»
+
+One sidebar section, «Обучение агента», replaced the old «База знаний» and «Обучение». It is
+organised by what the owner wants to do, not by entity, and has four tabs:
+
+| Tab | What it is for | Who sees it |
+|---|---|---|
+| «Знания» | The notes the agent answers from: tree, search, kind filter, editor, graph. Notes under `Скрипт/` show as a separate top-level group «Скрипт продаж». | Everyone |
+| «Как отвечает» | Communication style and rules — everything that shapes a live reply. Rules are described in [agent-coaching.md](agent-coaching.md). | Everyone; rules only for the owner |
+| «Научить» | Three ways to teach: «Из переписки WhatsApp» (section 11), «Спросить тренера» ([agent-coaching.md](agent-coaching.md)), «Загрузить материалы» (sections 4–6). | Owner |
+| «На проверке (N)» | Every open draft, newest first, with its origin («Из переписки», «Тренер», «Вручную»), number of changes and date. «Открыть» leads to the draft screen ([drafts-and-checks.md](drafts-and-checks.md)). | Owner |
+
+- **Default tab.** Without `?tab=` in the address the page opens «Научить» when the base has
+  no notes yet, otherwise «Знания».
+- **Next step.** For the owner, one line under the page title names the most useful action,
+  first match wins: a WhatsApp analysis in progress («Идёт разбор переписки — N%»), open
+  drafts («N черновиков ждут проверки»), an empty base («База пустая. Начните с переписки
+  WhatsApp»). «Открыть» goes there. Otherwise there is no line.
+- **«Научить»** starts with a chooser of three cards; «← Все способы» returns to it. A deep
+  link (a «Так нельзя» button, a link to a specific analysis) skips the chooser.
+- **Old links still work.** `/knowledge` opens «Знания», `/knowledge?tab=drafts` or `runs`
+  opens «Из переписки WhatsApp» (keeping `generation=`), `/knowledge?tab=sources` opens
+  «Загрузить материалы», `/coach` opens «Спросить тренера» with its dialog parameters.
+- A member sees only «Знания» (existing notes stay editable) and «Как отвечает» (the style
+  read-only, no rules); the page never asks the server for owner-only data on a member's behalf.
 
 ## 1. Заметка
 
@@ -120,7 +146,7 @@ tags: двери, входные
 
 ## 4. Вставить текст
 
-Блок **«Загрузить» → «Вставить текст»**: название источника, тип заметок и само поле текста.
+**«Научить» → «Загрузить материалы» → «Вставить текст»**: название источника, тип заметок и само поле текста.
 Одна вставка — до 200 000 символов.
 
 **Правило одно, и его стоит запомнить: пустая строка начинает новую заметку, а первая строка
@@ -179,7 +205,7 @@ tags: двери, входные
 
 ## 5. Загрузить страницу
 
-Блок **«Загрузить страницу»**: адрес, и кабинет сам читает страницу.
+**«Научить» → «Загрузить материалы» → «Веб-страница»**: адрес, и кабинет сам читает страницу.
 
 **Страница становится одной заметкой**, а не многими: путь — «С сайта/<название страницы>».
 Заголовки страницы (h1…h6) становятся заголовками markdown внутри неё — то есть теми самыми
@@ -233,7 +259,7 @@ tags: двери, входные
 
 ## 6. Забрать из Instagram
 
-Блок **«Забрать из Instagram»**: одна кнопка, вход через Meta — и подписи под постами
+**«Научить» → «Загрузить материалы» → «Instagram»**: одна кнопка, вход через Meta — и подписи под постами
 становятся заметками. Ничего вводить руками не нужно, адрес профиля тоже.
 
 Что требуется со стороны Instagram — это правило Meta, а не кабинета:
@@ -341,8 +367,8 @@ Instagram можно в настройках Meta, и это сработает 
 | Вставленный прайс стал одной заметкой | Между блоками нет пустых строк. Разделите блоки пустой строкой и вставьте заново. |
 | Длинная заметка целиком не находится по короткому запросу | В ней нет заголовков — весь текст лежит одним разделом. Разбейте заметку заголовками `##`. |
 | Заметка, созданная вручную, отвечает как «Другое» | У неё нет блока `---kind: …---` в начале текста — без него тип всегда «other». Допишите блок. |
-| Блока «Загрузить» нет на экране | Вы участник, а не владелец. Загружает источники владелец; заводить и править отдельные заметки можно и вам. |
-| Список источников не показывается | То же самое: источники видит владелец. |
+| Вкладок «Научить» и «На проверке» нет | Вы участник, а не владелец. Учит агента и загружает источники владелец; править существующие заметки во «Знаниях» можно и вам. |
+| Кнопки «+ Новая заметка» нет | То же самое: новые заметки заводит владелец. |
 | «Не удалось загрузить страницу» | Адрес недоступен снаружи, это не веб-страница, а файл, либо сайт не ответил. Откройте адрес в браузере в режиме инкогнито. |
 | «На странице нечего сохранить» | Страницу прочитали, но текста на ней не нашли — обычно его рисует JavaScript. Вставьте текст руками. |
 | Обновление не вернуло исправленную цену | Так и задумано: заметка с отметкой «изменено вручную» обновление не трогает. |
@@ -355,8 +381,31 @@ Instagram можно в настройках Meta, и это сработает 
 | В списке ровно 100 заметок | Это предел списка, а не вся база. Остальное ищется поиском. |
 | На графе показаны не все заметки | Кабинет рисует не больше 500 — об этом он пишет прямо над графом. |
 
-## Reviewed WhatsApp history
+## 11. Teaching from WhatsApp chats
 
-Owners can generate proposals from selected stored conversations and dates, review their source messages, and publish selected knowledge through the existing draft test/apply workflow. Members can read the results. Generation never publishes automatically and does not recover history the provider has not supplied.
+**«Научить» → «Из переписки WhatsApp»** is a four-step wizard. The indicator at the top shows
+① Период → ② Разбор → ③ Отбор → ④ Черновик; the step follows from the state of the selected
+analysis, nothing is stored separately.
 
-See [the workflow and release evidence](whatsapp-knowledge-verification.md) for limits, privacy caveats, validation results, and deployment requirements; see [Meta setup verification](meta-setup-verification.md) for provider-specific checks.
+1. **Период.** The last two weeks of stored dialogs: how many messages there are, how many fit,
+   what is sent to the AI provider, and the consent text. One line shows the current reply
+   style with «Изменить», which opens «Как отвечает». «Начать разбор» starts the analysis.
+2. **Разбор.** A progress bar with the percentage and «Отменить». A failed or cancelled
+   analysis that found nothing stays here with the reason, «Повторить» (failed only) and
+   «Начать заново».
+3. **Отбор.** The found facts, in two inner tabs «База знаний» and «Скрипт продаж»: select,
+   edit or reject each one, then «Собрать новый черновик». When nothing new was found the step
+   says so and offers «Начать заново».
+4. **Черновик.** Links to the drafts this analysis produced, «Открыть на проверку» for the
+   newest open one, and «Отобрать ещё» back to step 3. The same drafts also appear in
+   «На проверке».
+
+Below the wizard, **«История разборов (N)»** lists earlier analyses with date, status and
+«найдено фактов: N»; choosing one opens it in the wizard. **«Подробности разбора»** is one
+collapsed block with the technical numbers (batches, skipped messages, tokens and cost),
+excluded batches and raw findings.
+
+Nothing is published automatically: every change goes through a draft and its check. Members
+do not see this wizard. See [the workflow and release evidence](whatsapp-knowledge-verification.md)
+for limits, privacy caveats and deployment requirements, and
+[Meta setup verification](meta-setup-verification.md) for provider-specific checks.

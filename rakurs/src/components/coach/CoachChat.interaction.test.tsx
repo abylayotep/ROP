@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 
 const fixture = vi.hoisted(() => ({
   previewReady: false,
@@ -36,15 +36,17 @@ vi.mock('@/hooks/useApi', () => ({ useApi: (fetcher: Function, deps: unknown[]) 
       : undefined
     : call.includes('getAiSandboxSession') && deps[1] === 'sandbox'
       ? { turns: [{ id: 'turn-1', revision: 1, userText: 'Когда?', reply: 'Неверный ответ' }] }
+    : call.includes('getConversation') ? { contactName: 'Айгуль', contactPhone: '+7', messages: [
+      { id: 'message-1', aiReplyId: 'a1', author: 'ai', body: 'Неверный ответ' }] }
       : [];
   return { data, error: undefined, loading: data === undefined, reload: () => {} };
 } }));
 
-import { CoachScreen } from './CoachScreen';
+import { CoachChat } from './CoachChat';
 
 function mount() {
-  return render(<MemoryRouter initialEntries={['/a/agent-1/coach?session=session-1&turn=turn-1']}>
-    <Routes><Route path="/a/:agentId/coach" element={<CoachScreen />} /></Routes>
+  return render(<MemoryRouter initialEntries={['/a/agent-1/training?tab=teach&teach=coach&session=session-1&turn=turn-1']}>
+    <Routes><Route path="/a/:agentId/training" element={<CoachChat agentId="agent-1" onOpenRules={() => {}} />} /></Routes>
   </MemoryRouter>);
 }
 
@@ -71,6 +73,26 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
+function LocationProbe() {
+  const location = useLocation();
+  return <output data-testid="search">{location.search}</output>;
+}
+
+it('keeps the teach tab and drops only the correction params once a live correction completes', async () => {
+  fixture.previewReady = true;
+  fixture.send.mockResolvedValue({ id: 'proposal-1', message: 'Предлагаю изменить заметку.',
+    proposal: { kind: 'note', path: 'Доставка.md', body: 'Три дня.' }, warning: null });
+  const user = userEvent.setup();
+  render(<MemoryRouter initialEntries={['/a/agent-1/training?tab=teach&teach=coach&conversation=c1&reply=a1']}>
+    <Routes><Route path="/a/:agentId/training" element={<><CoachChat agentId="agent-1" onOpenRules={() => {}} /><LocationProbe /></>} /></Routes>
+  </MemoryRouter>);
+  await user.type(screen.getByLabelText('Как нужно исправить ответ'), 'Ответить: три дня');
+  await user.click(screen.getByRole('button', { name: 'Создать предложение' }));
+  await waitFor(() => expect(screen.getByTestId('search').textContent).toBe('?tab=teach&teach=coach'));
+  expect(fixture.send).toHaveBeenCalledTimes(1);
+  expect(fixture.send.mock.calls[0]![1]).toMatchObject({ conversationId: 'c1', aiReplyId: 'a1' });
+});
+
 it('blocks correction submit until the exact source preview has loaded, then sends one bound request', async () => {
   const user = userEvent.setup();
   const view = mount();
@@ -78,8 +100,8 @@ it('blocks correction submit until the exact source preview has loaded, then sen
   expect((screen.getByRole('button', { name: 'Создать предложение' }) as HTMLButtonElement).disabled).toBe(true);
   expect(fixture.send).not.toHaveBeenCalled();
   fixture.previewReady = true;
-  view.rerender(<MemoryRouter initialEntries={['/a/agent-1/coach?session=session-1&turn=turn-1']}>
-    <Routes><Route path="/a/:agentId/coach" element={<CoachScreen />} /></Routes>
+  view.rerender(<MemoryRouter initialEntries={['/a/agent-1/training?tab=teach&teach=coach&session=session-1&turn=turn-1']}>
+    <Routes><Route path="/a/:agentId/training" element={<CoachChat agentId="agent-1" onOpenRules={() => {}} />} /></Routes>
   </MemoryRouter>);
   expect(screen.getByText(/Проверенный источник: Правильный срок/)).toBeTruthy();
   await user.click(screen.getByRole('button', { name: 'Создать предложение' }));
@@ -138,7 +160,7 @@ it('submits a correction, saves an edited proposal, and hands off to a draft wit
 });
 
 it('requires the originating regression case before enabling a separate apply action', async () => {
-  const { DraftScreen } = await import('./DraftScreen');
+  const { DraftScreen } = await import('@/screens/DraftScreen');
   fixture.cases = [{ id: 'case-1', title: 'Исходный вопрос', messages: ['Когда?'], expectation: 'Три дня.',
     origin: 'correction', conversationId: null, requiredDraftId: 'draft-1', enabled: true, updatedAt: '' }];
   fixture.draftDetail = { id: 'draft-1', title: 'Исправить срок', origin: 'coach', status: 'open',

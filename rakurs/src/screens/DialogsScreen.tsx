@@ -52,7 +52,7 @@ const bubble = (mine: boolean): CSSProperties => ({
 
 /**
  * Whether «Так нельзя» belongs on this message: only the agent's own answer, and only for
- * the owner. «Обучение» refuses everyone else on the server (see `CoachScreen`'s own
+ * the owner. «Обучение» refuses everyone else on the server (see `CoachChat`'s own
  * comment), so a member offered this button would only ever land on a screen that tells
  * them so — worse than a button that is not there at all.
  */
@@ -72,7 +72,7 @@ export function canCoachFrom(message: Message, role: Role): boolean {
 export function coachLink(conversationId: string, aiReplyId?: string | null, messageId?: string): string {
   const reply = aiReplyId ? `&reply=${aiReplyId}` : '';
   const message = messageId ? `&message=${messageId}` : '';
-  return `../coach?conversation=${conversationId}${reply}${message}`;
+  return `../training?tab=teach&teach=coach&conversation=${conversationId}${reply}${message}`;
 }
 
 export function DialogsScreen() {
@@ -105,7 +105,7 @@ export function DialogsScreen() {
       <div style={{ marginBottom: 16, fontSize: 12, color: 'var(--text-dim)' }}>
         Новые сообщения обновляются автоматически каждые 5 секунд, пока вкладка открыта.
         {' '}Загрузка истории, создание базы и скрипта — в разделе{' '}
-        <Link to={`/a/${agent.id}/knowledge`}>База знаний</Link>.
+        <Link to={`/a/${agent.id}/training?tab=teach`}>Обучение агента</Link>.
       </div>
       <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start', flexWrap: 'wrap' }}>
       <div style={{ width: 320, maxWidth: '100%', flex: '1 1 280px', minWidth: 0 }}>

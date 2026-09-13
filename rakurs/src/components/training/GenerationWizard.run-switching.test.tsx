@@ -4,7 +4,7 @@ import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as api from '@/api';
 import type { KbGenerationRunDetail } from '@/types';
-import { ChatGenerationPanel } from './ChatGenerationPanel';
+import { GenerationWizard } from './GenerationWizard';
 
 vi.mock('@/api', () => ({
   getKnowledgeGenerationRun: vi.fn(),
@@ -14,10 +14,10 @@ vi.mock('@/api', () => ({
 vi.mock('@/hooks/useApi', () => ({
   useApi: () => ({ data: undefined, loading: false, error: undefined, reload: vi.fn() }),
 }));
-vi.mock('./CommunicationStyleCard', () => ({ CommunicationStyleCard: () => null }));
-vi.mock('./RecentHistoryPreparation', () => ({ RecentHistoryPreparation: () => null }));
-vi.mock('./ProposalWorkspace', () => ({
-  ProposalWorkspace: ({ detail, onLoadMoreProposals, collectionState }: ComponentProps<typeof import('./ProposalWorkspace').ProposalWorkspace>) => (
+vi.mock('@/components/knowledge/CommunicationStyleCard', () => ({ CommunicationStyleCard: () => null, communicationStyleLabel: () => 'style' }));
+vi.mock('@/components/knowledge/RecentHistoryPreparation', () => ({ RecentHistoryPreparation: () => null }));
+vi.mock('@/components/knowledge/ProposalWorkspace', () => ({
+  ProposalWorkspace: ({ detail, onLoadMoreProposals, collectionState }: ComponentProps<typeof import('@/components/knowledge/ProposalWorkspace').ProposalWorkspace>) => (
     <div data-reviewed-run={detail.run.id}>
       <button onClick={onLoadMoreProposals} disabled={collectionState?.proposals?.loading}>Load proposals</button>
       {collectionState?.proposals?.loading && <span role="status">Loading proposals</span>}
@@ -62,12 +62,14 @@ afterEach(() => {
   vi.resetAllMocks();
 });
 
-describe('ChatGenerationPanel run switching', () => {
+describe('GenerationWizard run switching', () => {
   it('isolates action errors, collection errors, and pending collection work across run switches', async () => {
     const runA = runDetail('run-a', 'failed');
+    runA.run.proposalCount = 2;
     runA.draftsNextCursor = 'draft-page-2';
     runA.proposals.nextCursor = 'proposal-page-2';
     const runB = runDetail('run-b', 'completed');
+    runB.run.proposalCount = 2;
     runB.proposals.nextCursor = 'proposal-page-2';
     const pendingA = deferred<KbGenerationRunDetail>();
     const firstB = deferred<KbGenerationRunDetail>();
@@ -92,7 +94,7 @@ describe('ChatGenerationPanel run switching', () => {
     }
     const panel = (runId: string) => (
       <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
-        <ChatGenerationPanel agentId="agent-1" initialRunId={runId} onRunId={() => undefined} />
+        <GenerationWizard agentId="agent-1" initialRunId={runId} onRunId={() => undefined} onOpenReplies={() => undefined} />
         <CommitProbe runId={runId} />
       </MemoryRouter>
     );
@@ -109,11 +111,12 @@ describe('ChatGenerationPanel run switching', () => {
 
     try {
       await act(async () => { renderer = create(panel('run-a')); });
-      await act(async () => { button('Повторить запуск').props.onClick(); });
+      await act(async () => { button('Повторить').props.onClick(); });
       await act(async () => { button('Показать ещё черновики').props.onClick(); });
+      expect(output()).toContain('A drafts failed');
+      await act(async () => { button('Отобрать ещё').props.onClick(); });
       await act(async () => { button('Load proposals').props.onClick(); });
       expect(output()).toContain('A action failed');
-      expect(output()).toContain('A drafts failed');
       expect(output()).toContain('Loading proposals');
 
       await act(async () => { renderer!.update(panel('run-b')); });
@@ -125,6 +128,7 @@ describe('ChatGenerationPanel run switching', () => {
       await act(async () => { retryB.resolve(runB); });
       assertNoStaleState(output());
       expect(output()).toContain('Draft from run-b');
+      await act(async () => { button('Отобрать ещё').props.onClick(); });
       expect(renderer!.root.findByProps({ 'data-reviewed-run': 'run-b' })).toBeDefined();
       expect(renderer!.root.findAllByProps({ role: 'alert' })).toHaveLength(0);
       expect(renderer!.root.findAllByProps({ role: 'status' })).toHaveLength(0);
@@ -170,22 +174,22 @@ describe('ChatGenerationPanel run switching', () => {
     }
     const panel = (runId: string) => (
       <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
-        <ChatGenerationPanel agentId="agent-1" initialRunId={runId} onRunId={() => undefined} readOnly />
+        <GenerationWizard agentId="agent-1" initialRunId={runId} onRunId={() => undefined} onOpenReplies={() => undefined} />
         <CommitProbe runId={runId} />
       </MemoryRouter>
     );
 
     try {
       await act(async () => { renderer = create(panel('run-a')); });
-      expect(JSON.stringify(renderer!.toJSON())).toContain('Draft from run-a');
+      expect(JSON.stringify(renderer!.toJSON())).toContain('Разбираем переписку');
       await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
       expect(getRun.mock.calls.map(([, runId]) => runId)).toEqual(['run-a', 'run-a']);
 
       await act(async () => { renderer!.update(panel('run-b')); });
       const firstBCommit = commits.find((commit) => commit.runId === 'run-b')!.output;
       expect(firstBCommit).not.toContain('Draft from run-a');
-      expect(firstBCommit).not.toContain('Статус запуска');
-      expect(firstBCommit).not.toContain('Обработка продолжается.');
+      expect(firstBCommit).not.toContain('Статус разбора');
+      expect(firstBCommit).not.toContain('Разбираем переписку');
 
       await act(async () => {
         pollA.reject(new Error('stale A poll failed'));
@@ -204,10 +208,15 @@ describe('ChatGenerationPanel run switching', () => {
 
       await act(async () => { retry.props.onClick(); });
       expect(getRun.mock.calls.map(([, runId]) => runId)).toEqual(['run-a', 'run-a', 'run-b', 'run-b']);
-      await act(async () => { retryB.resolve(runDetail('run-b', 'completed')); });
+      const runB = runDetail('run-b', 'completed');
+      runB.run.proposalCount = 2;
+      await act(async () => { retryB.resolve(runB); });
+      output = JSON.stringify(renderer!.toJSON());
+      expect(output).toContain('Draft from run-b');
+      const pickMore = renderer!.root.findAllByType('button').find((button) => button.children.includes('Отобрать ещё'))!;
+      await act(async () => { pickMore.props.onClick(); });
       output = JSON.stringify(renderer!.toJSON());
       expect(renderer!.root.findByProps({ 'data-reviewed-run': 'run-b' })).toBeDefined();
-      expect(output).toContain('Draft from run-b');
       expect(output).not.toContain('Draft from run-a');
       expect(output).not.toContain('B load failed');
       expect(renderer!.root.findAllByProps({ role: 'alert' })).toHaveLength(0);

@@ -255,7 +255,7 @@ function TestWorkspace({ agentId }: { agentId: string }) {
       </Card>
 
       <TestTurnInspector turn={activeTurn} session={currentSession}
-        onCorrect={() => activeTurn && currentSession && navigate(`../coach?session=${encodeURIComponent(currentSession.id)}&turn=${encodeURIComponent(activeTurn.id)}`)}
+        onCorrect={() => activeTurn && currentSession && navigate(`../training?tab=teach&teach=coach&session=${encodeURIComponent(currentSession.id)}&turn=${encodeURIComponent(activeTurn.id)}`)}
         onSaveCase={async () => {
           if (!activeTurn || !currentSession) return;
           try {

@@ -59,17 +59,16 @@ export function GenerationRunRail({
   onRetryLoadMore?: () => void;
 }) {
   return (
-    <aside className="generation-rail" aria-label="История запусков">
+    <aside className="generation-rail" aria-label="История разборов">
       <div className="generation-rail__head">
         <div>
-          <p className="knowledge-kicker">История</p>
-          <h2>Запуски</h2>
+          <h2>История разборов</h2>
         </div>
         <span className="generation-count">{runs.length}</span>
       </div>
 
       {loading && runs.length === 0 && (
-        <div className="generation-rail__skeleton" role="status" aria-label="Загружаем запуски">
+        <div className="generation-rail__skeleton" role="status" aria-label="Загружаем историю разборов">
           <span /><span /><span />
         </div>
       )}
@@ -81,8 +80,8 @@ export function GenerationRunRail({
       )}
       {!loading && error === undefined && runs.length === 0 && (
         <div className="knowledge-inline-state">
-          <p>Запусков пока нет.</p>
-          <span>Новая обработка появится здесь и останется в истории.</span>
+          <p>Разборов пока нет.</p>
+          <span>Новый разбор появится здесь и останется в истории.</span>
         </div>
       )}
 
@@ -104,12 +103,8 @@ export function GenerationRunRail({
                   </span>
                   <span className="generation-run__time">{new Date(run.createdAt).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}</span>
                   <span className="generation-run__metrics">
-                    <span><b>{run.proposalCount}</b> предложений</span>
-                    <span><b>{run.completedBatchCount}/{run.batchCount}</b> пакетов</span>
-                  </span>
-                  <span className="generation-run__foot">
-                    <span>{run.drafts.length} черн.</span>
-                    <span>{run.classificationCounts.customer} клиентских</span>
+                    <span>найдено фактов: {run.proposalCount}</span>
+                    <span>черновиков: {run.drafts.length}</span>
                   </span>
                 </button>
               </li>
@@ -120,7 +115,7 @@ export function GenerationRunRail({
 
       {hasMore && (
         <button type="button" className="generation-rail__more" disabled={loadingMore} onClick={onLoadMore}>
-          {loadingMore ? 'Загружаем…' : 'Показать ещё запусков'}
+          {loadingMore ? 'Загружаем…' : 'Показать ещё'}
         </button>
       )}
       {loadMoreError && runs.length > 0 && (

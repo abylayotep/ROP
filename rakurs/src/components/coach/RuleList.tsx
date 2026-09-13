@@ -42,7 +42,7 @@ const DISCARD_PROMPT = 'Уйти без сохранения? Несохранё
 
 /** Not a real rule id — every rule id is a uuid the server minted, and this string never
  * collides with one. Marks the inline slot as "a blank rule, not yet saved". Mirrors
- * `KnowledgeScreen`'s own `NEW` sentinel, for the same reason: a create draft and an edit
+ * `KnowledgeTab`'s own `NEW` sentinel, for the same reason: a create draft and an edit
  * draft are the same kind of unsaved text, so they share one slot and one dirty guard
  * instead of two states that can't see each other. */
 const NEW = 'new';
@@ -88,7 +88,7 @@ export function RuleList({
     : editingRule !== null && (draft !== editingRule.text || editCategory !== editingRule.category);
 
   /** `false` means a dirty draft vetoed the switch and asked the owner first — the same
-   * guard `KnowledgeScreen` runs before it lets a click discard an unsaved note. Covers both
+   * guard `KnowledgeTab` runs before it lets a click discard an unsaved note. Covers both
    * directions: leaving an in-progress create for an edit, and leaving an in-progress edit
    * for the create form, since both drafts now live in the one `slot`/`draft` pair above. */
   function confirmDiscard(): boolean {

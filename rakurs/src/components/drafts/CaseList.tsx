@@ -41,7 +41,7 @@ const ORIGIN_LABEL: Record<TestCase['origin'], string> = {
 };
 
 /** Not a real case id — every id is a uuid the server minted. Marks the inline slot as "a
- * blank case, not yet saved" — the same sentinel `KnowledgeScreen` and `RuleList` each keep
+ * blank case, not yet saved" — the same sentinel `KnowledgeTab` and `RuleList` each keep
  * their own copy of, for the same reason: one slot for both a create draft and an edit draft. */
 const NEW = 'new';
 

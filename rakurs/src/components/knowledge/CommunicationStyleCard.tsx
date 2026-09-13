@@ -10,6 +10,9 @@ const STYLES: ReadonlyArray<{ id: CommunicationStyle; label: string; hint: strin
   { id: 'friendly', label: 'Дружеский', hint: 'Неформально, открыто и по делу' },
 ];
 
+export const communicationStyleLabel = (preset: CommunicationStyle): string =>
+  STYLES.find((style) => style.id === preset)?.label ?? preset;
+
 type StyleUpdate = (
   agentId: string,
   preset: CommunicationStyle,

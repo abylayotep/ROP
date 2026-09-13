@@ -40,9 +40,9 @@ export function RecentHistoryPreparation({ agentId, busy, onStart }: { agentId: 
       Сообщений за период: {preview.counts.selectedMessages}. Подходит для обработки: {preview.counts.eligibleMessages}.
       {excluded > 0 && <> Не войдёт в обработку: {excluded}.</>}
     </p>}
-    {!source.loading && !source.error && !preview && <p>История ещё не загружена. Подключите WhatsApp и дождитесь сообщений.</p>}
-    {preview?.counts.eligibleMessages === 0 && <p>Пока нет подходящих переписок с ответами продавца. Ничего не будет отправлено в AI.</p>}
-    {preview?.truncated && <p role="alert">Не весь объём вошёл в обработку. Запуск остановлен, чтобы не потерять часть истории.</p>}
+    {!source.loading && !source.error && !preview && <p style={{ fontSize: 13 }}>История ещё не загружена. Подключите WhatsApp и дождитесь сообщений.</p>}
+    {preview?.counts.eligibleMessages === 0 && <p style={{ fontSize: 13 }}>Пока нет подходящих переписок с ответами продавца. Ничего не будет отправлено в AI.</p>}
+    {preview?.truncated && <p role="alert">Не весь объём вошёл в обработку. Разбор остановлен, чтобы не потерять часть истории.</p>}
     {source.error !== undefined && <p role="alert" style={{ color: 'var(--danger)' }}>
       Не удалось проверить весь объём: {api.humanError(source.error)} Ничего не отправлено в AI.
     </p>}
@@ -55,10 +55,10 @@ export function RecentHistoryPreparation({ agentId, busy, onStart }: { agentId: 
       автоматическое скрытие данных не гарантирует полную анонимность.
     </p>
     <button type="button" className="btn" disabled={busy || source.loading || source.error !== undefined || !preview || preview.truncated || preview.counts.eligibleMessages === 0}
-      onClick={() => preview && onStart(preview)}>{busy ? 'Запускаем подготовку…' : 'Подготовить базу знаний и скрипт'}</button>
+      onClick={() => preview && onStart(preview)}>{busy ? 'Запускаем разбор…' : 'Начать разбор'}</button>
     <details style={{ marginTop: 12, fontSize: 12, color: 'var(--text-dim)' }}>
       <summary>Что войдёт в обработку</summary>
-      <p>Берём только сообщения за указанный период, уже сохранённые на сайте. Новые сообщения учитываются при следующем запуске. Объём обновляется раз в минуту.</p>
+      <p>Берём только сообщения за указанный период, уже сохранённые на сайте. Новые сообщения учитываются при следующем разборе. Объём обновляется раз в минуту.</p>
       {preview && <>
         <p>Пропущено: AI и системных — {preview.counts.skippedAiOrSystem}; вложений без поддерживаемого текста — {preview.counts.skippedUnsupported}; пустых — {preview.counts.skippedEmpty}; чувствительных — {preview.counts.skippedSensitive}; слишком длинных — {preview.counts.skippedOversize}; без ответа продавца — {preview.counts.skippedNoSeller}.</p>
         <p>Модель: {preview.modelId}. Запросов: не больше {preview.maxCalls}. Лимит ответа на запрос: {preview.maxOutputTokens} токенов.</p>

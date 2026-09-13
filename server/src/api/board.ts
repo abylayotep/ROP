@@ -128,6 +128,7 @@ const toStage = (row: typeof stages.$inferSelect): Stage => ({
   kind: row.kind as Stage['kind'],
   position: row.position,
   description: row.description,
+  agentGoal: row.agentGoal,
   autoMessage: row.autoMessage,
 });
 

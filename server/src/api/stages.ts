@@ -18,6 +18,7 @@ const createStage = z.object({
   color: z.string().trim().min(1),
   kind: z.enum(KINDS),
   description: z.string().trim().default(''),
+  agentGoal: z.string().trim().default(''),
   autoMessage: z.string().default(''),
 });
 
@@ -26,6 +27,7 @@ const patchStage = z.object({
   color: z.string().trim().min(1).optional(),
   kind: z.enum(KINDS).optional(),
   description: z.string().trim().optional(),
+  agentGoal: z.string().trim().optional(),
   autoMessage: z.string().optional(),
 });
 
@@ -50,6 +52,7 @@ const toStage = (row: typeof stages.$inferSelect): Stage => ({
   kind: row.kind as Stage['kind'],
   position: row.position,
   description: row.description,
+  agentGoal: row.agentGoal,
   autoMessage: row.autoMessage,
 });
 
@@ -174,6 +177,7 @@ export function registerStageRoutes(
             color: parsed.data.color,
             kind: parsed.data.kind,
             description: parsed.data.description,
+            agentGoal: parsed.data.agentGoal,
             autoMessage: template(parsed.data.autoMessage) ?? null,
             position: (existing.at(-1)?.position ?? -1) + 1,
           })

@@ -148,6 +148,20 @@ describe('the lead', () => {
     expect(new Date(res.json().stageSetAt).getTime()).toBeGreaterThan(Date.now() - 10_000);
   });
 
+  it('lets an operator move a lead to the sale stage without a Kaspi payment', async () => {
+    const sale = (await db.select().from(stages).where(eq(stages.agentId, agentId))).find((row) => row.kind === 'success')!;
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: leadUrl(),
+      cookies: jar,
+      payload: { stageId: sale.id },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().stageId).toBe(sale.id);
+  });
+
   it('leaves the timestamp alone when the stage does not change', async () => {
     const stage = await stageNamed('В диалоге');
     const first = await app.inject({

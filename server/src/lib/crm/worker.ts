@@ -1,12 +1,12 @@
 import { randomUUID } from 'node:crypto';
-import { and, asc, desc, eq, isNull, isNotNull, lt, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, isNotNull, lt, or, sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
-import { agents, aiReplies, contacts, conversations, crmAnalyses, leadFields, leadValues, messages, notes, stages } from '../../db/schema.js';
+import { agents, aiReplies, contacts, conversations, crmAnalyses, kaspiPayments, leadFields, leadValues, messages, notes, orders, stages } from '../../db/schema.js';
 import type { ModelClient } from '../ai/openrouter.js';
 import { keyAad } from '../ai/turn.js';
 import { decideAutomation, loadAutomationSnapshot, type AutomationPurpose } from '../automation/policy.js';
 import { withAgentAutomationLock } from '../automation/execution.js';
-import { queueLead } from '../capi/enqueue.js';
+import { queueLead, queuePurchase } from '../capi/enqueue.js';
 import { recordStageMove } from '../funnel-history.js';
 import { decryptSecret } from '../secret-box.js';
 import { hasConfirmedKaspiPayment } from '../kaspi/service.js';
@@ -110,12 +110,16 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
           contact: { name: contact.name, phone: contact.phone }, history: inputHistory }) },
       ] });
     const analysis = parseCrmAnalysis(completion.text, inputHistory, fields);
-    const target = resolveCrmStage(funnel, analysis.confidence >= 65 ? analysis.stageId : null, paid);
+    // A paid claim the model is unsure of is not stored, so it can neither move the lead nor stick.
+    const payment = analysis.payment?.state === 'paid' && analysis.confidence < 65 ? null : analysis.payment;
+    const target = resolveCrmStage(funnel, analysis.confidence >= 65 ? analysis.stageId : null,
+      { paid: paid || payment?.state === 'paid', currentStageId: conversation.stageId });
     if (!await automationAllowed(db,input,'crm')) {
       await db.update(crmAnalyses).set({status:'pending',leaseToken:null,leaseUntil:null,updatedAt:new Date()}).where(ownLease);
       return 'skipped';
     }
     let moved = false;
+    let chatOrderId: string | null = null;
     let applied = false;
     let policyDenied = false;
     await withAgentAutomationLock(db, input.agentId, async (tx) => {
@@ -132,8 +136,9 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
         await tx.update(crmAnalyses).set({status:'pending',leaseUntil:null,leaseToken:null}).where(ownLease);
         return;
       }
+      const movedAt = new Date();
       if (target && target.id !== conversation.stageId) {
-        const changed = await tx.update(conversations).set({stageId:target.id,stageSetBy:'ai',stageSetAt:new Date()})
+        const changed = await tx.update(conversations).set({stageId:target.id,stageSetBy:'ai',stageSetAt:movedAt})
           .where(and(eq(conversations.id,conversation.id),
             conversation.stageId === null ? isNull(conversations.stageId) : eq(conversations.stageId,conversation.stageId),
             conversation.stageSetAt === null ? isNull(conversations.stageSetAt) : eq(conversations.stageSetAt,conversation.stageSetAt)))
@@ -142,6 +147,8 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
         if (moved) await recordStageMove(tx,{agentId:agent.id,conversationId:conversation.id,
           from:funnel.find((s)=>s.id===conversation.stageId)??null,to:target,movedBy:'ai'});
       }
+      const stageNow = moved ? target : target && target.id !== conversation.stageId ? null
+        : funnel.find((s) => s.id === conversation.stageId) ?? null;
       const evidence = {...lease.fieldEvidence};
       const profile = {...lease.profile};
       const accept = (key: string, value: string) => {
@@ -157,7 +164,7 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
         const proof = accept(`profile:${key}`,value);
         if (proof) { profile[key] = value; evidence[`profile:${key}`] = proof; }
       }
-      const paymentEvidence = resolvePaymentEvidence(profile.paymentEvidence, profile.paymentEvidenceReason, analysis.payment, paid);
+      const paymentEvidence = resolvePaymentEvidence(profile.paymentEvidence, profile.paymentEvidenceReason, payment, paid);
       profile.paymentEvidence = paymentEvidence.state;
       if (paymentEvidence.reason) profile.paymentEvidenceReason = paymentEvidence.reason;
       else delete profile.paymentEvidenceReason;
@@ -173,6 +180,19 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
           : await tx.update(leadValues).set({value,updatedAt:new Date()}).where(and(eq(leadValues.conversationId,conversation.id),eq(leadValues.fieldId,fieldId),sql`${leadValues.updatedAt} = ${original.version}::timestamptz`)).returning();
         if (changed.length) evidence[`field:${fieldId}`] = proof;
       }
+      // One paid order per sale, whoever moved the lead there. A Kaspi invoice in flight owns the money.
+      if (stageNow?.kind === 'success' && analysis.paidAmount) {
+        const [paidOrder] = await tx.select({id:orders.id}).from(orders)
+          .where(and(eq(orders.conversationId,conversation.id),eq(orders.status,'paid'))).limit(1);
+        const [invoice] = await tx.select({id:kaspiPayments.id}).from(kaspiPayments)
+          .where(and(eq(kaspiPayments.conversationId,conversation.id),inArray(kaspiPayments.status,['creating','pending','unknown','paid']))).limit(1);
+        if (!paidOrder && !invoice) {
+          const [order] = await tx.insert(orders).values({agentId:agent.id,conversationId:conversation.id,amount:analysis.paidAmount,
+            currency:agent.currency,status:'paid',comment:'Оплата по переписке',
+            paidAt:moved ? movedAt : conversation.stageSetAt ?? movedAt}).returning({id:orders.id});
+          chatOrderId = order!.id;
+        }
+      }
       if (profile.name && !contact.name) await tx.update(contacts).set({name:profile.name}).where(and(eq(contacts.id,contact.id),isNull(contacts.name)));
       await tx.update(crmAnalyses).set({sourceVersion:scanned.createdAt,analyzedMessageId:scanned.id,
         summary:analysis.summary,profile,fieldEvidence:evidence,confidence:analysis.confidence,
@@ -185,6 +205,8 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
     });
     if (policyDenied) return 'skipped';
     if (!applied) return 'skipped';
+    // Reported like a Kaspi sale: an ad report, not a customer effect, so no live trigger is needed.
+    if (chatOrderId) await queuePurchase(db,{agentId:agent.id,orderId:chatOrderId});
     let checkedOut = false;
     // Only a persisted live delivery authorizes customer side effects, never a backfill flag.
     if (liveId && last?.id === liveId && last.author === 'client' && Date.now()-last.sentAt.getTime() >= 0

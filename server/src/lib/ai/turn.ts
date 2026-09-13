@@ -43,7 +43,7 @@ import {
 import type { Env } from '../../env.js';
 import type { InstagramMessagingClient } from '../instagram/messaging-graph.js';
 import { deliveryForConversation, type ConversationDelivery } from '../messaging/transport.js';
-import { hasConfirmedKaspiPayment } from '../kaspi/service.js';
+import { hasVisiblePayment } from '../crm/payment.js';
 import {
   decideAutomation,
   loadAutomationSnapshot,
@@ -749,7 +749,7 @@ export async function executeAiCore(db: Db, deps: TurnDeps, input: AiCoreInput):
     const target = stageRows.find((stage) => stage.id === reply.stageId);
     if (!target) details.push(`Модель назвала этап, которого у агента нет: ${reply.stageId.slice(0, 80)}.`);
     else if (target.kind === 'success' && !await input.canMoveToSuccess()) {
-      details.push('Оплата ещё не подтверждена Kaspi. Стадия оплаты не изменена.');
+      details.push('Оплата в переписке не видна. Стадия продажи не изменена.');
     } else if (target.id !== input.stageId) targetStage = target;
   }
 
@@ -873,7 +873,7 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
     sentPhotoIds,
     allowProposedCrm: !deps.crm || dryRun,
     canContinue: dryRun ? undefined : () => automationAllowed(db, input, 'reply'),
-    canMoveToSuccess: () => hasConfirmedKaspiPayment(db, agent.id, conversation.id),
+    canMoveToSuccess: () => hasVisiblePayment(db, agent.id, conversation.id),
   });
   const spend = () => ({ agentId: agent.id, conversationId: conversation.id,
     model: agent.model, configVersion: agent.configVersion, ...core.usage });

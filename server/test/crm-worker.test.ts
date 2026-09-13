@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { withDb } from './helpers/db.js';
 import { createAccountWithOwner } from '../src/lib/provision.js';
-import { agents, aiReplies, capiEvents, contacts, conversations, crmAnalyses, leadFields, leadValues, messages, notes, stages, whatsappNumbers } from '../src/db/schema.js';
+import { agents, aiReplies, capiEvents, contacts, conversations, crmAnalyses, kaspiPayments, leadFields, leadValues, messages, notes, orders, stages, whatsappNumbers } from '../src/db/schema.js';
 import { seedFunnel } from '../src/lib/funnel.js';
 import { encryptSecret } from '../src/lib/secret-box.js';
 import { analyzeConversation, drainCrmAnalyses } from '../src/lib/crm/worker.js';
@@ -401,4 +401,68 @@ describe('independent CRM analysis', () => {
     expect((await db.select().from(crmAnalyses))[0]?.handledLiveMessageId).toBe(messageId);
   });
 
+});
+
+describe('chat payment', () => {
+  const sale = async () => (await db.select().from(stages).where(eq(stages.agentId, agentId))).find((s) => s.kind === 'success')!;
+  const paidChat = async () => {
+    const [offer] = await db.insert(messages).values({ conversationId, direction: 'out', author: 'phone', kind: 'text',
+      body: 'Размер 40 мм — 6.990 тенге', sentAt: new Date('2026-01-01T00:01:00Z') }).returning();
+    const [transfer] = await db.insert(messages).values({ conversationId, direction: 'in', author: 'client', kind: 'text',
+      body: 'Перевела 6990, спасибо', sentAt: new Date('2026-01-01T00:02:00Z') }).returning();
+    model.complete.mockResolvedValue({ text: JSON.stringify({ stageId: null, summary: 'Оплатила переводом', confidence: 90, profile: {}, fields: {},
+      checkout: null, payment: { state: 'paid', messageId: transfer!.id, quote: 'Перевела 6990', reason: 'Клиент перевёл оплату' },
+      paidAmount: { value: '6990', messageId: offer!.id, quote: '6.990 тенге' } }), promptTokens: 1, completionTokens: 1, cost: '0' });
+  };
+
+  it('moves a lead that paid by transfer to the sale stage and records one paid order', async () => {
+    await paidChat();
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+    const [conversation] = await db.select().from(conversations).where(eq(conversations.id, conversationId));
+    expect(conversation?.stageId).toBe((await sale()).id);
+    const rows = await db.select().from(orders).where(eq(orders.conversationId, conversationId));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ amount: '6990.00', status: 'paid', comment: 'Оплата по переписке' });
+    expect(rows[0]!.paidAt?.getTime()).toBe(conversation!.stageSetAt!.getTime());
+    expect((await db.select().from(capiEvents)).filter((e) => e.kind === 'purchase')).toHaveLength(1);
+    const [analysis] = await db.select().from(crmAnalyses).where(eq(crmAnalyses.conversationId, conversationId));
+    expect(analysis?.profile.paymentEvidence).toBe('paid');
+  });
+
+  it('does not record a second order when the conversation is analysed again', async () => {
+    await paidChat();
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+    await db.insert(messages).values({ conversationId, direction: 'in', author: 'client', kind: 'text', body: 'Когда отправите?', sentAt: new Date('2026-01-01T00:03:00Z') });
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+    expect(await db.select().from(orders)).toHaveLength(1);
+    expect((await db.select().from(capiEvents)).filter((e) => e.kind === 'purchase')).toHaveLength(1);
+  });
+
+  it('gives an operator-moved sale its order once the amount is found, and never leaves the sale stage', async () => {
+    await db.update(conversations).set({ stageId: (await sale()).id, stageSetAt: new Date('2026-01-02T00:00:00Z') }).where(eq(conversations.id, conversationId));
+    await paidChat();
+    const text = JSON.parse((await model.complete.getMockImplementation()!()).text);
+    model.complete.mockResolvedValue({ text: JSON.stringify({ ...text, stageId: targetId, payment: null }), promptTokens: 1, completionTokens: 1, cost: '0' });
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+    expect((await db.select().from(conversations))[0]?.stageId).toBe((await sale()).id);
+    expect((await db.select().from(orders))[0]?.paidAt?.toISOString()).toBe('2026-01-02T00:00:00.000Z');
+  });
+
+  it('records no chat order while a Kaspi invoice is pending', async () => {
+    await paidChat();
+    const [order] = await db.insert(orders).values({ agentId, conversationId, amount: '6990', currency: 'KZT' }).returning();
+    await db.insert(kaspiPayments).values({ agentId, conversationId, orderId: order!.id, requestKey: 'chat-payment-test', method: 'invoice',
+      phone: '77011234567', amount: '6990', status: 'pending' });
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+    expect((await db.select().from(orders)).filter((o) => o.status === 'paid')).toHaveLength(0);
+  });
+
+  it('does not move on a paid claim below the confidence threshold', async () => {
+    await paidChat();
+    const text = JSON.parse((await model.complete.getMockImplementation()!()).text);
+    model.complete.mockResolvedValue({ text: JSON.stringify({ ...text, confidence: 50 }), promptTokens: 1, completionTokens: 1, cost: '0' });
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+    expect((await db.select().from(conversations))[0]?.stageId).not.toBe((await sale()).id);
+    expect(await db.select().from(orders)).toHaveLength(0);
+  });
 });

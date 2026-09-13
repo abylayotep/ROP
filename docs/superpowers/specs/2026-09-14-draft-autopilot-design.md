@@ -136,11 +136,15 @@ Before any step: if the draft is no longer `open`, stop with «Черновик 
 
 ### `await_run`
 - Run `running` → stay.
-- Run `failed` (or `run_id` null because it was deleted) → `run_failures + 1`; at 3 stop «Прогон
+- Run `failed` (or `run_id` null because it was deleted) → add the failed run's cost and its
+  paired baseline cost (unless still running) to `cost`; `run_failures + 1`; at 3 stop «Прогон
   трижды оборвался»; otherwise back to `start_run` (the failed run still counts toward 4).
 - Run `done` → add its cost and its paired baseline cost to `cost`, then evaluate:
-  - `bad` = results with `verdict = 'worse'`, plus the required correction case when its
-    verdict is not `better` or its outcome is not sent/applied/handoff.
+  - `bad` = results with `verdict = 'worse'`, results with a null verdict or an outcome that is
+    not sent/applied/handoff (unjudged), plus the required correction case when its verdict is
+    not `better`. An unjudged result is attributed to topics only when its verdict is `worse`;
+    otherwise it takes the unattributed path below with «Случай „X“ не удалось оценить —
+    перепроверяем» / stop «Случай „X“ не удалось оценить — проверьте его вручную».
   - No `bad` and `isDraftApplicable` → `apply`.
   - No `bad` but not applicable (store moved under the draft) → `start_run`.
   - `bad` present: for each bad result map `usedOpIndexes` through `run_ops` to topic keys,
@@ -158,8 +162,8 @@ Before any step: if the draft is no longer `open`, stop with «Черновик 
 - For each pending fix, find the op by key in the current draft (skip if gone).
 - `rewrite` → `rewriteTopic` (below) → op-edit `update`; `topic_attempts[key] + 1`; log `fix`
   «Переписана тема „<title>“: <reason>». A failed rewrite counts as an attempt and logs `warn`.
-- `remove` → op-edit `remove`; log `remove` «Убрана тема „<title>“: после двух исправлений
-  ответ всё ещё хуже». If it is the last op, stop «Все темы убраны — применять нечего» without
+- `remove` → op-edit `remove`; log `remove` «Убрана тема „<title>“: после двух попыток
+  исправления ответ всё ещё хуже». If it is the last op, stop «Все темы убраны — применять нечего» without
   discarding.
 - Clear `pending_fixes`. Next: `start_run`.
 

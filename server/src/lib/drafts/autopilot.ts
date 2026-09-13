@@ -12,7 +12,7 @@
  * working wins, and that step's result is dropped. The engine calls the same lib functions the
  * manual routes do, so it is never blocked by the routes' "autopilot is running" guard.
  */
-import type { AutopilotStep, DraftAutopilot } from '@rakurs/contract';
+import type { AutopilotStep, DraftAutopilot, TestRun } from '@rakurs/contract';
 import { and, asc, eq, inArray } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import { agents, draftAutopilots, kbDrafts, testCases, testRuns } from '../../db/schema.js';
@@ -246,9 +246,17 @@ const awaitRun: StepFn = async (deps, row, draft, agent) => {
   }
 
   if (!run || run.status !== 'done') {
+    // A failed run still spent money, and so did the baseline run its POST paired with it.
+    let cost = row.cost;
+    if (run) {
+      cost = addCost(cost, run.cost);
+      const baseline = await pairedBaselineRun(db, run);
+      if (baseline && baseline.status !== 'running') cost = addCost(cost, baseline.cost);
+    }
     const runFailures = row.runFailures + 1;
-    if (runFailures >= AUTOPILOT_MAX_RUN_FAILURES) return { runFailures, runId: null, stop: 'Прогон трижды оборвался' };
+    if (runFailures >= AUTOPILOT_MAX_RUN_FAILURES) return { cost, runFailures, runId: null, stop: 'Прогон трижды оборвался' };
     return {
+      cost,
       runFailures,
       runId: null,
       logs: [entry('warn', 'Прогон оборвался — запускаем заново')],
@@ -261,9 +269,12 @@ const awaitRun: StepFn = async (deps, row, draft, agent) => {
 
   const [required] = await db.select({ id: testCases.id }).from(testCases)
     .where(eq(testCases.requiredDraftId, draft.id)).limit(1);
-  const bad = read.results.filter((result) => result.verdict === 'worse' || (
-    result.caseId === required?.id &&
-    (result.verdict !== 'better' || !ANSWERED_OUTCOMES.includes(result.after.outcome))
+  // A case the judge could not score, or whose draft-side turn never answered, proves nothing
+  // either way: it must not let the draft through unjudged.
+  const unjudged = (result: TestRun['results'][number]): boolean =>
+    result.verdict === null || !ANSWERED_OUTCOMES.includes(result.after.outcome);
+  const bad = read.results.filter((result) => result.verdict === 'worse' || unjudged(result) || (
+    result.caseId === required?.id && result.verdict !== 'better'
   ));
 
   if (bad.length === 0) {
@@ -280,15 +291,21 @@ const awaitRun: StepFn = async (deps, row, draft, agent) => {
   const runOps = row.runOps ?? [];
   const currentKeys = new Set(draft.ops.map(topicKey).filter((k): k is string => k !== null));
   const fixes = new Map<string, FailingCase[]>();
-  const unattributed: string[] = [];
+  const unattributed: { title: string; unjudged: boolean }[] = [];
   for (const result of bad) {
     const kase = caseById.get(result.caseId);
     const title = kase?.title ?? 'без названия';
+    // Only a real `worse` verdict points at the topics the answer used; an unscored case
+    // has nothing to fix and goes the noise-retry way.
+    if (unjudged(result) && result.verdict !== 'worse') {
+      unattributed.push({ title, unjudged: true });
+      continue;
+    }
     const keys = [...new Set(result.after.usedOpIndexes
       .map((i) => (runOps[i] ? topicKey(runOps[i]) : null))
       .filter((k): k is string => k !== null && currentKeys.has(k)))];
     if (keys.length === 0) {
-      unattributed.push(title);
+      unattributed.push({ title, unjudged: false });
       continue;
     }
     const failing: FailingCase = {
@@ -313,14 +330,15 @@ const awaitRun: StepFn = async (deps, row, draft, agent) => {
 
   const first = unattributed[0]!;
   if (!row.noiseRetryUsed) {
-    return {
-      cost,
-      noiseRetryUsed: true,
-      logs: [entry('warn', `Случай „${first}“ хуже, но темы черновика в ответе не участвовали — перепроверяем`)],
-      step: 'start_run',
-    };
+    const text = first.unjudged
+      ? `Случай „${first.title}“ не удалось оценить — перепроверяем`
+      : `Случай „${first.title}“ хуже, но темы черновика в ответе не участвовали — перепроверяем`;
+    return { cost, noiseRetryUsed: true, logs: [entry('warn', text)], step: 'start_run' };
   }
-  return { cost, stop: `Случай „${first}“ стал хуже не из-за тем черновика — проверьте его вручную` };
+  const reason = first.unjudged
+    ? `Случай „${first.title}“ не удалось оценить — проверьте его вручную`
+    : `Случай „${first.title}“ стал хуже не из-за тем черновика — проверьте его вручную`;
+  return { cost, stop: reason };
 };
 
 const fixTopics: StepFn = async (deps, row, draft, agent) => {
@@ -343,7 +361,7 @@ const fixTopics: StepFn = async (deps, row, draft, agent) => {
         current = await deps.ops.editOp(deps.db, {
           agentId: agent.id, draftId: draft.id, edit: { action: 'remove', index, current: op },
         });
-        logs.push(entry('remove', `Убрана тема „${title}“: после двух исправлений ответ всё ещё хуже`));
+        logs.push(entry('remove', `Убрана тема „${title}“: после двух попыток исправления ответ всё ещё хуже`));
         continue;
       }
 

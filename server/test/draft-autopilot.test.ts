@@ -109,7 +109,7 @@ const fakeOps = (): AutopilotOps => ({
   },
 });
 
-type Verdict = 'better' | 'worse' | 'same';
+type Verdict = 'better' | 'worse' | 'same' | null;
 
 async function finishRun(
   runId: string,
@@ -124,7 +124,7 @@ async function finishRun(
       reply: 'стало',
       outcome: result.outcome ?? 'sent',
       verdict: result.verdict,
-      verdictReason: result.verdict === 'worse' ? 'ответ хуже' : 'ответ лучше',
+      verdictReason: result.verdict === null ? null : result.verdict === 'worse' ? 'ответ хуже' : 'ответ лучше',
       usedOpIndexes: result.usedOpIndexes,
     });
   }
@@ -261,7 +261,7 @@ describe('advanceAutopilot', () => {
     expect(await kinds()).toContain('remove');
     expect(fixed.log.at(-1)).toMatchObject({
       kind: 'remove',
-      text: 'Убрана тема „Оплата“: после двух исправлений ответ всё ещё хуже',
+      text: 'Убрана тема „Оплата“: после двух попыток исправления ответ всё ещё хуже',
     });
     expect((await draftNow()).ops.map((op) => (op as { path: string }).path)).toEqual(['Доставка']);
 
@@ -321,6 +321,63 @@ describe('advanceAutopilot', () => {
     expect((await draftNow()).status).toBe('open');
   });
 
+  it('never applies a run the judge could not score: retries once, then stops', async () => {
+    id = await createRow({ step: 'start_run' });
+    await tick();
+    await finishRun((await rowNow()).runId!, caseIds.map((caseId) => ({ caseId, verdict: null, usedOpIndexes: [0] })));
+    await tick();
+    const retrying = await rowNow();
+    expect(retrying).toMatchObject({ status: 'running', step: 'start_run', noiseRetryUsed: true, pendingFixes: null });
+    expect(retrying.log.at(-1)).toMatchObject({
+      kind: 'warn',
+      // Result rows come back in no set order; either case may be named.
+      text: expect.stringMatching(/^Случай „(Сколько стоит доставка\?|Можно картой\?)“ не удалось оценить — перепроверяем$/),
+    });
+
+    await tick();
+    await finishRun((await rowNow()).runId!, caseIds.map((caseId) => ({ caseId, verdict: null, usedOpIndexes: [0] })));
+    await tick();
+    const stopped = await rowNow();
+    expect(stopped.status).toBe('stopped');
+    expect(stopped.stopReason)
+      .toMatch(/^Случай „(Сколько стоит доставка\?|Можно картой\?)“ не удалось оценить — проверьте его вручную$/);
+    expect((await draftNow()).status).toBe('open');
+  });
+
+  it('never applies a run whose draft-side turn failed: retries once, then stops', async () => {
+    id = await createRow({ step: 'start_run' });
+    await tick();
+    await finishRun((await rowNow()).runId!, [
+      { caseId: caseIds[0]!, verdict: 'better', usedOpIndexes: [0] },
+      { caseId: caseIds[1]!, verdict: 'same', usedOpIndexes: [1], outcome: 'failed' },
+    ]);
+    await tick();
+    const retrying = await rowNow();
+    expect(retrying).toMatchObject({ status: 'running', step: 'start_run', noiseRetryUsed: true });
+    expect(retrying.log.at(-1)).toMatchObject({ kind: 'warn', text: 'Случай „Можно картой?“ не удалось оценить — перепроверяем' });
+
+    await tick();
+    await finishRun((await rowNow()).runId!, [{ caseId: caseIds[1]!, verdict: 'better', usedOpIndexes: [1], outcome: 'failed' }]);
+    await tick();
+    const stopped = await rowNow();
+    expect(stopped.status).toBe('stopped');
+    expect(stopped.stopReason).toBe('Случай „Можно картой?“ не удалось оценить — проверьте его вручную');
+    expect((await draftNow()).status).toBe('open');
+  });
+
+  it('still attributes a worse verdict whose turn failed to the topics it used', async () => {
+    id = await createRow({ step: 'start_run' });
+    await tick();
+    await finishRun((await rowNow()).runId!, [
+      { caseId: caseIds[0]!, verdict: 'better', usedOpIndexes: [0] },
+      { caseId: caseIds[1]!, verdict: 'worse', usedOpIndexes: [1], outcome: 'failed' },
+    ]);
+    await tick();
+    const row = await rowNow();
+    expect(row.step).toBe('fix_topics');
+    expect(row.pendingFixes!.map((fix) => fix.key)).toEqual(['path:Оплата']);
+  });
+
   it('stops once four runs are used', async () => {
     id = await createRow({ step: 'start_run', runsStarted: 4 });
     await tick();
@@ -340,6 +397,29 @@ describe('advanceAutopilot', () => {
     const restarted = await rowNow();
     expect(restarted).toMatchObject({ status: 'running', step: 'start_run', runFailures: 1, runsStarted: 1 });
     expect(await kinds()).toContain('warn');
+  });
+
+  it('keeps the spend of a failed run and its paired baseline', async () => {
+    id = await createRow({ step: 'start_run', cost: '0.00100000' });
+    await tick();
+    const { runId } = await rowNow();
+    await db.insert(testRuns)
+      .values({ agentId, draftId: null, configVersion: 1, model: 'openai/gpt-4o-mini', status: 'done', cost: '0.00500000' });
+    await db.update(testRuns).set({ status: 'failed', cost: '0.02000000' }).where(eq(testRuns.id, runId!));
+    await tick();
+    const restarted = await rowNow();
+    expect(restarted).toMatchObject({ step: 'start_run', runFailures: 1 });
+    expect(Number(restarted.cost)).toBeCloseTo(0.026, 8);
+
+    // The third failure stops the autopilot and still counts what that run spent.
+    await db.update(draftAutopilots).set({ runFailures: 2 }).where(eq(draftAutopilots.id, id));
+    await tick();
+    const second = await rowNow();
+    await db.update(testRuns).set({ status: 'failed', cost: '0.03000000' }).where(eq(testRuns.id, second.runId!));
+    await tick();
+    const stopped = await rowNow();
+    expect(stopped.status).toBe('stopped');
+    expect(Number(stopped.cost)).toBeCloseTo(0.056, 8);
   });
 
   it('stops after the third failed run', async () => {

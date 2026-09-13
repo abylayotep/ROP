@@ -32,7 +32,8 @@ const LIST_LIMIT = 100;
 /** Mirrors `SEARCH_LIMIT` there: a search answers with the best twenty and stops. */
 const SEARCH_LIMIT = 20;
 
-/** Chat generation writes the sales script under this folder; the tree names it for people. */
+/** Chat generation used to write the sales script under this folder (new runs write knowledge
+ * topics only); the tree still names it for people on agents that have those notes. */
 const SCRIPT_FOLDER = 'Скрипт';
 
 type Filter = 'all' | KbNoteKind;
@@ -59,7 +60,13 @@ export function labelScriptFolder(nodes: TreeNode[]): TreeNode[] {
     node.path === SCRIPT_FOLDER && node.children.length > 0 ? { ...node, name: 'Скрипт продаж' } : node);
 }
 
-export function KnowledgeTab({ onDirtyChange, onTeach }: { onDirtyChange: (dirty: boolean) => void; onTeach: () => void }) {
+export function KnowledgeTab({ onDirtyChange, onTeach, reviewCount = 0, onOpenReview }: {
+  onDirtyChange: (dirty: boolean) => void;
+  onTeach: () => void;
+  /** Open drafts; the empty graph points at them when there are any. */
+  reviewCount?: number;
+  onOpenReview?: () => void;
+}) {
   const { agent, role } = useAgent();
   const owner = role === 'owner';
 
@@ -226,7 +233,7 @@ export function KnowledgeTab({ onDirtyChange, onTeach }: { onDirtyChange: (dirty
             )}
           </div>
           <div className={view === 'graph' ? '' : 'knowledge-view-panel--hidden'}>
-            <Card><Async state={graph} skeleton={<Skeleton height={560} />}>{(loaded) => loaded && <Graph graph={loaded} onOpenNote={openFromGraph} />}</Async></Card>
+            <Card><Async state={graph} skeleton={<Skeleton height={560} />}>{(loaded) => loaded && <Graph graph={loaded} onOpenNote={openFromGraph} onOpenReview={reviewCount > 0 ? onOpenReview : undefined} />}</Async></Card>
           </div>
         </div>
       </section>

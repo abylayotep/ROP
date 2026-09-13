@@ -36,7 +36,8 @@ const raw = (
 const input = (
   proposals: RawGenerationProposal[],
   communicationStyle: CommunicationStyle = 'warm',
-): ConsolidationInput => ({ proposals, communicationStyle });
+  existingTopics: ConsolidationInput['existingTopics'] = [],
+): ConsolidationInput => ({ proposals, communicationStyle, existingTopics });
 
 const answer = (items: unknown[]) => JSON.stringify({ items });
 
@@ -188,7 +189,7 @@ describe('generation proposal consolidation', () => {
     ['personal name', 'Напишите Алексею'],
   ])('drops unsafe %s returned by the model', async (_name, body) => {
     const model = fakeModel(answer([{
-      path: 'Скрипт/Ответ',
+      path: 'База знаний/Ответ',
       body,
       confidence: 'high',
       sourceProposalIds: ['p1'],
@@ -220,15 +221,16 @@ describe('generation proposal consolidation', () => {
     ]))).items).toEqual([]);
   });
 
-  it('applies communication style only to script calls and keeps warning-backed items unselected', async () => {
-    const model = fakeModel(
-      answer([{
-        path: 'База знаний/Оплата', body: 'Оплата при получении.', confidence: 'high', sourceProposalIds: ['knowledge-1'],
-      }]),
-      answer([{
-        path: 'Скрипт/Оплата', body: 'Оплатить можно при получении 😊', confidence: 'high', sourceProposalIds: ['script-1'],
-      }]),
-    );
+  it('consolidates legacy script findings and facts in one styled call into knowledge topics', async () => {
+    const model = fakeModel(answer([
+      {
+        path: 'База знаний/Оплата',
+        body: 'Как оплатить заказ.\n\n## Факты\n- Оплата при получении.\n\n## Готовые фразы\n- «Оплатить можно при получении 😊»\n- «Тапсырысты алған кезде төлеуге болады» (қаз.)\n\nСвязано: [[Доставка]]',
+        confidence: 'high',
+        sourceProposalIds: ['knowledge-1', 'script-1'],
+      },
+      { path: 'Скрипт/Оплата', body: 'Оплатить можно при получении 😊', confidence: 'high', sourceProposalIds: ['script-1'] },
+    ]));
     const result = await consolidateGenerationProposals(deps(model), input([
       raw('knowledge-1', 'Оплата при получении.', { path: 'База знаний/Оплата' }),
       raw('script-1', 'Можно ответить про оплату при получении.', {
@@ -236,14 +238,72 @@ describe('generation proposal consolidation', () => {
       }),
     ], 'friendly'));
 
-    const style = communicationStyleInstruction('friendly');
-    expect(model.calls).toHaveLength(2);
-    expect(model.calls[0]!.messages[0]!.content).not.toContain(style);
-    expect(model.calls[1]!.messages[0]!.content).toContain(style);
-    expect(result.items).toEqual(expect.arrayContaining([
-      expect.objectContaining({ kind: 'knowledge', selected: true, warnings: [] }),
-      expect.objectContaining({ kind: 'script', selected: false, warnings: ['context_limited'] }),
+    expect(model.calls).toHaveLength(1);
+    expect(model.calls[0]!.maxTokens).toBe(GENERATION_LIMITS.maxConsolidationOutputTokens);
+    const prompt = model.calls[0]!.messages[0]!.content;
+    expect(prompt).toContain(communicationStyleInstruction('friendly'));
+    expect(prompt).toContain('## Готовые фразы');
+    expect(prompt).toContain('[[Доставка]]');
+    expect(prompt).not.toContain('"Скрипт/"');
+    expect(result.items).toEqual([
+      expect.objectContaining({
+        kind: 'knowledge',
+        path: 'База знаний/Оплата',
+        selected: false,
+        warnings: ['context_limited'],
+        sourceProposalIds: ['knowledge-1', 'script-1'],
+      }),
+    ]);
+  });
+
+  it('joins items that name one topic with different case after the final pass', async () => {
+    const proposals = Array.from({ length: GENERATION_LIMITS.maxConsolidationItems + 1 }, (_, index) =>
+      raw(`p${index}`, `Подтверждённое условие ${index}.`));
+    const last = `p${GENERATION_LIMITS.maxConsolidationItems}`;
+    const model = fakeModel(
+      answer([{ path: 'База знаний/Доставка', body: 'Доставка два дня.', confidence: 'high', sourceProposalIds: ['p0'] }]),
+      answer([{ path: 'База знаний/доставка', body: 'Курьер звонит заранее.', confidence: 'review', sourceProposalIds: [last] }]),
+      answer([
+        { path: 'База знаний/Доставка', body: 'Доставка два дня.', confidence: 'high', sourceProposalIds: ['p0'] },
+        { path: 'База знаний/доставка', body: 'Курьер звонит заранее.', confidence: 'review', sourceProposalIds: [last] },
+      ]),
+    );
+
+    const result = await consolidateGenerationProposals(deps(model), input(proposals));
+
+    expect(result.items).toEqual([expect.objectContaining({
+      path: 'База знаний/Доставка',
+      body: 'Доставка два дня.\n\nКурьер звонит заранее.',
+      confidence: 'review',
+      selected: false,
+      sourceProposalIds: ['p0', last],
+    })]);
+  });
+
+  it('sends existing topics within budget, reuses their exact path, and never rewrites a path-only topic', async () => {
+    const big = 'Б'.repeat(GENERATION_LIMITS.maxExistingTopicCharacters);
+    const model = fakeModel(answer([
+      { path: 'база знаний/доставка', body: 'Доставка два дня.\n- Курьер звонит.', confidence: 'high', sourceProposalIds: ['p1'] },
+      { path: 'База знаний/Большая', body: 'Переписанная большая тема.', confidence: 'high', sourceProposalIds: ['p1'] },
     ]));
+
+    const result = await consolidateGenerationProposals(deps(model), input([
+      raw('p1', 'Курьер звонит.'),
+    ], 'warm', [
+      { path: 'База знаний/Доставка', body: 'Доставка два дня.' },
+      { path: 'База знаний/Большая', body: big },
+      { path: 'База знаний/Оплата', body: 'Kaspi.' },
+    ]));
+
+    const payload = JSON.parse(model.calls[0]!.messages[1]!.content) as { existingTopics: unknown[] };
+    expect(payload.existingTopics).toEqual([
+      { path: 'База знаний/Доставка', body: 'Доставка два дня.' },
+      { path: 'База знаний/Большая' },
+      { path: 'База знаний/Оплата' },
+    ]);
+    expect(result.items).toEqual([
+      expect.objectContaining({ path: 'База знаний/Доставка', body: 'Доставка два дня.\n- Курьер звонит.' }),
+    ]);
   });
 
   it('splits same-kind inputs by configured item limits', async () => {

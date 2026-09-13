@@ -55,6 +55,22 @@ describe('ProposalWorkspace', () => {
     expect(html).toContain('Собрать новый черновик');
   });
 
+  it('shows the knowledge/script switch only for runs that still have script proposals', () => {
+    const legacy = render();
+    expect(legacy).toContain('role="tablist"');
+    expect(legacy).toContain('Темы базы знаний');
+
+    const topicsOnly = { ...detail, proposals: { items: [proposal()], nextCursor: null } } as KbGenerationRunDetail;
+    const html = renderToStaticMarkup(createElement(StaticRouter, { location: '/' }, createElement(ProposalWorkspace, {
+      agentId: 'agent-1', detail: topicsOnly, onChanged: () => undefined,
+    })));
+    expect(html).not.toContain('role="tablist"');
+    expect(html).not.toContain('role="tabpanel"');
+    expect(html).not.toContain('Скрипт продаж');
+    expect(html).toContain('Темы базы знаний');
+    expect(html).toContain('Доставка занимает два дня.');
+  });
+
   it('keeps proposal rows compact until one row explicitly enters edit mode', () => {
     const html = render();
     expect(html).not.toContain('<textarea');

@@ -1,17 +1,21 @@
-import { useMemo, type ReactNode } from 'react';
+import { useMemo, useState, type ReactNode } from 'react';
 import * as api from '@/api';
+import { renderMarkdown } from '@/components/knowledge/markdown';
+import { MarkdownView } from '@/components/knowledge/NoteEditor';
 import { Card } from '@/components/ui/primitives';
 import { Async, Skeleton } from '@/components/ui/states';
 import { useApi } from '@/hooks/useApi';
 import { ruleCategoryLabel } from '@/lib/rule-categories';
+import { draftTopics, topicName } from '@/lib/training-state';
 import type { AgentRule, DraftOp, KbNoteDetail } from '@/types';
 
 /**
  * The change a draft would make — read before a single case is run, because the table below
  * answers «стало отвечать лучше», not «стало значить то, что владелец думает».
  *
- * A note op gets a line-by-line diff of its body: that is the whole content of a note, and
- * the owner reads it the same way they would read it in the editor. A rule op does not — a
+ * A new note is shown as it will read — rendered markdown under its topic name — because a
+ * diff against an empty file is one long green block. An edited note gets a line-by-line diff
+ * of its body: that is what changed, and the owner reads it line by line. A rule op does not — a
  * rule is one sentence, and a diff of one sentence against itself is noise; it shows the
  * category and the text the rule would read, which is what `agent-coaching.md` already says a
  * rule *is*.
@@ -39,19 +43,37 @@ async function loadContext(agentId: string, ops: DraftOp[], signal: AbortSignal)
   return { notes: new Map(noteRows.map((row) => [row.id, row])), rules };
 }
 
-export function OpDiff({ agentId, ops }: { agentId: string; ops: DraftOp[] }) {
+/** At or under this many ops every note card opens expanded; past it, the list would be a
+ * wall of text, so cards start collapsed to their first lines. */
+const EXPAND_ALL_MAX_OPS = 5;
+/** Lines of a new note's body a collapsed card still shows. */
+const PREVIEW_LINES = 3;
+
+export function OpDiff({ agentId, ops, topics = false }: {
+  agentId: string;
+  ops: DraftOp[];
+  /** A chat-generation draft: every note op is one knowledge topic, so the card says so. */
+  topics?: boolean;
+}) {
   // `ops` is the draft's own array, read fresh only when the draft itself reloads — a stable
   // reference the rest of the time, so this does not refetch on every render.
   const ctx = useApi<OpContext>((signal) => loadContext(agentId, ops, signal), [agentId, ops]);
+  const expanded = ops.length <= EXPAND_ALL_MAX_OPS;
 
   return (
     <Card>
-      <div style={{ fontSize: 13, fontWeight: 650, marginBottom: 12 }}>Изменение</div>
+      <div className="draft-ops__heading">{topics ? `Темы (${draftTopics({ ops }).count})` : 'Изменение'}</div>
+      {topics && (
+        <p className="draft-ops__intro">
+          Собрано из переписки WhatsApp. Каждая карточка — одна тема базы знаний: факты и готовые фразы.
+          После применения темы появятся во вкладке «Знания».
+        </p>
+      )}
       <Async state={ctx} skeleton={<Skeleton height={120} />}>
         {(loaded) => (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div className="draft-ops__list">
             {ops.map((op, i) => (
-              <OpCard key={i} op={op} ctx={loaded} />
+              <OpCard key={i} op={op} ctx={loaded} defaultExpanded={expanded} />
             ))}
           </div>
         )}
@@ -60,14 +82,14 @@ export function OpDiff({ agentId, ops }: { agentId: string; ops: DraftOp[] }) {
   );
 }
 
-function OpCard({ op, ctx }: { op: DraftOp; ctx: OpContext }) {
+function OpCard({ op, ctx, defaultExpanded }: { op: DraftOp; ctx: OpContext; defaultExpanded: boolean }) {
   switch (op.op) {
     case 'note_create':
       return (
-        <div>
-          <OpTitle>Новая заметка «{op.path}»</OpTitle>
-          <NoteDiff oldBody="" newBody={op.body} />
-        </div>
+        <NoteCard path={op.path} tag="Новая" defaultExpanded={defaultExpanded}
+          collapsed={<NoteBody body={previewBody(op.body)} />}>
+          <NoteBody body={op.body} />
+        </NoteCard>
       );
 
     case 'note_update': {
@@ -75,10 +97,10 @@ function OpCard({ op, ctx }: { op: DraftOp; ctx: OpContext }) {
       // surfaced through the outer `Async`'s own error state, not reached this branch at all.
       const note = ctx.notes.get(op.noteId)!;
       return (
-        <div>
-          <OpTitle>Правка заметки «{note.path}»</OpTitle>
+        <NoteCard path={note.path} tag="Правка" defaultExpanded={defaultExpanded}
+          collapsed={<div className="draft-topic__hint">Нажмите, чтобы увидеть, что изменится.</div>}>
           <NoteDiff oldBody={note.body} newBody={op.body} />
-        </div>
+        </NoteCard>
       );
     }
 
@@ -116,6 +138,47 @@ function OpCard({ op, ctx }: { op: DraftOp; ctx: OpContext }) {
       throw new Error(`unknown draft op: ${JSON.stringify(exhaustive)}`);
     }
   }
+}
+
+/** The first non-blank lines of a body — what a collapsed card still lets the owner read. */
+export function previewBody(body: string, lines = PREVIEW_LINES): string {
+  return body.split('\n').filter((line) => line.trim() !== '').slice(0, lines).join('\n');
+}
+
+/**
+ * One note op: the topic name (the path's last segment) as the title, the folder it lives in
+ * underneath, and a header that toggles the body. A draft of forty topics opened expanded was
+ * a page nobody scrolled to the end of, so past `EXPAND_ALL_MAX_OPS` cards start collapsed.
+ */
+function NoteCard({ path, tag, defaultExpanded, collapsed, children }: {
+  path: string;
+  tag: string;
+  defaultExpanded: boolean;
+  collapsed: ReactNode;
+  children: ReactNode;
+}) {
+  const [expanded, setExpanded] = useState(defaultExpanded);
+  const name = topicName(path);
+  const folder = path.split('/').map((segment) => segment.trim()).filter(Boolean).slice(0, -1).join(' / ');
+  return (
+    <section className={`draft-topic${expanded ? ' draft-topic--expanded' : ''}`} aria-label={name}>
+      <button type="button" className="draft-topic__header" aria-expanded={expanded} onClick={() => setExpanded((open) => !open)}>
+        <span className="draft-topic__titles">
+          <b className="draft-topic__title">{name}</b>
+          {folder !== '' && <span className="draft-topic__folder">{folder}</span>}
+        </span>
+        <span className="draft-topic__tag">{tag}</span>
+        <span className="draft-topic__toggle">{expanded ? 'Свернуть' : 'Показать всё'}</span>
+      </button>
+      <div className="draft-topic__body">{expanded ? children : collapsed}</div>
+    </section>
+  );
+}
+
+/** A proposed body read as the note will read once applied, not as a diff against nothing. */
+function NoteBody({ body }: { body: string }) {
+  if (body.trim() === '') return <div className="draft-topic__hint">Текст пуст.</div>;
+  return <div className="draft-topic__prose"><MarkdownView nodes={renderMarkdown(body, new Set())} targets={null} /></div>;
 }
 
 function OpTitle({ children }: { children: ReactNode }) {

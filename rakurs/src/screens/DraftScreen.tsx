@@ -9,8 +9,10 @@ import { Badge, Card, CardHead, Segmented, type SegmentItem } from '@/components
 import { Async, EmptyState, Skeleton } from '@/components/ui/states';
 import { useToast } from '@/components/ui/Toast';
 import { useApi } from '@/hooks/useApi';
+import { draftOrigin } from '@/lib/training-state';
 import { useAgent } from '@/store/agent';
 import type { KbDraft, KbDraftDetail, TestCase, TestRun } from '@/types';
+import './training-workspace.css';
 
 /**
  * «Было — стало», read and decided. Reached only from `ProposalCard`'s «В черновик» — there
@@ -291,7 +293,7 @@ function Draft({ agentId, draftId, initial }: { agentId: string; draftId: string
 
       {tab === 'run' ? (
         <>
-          <OpDiff agentId={agentId} ops={draft.ops} />
+          <OpDiff agentId={agentId} ops={draft.ops} topics={draftOrigin(draft) === 'Из переписки'} />
 
           <Card>
             <CardHead title="Случаи для прогона" />

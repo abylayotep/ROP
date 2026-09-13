@@ -4,7 +4,7 @@ import type { TeachMode } from '@/lib/training-routes';
 import { GenerationWizard } from './GenerationWizard';
 
 const WAYS: ReadonlyArray<{ id: TeachMode; title: string; text: string }> = [
-  { id: 'chats', title: 'Из переписки WhatsApp', text: 'Агент сам соберёт факты и скрипт из ваших ответов клиентам' },
+  { id: 'chats', title: 'Из переписки WhatsApp', text: 'Агент сам соберёт темы базы знаний — факты и готовые фразы — из ваших ответов клиентам' },
   { id: 'coach', title: 'Спросить тренера', text: 'Опишите, как отвечать, или исправьте конкретный ответ агента' },
   { id: 'import', title: 'Загрузить материалы', text: 'Текст, страница сайта, Instagram или старая история WhatsApp' },
 ];

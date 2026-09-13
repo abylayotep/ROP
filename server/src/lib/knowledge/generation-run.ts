@@ -32,6 +32,7 @@ import {
 import { GENERATION_LIMITS } from './generation-limits.js';
 import { generationContentHash, loadPreview } from './generation-selection.js';
 import { LEGACY_RAW_FINGERPRINT_PATTERN } from './generation-types.js';
+import { loadExistingTopics } from './whatsapp-drafts.js';
 
 export interface GenerationRunDeps {
   db: Db;
@@ -311,12 +312,14 @@ async function executeClaimedGenerationRun(deps: GenerationRunDeps, runId: strin
       warnings: proposal.warnings,
       sources: proposal.sources,
     }));
+    // Topics already in the knowledge base or the open chat draft grow instead of duplicating.
+    const existingTopics = await loadExistingTopics(db, run.agentId, true);
     const result = await consolidateGenerationProposals({
       model: deps.model,
       key,
       modelId: run.modelId,
       temperature: run.temperature,
-    }, { proposals: raw, communicationStyle: agent.communicationStyle });
+    }, { proposals: raw, communicationStyle: agent.communicationStyle, existingTopics });
     await addRunUsage(db, runId, result.usage);
 
     const candidateFingerprints = result.items.map((proposal) => fingerprint(proposal.path, proposal.body));
@@ -346,7 +349,7 @@ async function executeClaimedGenerationRun(deps: GenerationRunDeps, runId: strin
       runId,
       batchId: rawById.get(proposal.sourceProposalIds[0]!)!.batchId,
       fingerprint: fingerprint(proposal.path, proposal.body),
-      kind: proposal.kind,
+      kind: 'knowledge' as const,
       path: proposal.path,
       body: proposal.body,
       confidence: proposal.confidence,

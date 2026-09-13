@@ -242,7 +242,8 @@ describe('generation extraction', () => {
     expect(model.calls).toHaveLength(1);
     expect(model.calls[0]!.maxTokens).toBe(2_000);
     expect(model.calls[0]!.messages[0]!.content).toContain('База знаний/');
-    expect(model.calls[0]!.messages[0]!.content).toContain('Скрипт/');
+    expect(model.calls[0]!.messages[0]!.content).not.toContain('Скрипт/');
+    expect(model.calls[0]!.messages[0]!.content).toContain('ready-to-send phrase');
     expect(model.calls[0]!.messages[0]!.content).toContain('do not invent');
     expect(model.calls[0]!.messages[0]!.content).toContain('Write classification.reason in Russian.');
   });

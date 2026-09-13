@@ -12,3 +12,6 @@ export const generationPathSchema = z
 
 export const isValidGenerationPath = (path: string): boolean =>
   generationPathSchema.safeParse(path).success;
+
+/** Every generated topic note lives under this folder of the knowledge base. */
+export const TOPIC_PATH_PREFIX = 'База знаний/';

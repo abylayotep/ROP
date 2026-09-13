@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { draftOrigin, nextStep, pluralRu, runErrorSummary, tabAfterKey, wizardStep } from './training-state';
+import { draftOrigin, draftTopics, isWhatsAppDraftTitle, nextStep, pluralRu, runErrorSummary, tabAfterKey, wizardStep } from './training-state';
 
 const run = (status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled', proposalCount = 3, drafts = 0) =>
   ({ run: { status, proposalCount }, drafts: Array.from({ length: drafts }, (_, i) => ({ id: `d${i}` })) });
@@ -41,7 +41,27 @@ describe('draftOrigin', () => {
     expect(draftOrigin({ origin: 'coach', title: 'Правило' })).toBe('Тренер');
     expect(draftOrigin({ origin: 'manual', title: 'Скрипт продаж из WhatsApp' })).toBe('Из переписки');
     expect(draftOrigin({ origin: 'manual', title: 'База знаний из WhatsApp · 4' })).toBe('Из переписки');
+    expect(draftOrigin({ origin: 'manual', title: 'Обучение из переписки' })).toBe('Из переписки');
+    expect(draftOrigin({ origin: 'manual', title: 'Обучение из переписки · 3' })).toBe('Из переписки');
     expect(draftOrigin({ origin: 'manual', title: 'Правка цен' })).toBe('Вручную');
+    expect(draftOrigin({ origin: 'manual', title: 'Обучение из переписки · черновик' })).toBe('Вручную');
+  });
+
+  it('matches a chat-generation title against one given base only', () => {
+    expect(isWhatsAppDraftTitle('Скрипт продаж из WhatsApp · 12', 'Скрипт продаж из WhatsApp')).toBe(true);
+    expect(isWhatsAppDraftTitle('Скрипт продаж из WhatsApp · 12', 'Обучение из переписки')).toBe(false);
+  });
+});
+
+describe('draftTopics', () => {
+  it('counts every note op and names the new ones by their last path segment', () => {
+    expect(draftTopics({ ops: [
+      { op: 'note_create', path: 'База знаний/Доставка', body: 'b' },
+      { op: 'note_update', noteId: 'n1', body: 'b' },
+      { op: 'rule_create', category: 'tone', text: 't' },
+      { op: 'note_create', path: 'База знаний / Цены и размеры ', body: 'b' },
+      { op: 'note_create', path: 'Оплата', body: 'b' },
+    ] })).toEqual({ count: 4, names: ['Доставка', 'Цены и размеры', 'Оплата'] });
   });
 });
 

@@ -153,7 +153,13 @@ export function TrainingScreen() {
       onTabChange={(tab) => go(tab)}
     >
       {activeTab === 'knowledge' && (
-        <KnowledgeTab key={agent.id} onDirtyChange={setKnowledgeDirty} onTeach={() => go('teach', 'chats')} />
+        <KnowledgeTab
+          key={agent.id}
+          onDirtyChange={setKnowledgeDirty}
+          onTeach={() => go('teach', 'chats')}
+          reviewCount={drafts.data?.length ?? 0}
+          onOpenReview={() => go('review')}
+        />
       )}
 
       {activeTab === 'replies' && (

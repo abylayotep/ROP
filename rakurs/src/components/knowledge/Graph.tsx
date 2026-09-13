@@ -51,10 +51,13 @@ function truncateLabel(title: string): string {
 export function Graph({
   graph,
   onOpenNote,
+  onOpenReview,
 }: {
   graph: KbGraph;
   /** Already the screen's own dirty-editor guard — this component never bypasses it. */
   onOpenNote: (noteId: string) => void;
+  /** Given only when drafts wait for review: an empty base usually means nothing is applied yet. */
+  onOpenReview?: () => void;
 }) {
   const { theme } = useAppState();
   const containerRef = useRef<HTMLDivElement>(null);
@@ -102,8 +105,14 @@ export function Graph({
     };
   }, [graph, steps]);
 
+  // The canvas exists only past the empty states below. Keyed into the sizing effect so a
+  // graph that grows from one note to two, without a remount, still gets its canvas measured.
+  const drawable = graph.notes.length > 1;
+
   // Size the canvas in device pixels for crisp lines on a hi-DPI screen, and re-measure
-  // whenever the container's own box changes — including the very first layout pass.
+  // whenever the container's own box changes — including the very first layout pass. The
+  // graph view sits in a panel hidden with `display: none` while the notes view is on screen;
+  // the observer also fires when that panel is shown again, so the canvas never stays 0×0.
   useEffect(() => {
     const container = containerRef.current;
     const canvas = canvasRef.current;
@@ -121,7 +130,7 @@ export function Graph({
     const observer = new ResizeObserver(measure);
     observer.observe(container);
     return () => observer.disconnect();
-  }, []);
+  }, [drawable]);
 
   // Frame every node the first time its layout is ready, so a vault of five notes and one
   // of five hundred both open already fitted to the canvas instead of at a fixed zoom that
@@ -288,7 +297,16 @@ export function Graph({
   }
 
   if (graph.notes.length === 0) {
-    return <EmptyState>В базе знаний пока нет заметок — рисовать граф не из чего.</EmptyState>;
+    return (
+      <EmptyState>
+        <p style={{ margin: 0 }}>Граф появится, когда в базе знаний будут заметки.</p>
+        {onOpenReview && (
+          <button type="button" className="btn btn-sm" style={{ marginTop: 12 }} onClick={onOpenReview}>
+            Открыть «На проверке»
+          </button>
+        )}
+      </EmptyState>
+    );
   }
   if (graph.notes.length === 1) {
     return (
@@ -301,6 +319,11 @@ export function Graph({
 
   return (
     <div>
+      {graph.links.length === 0 && (
+        <div style={{ padding: '0 2px 10px', fontSize: 11.5, color: 'var(--text-dim)' }}>
+          Связей пока нет: они появляются из ссылок [[Название]] в тексте заметок.
+        </div>
+      )}
       {graph.truncated && (
         <div style={{ padding: '0 2px 10px', fontSize: 11, color: 'var(--text-dim)' }}>
           Показаны первые 500 заметок — в базе их больше. Остальные и их связи здесь не

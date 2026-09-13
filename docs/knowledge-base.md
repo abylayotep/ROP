@@ -19,7 +19,7 @@ organised by what the owner wants to do, not by entity, and has four tabs:
 
 | Tab | What it is for | Who sees it |
 |---|---|---|
-| «Знания» | The notes the agent answers from: tree, search, kind filter, editor, graph. Notes under `Скрипт/` show as a separate top-level group «Скрипт продаж». | Everyone |
+| «Знания» | The notes the agent answers from: tree, search, kind filter, editor, graph. Notes under `Скрипт/` (made before topic notes) show as a separate top-level group «Скрипт продаж». | Everyone |
 | «Как отвечает» | Communication style and rules — everything that shapes a live reply. Rules are described in [agent-coaching.md](agent-coaching.md). | Everyone; rules only for the owner |
 | «Научить» | Three ways to teach: «Из переписки WhatsApp» (section 11), «Спросить тренера» ([agent-coaching.md](agent-coaching.md)), «Загрузить материалы» (sections 4–6). | Owner |
 | «На проверке (N)» | Every open draft, newest first, with its origin («Из переписки», «Тренер», «Вручную»), number of changes and date. «Открыть» leads to the draft screen ([drafts-and-checks.md](drafts-and-checks.md)). | Owner |
@@ -393,20 +393,36 @@ analysis, nothing is stored separately.
 2. **Разбор.** A progress bar with the percentage and «Отменить». A failed or cancelled
    analysis that found nothing stays here with the reason, «Повторить» (failed only) and
    «Начать заново».
-3. **Отбор.** The found facts, in two inner tabs «База знаний» and «Скрипт продаж»: select,
-   edit or reject each one, then «Собрать новый черновик». When nothing new was found the step
-   says so and offers «Начать заново».
-4. **Черновик.** Links to the drafts this analysis produced, «Открыть на проверку» for the
-   newest open one, and «Отобрать ещё» back to step 3. The same drafts also appear in
-   «На проверке».
+3. **Отбор.** The found topics («Темы базы знаний»): select, edit or reject each one, then
+   «Собрать новый черновик». Runs made before topic notes still show a second inner tab
+   «Скрипт продаж» for their `Скрипт/` findings. When nothing new was found the step says so
+   and offers «Начать заново».
+4. **Черновик.** One link «Открыть черновик» to the open chat draft and «Отобрать ещё» back to
+   step 3. The same draft also appears in «На проверке».
 
-**One draft per kind.** An agent has at most one open «База знаний из WhatsApp» and one open
-«Скрипт продаж из WhatsApp». A new selection does not add a second draft: the open one is
-discarded and rebuilt from its changes plus the new ones, and when both write the same note
-(same path, or same note id for an update) the newer text wins and the older fact returns to
-«pending» in its analysis. The rebuilt draft has to be checked again. Rules live in
-`server/src/lib/knowledge/whatsapp-drafts.ts`; duplicates made before this rule are merged by
-`node dist/scripts/merge-whatsapp-drafts.js`.
+**Topic notes.** Extraction files every seller-supported fact and sales phrase under a broad
+customer topic, `База знаний/<topic>`. Consolidation then writes one note per topic, whatever
+the finding's kind: a one-line summary, `## Факты`, `## Готовые фразы` (Russian and Kazakh
+variants of one phrase in one entry) and a «Связано: [[…]]» line. A link names the other
+topic's title — the last path segment — so the graph gets edges once the notes are applied.
+Consolidation is also shown the existing topics (notes under `База знаний/` and the open chat
+draft's note ops, bodies up to 40,000 characters, the rest by path only): a matching topic keeps
+its exact path and gets a full merged body; a topic sent by path only is never rewritten. Items
+that still share a path after the last pass are joined deterministically.
+
+**One draft.** An agent has at most one open «Обучение из переписки». A new selection does not
+add a second draft: the open one — and any legacy «База знаний из WhatsApp» / «Скрипт продаж из
+WhatsApp» draft — is discarded and rebuilt from its changes plus the new ones. A proposal whose
+path already names a note becomes an update of that note. When two ops write the same note the
+newer text wins and the older proposals move to it, still «drafted», because the newer body is a
+merge that contains them. The rebuilt draft has to be checked again. Rules live in
+`server/src/lib/knowledge/whatsapp-drafts.ts`.
+
+**Regrouping old drafts.** `server/src/scripts/regroup-whatsapp-drafts.ts` runs the topic
+consolidation once over the ops of the per-phrase drafts made before this change and leaves one
+topic draft per agent (`--dry-run` prints `ops → topics` and writes nothing; `--agent <id>`
+limits it to one agent). It calls the agent's OpenRouter key; the command is in the file's doc
+comment.
 
 Below the wizard, **«История разборов (N)»** lists earlier analyses with date, status and
 «найдено фактов: N»; choosing one opens it in the wizard. **«Подробности разбора»** is one

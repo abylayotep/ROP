@@ -1,6 +1,6 @@
 import { eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { agents, contacts, conversations, kbDrafts, kbGenerationBatches, kbGenerationProposals, kbGenerationRawFindings, kbGenerationRuns, messages, users, whatsappNumbers, accounts } from '../src/db/schema.js';
+import { agents, contacts, conversations, kbDrafts, kbGenerationBatches, kbGenerationProposals, kbGenerationRawFindings, kbGenerationRuns, kbNotes, messages, users, whatsappNumbers, accounts } from '../src/db/schema.js';
 import { keyAad } from '../src/lib/ai/turn.js';
 import { cancelGenerationRun, executeGenerationRun, reconcileGenerationRuns, retryGenerationRun, startGenerationRun } from '../src/lib/knowledge/generation-run.js';
 import { previewSelection } from '../src/lib/knowledge/generation-selection.js';
@@ -45,8 +45,9 @@ const consolidationModel = (extraction: string) => {
       proposals: { id: string; path: string; body: string }[];
     };
     return {
+      // Like the real prompt, legacy «Скрипт/» findings come back as knowledge topics.
       text: consolidated(payload.proposals.map((proposal) => ({
-        path: proposal.path,
+        path: proposal.path.replace(/^Скрипт\//, 'База знаний/'),
         body: proposal.body,
         confidence: 'high',
         sourceProposalIds: [proposal.id],
@@ -239,13 +240,36 @@ describe('generation runs', () => {
     const proposals = await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.runId, run.id));
     expect(proposals).toEqual(expect.arrayContaining([
         expect.objectContaining({ kind: 'knowledge', path: 'База знаний/Доставка', confidence: 'high', selected: true, status: 'pending', draftId: null }),
-        expect.objectContaining({ kind: 'script', path: 'Скрипт/Срок доставки', confidence: 'high', selected: true, status: 'pending', draftId: null }),
+        expect.objectContaining({ kind: 'knowledge', path: 'База знаний/Срок доставки', confidence: 'high', selected: true, status: 'pending', draftId: null }),
       ]));
     expect(proposals).toHaveLength(2);
     expect(await db.select().from(kbGenerationRawFindings).where(eq(kbGenerationRawFindings.runId, run.id)))
       .toHaveLength(2);
     expect((await db.select().from(kbGenerationRuns).where(eq(kbGenerationRuns.id, run.id)))[0])
-      .toMatchObject({ status: 'completed', promptTokens: 300, completionTokens: 60, cost: '0.00030000' });
+      .toMatchObject({ status: 'completed', promptTokens: 200, completionTokens: 40, cost: '0.00020000' });
+  });
+
+  it('tells consolidation about knowledge-base topics and the open chat draft', async () => {
+    const run = await admitted('existing-topics');
+    await db.insert(kbNotes).values([
+      { agentId, path: 'База знаний/Оплата', title: 'Оплата', body: 'Kaspi.' },
+      { agentId, path: 'Инструкции/Тон', title: 'Тон', body: 'Вежливо.' },
+    ]);
+    await db.insert(kbDrafts).values({
+      agentId, title: 'Скрипт продаж из WhatsApp · 3', origin: 'manual', base: {},
+      ops: [{ op: 'note_create', path: 'База знаний/Сроки', body: 'Два дня.' }],
+    });
+    const model = consolidationModel(classified([
+      { path: 'База знаний/Доставка', body: 'Доставка занимает два дня.', sources: [messageId], warnings: [] },
+    ]));
+
+    await executeGenerationRun({ db, model, credentialsKey: key }, run.id);
+
+    const payload = JSON.parse(model.calls[1]!.messages[1]!.content) as { existingTopics: unknown[] };
+    expect(payload.existingTopics).toEqual([
+      { path: 'База знаний/Оплата', body: 'Kaspi.' },
+      { path: 'База знаний/Сроки', body: 'Два дня.' },
+    ]);
   });
 
   it('keeps grounded raw findings and reports an honest error when consolidation fails', async () => {

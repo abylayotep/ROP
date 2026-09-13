@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { and, asc, desc, eq, inArray, isNull, isNotNull, lt, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, isNull, isNotNull, lt, or, sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import { agents, aiReplies, contacts, conversations, crmAnalyses, kaspiPayments, leadFields, leadValues, messages, notes, orders, stages } from '../../db/schema.js';
 import type { ModelClient } from '../ai/openrouter.js';
@@ -185,12 +185,16 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
           : await tx.update(leadValues).set({value,updatedAt:new Date()}).where(and(eq(leadValues.conversationId,conversation.id),eq(leadValues.fieldId,fieldId),sql`${leadValues.updatedAt} = ${original.version}::timestamptz`)).returning();
         if (changed.length) evidence[`field:${fieldId}`] = proof;
       }
-      // One paid order per sale, whoever moved the lead there. A Kaspi invoice in flight owns the money.
+      // One paid order per sale episode — since the lead last entered the sale stage, whoever moved
+      // it there — so a customer buying again after being moved out and back gets a new order.
+      // A Kaspi invoice in flight owns the money whenever it was issued.
       if (stageNow?.kind === 'success' && analysis.paidAmount && analysis.confidence >= 65 && !undone) {
+        const episode = moved ? movedAt : locked.stageSetAt;
         const [paidOrder] = await tx.select({id:orders.id}).from(orders)
-          .where(and(eq(orders.conversationId,conversation.id),eq(orders.status,'paid'))).limit(1);
+          .where(and(eq(orders.conversationId,conversation.id),eq(orders.status,'paid'),episode ? gte(orders.paidAt,episode) : undefined)).limit(1);
         const [invoice] = await tx.select({id:kaspiPayments.id}).from(kaspiPayments)
-          .where(and(eq(kaspiPayments.conversationId,conversation.id),inArray(kaspiPayments.status,['creating','pending','unknown','paid']))).limit(1);
+          .where(and(eq(kaspiPayments.conversationId,conversation.id),or(inArray(kaspiPayments.status,['creating','pending','unknown']),
+            and(eq(kaspiPayments.status,'paid'),episode ? gte(kaspiPayments.createdAt,episode) : undefined)))).limit(1);
         if (!paidOrder && !invoice) {
           const [order] = await tx.insert(orders).values({agentId:agent.id,conversationId:conversation.id,amount:analysis.paidAmount,
             currency:agent.currency,status:'paid',comment:'Оплата по переписке',
@@ -217,8 +221,9 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
     if (liveId && last?.id === liveId && last.author === 'client' && Date.now()-last.sentAt.getTime() >= 0
       && Date.now()-last.sentAt.getTime() < 5*60_000) {
       const [current] = await db.select({agentEnabled:agents.aiEnabled,conversationEnabled:conversations.aiEnabled,
-        crmAnalysisMode:agents.crmAnalysisMode})
-        .from(conversations).innerJoin(agents,eq(agents.id,conversations.agentId)).where(eq(conversations.id,conversation.id));
+        crmAnalysisMode:agents.crmAnalysisMode,stageKind:stages.kind,stageSetAt:conversations.stageSetAt})
+        .from(conversations).innerJoin(agents,eq(agents.id,conversations.agentId)).leftJoin(stages,eq(stages.id,conversations.stageId))
+        .where(eq(conversations.id,conversation.id));
       if (agent.crmAnalysisMode === 'follow_ai' && current?.crmAnalysisMode === 'follow_ai' && moved && await automationAllowed(db,input,'crm')) {
         await queueLead(db,{agentId:agent.id,conversationId:conversation.id,
           canQueue:async (effectDb) => {
@@ -230,8 +235,9 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
         .orderBy(desc(messages.sentAt),desc(messages.id)).limit(1);
       if (agent.crmAnalysisMode === 'follow_ai' && current?.crmAnalysisMode === 'follow_ai' && current.agentEnabled && current.conversationEnabled && latest?.id === liveId) {
         const wantsCheckout = Boolean(deps.checkout && analysis.checkout?.messageId === liveId && analysis.confidence >= 85
-          && !await hasConfirmedKaspiPayment(db,agent.id,conversation.id)
-          && !(await db.select({id:orders.id}).from(orders).where(and(eq(orders.conversationId,conversation.id),eq(orders.status,'paid'))).limit(1)).length
+          // Only the current sale episode blocks an invoice: a repeat customer moved back into work can buy again.
+          && !(current.stageKind === 'success' && (await db.select({id:orders.id}).from(orders).where(and(eq(orders.conversationId,conversation.id),
+            eq(orders.status,'paid'),current.stageSetAt ? gte(orders.paidAt,current.stageSetAt) : undefined)).limit(1)).length)
           && await automationAllowed(db,input,'checkout'));
         if (wantsCheckout && contact.phone) {
           await deps.checkout!({agentId:agent.id,conversationId:conversation.id,phone:contact.phone,

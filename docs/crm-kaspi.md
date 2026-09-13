@@ -46,16 +46,23 @@ An order becomes paid in two ways. Kaspi's confirmed operation status marks its 
 order paid. Otherwise, when the analysis quotes the customer saying they paid (or the
 seller confirming receipt) with confidence, the worker moves the lead into the sale stage
 and records one paid order «Оплата по переписке» for the amount the seller quoted, unless
-a Kaspi invoice for the conversation is in flight. Either way a Meta Purchase is queued;
+a Kaspi invoice for the conversation is in flight. One order per sale episode: an order
+paid since the lead last entered the sale stage blocks another, an older one does not. Either way a Meta Purchase is queued;
 a sweep every minute re-queues purchases lost for orders paid in the last seven days. An
 image alone, or an operator, cannot mark an order paid by hand.
 
 AI never takes a lead out of the sale stage. An operator can undo a false chat sale: move
-the lead out of the sale stage and delete the chat order. After such a move neither the
-worker nor the live agent moves the lead back into the sale stage on chat evidence, and
-no new chat order is recorded; a confirmed Kaspi payment still moves it. Orders paid
-through Kaspi cannot be changed or deleted, and a lead with a paid order gets no new
-Kaspi invoice.
+the lead out of the sale stage, then delete the chat order (deleting it while the lead is
+still in the sale stage is refused). After such a move neither the worker nor the live
+agent moves the lead back into the sale stage on chat evidence, and no new chat order is
+recorded; a Kaspi payment confirmed after the move still moves it. Orders paid through
+Kaspi cannot be changed or deleted.
+
+A conversation holds the customer's whole relationship, so repeat purchases work: a lead
+standing in the sale stage with a paid order gets no new Kaspi invoice, manual or
+automatic, but once moved out of the sale stage it can be invoiced again, and a manager
+who moves it back into the sale stage lets the next chat payment record a new order and
+Purchase. Payments from an earlier sale never move the lead back.
 
 ## Dialog performance
 

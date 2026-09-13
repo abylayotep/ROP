@@ -3,7 +3,7 @@ import { and, desc, eq, isNull, or } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
-import { contacts, conversations, kaspiPayments, orders } from '../db/schema.js';
+import { contacts, conversations, kaspiPayments, orders, stages } from '../db/schema.js';
 import { ApiError } from '../lib/errors.js';
 import { isUuid } from '../lib/uuid.js';
 import { loadLead } from './leads.js';
@@ -157,6 +157,14 @@ export function registerOrderRoutes(
       // it to undo a sale the analysis saw by mistake; a Purchase not yet sent is then skipped.
       const [payment] = await db.select().from(kaspiPayments).where(eq(kaspiPayments.orderId, orderId));
       if (payment) throw new ApiError(409, 'Платёжный заказ нельзя удалить');
+      if (current.status === 'paid') {
+        // While the lead stands in the sale stage the next analysis would record the sale again,
+        // with a new order and a second Purchase: the undo starts with the stage.
+        const [stage] = await db.select({ kind: stages.kind }).from(conversations)
+          .innerJoin(stages, eq(stages.id, conversations.stageId))
+          .where(eq(conversations.id, current.conversationId));
+        if (stage?.kind === 'success') throw new ApiError(409, 'Сначала выведите сделку из стадии «Оплачено», затем удалите заказ');
+      }
       await db
         .delete(orders)
         .where(and(eq(orders.id, current.id), eq(orders.agentId, req.agent!.id)));

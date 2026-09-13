@@ -2,7 +2,7 @@ import { eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildServer } from '../src/api/server.js';
-import { agents, contacts, conversations, kaspiPayments, orders, whatsappNumbers } from '../src/db/schema.js';
+import { agents, contacts, conversations, kaspiPayments, orders, stages, whatsappNumbers } from '../src/db/schema.js';
 import { addMember, createAccountWithOwner } from '../src/lib/provision.js';
 import { withDb } from './helpers/db.js';
 import { testEnv } from './helpers/env.js';
@@ -266,6 +266,27 @@ describe('changing an order', () => {
     });
 
     expect(res.statusCode).toBe(200);
+    expect(await db.select().from(orders)).toHaveLength(0);
+  });
+
+  it('refuses to delete a chat-paid order while the lead is still in the sale stage, and allows it once moved out', async () => {
+    const funnel = await db.select().from(stages).where(eq(stages.agentId, agentId));
+    const sale = funnel.find((s) => s.kind === 'success')!;
+    const work = funnel.find((s) => s.kind === 'active')!;
+    await db.update(conversations).set({ stageId: sale.id, stageSetAt: new Date() }).where(eq(conversations.id, conversationId));
+    const [chat] = await db
+      .insert(orders)
+      .values({ agentId, conversationId, amount: '6990', currency: 'KZT', status: 'paid', comment: 'Оплата по переписке', paidAt: new Date() })
+      .returning();
+    const remove = () => app.inject({ method: 'DELETE', url: `/api/agents/${agentId}/orders/${chat!.id}`, cookies: jar });
+
+    const refused = await remove();
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json().message).toBe('Сначала выведите сделку из стадии «Оплачено», затем удалите заказ');
+    expect(await db.select().from(orders)).toHaveLength(1);
+
+    await db.update(conversations).set({ stageId: work.id, stageSetAt: new Date() }).where(eq(conversations.id, conversationId));
+    expect((await remove()).statusCode).toBe(200);
     expect(await db.select().from(orders)).toHaveLength(0);
   });
 

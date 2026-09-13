@@ -8,7 +8,7 @@ vi.mock('@/hooks/useApi', () => ({
   useApi: () => ({ data: { notes, rules: [] }, error: undefined, loading: false, reload: () => undefined }),
 }));
 
-import { OpDiff, previewBody } from './OpDiff';
+import { OPS_PAGE, OpDiff, previewBody } from './OpDiff';
 
 const text = (html: string) => html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
 const topicBody = [
@@ -25,14 +25,14 @@ const topicBody = [
   'Связано: [[Оплата]]',
 ].join('\n');
 const create = (name: string): DraftOp => ({ op: 'note_create', path: `База знаний/${name}`, body: topicBody });
-const render = (ops: DraftOp[], topics = true) => renderToStaticMarkup(createElement(OpDiff, { agentId: 'agent-1', ops, topics }));
+const render = (ops: DraftOp[], topics = true, onEdit?: () => Promise<boolean>) =>
+  renderToStaticMarkup(createElement(OpDiff, { agentId: 'agent-1', ops, topics, onEdit }));
 
 describe('OpDiff', () => {
   it('explains a chat-generation draft and counts its topics', () => {
     const plain = text(render([create('Доставка'), create('Оплата')]));
     expect(plain).toContain('Темы (2)');
     expect(plain).toContain('Собрано из переписки WhatsApp');
-    expect(plain).toContain('После применения темы появятся во вкладке «Знания»');
     expect(plain).not.toContain('Изменение');
   });
 
@@ -62,6 +62,22 @@ describe('OpDiff', () => {
     expect(html).toContain('Как и когда доставляем заказы.');
     expect(html).not.toContain('В регионы 3–5 дней.');
     expect(html).toContain('Показать всё');
+  });
+
+  it('shows the first page of cards and offers the rest', () => {
+    const plain = text(render(Array.from({ length: OPS_PAGE + 3 }, (_, index) => create(`Тема ${index}`))));
+    expect(plain).toContain(`Темы (${OPS_PAGE + 3})`);
+    expect(plain).toContain(`Тема ${OPS_PAGE - 1}`);
+    expect(plain).not.toContain(`Тема ${OPS_PAGE} `);
+    expect(plain).toContain('Показать ещё 3 из 3');
+  });
+
+  it('offers to edit and remove a topic only while the draft is editable', () => {
+    expect(text(render([create('Доставка')]))).not.toContain('Убрать');
+    const plain = text(render([create('Доставка')], true, async () => true));
+    expect(plain).toContain('Изменить');
+    expect(plain).toContain('Убрать');
+    expect(plain).toContain('Лишнюю тему уберите');
   });
 
   it('keeps a line diff for an update under the same header', () => {

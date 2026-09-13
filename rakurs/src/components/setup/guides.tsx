@@ -11,6 +11,7 @@ import { Inside, Note, Out, Path, Step, Steps, Troubles } from './Guide';
 
 const OPENROUTER_KEYS_URL = 'https://openrouter.ai/keys';
 const EVENTS_MANAGER_URL = 'https://business.facebook.com/events_manager2';
+const SYSTEM_USERS_URL = 'https://business.facebook.com/settings/system-users';
 
 /* ── Первое сообщение ──────────────────────────────────────────────────── */
 
@@ -240,20 +241,27 @@ export function CapiGuide() {
           исключительно по диалогам, начавшимся с клика по объявлению: диалог, в котором клиент
           написал сам, Meta не с чем сопоставить.
         </div>
+        <Note kind="warn">
+          Номер должен быть подключён через WhatsApp Cloud API. Номер, подключённый по QR, не
+          имеет аккаунта WhatsApp Business, и Meta не примет от него ни одной покупки.
+        </Note>
       </Step>
-      <Step n={2} title="Возьмите идентификатор набора данных">
+      <Step n={2} title="Выпустите токен системного пользователя">
         <div>
-          <Out href={EVENTS_MANAGER_URL}>Meta Events Manager</Out> →{' '}
-          <Path>Data sources</Path> → ваш набор данных → <Path>Settings</Path>. Это тот же
-          набор (пиксель), который используют ваши объявления, — чужой примет события и не
-          свяжет их с рекламой.
+          <Out href={SYSTEM_USERS_URL}>Business settings → System users</Out>: пользователю
+          выдан полный доступ к аккаунту WhatsApp Business вашего номера, в токене отмечены
+          права <Path>whatsapp_business_management</Path> и{' '}
+          <Path>whatsapp_business_manage_events</Path>. Порядок тот же, что и для WhatsApp на
+          этапе выше.
         </div>
       </Step>
-      <Step n={3} title="Выпустите токен с правом на этот набор">
+      <Step n={3} title="Получите набор данных вашего аккаунта WhatsApp">
         <div>
-          Постоянный токен системного пользователя, которому в{' '}
-          <Path>Business settings → Assign assets</Path> выдан доступ к этому набору данных.
-          Порядок тот же, что и для WhatsApp на этапе выше.
+          Нужен набор, привязанный к аккаунту WhatsApp Business, а не пиксель сайта: веб-набор
+          примет события и не свяжет их с рекламой. Такой набор не создаётся в Events Manager —
+          его выдаёт Meta по запросу <Path>POST graph.facebook.com/v21.0/ID_аккаунта_WhatsApp/dataset</Path>{' '}
+          с токеном из шага 2. Если набор уже есть, ответ вернёт его же. Число из поля{' '}
+          <Path>id</Path> — это идентификатор набора данных.
         </div>
       </Step>
       <Step n={4} title="Сохраните пару в «Интеграциях»">
@@ -265,7 +273,9 @@ export function CapiGuide() {
       </Step>
       <Step n={5} title="Проверьте тестовым кодом события">
         <div>
-          Поле «Тестовый код события» берётся в Events Manager, вкладка <Path>Test Events</Path>.
+          Поле «Тестовый код события» берётся в{' '}
+          <Out href={EVENTS_MANAGER_URL}>Events Manager</Out> → ваш набор → вкладка{' '}
+          <Path>Test Events</Path>.
           Пока код указан, события видны там и не идут в оптимизацию рекламы.
         </div>
         <Note kind="warn">

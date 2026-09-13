@@ -7,12 +7,19 @@
  * is whether one is stored.
  */
 import type { CapiEvent, CapiSettings } from '@rakurs/contract';
-import { and, desc, eq, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, isNotNull, type SQL } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
-import { capiEvents, capiSettings, contacts, conversations, orders } from '../db/schema.js';
+import {
+  capiEvents,
+  capiSettings,
+  contacts,
+  conversations,
+  orders,
+  whatsappNumbers,
+} from '../db/schema.js';
 import type { Env } from '../env.js';
 import { CapiError, type CapiClient } from '../lib/capi/client.js';
 import { UNREPORTABLE_BODY, buildLead, serialiseEvent } from '../lib/capi/events.js';
@@ -80,18 +87,41 @@ const toApi = (row: typeof capiSettings.$inferSelect): CapiSettings => ({
  * so a fixed one would make the second verification a no-op that Meta accepts without
  * looking — and a save would then report «проверено» about a token it never presented.
  *
- * The identifiers are invented and match nobody. That is fine and is the point: the event
- * is marked as a test, so it is never attributed to anything and never counted.
+ * The click and the phone are invented and match nobody. That is fine and is the point: the
+ * event is marked as a test, so it is never attributed to anything and never counted. The
+ * WhatsApp Business Account is the agent's own: Meta refuses a business-messaging event
+ * without one, so a verification without it would prove nothing about real events.
  */
-const verificationEvent = () =>
+const verificationEvent = (wabaId: string) =>
   serialiseEvent(
     buildLead({
       conversationId: `verify-${randomUUID()}`,
+      wabaId,
       ctwaClid: `verify.${randomUUID()}`,
       phone: VERIFY_PHONE,
       occurredAt: new Date(),
     }),
   );
+
+/**
+ * Refused before Meta is asked: without a WhatsApp Business Account there is nothing to put
+ * in `whatsapp_business_account_id`, and no event this cabinet builds would be accepted.
+ */
+const NO_WABA_NUMBER =
+  'Сначала подключите номер WhatsApp через Cloud API. Meta принимает покупки из переписки ' +
+  'только от номеров с аккаунтом WhatsApp Business, а номер, подключённый по QR, его не имеет.';
+
+/** The agent's WhatsApp Business Account to verify against, oldest Cloud API number first. */
+async function agentWabaId(db: Db, agentId: string): Promise<string | undefined> {
+  const [row] = await db
+    .select({ wabaId: whatsappNumbers.wabaId })
+    .from(whatsappNumbers)
+    .where(and(eq(whatsappNumbers.agentId, agentId), isNotNull(whatsappNumbers.wabaId)))
+    .orderBy(asc(whatsappNumbers.createdAt))
+    .limit(1);
+
+  return row?.wabaId ?? undefined;
+}
 
 /**
  * What to tell an owner Meta said, with the token taken back out of it.
@@ -249,6 +279,9 @@ export function registerCapiRoutes(
           }
         }
 
+        const wabaId = await agentWabaId(db, agentId);
+        if (wabaId === undefined) throw new ApiError(400, NO_WABA_NUMBER);
+
         // Proved before anything is written. A dataset id with a typo is accepted in silence
         // by every part of this system except Meta, and the owner finds out weeks later when
         // they wonder why their ads got worse. A mistyped replacement must also leave the
@@ -258,7 +291,7 @@ export function registerCapiRoutes(
             datasetId,
             token,
             testEventCode: testEventCode ?? VERIFY_TEST_CODE,
-            events: [verificationEvent()],
+            events: [verificationEvent(wabaId)],
           });
         } catch (thrown) {
           if (!(thrown instanceof CapiError)) throw thrown;

@@ -23,6 +23,7 @@ const paidAt = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
 const purchase = () =>
   buildPurchase({
     orderId: ORDER_ID,
+    wabaId: 'waba',
     ctwaClid: 'ARAaXQ_ctwa_clid',
     phone: '+7 708 580 79 32',
     amount: '1234567.89',
@@ -33,6 +34,7 @@ const purchase = () =>
 const lead = () =>
   buildLead({
     conversationId: CONVERSATION_ID,
+    wabaId: 'waba',
     ctwaClid: 'ARAaXQ_ctwa_clid',
     phone: '+7 708 580 79 32',
     occurredAt: paidAt,
@@ -78,6 +80,7 @@ describe('buildPurchase', () => {
     expect(event.event_name).toBe('Purchase');
     expect(event.action_source).toBe('business_messaging');
     expect(event.messaging_channel).toBe('whatsapp');
+    expect(event.user_data.whatsapp_business_account_id).toBe('waba');
     expect(event.user_data.ctwa_clid).toBe('ARAaXQ_ctwa_clid');
     expect(event.user_data.ph).toEqual([PHONE_DIGEST]);
   });
@@ -103,6 +106,7 @@ describe('buildPurchase', () => {
   it('keeps every digit of an amount at the column width', () => {
     const event = buildPurchase({
       orderId: ORDER_ID,
+      wabaId: 'waba',
       ctwaClid: 'clid',
       phone: '77085807932',
       amount: '999999999999.99',
@@ -130,6 +134,7 @@ describe('buildPurchase', () => {
 
     const event = buildPurchase({
       orderId: ORDER_ID,
+      wabaId: 'waba',
       ctwaClid: 'clid',
       phone: '77085807932',
       amount: wider,
@@ -145,6 +150,7 @@ describe('buildPurchase', () => {
     expect(() =>
       buildPurchase({
         orderId: ORDER_ID,
+        wabaId: 'waba',
         ctwaClid: 'clid',
         phone: '77085807932',
         amount: '1e6',
@@ -165,7 +171,11 @@ describe('buildPurchase', () => {
       event_id: purchaseEventId(ORDER_ID),
       action_source: 'business_messaging',
       messaging_channel: 'whatsapp',
-      user_data: { ctwa_clid: 'ARAaXQ_ctwa_clid', ph: [PHONE_DIGEST] },
+      user_data: {
+        whatsapp_business_account_id: 'waba',
+        ctwa_clid: 'ARAaXQ_ctwa_clid',
+        ph: [PHONE_DIGEST],
+      },
       custom_data: { value: 1234567.89, currency: 'KZT' },
     });
   });
@@ -193,7 +203,11 @@ describe('buildLead', () => {
       event_id: leadEventId(CONVERSATION_ID),
       action_source: 'business_messaging',
       messaging_channel: 'whatsapp',
-      user_data: { ctwa_clid: 'ARAaXQ_ctwa_clid', ph: [PHONE_DIGEST] },
+      user_data: {
+        whatsapp_business_account_id: 'waba',
+        ctwa_clid: 'ARAaXQ_ctwa_clid',
+        ph: [PHONE_DIGEST],
+      },
     });
   });
 });
@@ -216,6 +230,7 @@ describe('a stored event is byte for byte what is sent', () => {
 
     const event = buildPurchase({
       orderId: ORDER_ID,
+      wabaId: 'waba',
       ctwaClid: 'clid',
       phone: '77085807932',
       amount,

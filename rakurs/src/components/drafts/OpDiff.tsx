@@ -48,17 +48,27 @@ async function loadContext(agentId: string, ops: DraftOp[], signal: AbortSignal)
 const EXPAND_ALL_MAX_OPS = 5;
 /** Lines of a new note's body a collapsed card still shows. */
 const PREVIEW_LINES = 3;
+/** Cards shown before «Показать ещё» — a draft of eighty topics otherwise pushes the run and
+ * «Применить» a long scroll away. */
+export const OPS_PAGE = 10;
 
-export function OpDiff({ agentId, ops, topics = false }: {
+/** What the owner asked to do with one op; `DraftScreen` sends it to the server. */
+export type OpEdit = { action: 'remove' } | { action: 'update'; body: string };
+
+export function OpDiff({ agentId, ops, topics = false, onEdit }: {
   agentId: string;
   ops: DraftOp[];
   /** A chat-generation draft: every note op is one knowledge topic, so the card says so. */
   topics?: boolean;
+  /** Present while the draft can still be edited; each card then offers «Изменить» and «Убрать». */
+  onEdit?: (index: number, op: DraftOp, edit: OpEdit) => Promise<boolean>;
 }) {
   // `ops` is the draft's own array, read fresh only when the draft itself reloads — a stable
   // reference the rest of the time, so this does not refetch on every render.
   const ctx = useApi<OpContext>((signal) => loadContext(agentId, ops, signal), [agentId, ops]);
   const expanded = ops.length <= EXPAND_ALL_MAX_OPS;
+  const [shown, setShown] = useState(OPS_PAGE);
+  const hidden = Math.max(0, ops.length - shown);
 
   return (
     <Card>
@@ -66,15 +76,21 @@ export function OpDiff({ agentId, ops, topics = false }: {
       {topics && (
         <p className="draft-ops__intro">
           Собрано из переписки WhatsApp. Каждая карточка — одна тема базы знаний: факты и готовые фразы.
-          После применения темы появятся во вкладке «Знания».
+          {onEdit ? ' Лишнюю тему уберите, неточную — поправьте.' : ''}
         </p>
       )}
       <Async state={ctx} skeleton={<Skeleton height={120} />}>
         {(loaded) => (
           <div className="draft-ops__list">
-            {ops.map((op, i) => (
-              <OpCard key={i} op={op} ctx={loaded} defaultExpanded={expanded} />
+            {ops.slice(0, shown).map((op, i) => (
+              <OpCard key={opKey(op, i)} op={op} ctx={loaded} defaultExpanded={expanded}
+                onEdit={onEdit && ((edit) => onEdit(i, op, edit))} />
             ))}
+            {hidden > 0 && (
+              <button type="button" className="btn-sm draft-ops__more" onClick={() => setShown((n) => n + OPS_PAGE * 5)}>
+                Показать ещё {Math.min(hidden, OPS_PAGE * 5)} из {hidden}
+              </button>
+            )}
           </div>
         )}
       </Async>
@@ -82,11 +98,20 @@ export function OpDiff({ agentId, ops, topics = false }: {
   );
 }
 
-function OpCard({ op, ctx, defaultExpanded }: { op: DraftOp; ctx: OpContext; defaultExpanded: boolean }) {
+/** Keeps a card's own state (expanded, editing) on its topic when an earlier card is removed. */
+const opKey = (op: DraftOp, index: number): string =>
+  op.op === 'note_create' ? `path:${op.path}` : op.op === 'note_update' ? `note:${op.noteId}` : `op:${index}`;
+
+function OpCard({ op, ctx, defaultExpanded, onEdit }: {
+  op: DraftOp;
+  ctx: OpContext;
+  defaultExpanded: boolean;
+  onEdit?: (edit: OpEdit) => Promise<boolean>;
+}) {
   switch (op.op) {
     case 'note_create':
       return (
-        <NoteCard path={op.path} tag="Новая" defaultExpanded={defaultExpanded}
+        <NoteCard path={op.path} tag="Новая" body={op.body} defaultExpanded={defaultExpanded} onEdit={onEdit}
           collapsed={<NoteBody body={previewBody(op.body)} />}>
           <NoteBody body={op.body} />
         </NoteCard>
@@ -97,7 +122,7 @@ function OpCard({ op, ctx, defaultExpanded }: { op: DraftOp; ctx: OpContext; def
       // surfaced through the outer `Async`'s own error state, not reached this branch at all.
       const note = ctx.notes.get(op.noteId)!;
       return (
-        <NoteCard path={note.path} tag="Правка" defaultExpanded={defaultExpanded}
+        <NoteCard path={note.path} tag="Правка" body={op.body} defaultExpanded={defaultExpanded} onEdit={onEdit}
           collapsed={<div className="draft-topic__hint">Нажмите, чтобы увидеть, что изменится.</div>}>
           <NoteDiff oldBody={note.body} newBody={op.body} />
         </NoteCard>
@@ -149,28 +174,69 @@ export function previewBody(body: string, lines = PREVIEW_LINES): string {
  * One note op: the topic name (the path's last segment) as the title, the folder it lives in
  * underneath, and a header that toggles the body. A draft of forty topics opened expanded was
  * a page nobody scrolled to the end of, so past `EXPAND_ALL_MAX_OPS` cards start collapsed.
+ * With `onEdit`, the header also offers «Изменить» (the body in a textarea) and «Убрать».
  */
-function NoteCard({ path, tag, defaultExpanded, collapsed, children }: {
+function NoteCard({ path, tag, body, defaultExpanded, collapsed, onEdit, children }: {
   path: string;
   tag: string;
+  body: string;
   defaultExpanded: boolean;
   collapsed: ReactNode;
+  onEdit?: (edit: OpEdit) => Promise<boolean>;
   children: ReactNode;
 }) {
   const [expanded, setExpanded] = useState(defaultExpanded);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   const name = topicName(path);
   const folder = path.split('/').map((segment) => segment.trim()).filter(Boolean).slice(0, -1).join(' / ');
+
+  async function submit(edit: OpEdit) {
+    if (!onEdit || busy) return;
+    setBusy(true);
+    const ok = await onEdit(edit);
+    // A removed card unmounts on success; only an update or a refusal leaves one to reset.
+    if (edit.action === 'update' && ok) setEditing(null);
+    setBusy(false);
+  }
+
+  function remove() {
+    if (!window.confirm(`Убрать тему «${name}» из черновика? Она не попадёт в базу знаний.`)) return;
+    void submit({ action: 'remove' });
+  }
+
   return (
-    <section className={`draft-topic${expanded ? ' draft-topic--expanded' : ''}`} aria-label={name}>
-      <button type="button" className="draft-topic__header" aria-expanded={expanded} onClick={() => setExpanded((open) => !open)}>
-        <span className="draft-topic__titles">
-          <b className="draft-topic__title">{name}</b>
-          {folder !== '' && <span className="draft-topic__folder">{folder}</span>}
-        </span>
-        <span className="draft-topic__tag">{tag}</span>
-        <span className="draft-topic__toggle">{expanded ? 'Свернуть' : 'Показать всё'}</span>
-      </button>
-      <div className="draft-topic__body">{expanded ? children : collapsed}</div>
+    <section className={`draft-topic${expanded || editing !== null ? ' draft-topic--expanded' : ''}`} aria-label={name}>
+      <div className="draft-topic__head">
+        <button type="button" className="draft-topic__header" aria-expanded={expanded} onClick={() => setExpanded((open) => !open)}>
+          <span className="draft-topic__titles">
+            <b className="draft-topic__title">{name}</b>
+            {folder !== '' && <span className="draft-topic__folder">{folder}</span>}
+          </span>
+          <span className="draft-topic__tag">{tag}</span>
+          <span className="draft-topic__toggle">{expanded ? 'Свернуть' : 'Показать всё'}</span>
+        </button>
+        {onEdit && editing === null && (
+          <span className="draft-topic__actions">
+            <button type="button" className="btn-quiet" disabled={busy} onClick={() => setEditing(body)}>Изменить</button>
+            <button type="button" className="btn-quiet" disabled={busy} onClick={remove}>Убрать</button>
+          </span>
+        )}
+      </div>
+      <div className="draft-topic__body">
+        {editing !== null ? (
+          <div className="draft-topic__editor">
+            <textarea aria-label={`Текст темы «${name}»`} value={editing} onChange={(e) => setEditing(e.target.value)} />
+            <div className="draft-topic__editor-actions">
+              <button type="button" className="btn-sm" disabled={busy || editing.trim() === '' || editing === body}
+                onClick={() => void submit({ action: 'update', body: editing })}>
+                {busy ? 'Сохраняем…' : 'Сохранить'}
+              </button>
+              <button type="button" className="btn-quiet" disabled={busy} onClick={() => setEditing(null)}>Отмена</button>
+            </div>
+          </div>
+        ) : expanded ? children : collapsed}
+      </div>
     </section>
   );
 }

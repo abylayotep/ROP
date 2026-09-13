@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import type { Db } from '../src/db/client.js';
 import { accounts, agentRules, agents, kbChunks, kbNotes } from '../src/db/schema.js';
 import { deleteNote, saveNote } from '../src/lib/knowledge/notes.js';
+import { topicKey } from '../src/lib/drafts/edit-op.js';
 import { applyOps, baseOf, staleOps } from '../src/lib/drafts/ops.js';
 import { withDb } from './helpers/db.js';
 
@@ -116,5 +117,15 @@ describe('staleOps', () => {
     const base = await baseOf(db, agentId, ops);
     await db.delete(agentRules).where(eq(agentRules.id, rule!.id));
     expect(await staleOps(db, agentId, ops, base)).toEqual(['На «вы».']);
+  });
+});
+
+describe('topicKey', () => {
+  it('keys a created note by path, an edited note by id, and a rule not at all', () => {
+    const noteId = '8f1c9a52-3d4e-4b7a-9c61-2f0e5d8b7a13';
+    expect(topicKey({ op: 'note_create', path: 'Доставка', body: 'Доставка 1000 тенге' })).toBe('path:Доставка');
+    expect(topicKey({ op: 'note_update', noteId, body: 'Доставка 1500 тенге' })).toBe(`note:${noteId}`);
+    expect(topicKey({ op: 'rule_create', category: 'tone', text: 'На «вы».' })).toBeNull();
+    expect(topicKey({ op: 'rule_update', ruleId: noteId, enabled: false })).toBeNull();
   });
 });

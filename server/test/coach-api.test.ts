@@ -11,6 +11,7 @@ import {
   aiSandboxSessions,
   aiSandboxTurns,
   coachMessages,
+  responseFeedback,
   contacts,
   conversations,
   kbChunks,
@@ -239,6 +240,57 @@ afterEach(async () => {
 });
 
 describe('the coaching conversation', () => {
+  it('captures owned reply evidence and targets its note for a factual correction', async () => {
+    const { conversationId, aiReplyId } = await agentAnswered('Delivery costs 1500 KZT.');
+    model.reply({ message: 'Corrected.', proposal: { kind: 'note_edit', noteId: randomUUID(), body: 'Delivery costs 1000 KZT.' } });
+    const res = await app.inject({ method: 'POST', url: coach(), cookies: jar, payload: {
+      text: 'Use 1000 KZT.', feedback: { source: { kind: 'conversation_reply', conversationId, aiReplyId }, correctionType: 'fact', note: 'Correct delivery price.' },
+    } });
+    expect(res.statusCode).toBe(200);
+    const [feedback] = await db.select().from(responseFeedback);
+    expect(feedback!.snapshot.responseText).toBe('Delivery costs 1500 KZT.');
+    expect(feedback!.snapshot.sourceRecords[0]!.title).toBe('Доставка › По городу');
+    expect(feedback!.snapshot.sourceRecords[0]!.content).toContain('1500 KZT');
+    expect(res.json().proposal.noteId).toBe((await db.select().from(kbNotes))[0]!.id);
+    expect(await db.select().from(agentRules)).toEqual([]);
+  });
+
+  it('returns 404 for a foreign sandbox correction source', async () => {
+    const res = await app.inject({ method: 'POST', url: coach(), cookies: jar, payload: {
+      text: 'Fix it', feedback: { source: { kind: 'sandbox_turn', sessionId: randomUUID(), turnId: randomUUID() }, correctionType: 'behavior', note: 'Use formal tone.' },
+    } });
+    expect(res.statusCode).toBe(404);
+    expect(await db.select().from(responseFeedback)).toEqual([]);
+  });
+
+  it('uses a sandbox turn without creating production messages', async () => {
+    const accountId = (await db.select({ accountId: agents.accountId }).from(agents).where(eq(agents.id, agentId)))[0]!.accountId;
+    const [session] = await db.insert(aiSandboxSessions).values({ accountId, agentId }).returning();
+    const [turn] = await db.insert(aiSandboxTurns).values({
+      accountId, agentId, sessionId: session!.id, revision: 1, userText: 'Hello',
+      reply: 'Hi', configVersion: 3, model: 'test-model', outcome: 'replied',
+    }).returning();
+    model.reply({ message: 'Use formal tone.', proposal: { kind: 'rule', category: 'tone', text: 'Address customers formally.' } });
+    const res = await app.inject({ method: 'POST', url: coach(), cookies: jar, payload: {
+      text: 'Use formal tone.', feedback: { source: { kind: 'sandbox_turn', sessionId: session!.id, turnId: turn!.id }, correctionType: 'behavior', note: 'Use formal tone.' },
+    } });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().proposal.kind).toBe('rule');
+    expect((await db.select().from(responseFeedback))[0]!.snapshot.configVersion).toBe(3);
+    expect(await db.select().from(messages)).toEqual([]);
+    expect(await db.select().from(agentRules)).toEqual([]);
+  });
+
+  it('rejects a factual correction proposal that tries to change a rule', async () => {
+    const { conversationId, aiReplyId } = await agentAnswered('Wrong fact');
+    model.reply({ message: 'Changed.', proposal: { kind: 'rule', category: 'business', text: 'Invent a price.' } });
+    const res = await app.inject({ method: 'POST', url: coach(), cookies: jar, payload: {
+      text: 'Correct the fact.', feedback: { source: { kind: 'conversation_reply', conversationId, aiReplyId }, correctionType: 'fact', note: 'Correct the fact.' },
+    } });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().proposal).toBeNull();
+    expect(await db.select().from(agentRules)).toEqual([]);
+  });
   it('stores the owner line and the model reply', async () => {
     model.reply({ message: 'Добавлю правило.', proposal: { kind: 'rule', category: 'forbid', text: 'Не обещай скидку.' } });
 

@@ -69,13 +69,18 @@ import { z } from 'zod';
 import type { Db } from '../db/client.js';
 import {
   agentRules,
+  agents,
   aiReplies,
+  aiSandboxSessions,
+  aiSandboxTurns,
   coachMessages,
   conversations,
   kbChunks,
   kbNotes,
   messages,
+  responseFeedback,
 } from '../db/schema.js';
+import type { CoachSourceSnapshot } from '@rakurs/contract';
 import { releaseTurnSlot, tryTakeTurnSlot } from '../db/turn-cap.js';
 import type { Env } from '../env.js';
 import {
@@ -111,6 +116,9 @@ const HISTORY_LIMIT = 100;
  * window for a live turn; carried over so the coach reads the same slice of the dialog the
  * agent itself would have. */
 const TRANSCRIPT_LIMIT = 20;
+const SNAPSHOT_TRANSCRIPT_LIMIT = 4_000;
+const EVIDENCE_LIMIT = 8;
+const EVIDENCE_CONTENT_LIMIT = 400;
 
 const postBody = z.object({
   text: z.string().trim().min(1).max(COACH_LIMIT),
@@ -121,6 +129,14 @@ const postBody = z.object({
   // dialog's message — see the file comment for why this, and not `conversationId` alone,
   // is what lets the prompt say which section a wrong answer came from.
   aiReplyId: z.string().trim().min(1).optional(),
+  feedback: z.object({
+    source: z.discriminatedUnion('kind', [
+      z.object({ kind: z.literal('conversation_reply'), conversationId: z.string(), aiReplyId: z.string() }),
+      z.object({ kind: z.literal('sandbox_turn'), sessionId: z.string(), turnId: z.string() }),
+    ]),
+    correctionType: z.enum(['fact', 'behavior']),
+    note: z.string().trim().min(1).max(COACH_LIMIT),
+  }).optional(),
 });
 
 const toMessage = (row: typeof coachMessages.$inferSelect) => ({
@@ -135,6 +151,9 @@ const toMessage = (row: typeof coachMessages.$inferSelect) => ({
   // carries the id of the draft it became.
   draftId: row.draftId,
   conversationId: row.conversationId,
+  feedbackId: row.feedbackId,
+  revision: row.revision,
+  sourceSnapshot: row.sourceSnapshot,
   createdAt: row.createdAt.toISOString(),
 });
 
@@ -231,6 +250,83 @@ async function sectionTitlesFor(db: Db, agentId: string, itemIds: readonly strin
   return itemIds.map((id) => titleById.get(id)).filter((title): title is string => title !== undefined);
 }
 
+async function verifiedEvidence(db: Db, agentId: string, itemIds: readonly string[]) {
+  const ids = [...new Set(itemIds.filter(isUuid))].slice(0, EVIDENCE_LIMIT);
+  if (ids.length === 0) return [];
+  const rows = await db.select({
+    id: kbChunks.id, title: kbChunks.title, heading: kbChunks.heading,
+    content: kbChunks.content, noteId: kbNotes.id, path: kbNotes.path, noteTitle: kbNotes.title,
+  }).from(kbChunks).innerJoin(kbNotes, and(eq(kbChunks.noteId, kbNotes.id), eq(kbNotes.agentId, agentId)))
+    .where(and(eq(kbChunks.agentId, agentId), inArray(kbChunks.id, ids)));
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  return ids.flatMap((id) => {
+    const row = byId.get(id);
+    return row ? [{ ...row, content: row.content.slice(0, EVIDENCE_CONTENT_LIMIT) }] : [];
+  });
+}
+
+function redact(text: string): string {
+  return text.replace(/sk-or-[A-Za-z0-9_-]+/g, '[redacted]')
+    .replace(/(?:Bearer\s+)[A-Za-z0-9._-]+/gi, 'Bearer [redacted]');
+}
+
+async function resolveFeedback(db: Db, agentId: string, accountId: string,
+  feedback: z.infer<typeof postBody>['feedback']) {
+  if (!feedback) return null;
+  const source = feedback.source;
+  let conversationId: string | null = null;
+  let aiReplyId: string | null = null;
+  let sessionId: string | null = null;
+  let sandboxTurnId: string | null = null;
+  let transcript: TranscriptLine[];
+  let responseText: string;
+  let sourceIds: string[];
+  let configVersion: number;
+  if (source.kind === 'conversation_reply') {
+    if (!isUuid(source.conversationId)) throw new ApiError(404, 'Ответ агента не найден');
+    conversationId = await ownConversation(db, agentId, source.conversationId);
+    const reply = await ownReply(db, agentId, conversationId, source.aiReplyId);
+    aiReplyId = reply.id;
+    sourceIds = reply.usedItemIds;
+    const [replyRow] = await db.select({ body: messages.body }).from(aiReplies)
+      .leftJoin(messages, and(eq(aiReplies.messageId, messages.id), eq(messages.conversationId, conversationId)))
+      .where(eq(aiReplies.id, aiReplyId));
+    if (!replyRow?.body) throw new ApiError(404, 'Ответ агента не найден');
+    responseText = replyRow.body;
+    transcript = await transcriptFor(db, conversationId);
+    const [agent] = await db.select({ configVersion: agents.configVersion }).from(agents).where(eq(agents.id, agentId));
+    configVersion = agent!.configVersion;
+  } else {
+    if (!isUuid(source.sessionId) || !isUuid(source.turnId)) throw new ApiError(404, 'Ответ агента не найден');
+    const [turn] = await db.select().from(aiSandboxTurns).innerJoin(aiSandboxSessions,
+      and(eq(aiSandboxTurns.sessionId, aiSandboxSessions.id), eq(aiSandboxSessions.agentId, agentId),
+        eq(aiSandboxSessions.accountId, accountId)))
+      .where(and(eq(aiSandboxTurns.id, source.turnId), eq(aiSandboxTurns.sessionId, source.sessionId),
+        eq(aiSandboxTurns.agentId, agentId), eq(aiSandboxTurns.accountId, accountId)));
+    if (!turn || turn.ai_sandbox_turns.reply === null) throw new ApiError(404, 'Ответ агента не найден');
+    sessionId = source.sessionId;
+    sandboxTurnId = source.turnId;
+    responseText = turn.ai_sandbox_turns.reply;
+    sourceIds = turn.ai_sandbox_turns.sourceIds;
+    configVersion = turn.ai_sandbox_turns.configVersion;
+    const turns = await db.select({ userText: aiSandboxTurns.userText, reply: aiSandboxTurns.reply })
+      .from(aiSandboxTurns).where(and(eq(aiSandboxTurns.sessionId, sessionId), eq(aiSandboxTurns.agentId, agentId)))
+      .orderBy(desc(aiSandboxTurns.revision)).limit(10);
+    transcript = turns.reverse().flatMap((row) => [
+      { author: 'client', text: row.userText }, { author: 'ai', text: row.reply ?? '' },
+    ]);
+  }
+  const evidence = await verifiedEvidence(db, agentId, sourceIds);
+  const snapshot: CoachSourceSnapshot = {
+    transcript: redact(transcript.map((line) => `${line.author}: ${line.text}`).join('\n')).slice(-SNAPSHOT_TRANSCRIPT_LIMIT),
+    responseText: redact(responseText).slice(0, 2_000), configVersion,
+    sourceIds: evidence.map((row) => row.id),
+    sourceRecords: evidence.map((row) => ({ id: row.id, title: row.title, content: redact(row.content) })),
+  };
+  return { conversationId, aiReplyId, sessionId, sandboxTurnId, transcript,
+    evidence, snapshot, correctionType: feedback.correctionType, note: feedback.note };
+}
+
 /** The named conversation's id, only if it belongs to this agent — 404 either way, so a
  * stranger's conversation id is indistinguishable from one that does not exist at all. */
 async function ownConversation(db: Db, agentId: string, conversationId: string): Promise<string> {
@@ -300,13 +396,18 @@ export function registerCoachRoutes(
       }
 
       try {
+        const correction = await resolveFeedback(db, agentId, req.agent!.accountId, parsed.data.feedback);
+        const storedConversationId = correction?.conversationId ?? conversationId;
         // The reply this turn is about, and — only when the request named one specifically
         // rather than just the conversation — the sections it cited. Resolved ahead of the
         // `Promise.all` below because `citedSections` reads `ownReply`'s own result; asking
         // for the same row twice in parallel would be one query this route does not need.
         let replyId: string | null = null;
         let citedSections: string[] | null = null;
-        if (conversationId !== null) {
+        if (correction) {
+          replyId = correction.aiReplyId;
+          citedSections = correction.evidence.map((row) => row.title);
+        } else if (conversationId !== null) {
           if (parsed.data.aiReplyId === undefined) {
             replyId = await latestReplyId(db, conversationId);
           } else {
@@ -320,8 +421,21 @@ export function registerCoachRoutes(
           allRules(db, agentId),
           notePathsFor(db, agentId),
           recentHistory(db, agentId),
-          conversationId === null ? Promise.resolve(null) : transcriptFor(db, conversationId),
+          correction ? Promise.resolve(correction.transcript) :
+            conversationId === null ? Promise.resolve(null) : transcriptFor(db, conversationId),
         ]);
+
+        let feedbackId: string | null = null;
+        if (correction) {
+          const [stored] = await db.insert(responseFeedback).values({
+            accountId: req.agent!.accountId, agentId,
+            conversationId: correction.conversationId, aiReplyId: correction.aiReplyId,
+            sessionId: correction.sessionId, sandboxTurnId: correction.sandboxTurnId,
+            correctionType: correction.correctionType, note: correction.note,
+            snapshot: correction.snapshot,
+          }).returning({ id: responseFeedback.id });
+          feedbackId = stored!.id;
+        }
 
         // Returns its own `createdAt` — Postgres's clock, stamped right after the store above
         // was read — so the model row below can carry it as `contextAt`: the instant the
@@ -333,8 +447,10 @@ export function registerCoachRoutes(
             agentId,
             role: 'owner',
             text: parsed.data.text,
-            conversationId,
+            conversationId: storedConversationId,
             aiReplyId: replyId,
+            feedbackId,
+            sourceSnapshot: correction?.snapshot ?? null,
           })
           .returning({ createdAt: coachMessages.createdAt });
 
@@ -347,6 +463,10 @@ export function registerCoachRoutes(
           history: [...history, { role: 'owner', text: parsed.data.text }],
           transcript,
           citedSections,
+          correction: correction ? {
+            type: correction.correctionType, note: correction.note,
+            responseText: correction.snapshot.responseText, evidence: correction.evidence,
+          } : undefined,
         };
 
         const result = await runCoach(db, { model: deps.model, key }, { agentId, context });
@@ -359,8 +479,10 @@ export function registerCoachRoutes(
             text: result.text,
             proposal: result.proposal,
             warning: result.warning,
-            conversationId,
+            conversationId: storedConversationId,
             aiReplyId: replyId,
+            feedbackId,
+            sourceSnapshot: correction?.snapshot ?? null,
             contextAt: ownerRow!.createdAt,
           })
           .returning();

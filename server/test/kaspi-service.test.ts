@@ -64,6 +64,13 @@ describe('durable Kaspi checkout', () => {
     fetcher.mockResolvedValueOnce(reply({ QrOperationId: 'operation-repeat' }));
     expect((await createKaspiCheckout(db, env, input())).status).toBe('pending');
   });
+  it('invoices a repeat customer moved out of the sale stage and back, past an earlier paid order', async () => {
+    const [sale] = await db.select().from(stages).where(eq(stages.agentId, agentId));
+    await db.insert(orders).values({ agentId, conversationId, amount: '6990', currency: 'KZT', status: 'paid', comment: 'Оплата по переписке', paidAt: new Date(Date.now() - 86_400_000) });
+    await db.update(conversations).set({ stageId: sale!.id, stageSetAt: new Date() }).where(eq(conversations.id, conversationId));
+    fetcher.mockResolvedValueOnce(reply({ QrOperationId: 'operation-episode' }));
+    expect((await createKaspiCheckout(db, env, input())).status).toBe('pending');
+  });
   it('retains an unknown create and never sends a second invoice after a timeout', async () => {
     fetcher.mockRejectedValue(new Error('timeout'));
     const created = await createKaspiCheckout(db, env, input());

@@ -174,6 +174,8 @@ it('grounds the paid amount in a seller price message', () => {
   const client = { id: 'c1', author: 'client', kind: 'text', body: 'Беру за 6990' };
   const amount = (messageId: string, value: string, quote: string) => ({ paidAmount: { value, messageId, quote } });
   expect(parseCrmAnalysis(output(amount('o1', '6990', '6.990 тенге')), [offer, client], []).paidAmount).toBe('6990');
+  expect(parseCrmAnalysis(output(amount('o1', '6990', '6.990 тенге')), [offer, client], []).paidAmountMessageId).toBe('o1');
+  expect(parseCrmAnalysis(output(amount('o1', '699', '6.990 тенге')), [offer, client], []).paidAmountMessageId).toBeNull();
   expect(parseCrmAnalysis(output(amount('o1', '699', '6.990 тенге')), [offer, client], []).paidAmount).toBeNull();
   expect(parseCrmAnalysis(output(amount('c1', '6990', 'за 6990')), [offer, client], []).paidAmount).toBeNull();
   expect(parseCrmAnalysis(output(amount('o1', '6990', '7 000 тенге')), [offer, client], []).paidAmount).toBeNull();

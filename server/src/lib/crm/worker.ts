@@ -9,7 +9,8 @@ import { withAgentAutomationLock } from '../automation/execution.js';
 import { queueLead, queuePurchase } from '../capi/enqueue.js';
 import { recordStageMove } from '../funnel-history.js';
 import { decryptSecret } from '../secret-box.js';
-import { hasConfirmedKaspiPayment } from '../kaspi/service.js';
+import { hasConfirmedKaspiPayment, hasPaidOrderInSaleEpisode } from '../kaspi/service.js';
+import { ApiError } from '../errors.js';
 import { operatorLeftSale } from './payment.js';
 import { crmPrompt, parseCrmAnalysis, resolveCrmStage, resolvePaymentEvidence, type CheckoutIntent } from './analysis.js';
 
@@ -115,9 +116,18 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
     const analysis = parseCrmAnalysis(completion.text, inputHistory, fields);
     // A paid claim the model is unsure of is not stored, so it can neither move the lead nor stick.
     const payment = analysis.payment?.state === 'paid' && analysis.confidence < 65 ? null : analysis.payment;
+    // Chat evidence of money counts only when written after the last paid order, Kaspi or chat:
+    // after a sale the old transfer and price stay in the thread and must not sell again.
+    const [lastPaid] = await db.select({paidAt:orders.paidAt}).from(orders)
+      .where(and(eq(orders.conversationId,conversation.id),eq(orders.status,'paid'),isNotNull(orders.paidAt)))
+      .orderBy(desc(orders.paidAt)).limit(1);
+    const fresh = (messageId: string | null | undefined) => !lastPaid?.paidAt
+      || (history.find((m) => m.id === messageId)?.sentAt.getTime() ?? -Infinity) > lastPaid.paidAt.getTime();
+    const chatPaid = payment?.state === 'paid' && fresh(payment.messageId) && (!analysis.paidAmount || fresh(analysis.paidAmountMessageId));
+    const chatAmount = analysis.paidAmount && (!lastPaid?.paidAt || (chatPaid && fresh(analysis.paidAmountMessageId))) ? analysis.paidAmount : null;
     // An operator who took the lead out of the sale stage has overruled the chat; only Kaspi money moves it back.
     const target = resolveCrmStage(funnel, analysis.confidence >= 65 ? analysis.stageId : null,
-      { paid: paid || (!undone && payment?.state === 'paid'), currentStageId: conversation.stageId });
+      { paid: paid || (!undone && chatPaid), currentStageId: conversation.stageId });
     if (!await automationAllowed(db,input,'crm')) {
       await db.update(crmAnalyses).set({status:'pending',leaseToken:null,leaseUntil:null,updatedAt:new Date()}).where(ownLease);
       return 'skipped';
@@ -188,15 +198,14 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
       // One paid order per sale episode — since the lead last entered the sale stage, whoever moved
       // it there — so a customer buying again after being moved out and back gets a new order.
       // A Kaspi invoice in flight owns the money whenever it was issued.
-      if (stageNow?.kind === 'success' && analysis.paidAmount && analysis.confidence >= 65 && !undone) {
+      if (stageNow?.kind === 'success' && chatAmount && analysis.confidence >= 65 && !undone) {
         const episode = moved ? movedAt : locked.stageSetAt;
-        const [paidOrder] = await tx.select({id:orders.id}).from(orders)
-          .where(and(eq(orders.conversationId,conversation.id),eq(orders.status,'paid'),episode ? gte(orders.paidAt,episode) : undefined)).limit(1);
+        const paidOrder = await hasPaidOrderInSaleEpisode(tx, conversation.id);
         const [invoice] = await tx.select({id:kaspiPayments.id}).from(kaspiPayments)
           .where(and(eq(kaspiPayments.conversationId,conversation.id),or(inArray(kaspiPayments.status,['creating','pending','unknown']),
-            and(eq(kaspiPayments.status,'paid'),episode ? gte(kaspiPayments.createdAt,episode) : undefined)))).limit(1);
+            and(eq(kaspiPayments.status,'paid'),episode ? gte(kaspiPayments.confirmedAt,episode) : undefined)))).limit(1);
         if (!paidOrder && !invoice) {
-          const [order] = await tx.insert(orders).values({agentId:agent.id,conversationId:conversation.id,amount:analysis.paidAmount,
+          const [order] = await tx.insert(orders).values({agentId:agent.id,conversationId:conversation.id,amount:chatAmount,
             currency:agent.currency,status:'paid',comment:'Оплата по переписке',
             paidAt:moved ? movedAt : locked.stageSetAt ?? movedAt}).returning({id:orders.id});
           chatOrderId = order!.id;
@@ -221,9 +230,8 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
     if (liveId && last?.id === liveId && last.author === 'client' && Date.now()-last.sentAt.getTime() >= 0
       && Date.now()-last.sentAt.getTime() < 5*60_000) {
       const [current] = await db.select({agentEnabled:agents.aiEnabled,conversationEnabled:conversations.aiEnabled,
-        crmAnalysisMode:agents.crmAnalysisMode,stageKind:stages.kind,stageSetAt:conversations.stageSetAt})
-        .from(conversations).innerJoin(agents,eq(agents.id,conversations.agentId)).leftJoin(stages,eq(stages.id,conversations.stageId))
-        .where(eq(conversations.id,conversation.id));
+        crmAnalysisMode:agents.crmAnalysisMode})
+        .from(conversations).innerJoin(agents,eq(agents.id,conversations.agentId)).where(eq(conversations.id,conversation.id));
       if (agent.crmAnalysisMode === 'follow_ai' && current?.crmAnalysisMode === 'follow_ai' && moved && await automationAllowed(db,input,'crm')) {
         await queueLead(db,{agentId:agent.id,conversationId:conversation.id,
           canQueue:async (effectDb) => {
@@ -235,19 +243,27 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
         .orderBy(desc(messages.sentAt),desc(messages.id)).limit(1);
       if (agent.crmAnalysisMode === 'follow_ai' && current?.crmAnalysisMode === 'follow_ai' && current.agentEnabled && current.conversationEnabled && latest?.id === liveId) {
         const wantsCheckout = Boolean(deps.checkout && analysis.checkout?.messageId === liveId && analysis.confidence >= 85
-          // Only the current sale episode blocks an invoice: a repeat customer moved back into work can buy again.
-          && !(current.stageKind === 'success' && (await db.select({id:orders.id}).from(orders).where(and(eq(orders.conversationId,conversation.id),
-            eq(orders.status,'paid'),current.stageSetAt ? gte(orders.paidAt,current.stageSetAt) : undefined)).limit(1)).length)
+          // Only the current sale episode blocks an invoice, by the same rule `createKaspiCheckout` refuses on.
+          && !await hasPaidOrderInSaleEpisode(db,conversation.id)
           && await automationAllowed(db,input,'checkout'));
+        let refused: string | null = null;
         if (wantsCheckout && contact.phone) {
-          await deps.checkout!({agentId:agent.id,conversationId:conversation.id,phone:contact.phone,
-            intent:analysis.checkout!,summary:analysis.summary});
-          checkedOut = true;
-        } else if (deps.reply && await automationAllowed(db,input,'reply')) {
+          try {
+            await deps.checkout!({agentId:agent.id,conversationId:conversation.id,phone:contact.phone,
+              intent:analysis.checkout!,summary:analysis.summary});
+            checkedOut = true;
+          } catch (error) {
+            // A refusal (a paid sale, an unfinished invoice) is an answer, not a failure: retrying
+            // the analysis would only be refused again while the customer waits in silence.
+            if (!(error instanceof ApiError && error.statusCode === 409)) throw error;
+            refused = `Счёт Kaspi не создан: ${error.message}`;
+          }
+        }
+        if (!checkedOut && deps.reply && await automationAllowed(db,input,'reply')) {
           // No phone means no Kaspi invoice (an Instagram customer); the owner is told, and the
-          // customer still gets the ordinary reply rather than silence.
+          // customer still gets the ordinary reply rather than silence. So does a refused invoice.
           if (wantsCheckout) await db.insert(notes).values({ conversationId: conversation.id,
-            body: 'Счёт Kaspi не создан: у клиента нет номера телефона. Добавьте номер в карточку клиента и повторите действие.' });
+            body: refused ?? 'Счёт Kaspi не создан: у клиента нет номера телефона. Добавьте номер в карточку клиента и повторите действие.' });
           await deps.reply(agent.id,conversation.id);
         }
       }

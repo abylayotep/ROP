@@ -31,6 +31,8 @@ export interface CrmAnalysis {
   evidence: Record<string, { messageId: string }>;
   payment: { state: 'unknown' | 'awaiting_payment' | 'needs_verification' | 'paid'; reason: string; messageId: string } | null;
   paidAmount: string | null;
+  /** The seller message the paid amount was quoted in, when `paidAmount` is set. */
+  paidAmountMessageId: string | null;
 }
 export function resolvePaymentEvidence(previousState: string | undefined, previousReason: string | undefined | null,
   current: CrmAnalysis['payment'], confirmed: boolean) {
@@ -128,17 +130,18 @@ export function parseCrmAnalysis(raw: string, history: EvidenceMessage[], fields
     else if (paidClaim || paidReceipt || groundedText) payment = { state, reason: result.payment.reason, messageId: result.payment.messageId };
   }
   let paidAmount: string | null = null;
+  let paidAmountMessageId: string | null = null;
   if (result.paidAmount) {
     const source = messages.get(result.paidAmount.messageId);
     const { value, quote } = result.paidAmount;
     if (source && SELLER.includes(source.author) && source.body?.includes(quote) && Number(value) > 0
-      && pricesIn(quote).includes(value)) paidAmount = value;
+      && pricesIn(quote).includes(value)) { paidAmount = value; paidAmountMessageId = source.id; }
   }
   const acceptedEvidence = Object.fromEntries([
     ...Object.keys(profile).map((key) => [`profile:${key}`, {messageId: result.profile[key]!.messageId}]),
     ...Object.keys(custom).map((key) => [`field:${key}`, {messageId: result.fields[key]!.messageId}]),
   ]);
-  return { stageId: result.stageId, summary: result.summary, confidence: result.confidence, profile, fields: custom, checkout, payment, paidAmount, evidence: acceptedEvidence };
+  return { stageId: result.stageId, summary: result.summary, confidence: result.confidence, profile, fields: custom, checkout, payment, paidAmount, paidAmountMessageId, evidence: acceptedEvidence };
 }
 
 /** The sale stage is entered only on payment, and the analysis never takes a lead out of it. */

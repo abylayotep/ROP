@@ -252,8 +252,8 @@ describe('knowledge generation API', () => {
     expect(paged.json().proposals.items).toEqual([]);
     expect(paged.json().drafts).toHaveLength(2);
     expect(paged.json().drafts).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: explicit.json().draftIds[0], title: 'База знаний из WhatsApp · 1' }),
-      expect.objectContaining({ id: explicit.json().draftIds[1], title: 'Скрипт продаж из WhatsApp · 1' }),
+      expect.objectContaining({ id: explicit.json().draftIds[0], title: 'База знаний из WhatsApp' }),
+      expect.objectContaining({ id: explicit.json().draftIds[1], title: 'Скрипт продаж из WhatsApp' }),
     ]));
     expect(paged.json().draftsNextCursor).toBeNull();
   });

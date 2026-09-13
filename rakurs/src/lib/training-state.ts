@@ -52,11 +52,12 @@ export function nextStep(input: {
 
 export type DraftOriginLabel = 'Тренер' | 'Из переписки' | 'Вручную';
 
-/** Chat-generation drafts carry `origin: 'manual'`; the server titles them «… из WhatsApp»
- * (`draftKinds` in `server/src/lib/knowledge/generation-review.ts`). */
+/** Chat-generation drafts carry `origin: 'manual'`; the server titles them «База знаний из WhatsApp»
+ * and «Скрипт продаж из WhatsApp» (`server/src/lib/knowledge/whatsapp-drafts.ts`). Older ones
+ * ended with « · N», the number of changes. */
 export function draftOrigin(draft: Pick<KbDraft, 'origin' | 'title'>): DraftOriginLabel {
   if (draft.origin === 'coach') return 'Тренер';
-  if (draft.title.endsWith(' из WhatsApp')) return 'Из переписки';
+  if (/ из WhatsApp( · \d+)?$/.test(draft.title)) return 'Из переписки';
   return 'Вручную';
 }
 

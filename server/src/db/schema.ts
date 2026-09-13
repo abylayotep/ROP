@@ -1268,10 +1268,12 @@ export const testCases = pgTable(
     origin: text('origin').notNull().default('manual'),
     conversationId: uuid('conversation_id').references(() => conversations.id, { onDelete: 'set null' }),
     enabled: boolean('enabled').notNull().default(true),
+    requiredDraftId: uuid('required_draft_id').references((): AnyPgColumn => kbDrafts.id, { onDelete: 'cascade' }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index('test_cases_agent_enabled_idx').on(t.agentId, t.enabled)],
+  (t) => [index('test_cases_agent_enabled_idx').on(t.agentId, t.enabled),
+    unique('test_cases_required_draft_key').on(t.requiredDraftId)],
 );
 
 /** One pass over a set of cases. `draftId` null is a baseline: the store as it stands. */

@@ -12,11 +12,15 @@ import type { Db } from '../src/db/client.js';
 import {
   agentRules,
   agents,
+  aiSandboxSessions,
+  aiSandboxTurns,
   kbDrafts,
   kbGenerationBatches,
   kbGenerationProposals,
   kbGenerationRuns,
   kbNotes,
+  coachMessages,
+  responseFeedback,
   testCases,
   testResults,
   testRuns,
@@ -239,6 +243,69 @@ afterEach(async () => {
 });
 
 describe('applying a draft', () => {
+  async function boundDraft() {
+    const draft = await openDraft();
+    const kase = await addCase('Сколько доставка?');
+    await db.update(testCases).set({ requiredDraftId: draft.id, origin: 'correction' }).where(eq(testCases.id, kase.id));
+    return { draft, kase };
+  }
+
+  it('refuses a required case whose current run has no result', async () => {
+    const { draft, kase } = await boundDraft();
+    const run = await runOver(draft, [kase]);
+    await db.delete(testResults).where(eq(testResults.runId, run.id));
+    expect((await getDraft(draft.id)).json().applicable).toBe(false);
+    expect((await apply(draft.id)).statusCode).toBe(409);
+  });
+
+  it('refuses a failed required case and applies after a successful rerun', async () => {
+    const { draft, kase } = await boundDraft();
+    const failed = await runOver(draft, [kase]);
+    await db.update(testResults).set({ outcome: 'failed' }).where(eq(testResults.runId, failed.id));
+    expect((await apply(draft.id)).statusCode).toBe(409);
+    const passed = await runOver(draft, [kase]);
+    await db.update(testResults).set({ outcome: 'sent', reply: 'Доставка стоит 1500 ₸.' }).where(eq(testResults.runId, passed.id));
+    expect((await getDraft(draft.id)).json()).toMatchObject({ applicable: true, requiredCaseId: kase.id });
+    expect((await apply(draft.id)).statusCode).toBe(200);
+  });
+
+  it('refuses a required case passed at an older config version', async () => {
+    const { draft, kase } = await boundDraft();
+    await runOver(draft, [kase]);
+    await addRule({ category: 'tone', text: 'На «вы».' });
+    expect((await getDraft(draft.id)).json().applicable).toBe(false);
+    expect((await apply(draft.id)).statusCode).toBe(409);
+  });
+  it('creates a required case from saved feedback and refuses an unrelated run', async () => {
+    const accountId = (await db.select({ accountId: agents.accountId }).from(agents).where(eq(agents.id, agentId)))[0]!.accountId;
+    const [session] = await db.insert(aiSandboxSessions).values({ accountId, agentId }).returning();
+    const [turn] = await db.insert(aiSandboxTurns).values({ accountId, agentId, sessionId: session!.id,
+      revision: 1, userText: 'Сколько доставка?', reply: 'Бесплатно.', configVersion: 1,
+      model: 'test', outcome: 'sent' }).returning();
+    const [feedback] = await db.insert(responseFeedback).values({
+      accountId,
+      agentId,
+      sessionId: session!.id, sandboxTurnId: turn!.id, correctionType: 'fact',
+      note: 'Доставка стоит 1500 ₸.',
+      snapshot: { transcript: 'client: Сколько доставка?\nai: Бесплатно.', responseText: 'Бесплатно.', configVersion: 1, sourceIds: [], sourceRecords: [] },
+    }).returning();
+    const [message] = await db.insert(coachMessages).values({ agentId, role: 'model', text: 'proposal',
+      proposal: { kind: 'note', path: 'Доставка', body: 'Доставка стоит 1500 ₸.' }, feedbackId: feedback!.id,
+    }).returning();
+    const created = await app.inject({ method: 'POST', cookies: jar,
+      url: `/api/agents/${agentId}/coach/messages/${message!.id}/draft`, payload: { revision: 1 } });
+    expect(created.statusCode).toBe(200);
+    const draft = created.json();
+    const required = await db.select().from(testCases).where(eq(testCases.agentId, agentId));
+    expect(required).toHaveLength(1);
+    expect(required[0]).toMatchObject({ messages: ['Сколько доставка?'], expectation: 'Доставка стоит 1500 ₸.', enabled: true });
+    const unrelated = await addCase('Другой вопрос');
+    const run = await app.inject({ method: 'POST', cookies: jar, url: `${drafts()}/${draft.id}/runs`, payload: { caseIds: [unrelated.id] } });
+    expect(run.statusCode).toBe(200);
+    await waitForRun(run.json().id);
+    const results = await db.select().from(testResults).where(eq(testResults.runId, run.json().id));
+    expect(results.map((row) => row.caseId)).toContain(required[0]!.id);
+  });
   it('refuses a draft that has never been run', async () => {
     const draft = await openDraft();
     const res = await apply(draft.id);

@@ -1183,6 +1183,7 @@ export interface DraftRunSummary {
 export interface KbDraftDetail extends KbDraft {
   runs: DraftRunSummary[];
   applicable: boolean;
+  requiredCaseId: string | null;
 }
 
 export interface TestCase {
@@ -1191,8 +1192,9 @@ export interface TestCase {
   /** The customer's side only. The agent's replies are what is being tested. */
   messages: string[];
   expectation: string | null;
-  origin: 'manual' | 'dialog' | 'generated';
+  origin: 'manual' | 'dialog' | 'generated' | 'correction';
   conversationId: string | null;
+  requiredDraftId: string | null;
   enabled: boolean;
   updatedAt: string;
 }

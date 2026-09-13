@@ -1,6 +1,6 @@
-import { and, eq } from 'drizzle-orm';
+import { and, desc, eq } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
-import { testRuns } from '../../db/schema.js';
+import { testCases, testResults, testRuns } from '../../db/schema.js';
 
 /**
  * Whether a draft is provably safe to apply *right now* — some run of it finished `done` at
@@ -16,6 +16,17 @@ import { testRuns } from '../../db/schema.js';
  * about what "tested" means, and two copies is how they quietly stop agreeing.
  */
 export async function isDraftApplicable(db: Db, draftId: string, currentConfigVersion: number): Promise<boolean> {
+  const [required] = await db.select({ id: testCases.id }).from(testCases)
+    .where(eq(testCases.requiredDraftId, draftId)).limit(1);
+  if (required) {
+    const [latest] = await db.select({ id: testRuns.id, status: testRuns.status })
+      .from(testRuns).where(and(eq(testRuns.draftId, draftId), eq(testRuns.configVersion, currentConfigVersion)))
+      .orderBy(desc(testRuns.startedAt), desc(testRuns.id)).limit(1);
+    if (!latest || latest.status !== 'done') return false;
+    const [result] = await db.select({ outcome: testResults.outcome }).from(testResults)
+      .where(and(eq(testResults.runId, latest.id), eq(testResults.caseId, required.id))).limit(1);
+    return result !== undefined && ['sent', 'applied', 'handoff'].includes(result.outcome);
+  }
   const [row] = await db
     .select({ id: testRuns.id })
     .from(testRuns)

@@ -318,6 +318,23 @@ describe('keeping cases by hand', () => {
   });
 });
 
+describe('required correction cases', () => {
+  it('cannot be edited, disabled, or deleted through the case API', async () => {
+    const draft = await openDraft();
+    const [kase] = await db.insert(testCases).values({ agentId, title: 'Исправление',
+      messages: ['Сколько доставка?'], expectation: '1500 ₸', origin: 'correction',
+      requiredDraftId: draft.id }).returning();
+    const patch = await app.inject({ method: 'PATCH', cookies: jar, url: `${cases()}/${kase!.id}`,
+      payload: { enabled: false, messages: ['Другой вопрос'] } });
+    const deletion = await app.inject({ method: 'DELETE', cookies: jar, url: `${cases()}/${kase!.id}` });
+    expect(patch.statusCode).toBe(409);
+    expect(deletion.statusCode).toBe(409);
+    expect((await db.select().from(testCases).where(eq(testCases.id, kase!.id)))[0]).toMatchObject({
+      enabled: true, messages: ['Сколько доставка?'],
+    });
+  });
+});
+
 describe('pulling a case out of a real dialog', () => {
   it('pulls the customer side out of a dialog and nothing else', async () => {
     const { conversationId } = await dialogWith([

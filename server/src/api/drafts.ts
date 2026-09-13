@@ -234,6 +234,7 @@ import {
   coachMessages,
   kbDrafts,
   kbGenerationProposals,
+  responseFeedback,
   testCases,
   testResults,
   testRuns,
@@ -253,6 +254,7 @@ import { ApiError, isDuplicate } from '../lib/errors.js';
 import { clampTitle } from '../lib/knowledge/split.js';
 import { credentialsKey, decryptSecret } from '../lib/secret-box.js';
 import { isUuid } from '../lib/uuid.js';
+import { correctionCaseFromSnapshot } from './test-cases.js';
 import { requireAgent } from './require-agent.js';
 
 /** Matches the sandbox and the coach — see `db/turn-cap.ts`. A run of any size never holds
@@ -652,8 +654,10 @@ export function registerDraftRoutes(
       // The exact predicate the apply route itself checks — see `isDraftApplicable`'s own
       // comment for why this is one shared function rather than a second copy of the query.
       const applicable = await isDraftApplicable(db, row.id, req.agent!.configVersion);
+      const [requiredCase] = await db.select({ id: testCases.id }).from(testCases)
+        .where(eq(testCases.requiredDraftId, row.id)).limit(1);
 
-      return { ...toDraft(row), runs, applicable };
+      return { ...toDraft(row), runs, applicable, requiredCaseId: requiredCase?.id ?? null };
     },
   );
 
@@ -823,7 +827,9 @@ export function registerDraftRoutes(
         // repeated id is one case to run, not two, and left alone it would trip `test_results`'
         // own `(run_id, case_id)` uniqueness on the second write and fail the whole run for a
         // client mistake this route can just as easily not make in the first place.
-        const caseIds = [...new Set(parsed.data.caseIds)];
+        const [requiredCase] = await db.select({ id: testCases.id }).from(testCases)
+          .where(eq(testCases.requiredDraftId, draft.id)).limit(1);
+        const caseIds = [...new Set([...parsed.data.caseIds, ...(requiredCase ? [requiredCase.id] : [])])];
 
         if (caseIds.length === 0) {
           throw new ApiError(400, 'Нужен хотя бы один случай для прогона');
@@ -849,6 +855,9 @@ export function registerDraftRoutes(
 
         // A disabled case stays named in the request but is not run — see the file comment.
         const runIds = caseIds.filter((id) => casesById.get(id)!.enabled);
+        if (requiredCase && !casesById.get(requiredCase.id)!.enabled) {
+          throw new ApiError(409, 'Обязательный случай исправления отключён');
+        }
         if (runIds.length === 0) {
           throw new ApiError(400, 'Все выбранные случаи отключены — включите хотя бы один');
         }
@@ -1243,10 +1252,20 @@ export function registerDraftRoutes(
       const title = titleFor(op, base);
 
       const draft = await db.transaction(async (tx) => {
+        const [feedback] = message.feedbackId
+          ? await tx.select().from(responseFeedback).where(and(eq(responseFeedback.id, message.feedbackId),
+              eq(responseFeedback.agentId, agentId))).limit(1)
+          : [undefined];
+        if (message.feedbackId && !feedback) throw new ApiError(409, 'Сохранённое исправление не найдено');
+        const correctionCase = feedback ? correctionCaseFromSnapshot(feedback.snapshot, feedback.note) : null;
         const [row] = await tx
           .insert(kbDrafts)
           .values({ agentId, title, origin: 'coach', status: 'open', ops: [op], base, createdBy: req.user!.id })
           .returning();
+        if (correctionCase) {
+          await tx.insert(testCases).values({ agentId, ...correctionCase, origin: 'correction',
+            requiredDraftId: row!.id });
+        }
         const [claimed] = await tx
           .update(coachMessages)
           .set({ status: 'drafted', draftId: row!.id })

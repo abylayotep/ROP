@@ -40,6 +40,7 @@ import { clampTitle } from '../lib/knowledge/split.js';
 import { credentialsKey, decryptSecret } from '../lib/secret-box.js';
 import { isUuid } from '../lib/uuid.js';
 import { requireAgent } from './require-agent.js';
+import type { CoachSourceSnapshot } from '@rakurs/contract';
 
 /** A case's own conversation can run long; ten replayed messages is already two model calls'
  * worth of context inside one case, and `from-dialog` keeps to the same bound for the same
@@ -48,6 +49,16 @@ const MAX_MESSAGES = 10;
 const MESSAGE_MAX = 4000;
 const TITLE_MAX = 200;
 const EXPECTATION_MAX = 500;
+
+export function correctionCaseFromSnapshot(snapshot: CoachSourceSnapshot, note: string) {
+  const messages = snapshot.transcript.split(/\n(?=(?:client|ai): )/)
+    .filter((line) => line.startsWith('client: '))
+    .map((line) => clampTitle(line.slice('client: '.length).trim(), MESSAGE_MAX))
+    .filter(Boolean).slice(-MAX_MESSAGES);
+  if (messages.length === 0) throw new ApiError(409, 'В сохранённом ответе нет сообщения клиента для проверки');
+  return { title: clampTitle(messages[0]!, TITLE_MAX), messages,
+    expectation: clampTitle(note.trim(), EXPECTATION_MAX) };
+}
 
 const createCaseBody = z.object({
   title: z.string().trim().min(1).max(TITLE_MAX),
@@ -71,8 +82,9 @@ const toCase = (row: typeof testCases.$inferSelect) => ({
   title: row.title,
   messages: row.messages,
   expectation: row.expectation,
-  origin: row.origin as 'manual' | 'dialog' | 'generated',
+  origin: row.origin as 'manual' | 'dialog' | 'generated' | 'correction',
   conversationId: row.conversationId,
+  requiredDraftId: row.requiredDraftId,
   enabled: row.enabled,
   updatedAt: row.updatedAt.toISOString(),
 });
@@ -144,7 +156,8 @@ export function registerTestCaseRoutes(
     async (req) => {
       const agentId = req.agent!.id;
       const { caseId } = req.params as { caseId: string };
-      await loadCase(agentId, caseId);
+      const existing = await loadCase(agentId, caseId);
+      if (existing.requiredDraftId) throw new ApiError(409, 'Обязательный случай исправления нельзя изменить');
 
       const parsed = patchCaseBody.safeParse(req.body);
       if (!parsed.success) throw new ApiError(400, 'Не удалось разобрать случай');
@@ -205,7 +218,8 @@ export function registerTestCaseRoutes(
     async (req) => {
       const agentId = req.agent!.id;
       const { caseId } = req.params as { caseId: string };
-      await loadCase(agentId, caseId);
+      const existing = await loadCase(agentId, caseId);
+      if (existing.requiredDraftId) throw new ApiError(409, 'Обязательный случай исправления нельзя удалить');
       await db.delete(testCases).where(and(eq(testCases.id, caseId), eq(testCases.agentId, agentId)));
       return { ok: true };
     },

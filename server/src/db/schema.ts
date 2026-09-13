@@ -44,7 +44,7 @@ import type { CapiEventBody } from '../lib/capi/events.js';
 // Type-only, so this stays a leaf module at runtime. `coach_messages.proposal` holds what the
 // coach suggested, and the brand is what stops anything but a real proposal filling it.
 import type { CoachProposal } from '../lib/ai/coach.js';
-import type { CoachSourceSnapshot, CorrectionType } from '../../../packages/contract/index.js';
+import type { CoachSourceSnapshot, CorrectionType } from '@rakurs/contract';
 // Type-only, so this stays a leaf module at runtime. `kb_drafts.ops` and `kb_drafts.base` hold
 // what a draft would write and what it was tested against, and the brand is what stops anything
 // but the drafts module filling them.

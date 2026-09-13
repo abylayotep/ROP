@@ -3,7 +3,10 @@
   "compilerOptions": {
     "noEmit": false,
     "rootDir": "src",
-    "outDir": "dist"
+    "outDir": "dist",
+    "paths": {
+      "@rakurs/contract": ["../packages/contract/dist/index.d.ts"]
+    }
   },
   "include": ["src"]
 }

@@ -1,5 +1,5 @@
 import type { Lead } from '@rakurs/contract';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, isNull, or } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
@@ -61,7 +61,7 @@ export function registerOrderRoutes(
   db: Db,
   guard: preHandlerHookHandler,
 ): void {
-  // Account members may edit notes; only the provider confirms money received.
+  // Account members may edit notes; money is confirmed by Kaspi or shown in the chat.
   const anyMember = requireAgent(db);
 
   /** The agent's order, or a 404 that tells a stranger nothing. */
@@ -77,10 +77,11 @@ export function registerOrderRoutes(
 
   app.get('/api/agents/:agentId/orders', { preHandler: [guard, anyMember] }, async (req) => {
     const rows = await db.select({ order: orders, contactName: contacts.name, contactPhone: contacts.phone, operationId: kaspiPayments.operationId })
-      .from(orders).innerJoin(kaspiPayments, eq(kaspiPayments.orderId, orders.id))
+      .from(orders).leftJoin(kaspiPayments, eq(kaspiPayments.orderId, orders.id))
       .innerJoin(conversations, eq(conversations.id, orders.conversationId))
       .innerJoin(contacts, eq(contacts.id, conversations.contactId))
-      .where(and(eq(orders.agentId, req.agent!.id), eq(orders.status, 'paid'), eq(kaspiPayments.status, 'paid')))
+      .where(and(eq(orders.agentId, req.agent!.id), eq(orders.status, 'paid'),
+        or(isNull(kaspiPayments.id), eq(kaspiPayments.status, 'paid'))))
       .orderBy(desc(orders.paidAt)).limit(500);
     return { orders: rows.map(({ order, ...rest }) => ({ ...order, ...rest, paidAt: order.paidAt?.toISOString() ?? null, createdAt: order.createdAt.toISOString() })) };
   });

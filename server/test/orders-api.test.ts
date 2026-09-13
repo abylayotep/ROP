@@ -2,7 +2,7 @@ import { eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildServer } from '../src/api/server.js';
-import { agents, contacts, conversations, orders, whatsappNumbers } from '../src/db/schema.js';
+import { agents, contacts, conversations, kaspiPayments, orders, whatsappNumbers } from '../src/db/schema.js';
 import { addMember, createAccountWithOwner } from '../src/lib/provision.js';
 import { withDb } from './helpers/db.js';
 import { testEnv } from './helpers/env.js';
@@ -304,5 +304,38 @@ describe('access', () => {
     });
 
     expect(res.statusCode).toBe(404);
+  });
+});
+
+describe('listing paid orders', () => {
+  it('lists orders paid through Kaspi and in the chat, and nothing unpaid', async () => {
+    const [kaspi, chat] = await db
+      .insert(orders)
+      .values([
+        { agentId, conversationId, amount: '5000', currency: 'KZT', status: 'paid', paidAt: new Date('2026-01-01T00:00:00Z') },
+        { agentId, conversationId, amount: '6990', currency: 'KZT', status: 'paid', comment: 'Оплата по переписке', paidAt: new Date('2026-01-02T00:00:00Z') },
+        { agentId, conversationId, amount: '100', currency: 'KZT' },
+      ])
+      .returning();
+    await db.insert(kaspiPayments).values({
+      agentId,
+      conversationId,
+      orderId: kaspi!.id,
+      requestKey: 'orders-list',
+      method: 'invoice',
+      phone: '77085807932',
+      amount: '5000',
+      operationId: 'op-1',
+      status: 'paid',
+      confirmedAt: new Date('2026-01-01T00:00:00Z'),
+    });
+
+    const res = await app.inject({ method: 'GET', url: `/api/agents/${agentId}/orders`, cookies: jar });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().orders).toEqual([
+      expect.objectContaining({ id: chat!.id, operationId: null, comment: 'Оплата по переписке' }),
+      expect.objectContaining({ id: kaspi!.id, operationId: 'op-1' }),
+    ]);
   });
 });

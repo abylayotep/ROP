@@ -5,7 +5,7 @@ import { useToast } from '@/components/ui/Toast';
 import { ruleCategoryPhrase } from '@/lib/rule-categories';
 import type { AgentRule, CoachMessage, CoachProposal } from '@/types';
 import { ApiError } from '@/api/client';
-import { proposalWithText } from './proposal';
+import { needsProposalReconciliation, proposalWithText } from './proposal';
 
 /**
  * What a coaching turn proposed, and the two answers an owner may give it today.
@@ -93,6 +93,7 @@ export function ProposalCard({
 
   const decided = savedMessage.status !== 'pending';
   const dirty = text !== describeProposal(savedMessage.proposal ?? proposal, rules).body;
+  const draftAllowed = !decided && !dirty && !saving && !drafting && !conflict;
 
   async function save() {
     if (saving || decided || !dirty) return;
@@ -105,11 +106,14 @@ export function ProposalCard({
       if (error instanceof ApiError && error.status === 409) {
         try {
           const latest = (await api.listCoachMessages(agentId)).find((item) => item.id === message.id);
-          if (latest) setSavedMessage(latest);
+          if (latest) {
+            setSavedMessage(latest);
+            setConflict(needsProposalReconciliation(text, describeProposal(latest.proposal ?? proposal, rules).body));
+          } else setConflict(true);
         } catch (reloadError) {
           toast.fail(reloadError);
+          setConflict(true);
         }
-        setConflict(true);
       } else toast.fail(error);
     } finally {
       setSaving(false);
@@ -131,7 +135,7 @@ export function ProposalCard({
   }
 
   async function toDraft() {
-    if (drafting || decided || dirty || saving || conflict) return;
+    if (!draftAllowed) return;
     setDrafting(true);
     try {
       const draft = await api.draftCoachMessage(agentId, message.id, savedMessage.revision ?? 1);
@@ -160,24 +164,24 @@ export function ProposalCard({
         onChange={(e) => setText(e.target.value)}
       />
 
-      {conflict && <div role="alert" style={{ fontSize: 11.5, color: 'var(--warn)' }}>Предложение изменилось. Ваш текст сохранён в поле; проверьте его и сохраните снова.</div>}
+      {conflict && dirty && <div role="alert" style={{ fontSize: 11.5, color: 'var(--warn)' }}>Предложение изменилось. Ваш текст сохранён в поле; проверьте его и сохраните снова.</div>}
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <button type="button" className="btn-sm" disabled={saving || !dirty || decided} onClick={() => void save()}>
           {saving ? 'Сохраняем…' : 'Сохранить правку'}
         </button>
-        <button type="button" className="btn-sm" disabled={drafting || decided || dirty || saving || conflict} onClick={() => void toDraft()}>
+        <button type="button" className="btn-sm" disabled={!draftAllowed} onClick={() => void toDraft()}>
           {drafting ? 'Открываем…' : 'В черновик'}
         </button>
         <button type="button" className="btn-sm" disabled={rejecting || decided} onClick={reject}>
-          {message.status === 'rejected' ? 'Отклонено' : rejecting ? 'Отклоняем…' : 'Отклонить'}
+          {savedMessage.status === 'rejected' ? 'Отклонено' : rejecting ? 'Отклоняем…' : 'Отклонить'}
         </button>
-        {message.status === 'drafted' && message.draftId && (
+        {savedMessage.status === 'drafted' && savedMessage.draftId && (
           <button
             type="button"
             className="btn-link"
             style={{ fontSize: 11, color: 'var(--text-dim)' }}
-            onClick={() => navigate(`../drafts/${message.draftId}`)}
+            onClick={() => navigate(`../drafts/${savedMessage.draftId}`)}
           >
             В черновиках →
           </button>

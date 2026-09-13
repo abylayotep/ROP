@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { describeProposal } from './ProposalCard.js';
-import { proposalWithText } from './proposal';
+import { needsProposalReconciliation, proposalWithText } from './proposal';
 
 const rules = [{ id: 'r1', category: 'tone' as const, text: 'На «вы».', enabled: true,
   origin: 'manual' as const, position: 0, warning: null, updatedAt: '' }];
@@ -49,5 +49,15 @@ describe('proposalWithText', () => {
     expect(proposalWithText({ kind: 'note_edit', noteId: 'target', body: 'Old' }, 'New')).toEqual({
       kind: 'note_edit', noteId: 'target', body: 'New',
     });
+  });
+});
+
+describe('needsProposalReconciliation', () => {
+  it('clears a conflict when the reloaded proposal already contains the preserved text', () => {
+    expect(needsProposalReconciliation('Edited wording.', 'Edited wording.')).toBe(false);
+  });
+
+  it('keeps the conflict when the saved proposal differs from the preserved text', () => {
+    expect(needsProposalReconciliation('Edited wording.', 'Another edit.')).toBe(true);
   });
 });

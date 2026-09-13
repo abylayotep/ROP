@@ -9,3 +9,8 @@ export function proposalWithText(proposal: CoachProposal, text: string): CoachPr
     case 'note_edit': return { ...proposal, body: text };
   }
 }
+
+/** A reload that already contains the local text needs no further reconciliation. */
+export function needsProposalReconciliation(localText: string, savedText: string): boolean {
+  return localText !== savedText;
+}

@@ -9,7 +9,8 @@ import { credentialsKey } from '../lib/secret-box.js';
  * One-off: rewrites each agent's open WhatsApp chat drafts (the per-phrase «База знаний из
  * WhatsApp» / «Скрипт продаж из WhatsApp» ones included) into one «Обучение из переписки» draft
  * of topic notes. Calls the agent's own OpenRouter key, so it costs money: run `--dry-run` first,
- * which prints every agent's `ops → topics` and the topic paths and writes nothing.
+ * which runs only the cheap topic-assign step, prints every agent's `ops → topics` and each
+ * `topic ← N ops`, and writes nothing.
  *
  * Usage: `node dist/scripts/regroup-whatsapp-drafts.js [--agent <id>] [--dry-run]`
  *

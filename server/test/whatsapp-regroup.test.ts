@@ -75,33 +75,28 @@ beforeEach(async () => {
   await drafted('payment', knowledge!.id, 1, 'База знаний/Оплата');
 });
 
-/** Answers like the topic prompt: both «сроки» ops become one topic, payment extends the note, price is dropped. */
+const bodies: Record<string, string> = {
+  'Сроки': 'Сроки изготовления.\n\n## Факты\n- Три дня.\n\n## Готовые фразы\n- «Сделаем за три дня.»\n\nСвязано: [[Оплата]]',
+  'Оплата': 'Как оплатить.\n\n## Факты\n- Kaspi.\n- Kaspi QR.',
+};
+
+/** Answers like the two topic prompts: both «сроки» ops go to one topic, payment extends the note, price is dropped. */
 const topicModel = (onCall?: () => Promise<void>) => {
   const model = fakeModel();
   model.complete = async (call: CompletionInput) => {
     model.calls.push(call);
     await onCall?.();
-    const payload = JSON.parse(call.messages[1]!.content) as { proposals: { id: string; path: string }[] };
-    const ids = (...paths: string[]) => payload.proposals.filter((raw) => paths.includes(raw.path)).map((raw) => raw.id);
-    return {
-      text: JSON.stringify({ items: [
-        {
-          path: 'База знаний/Сроки',
-          body: 'Сроки изготовления.\n\n## Факты\n- Три дня.\n\n## Готовые фразы\n- «Сделаем за три дня.»\n\nСвязано: [[Оплата]]',
-          confidence: 'high',
-          sourceProposalIds: ids('Скрипт/Сроки', 'База знаний/Сроки выполнения'),
-        },
-        {
-          path: 'База знаний/Оплата',
-          body: 'Как оплатить.\n\n## Факты\n- Kaspi.\n- Kaspi QR.',
-          confidence: 'high',
-          sourceProposalIds: ids('База знаний/Оплата'),
-        },
-      ] }),
-      promptTokens: 300,
-      completionTokens: 90,
-      cost: '0.00300000',
+    const payload = JSON.parse(call.messages[1]!.content) as {
+      proposals?: { id: string; path: string }[];
+      topic?: string;
     };
+    const text = payload.proposals
+      ? JSON.stringify({ assignments: payload.proposals.map((raw) => ({
+        id: raw.id,
+        topic: raw.path.includes('Сроки') ? 'Сроки' : raw.path.endsWith('Оплата') ? 'оплата' : null,
+      })) })
+      : JSON.stringify({ body: bodies[payload.topic!], confidence: 'high' });
+    return { text, promptTokens: 300, completionTokens: 90, cost: '0.00300000' };
   };
   return model;
 };
@@ -114,14 +109,18 @@ describe('regroupWhatsAppDrafts', () => {
     const results = await regroupWhatsAppDrafts(db, { model, credentialsKey: key, log: (line) => lines.push(line) }, { dryRun: true });
 
     expect(results).toEqual([expect.objectContaining({
-      agentId, outcome: 'dry_run', beforeOps: 4, topics: ['База знаний/Сроки', 'База знаний/Оплата'],
+      agentId, outcome: 'dry_run', beforeOps: 4,
+      topics: [{ path: 'База знаний/Сроки', ops: 2 }, { path: 'База знаний/Оплата', ops: 1 }],
     })]);
+    // Only the assign step runs: one cheap call, no topic bodies written.
+    expect(model.calls).toHaveLength(1);
     expect(lines[0]).toContain('4 ops → 2 topics');
     expect(lines[0]).toContain('300/90 tokens');
-    expect(lines).toContain('  База знаний/Сроки');
+    expect(lines).toContain('  База знаний/Сроки ← 2 ops');
+    expect(lines).toContain('  База знаний/Оплата ← 1 ops');
     expect(model.calls[0]).toMatchObject({ key: 'provider-key', model: 'run-model', temperature: '0.10' });
-    const payload = JSON.parse(model.calls[0]!.messages[1]!.content) as { existingTopics: unknown[]; proposals: unknown[] };
-    expect(payload.existingTopics).toEqual([{ path: 'База знаний/Оплата', body: 'Kaspi.' }]);
+    const payload = JSON.parse(model.calls[0]!.messages[1]!.content) as { topics: string[]; proposals: unknown[] };
+    expect(payload.topics).toContain('Оплата');
     expect(payload.proposals).toEqual(expect.arrayContaining([
       expect.objectContaining({ path: 'Скрипт/Сроки', body: 'Сделаем за три дня.' }),
     ]));
@@ -130,7 +129,15 @@ describe('regroupWhatsAppDrafts', () => {
   });
 
   it('leaves one topic draft, repoints cited proposals and releases dropped ones', async () => {
-    await regroupWhatsAppDrafts(db, { model: topicModel(), credentialsKey: key, log: () => undefined }, { dryRun: false });
+    const model = topicModel();
+    const lines: string[] = [];
+    await regroupWhatsAppDrafts(db, { model, credentialsKey: key, log: (line) => lines.push(line) }, { dryRun: false });
+
+    expect(model.calls).toHaveLength(3);
+    const payment = JSON.parse(model.calls[2]!.messages[1]!.content) as { topic: string; existingBody?: string };
+    expect(payment).toMatchObject({ topic: 'Оплата', existingBody: 'Kaspi.' });
+    expect(lines[0]).toContain('900/270 tokens');
+    expect(lines).toContain('  База знаний/Сроки ← 2 ops');
 
     const drafts = await db.select().from(kbDrafts);
     const open = drafts.filter((draft) => draft.status === 'open');
@@ -154,7 +161,10 @@ describe('regroupWhatsAppDrafts', () => {
   });
 
   it('gives up on an agent whose drafts changed while the model was answering', async () => {
+    let inserted = false;
     const model = topicModel(async () => {
+      if (inserted) return;
+      inserted = true;
       await db.insert(kbDrafts).values({
         agentId, title: 'Обучение из переписки', origin: 'manual', base: {},
         ops: [{ op: 'note_create', path: 'База знаний/Новое', body: 'Новое.' }],

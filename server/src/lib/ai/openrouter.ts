@@ -72,6 +72,8 @@ export interface CompletionInput {
   temperature: string;
   /** Optional provider-side output cap; existing callers remain uncapped. */
   maxTokens?: number;
+  /** Optional per-call deadline for a caller whose answers are long; defaults to `TIMEOUT_MS`. */
+  timeoutMs?: number;
   messages: ChatMessage[];
 }
 
@@ -185,13 +187,13 @@ async function failure(response: Response, key: string): Promise<ModelError> {
  * while the body is being read. Parsing sits inside it too, so a truncated body raises this
  * rather than a `SyntaxError` nobody expects.
  */
-async function within<T>(key: string, exchange: () => Promise<T>): Promise<T> {
+async function within<T>(key: string, timeoutMs: number, exchange: () => Promise<T>): Promise<T> {
   try {
     return await exchange();
   } catch (error) {
     if (error instanceof ModelError) throw error;
     if ((error as { name?: string } | null)?.name === 'TimeoutError') {
-      throw new ModelError(`Модель не ответила за ${Math.round(TIMEOUT_MS / 1000)} с.`, 504);
+      throw new ModelError(`Модель не ответила за ${Math.round(timeoutMs / 1000)} с.`, 504);
     }
     const detail = withoutSecret(String((error as { message?: string })?.message ?? error), key);
     throw new ModelError('Не удалось связаться с OpenRouter.', 502, detail.slice(0, 500));
@@ -227,7 +229,7 @@ export function createModelClient(): ModelClient & {
 } {
   return {
     async transcribe({ key, bytes, mime }) {
-      return within(key, async () => {
+      return within(key, TIMEOUT_MS, async () => {
         const response = await fetch(`${BASE}/audio/transcriptions`, {
           method: 'POST',
           headers: {
@@ -260,8 +262,8 @@ export function createModelClient(): ModelClient & {
         return transcript;
       });
     },
-    async complete({ key, model, temperature, maxTokens, messages }) {
-      return within(key, async () => {
+    async complete({ key, model, temperature, maxTokens, timeoutMs = TIMEOUT_MS, messages }) {
+      return within(key, timeoutMs, async () => {
         const response = await fetch(`${BASE}/chat/completions`, {
           method: 'POST',
           headers: {
@@ -279,7 +281,7 @@ export function createModelClient(): ModelClient & {
             // across a model list the owner controls.
             response_format: { type: 'json_object' },
           }),
-          signal: AbortSignal.timeout(TIMEOUT_MS),
+          signal: AbortSignal.timeout(timeoutMs),
         });
 
         if (!response.ok) throw await failure(response, key);

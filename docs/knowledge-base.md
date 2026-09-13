@@ -405,10 +405,22 @@ customer topic, `База знаний/<topic>`. Consolidation then writes one n
 the finding's kind: a one-line summary, `## Факты`, `## Готовые фразы` (Russian and Kazakh
 variants of one phrase in one entry) and a «Связано: [[…]]» line. A link names the other
 topic's title — the last path segment — so the graph gets edges once the notes are applied.
-Consolidation is also shown the existing topics (notes under `База знаний/` and the open chat
-draft's note ops, bodies up to 40,000 characters, the rest by path only): a matching topic keeps
-its exact path and gets a full merged body; a topic sent by path only is never rewritten. Items
-that still share a path after the last pass are joined deterministically.
+
+Consolidation is two bounded steps (`server/src/lib/knowledge/generation-consolidate.ts`), so no
+call has to emit many bodies at once:
+1. **Assign.** Chunks of up to 40 findings / 20,000 characters (bodies previewed) go out with the
+   topic list — existing topic titles, topics chosen by earlier chunks and a few broad seed themes
+   — and the model returns only `{id, topic}` pairs. It prefers listed topics, aims for about 12,
+   never names a single question or a Kazakh title, and may drop a finding (`null`). Titles match
+   case-insensitively and reuse an existing topic's exact path; at most 20 topics per run.
+2. **Write.** One call per topic (120 s deadline, 3,000 output tokens) returns the full body,
+   merging the existing body when the topic already exists. A topic whose findings exceed one
+   call is written in slices, each folding into the body so far.
+
+Existing topics are notes under `База знаний/` and the open chat draft's note ops, bodies up to
+40,000 characters in total; a topic past that budget is closed — never offered, never rewritten,
+and findings the model still puts there are dropped.
+Unsafe titles or bodies are dropped; a failing call fails the run with the usage spent so far.
 
 **One draft.** An agent has at most one open «Обучение из переписки». A new selection does not
 add a second draft: the open one — and any legacy «База знаний из WhatsApp» / «Скрипт продаж из
@@ -420,7 +432,8 @@ merge that contains them. The rebuilt draft has to be checked again. Rules live 
 
 **Regrouping old drafts.** `server/src/scripts/regroup-whatsapp-drafts.ts` runs the topic
 consolidation once over the ops of the per-phrase drafts made before this change and leaves one
-topic draft per agent (`--dry-run` prints `ops → topics` and writes nothing; `--agent <id>`
+topic draft per agent (`--dry-run` runs only the assign step, prints `topic ← N ops` and writes
+nothing; `--agent <id>`
 limits it to one agent). It calls the agent's OpenRouter key; the command is in the file's doc
 comment.
 

@@ -7,6 +7,7 @@ import { decryptSecret } from '../secret-box.js';
 import {
   consolidateGenerationProposals,
   GenerationConsolidationError,
+  planGenerationTopics,
   type ConsolidationUsage,
   type RawGenerationProposal,
 } from './generation-consolidate.js';
@@ -35,8 +36,14 @@ export interface RegroupAgentResult {
   /** Why nothing was written; `null` for a dry run and a write. */
   reason: string | null;
   beforeOps: number;
-  topics: string[];
+  /** Topic paths with how many ops each collects: planned on a dry run, written otherwise. */
+  topics: RegroupTopic[];
   usage: ConsolidationUsage;
+}
+
+export interface RegroupTopic {
+  path: string;
+  ops: number;
 }
 
 const noUsage = (): ConsolidationUsage => ({ promptTokens: 0, completionTokens: 0, cost: '0' });
@@ -47,7 +54,8 @@ const opRef = (draftId: string, index: number): string => `${draftId}:${index}`;
 /**
  * One-off: rewrites the open chat drafts made before topic notes («… из WhatsApp», one note per
  * phrase) into the one «Обучение из переписки» draft of topic notes, by running today's
- * consolidation over their ops. Every proposal of an op a topic cites moves to that topic and
+ * consolidation over their ops. A dry run runs only the cheap assign step and prints which topic
+ * each op would go to; a write runs both steps. Every proposal of an op a topic cites moves to that topic and
  * stays «drafted»; proposals of ops the model dropped go back to «pending» in their run.
  *
  * The model call happens outside any transaction. The write then locks the agent's drafts and
@@ -71,7 +79,7 @@ export async function regroupWhatsAppDrafts(
     const result = await regroupAgent(db, deps, agentId, options.dryRun);
     const tokens = `${result.usage.promptTokens}/${result.usage.completionTokens} tokens, cost ${result.usage.cost}`;
     deps.log(`agent ${agentId}: ${result.beforeOps} ops → ${result.topics.length} topics (${result.outcome}${result.reason ? `: ${result.reason}` : ''}; ${tokens})`);
-    for (const topic of result.topics) deps.log(`  ${topic}`);
+    for (const topic of result.topics) deps.log(`  ${topic.path} ← ${topic.ops} ops`);
     results.push(result);
   }
   return results;
@@ -131,19 +139,26 @@ async function regroupAgent(db: Db, deps: RegroupDeps, agentId: string, dryRun: 
   }
   if (raw.length === 0) return outcome('skipped', 'no_note_ops', { beforeOps });
 
+  const consolidationDeps = {
+    model: deps.model,
+    key,
+    modelId: lastRun?.modelId ?? agent.model,
+    temperature: lastRun?.temperature ?? agent.temperature,
+  };
+  const consolidationInput = {
+    proposals: raw,
+    communicationStyle: agent.communicationStyle,
+    existingTopics: await loadExistingTopics(db, agentId, false),
+  };
   let items;
   let usage: ConsolidationUsage;
   try {
-    const result = await consolidateGenerationProposals({
-      model: deps.model,
-      key,
-      modelId: lastRun?.modelId ?? agent.model,
-      temperature: lastRun?.temperature ?? agent.temperature,
-    }, {
-      proposals: raw,
-      communicationStyle: agent.communicationStyle,
-      existingTopics: await loadExistingTopics(db, agentId, false),
-    });
+    if (dryRun) {
+      const plan = await planGenerationTopics(consolidationDeps, consolidationInput);
+      const topics = plan.topics.map((topic) => ({ path: topic.path, ops: topic.proposalIds.length }));
+      return outcome('dry_run', null, { beforeOps, topics, usage: plan.usage });
+    }
+    const result = await consolidateGenerationProposals(consolidationDeps, consolidationInput);
     items = result.items;
     usage = result.usage;
   } catch (error) {
@@ -152,8 +167,7 @@ async function regroupAgent(db: Db, deps: RegroupDeps, agentId: string, dryRun: 
     }
     throw error;
   }
-  const topics = items.map((item) => item.path);
-  if (dryRun) return outcome('dry_run', null, { beforeOps, topics, usage });
+  const topics = items.map((item) => ({ path: item.path, ops: new Set(item.sourceProposalIds).size }));
   if (items.length === 0) return outcome('skipped', 'no_topics', { beforeOps, usage });
 
   const written = await db.transaction(async (tx) => {

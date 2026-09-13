@@ -12,6 +12,14 @@ export function correctionText(note: string): string | null {
   return note.trim() || null;
 }
 
+export function findCompletedFeedback<T extends { role: string; feedbackId?: string | null; text: string }>(
+  messages: T[], existing: Set<string>, note: string,
+): T | null {
+  const owner = messages.find((item) => item.role === 'owner' && item.feedbackId &&
+    !existing.has(item.feedbackId) && item.text === note);
+  return messages.find((item) => item.role === 'model' && item.feedbackId === owner?.feedbackId) ?? null;
+}
+
 export function recoveredTurn<T extends { revision: number; userText: string }>(
   session: { revision: number; turns: T[] }, pending: { revision: number; text: string },
 ): T | null {

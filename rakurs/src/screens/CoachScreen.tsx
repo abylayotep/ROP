@@ -9,7 +9,7 @@ import { useToast } from '@/components/ui/Toast';
 import { useApi } from '@/hooks/useApi';
 import { useAgent } from '@/store/agent';
 import type { AgentRule, CoachMessage, ConversationThread, KbDraft } from '@/types';
-import { correctionSource, correctionText, type CorrectionTarget } from './response-feedback';
+import { correctionSource, correctionText, findCompletedFeedback, type CorrectionTarget } from './response-feedback';
 
 /**
  * Обучение: a chat where the owner teaches the agent, and the rules that chat has already
@@ -85,6 +85,8 @@ function Coach({ agentId, loaded }: { agentId: string; loaded: Loaded }) {
   const [text, setText] = useState('');
   const [correctionType, setCorrectionType] = useState<'fact' | 'behavior'>('fact');
   const [sending, setSending] = useState(false);
+  const [uncertain, setUncertain] = useState(false);
+  const pendingFeedback = useRef<{ existing: Set<string>; note: string } | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const textRef = useRef<HTMLTextAreaElement>(null);
 
@@ -117,12 +119,43 @@ function Coach({ agentId, loaded }: { agentId: string; loaded: Loaded }) {
     if (conversationId !== null) textRef.current?.focus();
   }, [conversationId]);
 
+  async function checkFeedbackStatus() {
+    const pending = pendingFeedback.current;
+    if (!pending) return;
+    try {
+      const fresh = await api.listCoachMessages(agentId);
+      const related = fresh.filter((item) => item.feedbackId && !pending.existing.has(item.feedbackId));
+      const completed = findCompletedFeedback(fresh, pending.existing, pending.note);
+      if (completed) {
+        setMessages(fresh);
+        pendingFeedback.current = null;
+        setUncertain(false);
+        setParams({}, { replace: true });
+      } else if (related.some((item) => item.role === 'owner' && item.text === pending.note)) {
+        setMessages(fresh);
+      }
+    } catch {
+      // The status remains unknown. Keep the composer blocked rather than resending.
+    }
+  }
+
+  useEffect(() => {
+    if (!uncertain) return;
+    const timer = setInterval(() => void checkFeedbackStatus(), 5_000);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [uncertain, agentId]);
+
   async function send(event: FormEvent) {
     event.preventDefault();
     const value = text.trim();
-    if (value === '' || sending) return;
+    if (value === '' || sending || uncertain) return;
 
     setSending(true);
+    if (correctionTarget) pendingFeedback.current = {
+      existing: new Set(messages.map((item) => item.feedbackId).filter((id): id is string => !!id)),
+      note: value,
+    };
     // Shown right away — the owner's own line does not need the model's turn to finish to
     // appear, and it costs nothing to write locally.
     const ownerLine: CoachMessage = {
@@ -170,7 +203,14 @@ function Coach({ agentId, loaded }: { agentId: string; loaded: Loaded }) {
         },
       ]);
       if (correctionTarget) setParams({}, { replace: true });
+      pendingFeedback.current = null;
     } catch (error) {
+      if (correctionTarget && !(error instanceof api.ApiError && error.status >= 400 && error.status < 500)) {
+        setUncertain(true);
+        void checkFeedbackStatus();
+        return;
+      }
+      pendingFeedback.current = null;
       // The turn never happened — its line does not stay, and the text goes back into the
       // box so retyping a paragraph is not the price of a failed send.
       setMessages((prev) => prev.filter((m) => m.id !== ownerLine.id));
@@ -256,6 +296,9 @@ function Coach({ agentId, loaded }: { agentId: string; loaded: Loaded }) {
         </Card>
 
         <form onSubmit={send} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {uncertain && <div role="alert">Статус исправления неизвестен: коуч мог сохранить предложение. Повторная отправка заблокирована.
+            <button type="button" className="btn btn-sm" onClick={() => void checkFeedbackStatus()}>Проверить статус</button>
+          </div>}
           {correctionTarget && <>
             <label htmlFor="correction-type">Тип исправления</label>
             <select id="correction-type" value={correctionType} onChange={(event) => setCorrectionType(event.target.value as 'fact' | 'behavior')}>
@@ -269,12 +312,12 @@ function Coach({ agentId, loaded }: { agentId: string; loaded: Loaded }) {
             ref={textRef}
             style={{ ...control, minHeight: 72 }}
             value={text}
-            disabled={sending}
+            disabled={sending || uncertain}
             placeholder="Например: мы продаём мебель на заказ, всегда спрашиваем город и срок"
             onChange={(e) => setText(e.target.value)}
           />
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <button type="submit" className="btn" disabled={sending || correctionText(text) === null}>
+            <button type="submit" className="btn" disabled={sending || uncertain || correctionText(text) === null}>
               {sending ? 'Коуч отвечает…' : correctionTarget ? 'Создать предложение' : 'Отправить'}
             </button>
             {/* Every turn is a real OpenRouter call, the same money a sandbox run spends —
@@ -352,6 +395,9 @@ function OpenDrafts({ agentId }: { agentId: string }) {
 }
 
 function CorrectionContext({ agentId, target, messageId }: { agentId: string; target: CorrectionTarget; messageId: string | null }) {
+  const preview = useApi((signal) => api.previewResponseFeedback(agentId, correctionSource(target), signal),
+    [agentId, target.kind, target.kind === 'sandbox' ? target.sessionId : target.conversationId,
+      target.kind === 'sandbox' ? target.turnId : target.replyId]);
   const context = useApi(async (signal) => target.kind === 'sandbox'
     ? api.getAiSandboxSession(agentId, target.sessionId, signal)
     : api.getConversation(agentId, target.conversationId, signal,
@@ -369,10 +415,7 @@ function CorrectionContext({ agentId, target, messageId }: { agentId: string; ta
       {session.turns.slice(Math.max(0, index - 2), index + 1).map((item) =>
         <p key={item.id}>Клиент: {item.userText}<br />Агент: {item.reply ?? 'Без ответа'}</p>)}
       <strong>Проверенные источники ответа</strong>
-      {turn.sourceIds.length ? <ul>{turn.sourceIds.map((id) =>
-        <li key={id}>{turn.usedItems.find((item) => item.id === id)?.title ?? `Источник ${id}`}</li>)}</ul>
-        : <p>Источники не использовались.</p>}
-      <p>Сервер повторно проверит принадлежность ответа и источников перед созданием предложения.</p>
+      <VerifiedSources preview={preview} />
     </Card>;
   }
   const thread = context.data as ConversationThread;
@@ -382,8 +425,17 @@ function CorrectionContext({ agentId, target, messageId }: { agentId: string; ta
     <h3>Исправление ответа в диалоге</h3>
     {thread.messages.slice(Math.max(0, index - 5), index + 1).map((message) =>
       <p key={message.id}>{message.author === 'ai' ? 'Агент' : message.author === 'client' ? 'Клиент' : 'Оператор'}: {message.body}</p>)}
-    <p>Проверенные источники выбранного ответа будут зафиксированы сервером вместе с исправлением.</p>
+    <strong>Проверенные источники выбранного ответа</strong>
+    <VerifiedSources preview={preview} />
   </Card>;
+}
+
+function VerifiedSources({ preview }: { preview: ReturnType<typeof useApi<import('@rakurs/contract').CoachSourceSnapshot>> }) {
+  if (preview.error) return <p role="alert">Не удалось проверить источники. Обновите страницу перед отправкой исправления.</p>;
+  if (!preview.data) return <p>Проверяем источники ответа…</p>;
+  return preview.data.sourceRecords.length
+    ? <ul>{preview.data.sourceRecords.map((source) => <li key={source.id}>{source.title}: {source.content}</li>)}</ul>
+    : <p>Источники не использовались.</p>;
 }
 
 /**

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { correctionSource, correctionText, recoveredTurn } from './response-feedback';
+import { correctionSource, correctionText, recoveredTurn, findCompletedFeedback } from './response-feedback';
 
 describe('response correction', () => {
   it('binds live feedback to the selected reply, not the latest conversation reply', () => {
@@ -23,5 +23,15 @@ describe('response correction', () => {
     expect(recoveredTurn({ revision: 2, turns: [{ revision: 2, userText: 'Есть доставка?', id: 'turn-2' }] },
       { revision: 1, text: 'Есть доставка?' })).toEqual({ revision: 2, userText: 'Есть доставка?', id: 'turn-2' });
     expect(recoveredTurn({ revision: 1, turns: [] }, { revision: 1, text: 'Есть доставка?' })).toBeNull();
+  });
+
+  it('does not mistake an in-flight owner row or an older proposal for completed feedback', () => {
+    const messages = [
+      { role: 'model', feedbackId: 'previous', text: 'Old proposal' },
+      { role: 'owner', feedbackId: 'new', text: 'Correct the reply' },
+    ];
+    expect(findCompletedFeedback(messages, new Set(['previous']), 'Correct the reply')).toBeNull();
+    expect(findCompletedFeedback([...messages, { role: 'model', feedbackId: 'new', text: 'New proposal' }],
+      new Set(['previous']), 'Correct the reply')).toEqual({ role: 'model', feedbackId: 'new', text: 'New proposal' });
   });
 });

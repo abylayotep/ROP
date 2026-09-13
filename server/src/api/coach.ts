@@ -379,6 +379,18 @@ export function registerCoachRoutes(
     },
   );
 
+  app.get('/api/agents/:agentId/coach/feedback-preview',
+    { preHandler: [guard, ownerOnly] }, async (req) => {
+      const query = z.discriminatedUnion('kind', [
+        z.object({ kind: z.literal('conversation_reply'), conversationId: z.string().uuid(), aiReplyId: z.string().uuid() }),
+        z.object({ kind: z.literal('sandbox_turn'), sessionId: z.string().uuid(), turnId: z.string().uuid() }),
+      ]).safeParse(req.query);
+      if (!query.success) throw new ApiError(400, 'Выберите ответ для исправления');
+      const correction = await resolveFeedback(db, req.agent!.id, req.agent!.accountId,
+        { source: query.data, correctionType: 'fact', note: 'preview' });
+      return correction!.snapshot;
+    });
+
   app.post(
     '/api/agents/:agentId/coach/messages',
     {

@@ -670,6 +670,13 @@ export const deleteRule = (agentId: string, ruleId: string) =>
 export const listCoachMessages = (agentId: string, signal?: AbortSignal) =>
   request<CoachMessage[]>(`/agents/${agentId}/coach/messages`, { signal });
 
+export const previewResponseFeedback = (agentId: string, source: {
+  kind: 'conversation_reply'; conversationId: string; aiReplyId: string;
+} | { kind: 'sandbox_turn'; sessionId: string; turnId: string }, signal?: AbortSignal) =>
+  request<import('@rakurs/contract').CoachSourceSnapshot>(`/agents/${agentId}/coach/feedback-preview`, {
+    signal, query: source,
+  });
+
 /**
  * What a coaching turn answers: the model's own line, a possible proposal, and a warning
  * when the fact check turned a priced rule into a note.

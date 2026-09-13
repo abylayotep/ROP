@@ -240,6 +240,15 @@ afterEach(async () => {
 });
 
 describe('the coaching conversation', () => {
+  it('previews verified sources of the exact owned live reply before writing feedback', async () => {
+    const target = await agentAnswered('Доставка за 2 дня');
+    const url = `/api/agents/${agentId}/coach/feedback-preview?kind=conversation_reply&conversationId=${target.conversationId}&aiReplyId=${target.aiReplyId}`;
+    const result = await app.inject({ method: 'GET', url, cookies: jar });
+    expect(result.statusCode).toBe(200);
+    expect(result.json()).toMatchObject({ responseText: 'Доставка за 2 дня', sourceRecords: [{ title: 'Доставка › По городу', content: 'Доставка за 2 дня' }] });
+    expect(await db.select().from(responseFeedback)).toHaveLength(0);
+    expect((await app.inject({ method: 'GET', url, cookies: memberJar })).statusCode).toBe(403);
+  });
   it('captures owned reply evidence and targets its note for a factual correction', async () => {
     const { conversationId, aiReplyId } = await agentAnswered('Delivery costs 1500 KZT.');
     const [note] = await db.select().from(kbNotes);

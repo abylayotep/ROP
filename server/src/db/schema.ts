@@ -54,7 +54,7 @@ import type {
   GenerationStoredCounts,
   GenerationStoredSource,
 } from '../lib/knowledge/generation-types.js';
-import type { AiTurnField, KbGenerationSelection, KbGenerationWarning } from '@rakurs/contract';
+import type { AiSandboxCheckout, AiTurnField, KbGenerationSelection, KbGenerationWarning } from '@rakurs/contract';
 
 export type AgentResponseMode = 'off' | 'test' | 'live';
 
@@ -194,6 +194,8 @@ export const aiSandboxSessions = pgTable(
     stageId: uuid('stage_id'),
     stageName: text('stage_name'),
     fields: jsonb('fields').$type<AiTurnField[]>().notNull().default([]),
+    crmSummary: text('crm_summary'),
+    crmProfile: jsonb('crm_profile').$type<Record<string, string>>().notNull().default({}),
     outcome: text('outcome'),
     handoff: text('handoff'),
     archivedAt: timestamp('archived_at', { withTimezone: true }),
@@ -229,6 +231,8 @@ export const aiSandboxTurns = pgTable(
     stageId: uuid('stage_id'),
     stageName: text('stage_name'),
     fields: jsonb('fields').$type<AiTurnField[]>().notNull().default([]),
+    effectSource: text('effect_source').$type<'ai' | 'crm'>().notNull().default('ai'),
+    checkout: jsonb('checkout').$type<AiSandboxCheckout | null>(),
     handoff: text('handoff'),
     outcome: text('outcome').notNull(),
     detail: text('detail'),

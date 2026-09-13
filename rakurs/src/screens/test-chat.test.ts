@@ -28,6 +28,7 @@ const turn = (revision: number): AiSandboxTurn => ({
   reply: `Answer ${revision}`, configVersion: 1, model: 'test-model',
   sourceIds: [`source-${revision}`], usedItems: [{ id: `source-${revision}`, title: `Source ${revision}` }],
   stageId: null, stageName: null, fields: [], handoff: null, outcome: 'sent', detail: null,
+  effectSource: 'ai', checkout: null,
   createdAt: `2026-09-12T09:0${revision}:00.000Z`,
 });
 

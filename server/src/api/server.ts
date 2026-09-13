@@ -154,7 +154,7 @@ export function buildServer(env: Env, db: Db, deps: ServerDeps = {}): FastifyIns
     registerKnowledgeGenerationRoutes(app, db, env, guard, { model });
     registerRuleRoutes(app, db, guard);
     registerAiRoutes(app, db, env, guard, { model, graph, linked });
-    registerAiSandboxRoutes(app, db, guard, turnDeps);
+    registerAiSandboxRoutes(app, db, guard, { ...turnDeps, crm });
     // The coach writes only `coach_messages` — see the file's own comment for why a
     // proposal never reaches `agent_rules` or `kb_notes` from here.
     registerCoachRoutes(app, db, env, guard, { model });

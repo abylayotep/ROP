@@ -723,6 +723,12 @@ export type AiSandboxTurnRequest = { text: string; revision: number };
 /** Optional presentation details for a new browser-only conversation. */
 export type AiSandboxCreateRequest = { title?: string; phone?: string };
 
+export interface AiSandboxCheckout {
+  method: 'invoice' | 'qr';
+  amount: string;
+  status: 'would_create' | 'blocked_no_phone';
+}
+
 /** One persisted exchange and the production effects it only proposed. */
 export interface AiSandboxTurn extends AiTurn {
   id: string;
@@ -735,6 +741,10 @@ export interface AiSandboxTurn extends AiTurn {
   sourceIds: string[];
   /** The proposed stage identifier; it never grants permission to update that stage. */
   stageId: string | null;
+  /** Which production path supplied the simulated CRM effects. */
+  effectSource: 'ai' | 'crm';
+  /** A grounded checkout intent only; no payment or order has been created. */
+  checkout: AiSandboxCheckout | null;
   createdAt: string;
 }
 

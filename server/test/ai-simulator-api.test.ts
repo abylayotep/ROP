@@ -285,6 +285,29 @@ describe('AI sandbox session routes', () => {
     expect(oldRoute.json().message).toContain('номер WhatsApp');
   });
 
+  it('uses the production separate-CRM setting for browser turns', async () => {
+    await app.close();
+    model = fakeModel(
+      JSON.stringify({ stageId: null, summary: 'Client greeted the agent.', confidence: 90,
+        profile: {}, fields: {}, checkout: null }),
+      JSON.stringify({ reply: 'Hello!', stageId: null, fields: {}, handoff: null,
+        usedItemIds: [] }),
+    );
+    app = buildServer(env, db, { model, graph: fakeGraph(), linked: fakeLinked(), crmEnabled: true });
+    await app.ready();
+    const created = (await create()).json();
+
+    const sent = await request('POST', `${base()}/${created.id}/turns`,
+      { text: 'Hello', revision: 0 });
+
+    expect(sent.statusCode).toBe(200);
+    expect(sent.json()).toMatchObject({ reply: 'Hello!', effectSource: 'crm' });
+    expect(model.calls).toHaveLength(2);
+    expect((await request('GET', `${base()}/${created.id}`)).json().turns[0])
+      .toMatchObject({ effectSource: 'crm' });
+    expect(await db.select().from(orders)).toEqual([]);
+  });
+
   it('rejects blank, oversized and invalid-revision messages before calling the model', async () => {
     const created = (await create()).json();
     for (const payload of [

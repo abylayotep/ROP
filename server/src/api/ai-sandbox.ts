@@ -91,6 +91,7 @@ export function registerAiSandboxRoutes(
           return title === undefined ? [] : [{ id: sourceId, title }];
         }),
         stageId: turn.stageId, stageName: turn.stageName, fields: turn.fields,
+        effectSource: turn.effectSource, checkout: turn.checkout,
         handoff: turn.handoff, outcome: turn.outcome, detail: turn.detail,
         createdAt: turn.createdAt.toISOString(),
       });

@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import type { Db } from '../src/db/client.js';
 import {
   accounts, agents, aiReplies, aiSandboxSessions, aiSandboxTurns, capiEvents,
-  contacts, conversations, leadFields, leadValues, messages, notes, orders,
+  contacts, conversations, kaspiPayments, leadFields, leadValues, messages, notes, orders,
   stageTransitions, stages,
 } from '../src/db/schema.js';
 import { ApiError } from '../src/lib/errors.js';
@@ -34,6 +34,8 @@ let linked: ReturnType<typeof fakeLinked>;
 const deps = (): TurnDeps => ({ model, graph, linked, key });
 const run = (text: string, revision: number) =>
   runSimulatorTurn(db, deps(), { agentId, sessionId, text, revision });
+const runWithCrm = (text: string, revision: number) =>
+  runSimulatorTurn(db, { ...deps(), crm: async () => false }, { agentId, sessionId, text, revision });
 
 beforeEach(async () => {
   db = await withDb();
@@ -61,6 +63,83 @@ beforeEach(async () => {
 });
 
 describe('persistent browser simulator', () => {
+  it('uses separate CRM analysis for applied stage and fields, ignoring AI CRM proposals', async () => {
+    const [otherStage] = await db.insert(stages).values({ agentId, name: 'Other',
+      color: '#ffffff', kind: 'qualified', position: 2 }).returning();
+    model = { ...fakeModel(), async complete(input) {
+      this.calls.push(input);
+      if (input.messages[0]!.content.includes('You maintain CRM records')) {
+        const payload = JSON.parse(input.messages[1]!.content) as {
+          history: { id: string; body: string }[];
+        };
+        const latest = payload.history.at(-1)!;
+        return { text: JSON.stringify({ stageId, summary: 'Customer is qualified.', confidence: 90,
+          profile: {}, fields: { [fieldId]: { value: 'Almaty', messageId: latest.id,
+            quote: latest.body } }, checkout: null }), promptTokens: 100,
+          completionTokens: 20, cost: '0.00010000' };
+      }
+      return { text: answer('I can help.', { stageId: otherStage!.id,
+        fields: { [fieldId]: 'Invented city' } }), promptTokens: 100,
+        completionTokens: 20, cost: '0.00010000' };
+    } };
+
+    const turn = await runWithCrm('I live in Almaty. Can you help?', 0);
+
+    expect(turn).toMatchObject({ reply: 'I can help.', stageId, stageName: 'Qualified',
+      fields: [{ id: fieldId, name: 'City', value: 'Almaty' }] });
+    expect((await db.select().from(aiSandboxSessions))[0])
+      .toMatchObject({ revision: 1, stageId,
+        fields: [{ id: fieldId, name: 'City', value: 'Almaty' }] });
+    expect(model.calls).toHaveLength(2);
+    expect(model.calls[0]!.messages[0]!.content).toContain('You maintain CRM records');
+    expect(model.calls[1]!.messages.some((part) => part.content.includes('Qualified')
+      && part.content.includes('Almaty'))).toBe(true);
+    await runWithCrm('Can we continue?', 1);
+    const nextCrmInput = JSON.parse(model.calls[2]!.messages[1]!.content) as {
+      previousAnalysis: { stageId: string; summary: string };
+      fields: { fieldId: string; value: string }[];
+    };
+    expect(nextCrmInput.previousAnalysis).toMatchObject({ stageId,
+      summary: 'Customer is qualified.' });
+    expect(nextCrmInput.fields).toContainEqual({ fieldId, value: 'Almaty' });
+  });
+
+  it('captures a grounded checkout proposal without invoking AI reply or creating an order', async () => {
+    await db.update(aiSandboxSessions).set({ phone: '77001234567' })
+      .where(eq(aiSandboxSessions.id, sessionId));
+    model = { ...fakeModel(), async complete(input) {
+      this.calls.push(input);
+      if (!input.messages[0]!.content.includes('You maintain CRM records')) {
+        return { text: answer('Итого 5000 ₸.'), promptTokens: 100,
+          completionTokens: 20, cost: '0.00010000' };
+      }
+      const payload = JSON.parse(input.messages[1]!.content) as {
+        history: { id: string; author: string; body: string }[];
+      };
+      const latest = payload.history.at(-1)!;
+      const quoted = payload.history.find((entry) => entry.author === 'ai' && entry.body === 'Итого 5000 ₸.');
+      return { text: JSON.stringify({ stageId: null, summary: 'Customer requested payment.',
+        confidence: 90, profile: {}, fields: {}, checkout: quoted ? {
+          method: 'invoice', messageId: latest.id, quote: latest.body,
+          amount: '5000', amountMessageId: quoted.id,
+        } : null }), promptTokens: 100, completionTokens: 20, cost: '0.00010000' };
+    } };
+
+    await runWithCrm('Is the total 5000 ₸?', 0);
+    const turn = await runWithCrm('Оформляйте, пришлите счёт', 1);
+
+    expect(turn).toMatchObject({ outcome: 'checkout', reply: null,
+      checkout: { method: 'invoice', amount: '5000' } });
+    expect((await db.select().from(aiSandboxTurns))[1])
+      .toMatchObject({ checkout: { method: 'invoice', amount: '5000', status: 'would_create' } });
+    expect(model.calls).toHaveLength(3);
+    expect(await db.select().from(orders)).toEqual([]);
+    expect(await db.select().from(kaspiPayments)).toEqual([]);
+    expect(await db.select().from(conversations)).toEqual([]);
+    expect(await db.select().from(messages)).toEqual([]);
+    expect(graph.calls).toEqual([]);
+    expect(linked.calls).toEqual([]);
+  });
   it('carries its previous reply and proposed lead state into the second production prompt', async () => {
     model = fakeModel(
       answer('Which city?', { stageId, fields: { [fieldId]: 'Almaty' } }),

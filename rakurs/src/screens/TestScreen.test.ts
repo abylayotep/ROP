@@ -16,7 +16,7 @@ vi.mock('@/hooks/useApi', () => ({
   useApi: () => ({ data: fixture.data, error: fixture.error, loading: false, reload: vi.fn() }),
 }));
 
-import { TestComposer, TestScreen, TestTurnInspector } from './TestScreen';
+import { TestComposer, TestScreen, TestTurnInspector, turnBubbleText } from './TestScreen';
 import { initialChatState, openSession } from './test-chat';
 
 const turn: AiSandboxTurn = {
@@ -25,6 +25,7 @@ const turn: AiSandboxTurn = {
   usedItems: [{ id: 'source-1', title: 'Доставка' }], stageId: 'stage-1',
   stageName: 'Готов к покупке', fields: [{ id: 'field-1', name: 'Город', value: 'Алматы' }],
   handoff: null, outcome: 'sent', detail: 'Draft checkout only',
+  effectSource: 'ai', checkout: null,
   createdAt: '2026-09-12T10:00:00.000Z',
 };
 
@@ -51,6 +52,23 @@ describe('testing screen', () => {
     expect(html).toMatch(/disabled=""[^>]*>Исправить ответ/);
     expect(html).toMatch(/disabled=""[^>]*>Сохранить как тест-кейс/);
     expect(html).toContain('пока недоступны');
+  });
+
+  it('labels separate CRM effects and a checkout as simulated without claiming payment creation', () => {
+    const html = renderToStaticMarkup(createElement(TestTurnInspector, {
+      turn: { ...turn, effectSource: 'crm', outcome: 'checkout', reply: null,
+        checkout: { method: 'invoice', amount: '5000', status: 'would_create' } },
+    }));
+    expect(html).toContain('Отдельный CRM-разбор');
+    expect(html).toContain('5000');
+    expect(html).toContain('Счёт и платёж не созданы');
+    expect(html).toContain('Следующие ходы не включают платёжные инструкции Kaspi');
+  });
+
+  it('shows a checkout proposal instead of saying the agent silently failed to answer', () => {
+    expect(turnBubbleText({ ...turn, reply: null, outcome: 'checkout',
+      checkout: { method: 'invoice', amount: '5000', status: 'would_create' } }))
+      .toContain('счёт');
   });
 
   it('shows a retryable warning when a list reload fails with stale data', () => {

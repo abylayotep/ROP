@@ -16,10 +16,19 @@ const outcomeLabels: Record<string, string> = {
   sent: 'Ответ отправился бы клиенту',
   unrecorded: 'Ответ отправился бы, но не записался бы',
   applied: 'Карточка лида обновилась бы без ответа',
+  checkout: 'CRM предложил создать счёт вместо ответа агента',
   handoff: 'Диалог перешёл бы человеку',
   failed: 'Агент не смог подготовить ответ',
   skipped: 'Агент не стал бы отвечать',
 };
+
+export function turnBubbleText(turn: AiSandboxTurn): string {
+  if (turn.reply !== null) return turn.reply;
+  if (turn.checkout) return turn.checkout.status === 'would_create'
+    ? `CRM запросил бы счёт на ${turn.checkout.amount} ₸`
+    : 'Счёт не был бы создан без номера клиента';
+  return 'Агент не ответил';
+}
 
 export function TestScreen() {
   const { agent, role } = useAgent();
@@ -189,7 +198,7 @@ function TestWorkspace({ agentId }: { agentId: string }) {
                     className={`test-bubble test-bubble-agent ${chat.selectedTurnId === turn.id ? 'test-bubble-selected' : ''}`}
                     onClick={() => setChat((state) => selectTurn(state, turn.id))}
                     aria-pressed={chat.selectedTurnId === turn.id}>
-                    {turn.reply ?? 'Агент не ответил'}
+                    {turnBubbleText(turn)}
                     <small>Ход {turn.revision} · показать источники и эффекты</small>
                   </button>
                 </div>
@@ -262,10 +271,17 @@ export function TestTurnInspector({ turn }: { turn: AiSandboxTurn | null }) {
           </div>
           <div className="test-inspector-group">
             <h3>Предполагаемый результат</h3>
+            <p>{turn.effectSource === 'crm'
+              ? 'Отдельный CRM-разбор: показаны только его этап и поля; предложения AI-ответа не применялись.'
+              : 'Этап и поля предложены AI-ответом.'}</p>
             <p>{outcomeLabels[turn.outcome] ?? turn.outcome}</p>
             {turn.detail && <p>{turn.detail}</p>}
             {turn.stageName && <p>Этап: {turn.stageName}</p>}
             {turn.fields.map((field) => <p key={field.id}>{field.name}: {field.value}</p>)}
+            {turn.checkout && <p>Счёт {turn.checkout.method === 'qr' ? 'QR' : 'Kaspi'} на {turn.checkout.amount} ₸:
+              {' '}{turn.checkout.status === 'would_create' ? 'CRM запросил бы создание; ответ Kaspi неизвестен.'
+                : 'не был бы создан без номера клиента.'} Счёт и платёж не созданы.</p>}
+            {turn.checkout && <p>Следующие ходы не включают платёжные инструкции Kaspi, потому что внешний сервис не вызывался.</p>}
             {turn.handoff && <p>Передача человеку: {turn.handoff}</p>}
           </div>
           <div className="test-inspector-group test-inspector-meta">

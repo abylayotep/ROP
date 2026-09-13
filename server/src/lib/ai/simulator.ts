@@ -4,6 +4,7 @@ import type { Db } from '../../db/client.js';
 import { agents, aiSandboxSessions, aiSandboxTurns } from '../../db/schema.js';
 import { releaseTurnSlot, tryTakeTurnSlot } from '../../db/turn-cap.js';
 import { ApiError } from '../errors.js';
+import { simulateCrmAnalysis } from '../crm/simulate.js';
 import { HISTORY_LIMIT } from './prompt.js';
 import { executeAiCore, type TurnDeps } from './turn.js';
 
@@ -46,38 +47,52 @@ export async function runSimulatorTurn(
     const previous = await db.select().from(aiSandboxTurns)
       .where(and(eq(aiSandboxTurns.sessionId, session.id),
         eq(aiSandboxTurns.agentId, agent.id), eq(aiSandboxTurns.accountId, agent.accountId)))
-      .orderBy(desc(aiSandboxTurns.revision)).limit(HISTORY_LIMIT);
-    const history = previous.reverse().flatMap((turn) => [
+      .orderBy(desc(aiSandboxTurns.revision)).limit(25);
+    previous.reverse();
+    const history = previous.flatMap((turn) => [
       { author: 'client', body: turn.userText, kind: 'text' },
       ...(turn.reply === null ? [] : [{ author: 'ai', body: turn.reply, kind: 'text' }]),
     ]).concat({ author: 'client', body: text, kind: 'text' }).slice(-HISTORY_LIMIT);
 
-    const core = await executeAiCore(db, deps, {
-      agent, history, stageId: session.stageId, stageName: session.stageName,
-      values: session.fields.map(({ id, name, value }) => ({ fieldId: id, name, value })),
-      allowProposedCrm: true,
+    const crm = deps.crm ? await simulateCrmAnalysis(db, deps, agent, session, previous, text) : null;
+    const crmStageId = crm?.stage?.id ?? session.stageId;
+    const crmStageName = crm?.stage?.name ?? session.stageName;
+    const crmFields = [...session.fields];
+    for (const field of crm?.fields ?? []) {
+      const at = crmFields.findIndex(({ id }) => id === field.id);
+      if (at === -1) crmFields.push(field);
+      else crmFields[at] = field;
+    }
+    const core = crm?.error || crm?.checkout ? null : await executeAiCore(db, deps, {
+      agent, history, stageId: crmStageId, stageName: crmStageName,
+      values: crmFields.map(({ id, name, value }) => ({ fieldId: id, name, value })),
+      allowProposedCrm: crm === null,
       // A browser rehearsal has no paid order or live conversation to confirm.
       canMoveToSuccess: async () => false,
     });
 
-    const body = core.kind === 'ready' ? core.reply?.reply.trim() ?? '' : '';
-    const withheld = core.kind === 'ready' && core.invented !== null;
+    const body = core?.kind === 'ready' ? core.reply?.reply.trim() ?? '' : '';
+    const withheld = core?.kind === 'ready' && core.invented !== null;
     const reply = body === '' || withheld ? null : body;
-    const handoff = core.kind === 'ready' ? core.handoffReason : null;
-    const stage = core.kind === 'ready' ? core.targetStage : null;
-    const fields: AiTurnField[] = core.kind === 'ready'
+    const handoff = core?.kind === 'ready' ? core.handoffReason : null;
+    const stage = crm?.stage ?? (core?.kind === 'ready' ? core.targetStage : null);
+    const fields: AiTurnField[] = crm?.fields ?? (core?.kind === 'ready'
       ? Object.entries(core.fields).map(([id, value]) => ({
           id, name: core.fieldRows.find((field) => field.id === id)!.name, value,
-        })) : [];
-    const outcome = core.kind !== 'ready' ? core.kind
+        })) : []);
+    const outcome = crm?.error ? 'failed' : crm?.checkout ? 'checkout' : core?.kind !== 'ready' ? core!.kind
       : handoff !== null ? 'handoff' : body === '' ? 'applied' : 'sent';
-    const details = core.kind === 'ready'
+    const details = crm?.error ? [crm.error] : crm?.checkout
+      ? [crm.checkout.status === 'would_create'
+        ? 'Только предложение счёта: Kaspi не вызывался, заказ и платёж не созданы.'
+        : 'Счёт не был бы создан: у клиента нет номера телефона.']
+      : core?.kind === 'ready'
       ? [...core.details, ...(core.unreadableDetail === null ? [] : [core.unreadableDetail])]
-      : [core.detail];
-    if (core.kind === 'ready' && body === '' && core.reply !== null) {
+      : [core!.detail];
+    if (core?.kind === 'ready' && body === '' && core.reply !== null) {
       details.push('Модель не написала ответа клиенту.');
     }
-    if (core.kind === 'ready' && core.invented !== null) {
+    if (core?.kind === 'ready' && core.invented !== null) {
       details.push(`в ответе есть число «${core.invented.slice(0, 40)}» без источника — ответ клиенту не отправлен.`);
     }
     const detail = details.length > 0 ? details.join(' ') : null;
@@ -96,6 +111,7 @@ export async function runSimulatorTurn(
         stageId: stage?.id ?? session.stageId,
         stageName: stage?.name ?? session.stageName,
         fields: merged,
+        ...(crm && !crm.error ? { crmSummary: crm.summary, crmProfile: crm.profile } : {}),
         outcome,
         handoff,
         updatedAt: new Date(),
@@ -107,9 +123,10 @@ export async function runSimulatorTurn(
         accountId: agent.accountId, agentId: agent.id, sessionId: session.id,
         revision: advanced.revision, userText: text, reply,
         configVersion: agent.configVersion, model: agent.model,
-        sourceIds: core.kind === 'ready' ? core.usedItemIds : [],
+        sourceIds: core?.kind === 'ready' ? core.usedItemIds : [],
         stageId: stage?.id ?? null, stageName: stage?.name ?? null,
-        fields, handoff, outcome, detail,
+        fields, handoff, outcome, detail, effectSource: crm ? 'crm' : 'ai',
+        checkout: crm?.checkout ?? null,
       }).returning();
       return turn!;
     });
@@ -118,8 +135,9 @@ export async function runSimulatorTurn(
       id: stored.id, revision: stored.revision, userText: stored.userText,
       reply: stored.reply, configVersion: stored.configVersion, model: stored.model,
       sourceIds: stored.sourceIds,
-      usedItems: core.kind === 'ready' ? core.usedItems : [],
+      usedItems: core?.kind === 'ready' ? core.usedItems : [],
       stageId: stored.stageId, stageName: stored.stageName, fields: stored.fields,
+      effectSource: stored.effectSource, checkout: stored.checkout,
       handoff: stored.handoff, outcome: stored.outcome, detail: stored.detail,
       createdAt: stored.createdAt.toISOString(),
     };

@@ -197,8 +197,8 @@ export function ProductEditor({ agentId, product, owner, onSaved, onClose, onDel
       if (product === null) {
         next = await api.createProduct(agentId, { name: name.trim(), description: description.trim(), active, variants: table.variants });
       } else {
-        await api.updateProduct(agentId, product.id, { name: name.trim(), description: description.trim(), active });
-        next = await api.replaceProductVariants(agentId, product.id, table.variants);
+        next = await api.updateProduct(agentId, product.id,
+          { name: name.trim(), description: description.trim(), active, variants: table.variants });
       }
       onSaved(next);
       setRows(rowsOf(next));

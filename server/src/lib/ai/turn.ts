@@ -1087,49 +1087,33 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
       photoIds = core.photos.map((photo) => photo.id);
     } else {
       /**
-       * The reply, then its photos, inside the one gated effect.
+       * One outbound effect under the same authorization the reply had.
        *
-       * Photos ride the reply's own authorization rather than asking again: a handoff reply
-       * is allowed by a check that a second, ordinary one would refuse, and a photo sent
-       * without the sentence it illustrates is worse than none. The price is holding the
-       * automation lock across up to three more sends, each bounded by the transport's own
-       * deadline. A photo that fails never touches the reply's delivery.
+       * Taken once for the text and again for every photo, each its own short critical
+       * section, so other conversations of this agent interleave between sends instead of
+       * waiting out three photo deadlines. A handoff reply is allowed by its own check — the
+       * conversation's switch is already off — which asks that nothing but this turn has
+       * written since `expectedNewestId`; each send moves that marker to its own message.
        */
-      const send = async (tx: AutomationTransaction): Promise<Delivery> => {
-        const delivered = await deliver(tx, deps, {
+      const gated = <T>(expectedNewestId: string, effect: (tx: AutomationTransaction) => Promise<T>) =>
+        handoffReason === null
+          ? withAutomationEffect(db, input, 'reply', (tx, snapshot) =>
+              input.crmOrigin && snapshot.crmAnalysisMode !== 'follow_ai' ? Promise.resolve(null) : effect(tx))
+            .then((result) => (result.allowed ? result.value : null))
+          : withAgentAutomationLock(db, agent.id, async (tx) => {
+              const effectDb = tx as unknown as Db;
+              if (input.crmOrigin && !await crmOriginAllowed(effectDb, input, 'crm')) return null;
+              if (!await handoffReplyAllowed(effectDb, input, ownsHandoff, expectedNewestId)) return null;
+              return effect(tx);
+            });
+      const sent = await gated(before.lastMessageId, (tx) =>
+        deliver(tx, deps, {
           conversation,
           channel: ready.delivery.channel,
           address: ready.delivery.address,
           transport: ready.transport,
           body,
-        });
-        if (delivered.state !== 'sent' || core.photos.length === 0) return delivered;
-        const outcome = await sendPhotos(tx, {
-          agentId: agent.id,
-          conversation,
-          channel: ready.delivery.channel,
-          address: ready.delivery.address,
-          transport: ready.transport,
-          mediaDir: deps.env?.MEDIA_DIR,
-          photoIds: core.photos.map((photo) => photo.id),
-        });
-        photoIds = outcome.sent;
-        if (outcome.detail !== null) details.push(outcome.detail);
-        return delivered;
-      };
-      const sent = handoffReason === null
-        ? await withAutomationEffect(db, input, 'reply', (tx, snapshot) =>
-            input.crmOrigin && snapshot.crmAnalysisMode !== 'follow_ai' ? Promise.resolve(null) : send(tx)).then((result) =>
-            result.allowed ? result.value : null,
-          )
-        : await withAgentAutomationLock(db, agent.id, async (tx) => {
-            const effectDb = tx as unknown as Db;
-            if (input.crmOrigin && !await crmOriginAllowed(effectDb, input, 'crm')) return null;
-            if (!await handoffReplyAllowed(effectDb, input, ownsHandoff, before.lastMessageId)) {
-              return null;
-            }
-            return send(tx);
-          });
+        }));
       if (sent === null) {
         // The handoff above still happened — the switch is off and the note is written —
         // so the person it was handed to is still told.
@@ -1138,6 +1122,33 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
       }
       delivery = sent;
       if (delivery.state !== 'sent') details.push(delivery.detail);
+
+      // Photos only after a text that is on the thread: an unrecorded reply leaves no message
+      // for the handoff check to anchor on, and a photo without its sentence explains nothing.
+      if (delivery.state === 'sent' && delivery.messageId !== null && core.photos.length > 0) {
+        let newest = delivery.messageId;
+        const notes: string[] = [];
+        for (const photo of core.photos) {
+          const result = await gated(newest, (tx) => sendPhoto(tx, {
+            agentId: agent.id,
+            conversation,
+            channel: ready.delivery.channel,
+            address: ready.delivery.address,
+            transport: ready.transport,
+            mediaDir: deps.env?.MEDIA_DIR,
+            photoId: photo.id,
+          }));
+          if (result === null) {
+            notes.push('Остальные фото не отправлены: автоматизация для диалога выключилась.');
+            break;
+          }
+          if (result.state === 'gone') { notes.push(result.detail); continue; }
+          if (result.state !== 'failed') photoIds.push(photo.id);
+          if (result.state !== 'sent') { notes.push(result.detail); break; }
+          newest = result.messageId;
+        }
+        if (notes.length > 0) details.push(notes.join(' '));
+      }
     }
   }
 
@@ -1360,18 +1371,19 @@ async function deliver(
 }
 
 /**
- * Catalog photos, sent one by one after the reply the way an operator's file is.
+ * One catalog photo, sent the way an operator's file is.
  *
- * Each goes through the operator's own road: the bytes are copied under a message-owned name
- * first, so the conversation keeps showing the photo after the owner deletes it from the
- * catalog; then the transport sends; then the row is written, carrying `productPhotoId` so the
- * next turn knows. The first failure stops the rest — a phone that did not take one photo is
- * unlikely to take the next, and each attempt can hold the lock for its full deadline.
- *
- * Re-read against the catalog here rather than trusted from the prompt: a photo deleted or a
- * product switched off while the model was thinking is not sent.
+ * The bytes are copied under a message-owned name first, so the conversation keeps showing the
+ * photo after the owner deletes it from the catalog; then the transport sends; then the row is
+ * written, carrying `productPhotoId` so the next turn knows. The photo is re-read against the
+ * catalog here rather than trusted from the prompt: one deleted or switched off while the
+ * model was thinking is not sent.
  */
-async function sendPhotos(
+type PhotoSend =
+  | { state: 'sent'; messageId: string }
+  | { state: 'gone' | 'unrecorded' | 'failed'; detail: string };
+
+async function sendPhoto(
   db: AutomationTransaction,
   input: {
     agentId: string;
@@ -1380,70 +1392,64 @@ async function sendPhotos(
     address: string;
     transport: MessageTransport;
     mediaDir: string | undefined;
-    photoIds: readonly string[];
+    photoId: string;
   },
-): Promise<{ sent: string[]; detail: string | null }> {
+): Promise<PhotoSend> {
   const { conversation, channel, address, transport, mediaDir } = input;
-  if (mediaDir === undefined) return { sent: [], detail: 'Фото не отправлены: хранилище файлов не настроено.' };
+  if (mediaDir === undefined) return { state: 'failed', detail: 'Фото не отправлено: хранилище файлов не настроено.' };
 
-  const rows = await db
+  const [row] = await db
     .select({ photo: productPhotos })
     .from(productPhotos)
     .innerJoin(products, eq(products.id, productPhotos.productId))
-    .where(and(inArray(productPhotos.id, [...input.photoIds]), eq(products.agentId, input.agentId),
-      eq(products.active, true)));
-  const byId = new Map(rows.map(({ photo }) => [photo.id, photo]));
-  const photos = input.photoIds.flatMap((id) => byId.get(id) ?? []);
-  const sent: string[] = [];
-  const gone = input.photoIds.length - photos.length;
-  const notes = gone > 0 ? [`Фото удалили из каталога до отправки: ${gone}.`] : [];
+    .where(and(eq(productPhotos.id, input.photoId), eq(products.agentId, input.agentId), eq(products.active, true)));
+  if (!row) return { state: 'gone', detail: 'Фото удалили из каталога до отправки.' };
+  const { photo } = row;
 
-  for (const photo of photos) {
-    let copy: string | null = null;
-    let accepted = false;
-    try {
-      const bytes = await readFile(join(mediaDir, photo.mediaPath));
-      copy = (await storeInboundMedia({ mediaDir }, {
-        bytes, mime: photo.mediaMime, agentId: input.agentId, waMessageId: `out.${randomUUID()}`,
-      })).path;
-      const { messageId } = await transport.sendMedia(address, {
-        path: join(mediaDir, copy),
-        mime: photo.mediaMime,
-        filename: photo.filename || undefined,
-      });
-      accepted = true;
-      const storedPath = copy;
-      await db.transaction(async (savepoint) => {
-        const sentAt = new Date();
-        await savepoint.insert(messages).values({
-          conversationId: conversation.id,
-          waMessageId: channel === 'whatsapp' ? messageId : null,
-          instagramMessageId: channel === 'instagram' ? messageId : null,
-          direction: 'out',
-          author: 'ai',
-          kind: 'image',
-          body: null,
-          status: 'sent',
-          sentAt,
-          mediaPath: storedPath,
-          mediaMime: photo.mediaMime,
-          productPhotoId: photo.id,
-        });
-        await savepoint.update(conversations).set({ lastMessageAt: sentAt })
-          .where(eq(conversations.id, conversation.id));
-      });
-      sent.push(photo.id);
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      if (accepted) {
-        notes.push(`Фото доставлено клиенту, но не сохранено в переписке: ${reason}`);
-        sent.push(photo.id);
-      } else {
-        if (copy !== null) await removeStoredFiles(mediaDir, [copy]);
-        notes.push(`Фото не отправлено: ${reason}`);
-      }
-      break;
+  let copy: string | null = null;
+  let accepted = false;
+  try {
+    const [fresh] = await db.select({ lastInboundAt: conversations.lastInboundAt })
+      .from(conversations).where(eq(conversations.id, conversation.id));
+    if (!fresh || !windowOpen(fresh.lastInboundAt)) {
+      return { state: 'failed', detail: 'Фото не отправлено: окно ответа закрылось.' };
     }
+    const bytes = await readFile(join(mediaDir, photo.mediaPath));
+    copy = (await storeInboundMedia({ mediaDir }, {
+      bytes, mime: photo.mediaMime, agentId: input.agentId, waMessageId: `out.${randomUUID()}`,
+    })).path;
+    const { messageId } = await transport.sendMedia(address, {
+      path: join(mediaDir, copy),
+      mime: photo.mediaMime,
+      filename: photo.filename || undefined,
+    });
+    accepted = true;
+    const storedPath = copy;
+    const storedId = await db.transaction(async (savepoint) => {
+      const sentAt = new Date();
+      const [stored] = await savepoint.insert(messages).values({
+        conversationId: conversation.id,
+        waMessageId: channel === 'whatsapp' ? messageId : null,
+        instagramMessageId: channel === 'instagram' ? messageId : null,
+        direction: 'out',
+        author: 'ai',
+        kind: 'image',
+        body: null,
+        status: 'sent',
+        sentAt,
+        mediaPath: storedPath,
+        mediaMime: photo.mediaMime,
+        productPhotoId: photo.id,
+      }).returning({ id: messages.id });
+      await savepoint.update(conversations).set({ lastMessageAt: sentAt })
+        .where(eq(conversations.id, conversation.id));
+      return stored!.id;
+    });
+    return { state: 'sent', messageId: storedId };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    if (accepted) return { state: 'unrecorded', detail: `Фото доставлено клиенту, но не сохранено в переписке: ${reason}` };
+    if (copy !== null) await removeStoredFiles(mediaDir, [copy]);
+    return { state: 'failed', detail: `Фото не отправлено: ${reason}` };
   }
-  return { sent, detail: notes.length === 0 ? null : notes.join(' ') };
 }

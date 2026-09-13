@@ -122,13 +122,21 @@ describe('product catalog API', () => {
       .toEqual([['40 мм', 90000, 0], ['30 мм', 72000, 1]]);
     expect(await version()).toBe(start + 4);
 
+    // The editor's save: fields and the size table in one request, one version.
+    const together = await app.inject({
+      method: 'PATCH', url: url(`/${product.id}`), cookies: owner,
+      payload: { description: 'Стальная', variants: [{ label: '', price: 80000 }] },
+    });
+    expect(together.json()).toMatchObject({ description: 'Стальная', variants: [{ label: '', price: 80000 }] });
+    expect(await version()).toBe(start + 5);
+
     const list = await app.inject({ method: 'GET', url: url(), cookies: member });
     expect(list.statusCode).toBe(200);
     expect((list.json() as Product[]).map((p) => p.name)).toEqual(['Дверь «Базальт»', 'Ручка']);
 
     const removed = await app.inject({ method: 'DELETE', url: url(`/${product.id}`), cookies: owner });
     expect(removed.statusCode).toBe(200);
-    expect(await version()).toBe(start + 5);
+    expect(await version()).toBe(start + 6);
     expect(((await app.inject({ method: 'GET', url: url(), cookies: owner })).json() as Product[])).toHaveLength(1);
   });
 

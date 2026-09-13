@@ -179,6 +179,24 @@ describe('catalog photos in a live turn', () => {
     expect(await thread()).toHaveLength(1);
   });
 
+  it('re-checks the automation gate before every photo and stops when it refuses', async () => {
+    const base = graph.sendMedia!;
+    graph = { ...graph, sendMedia: async (...args) => {
+      const sent = await base(...args);
+      // Between the first photo and the second, the owner switches the agent off.
+      await db.update(agents).set({ responseMode: 'off' }).where(eq(agents.id, agentId));
+      return sent;
+    } };
+    const result = await runTurn(db, deps(fakeModel(answer({ photoIds: [photoIds[0], photoIds[1], photoIds[2]] }))),
+      { agentId, conversationId });
+
+    expect(result.outcome).toBe('sent');
+    expect(media).toHaveLength(1);
+    expect(result.photoIds).toEqual([photoIds[0]]);
+    expect(result.detail).toContain('Остальные фото не отправлены');
+    expect((await thread()).map((row) => row.kind)).toEqual(['text', 'text', 'image']);
+  });
+
   it('keeps the text outcome when a photo fails, stops the rest and says why', async () => {
     failMedia = new Error('media upload refused');
     const result = await runTurn(db, deps(fakeModel(answer({ photoIds: [photoIds[0], photoIds[1]] }))),

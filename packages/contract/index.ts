@@ -746,6 +746,8 @@ export interface ProductUpdateRequest {
   name?: string;
   description?: string;
   active?: boolean;
+  /** Replaces every variant in the same transaction as the fields. */
+  variants?: ProductVariantInput[];
 }
 
 /** Replaces every variant: the editor saves the table as a whole. */

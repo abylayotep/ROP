@@ -48,6 +48,8 @@ const updateProduct = z.object({
   name: z.string().trim().min(1).max(NAME_MAX).optional(),
   description: z.string().trim().max(DESCRIPTION_MAX).optional(),
   active: z.boolean().optional(),
+  // The editor saves fields and the size table together, so one save is one version.
+  variants: variantList.optional(),
 });
 const replaceVariants = z.object({ variants: variantList });
 const photoOrder = z.object({ photoIds: z.array(z.string()).max(PHOTOS_PER_PRODUCT) });
@@ -151,7 +153,9 @@ export function registerProductRoutes(
 
     await db.transaction(async (tx) => {
       await ownProduct(agentId, productId, tx);
-      await tx.update(products).set({ ...parsed.data, updatedAt: sql`now()` }).where(eq(products.id, productId));
+      const { variants, ...fields } = parsed.data;
+      await tx.update(products).set({ ...fields, updatedAt: sql`now()` }).where(eq(products.id, productId));
+      if (variants !== undefined) await writeVariants(tx, productId, variants);
       await bumpConfigVersion(tx as unknown as Db, agentId);
     });
     return productById(agentId, productId);

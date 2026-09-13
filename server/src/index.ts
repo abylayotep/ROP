@@ -180,11 +180,24 @@ const reconcilePayments = async () => {
   kaspiRunning = true;
   try { await reconcileKaspiPayments(db,env); }
   catch { app.log.error('kaspi: reconciliation failed'); }
-  // Chat-paid orders have no Kaspi row, so their lost purchases are recovered separately.
-  try { await queueMissingPurchases(db); }
-  catch { app.log.error('capi: purchase recovery failed'); }
   finally { kaspiRunning = false; }
 };
 void reconcilePayments();
 const kaspiTimer = setInterval(() => void reconcilePayments(),5_000);
 kaspiTimer.unref();
+// Chat-paid orders have no Kaspi row, so their lost purchases are recovered on their own,
+// slower clock: a lost report is rare, and the sweep reads every tenant's recent orders.
+let purchaseRecoveryRunning = false;
+const recoverPurchases = async () => {
+  if (purchaseRecoveryRunning) return;
+  purchaseRecoveryRunning = true;
+  try {
+    const missing = await queueMissingPurchases(db);
+    if (missing.length > 0) app.log.warn({ count: missing.length, orderIds: missing }, 'capi: paid orders still without a purchase after recovery');
+  }
+  catch { app.log.error('capi: purchase recovery failed'); }
+  finally { purchaseRecoveryRunning = false; }
+};
+void recoverPurchases();
+const purchaseRecoveryTimer = setInterval(() => void recoverPurchases(),60_000);
+purchaseRecoveryTimer.unref();

@@ -49,6 +49,12 @@ describe('durable Kaspi checkout', () => {
     await reconcileKaspiPayment(db, env, agentId, created.id);
     expect(fetcher).toHaveBeenCalledTimes(3);
   });
+  it('refuses a new invoice for a deal that already has a paid order', async () => {
+    await db.insert(orders).values({ agentId, conversationId, amount: '6990', currency: 'KZT', status: 'paid', comment: 'Оплата по переписке', paidAt: new Date() });
+    await expect(createKaspiCheckout(db, env, input())).rejects.toMatchObject({ statusCode: 409, message: 'У сделки уже есть оплаченный заказ' });
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(await db.select().from(kaspiPayments)).toHaveLength(0);
+  });
   it('retains an unknown create and never sends a second invoice after a timeout', async () => {
     fetcher.mockRejectedValue(new Error('timeout'));
     const created = await createKaspiCheckout(db, env, input());

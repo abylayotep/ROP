@@ -261,12 +261,21 @@ describe('an order becoming paid', () => {
     await db.insert(orders).values({ agentId, conversationId: adConversationId, amount: '100', currency: 'KZT',
       status: 'paid', paidAt: new Date(Date.now() - 30 * 86_400_000) });
 
-    await queueMissingPurchases(db);
-    await queueMissingPurchases(db);
+    expect(await queueMissingPurchases(db)).toEqual([]);
+    expect(await queueMissingPurchases(db)).toEqual([]);
 
     const rows = await queued();
     expect(rows).toHaveLength(1);
     expect(rows[0]!.eventId).toBe(purchaseEventId(order!.id));
+  });
+
+  it('names the orders a sweep still could not queue a purchase for', async () => {
+    const [order] = await db.insert(orders).values({ agentId, conversationId: adConversationId, amount: '6990', currency: 'KZT',
+      status: 'paid', comment: 'Оплата по переписке', paidAt: new Date() }).returning();
+
+    // queuePurchase swallows its failures, so a failing one is one that leaves no row.
+    expect(await queueMissingPurchases(db, async () => {})).toEqual([order!.id]);
+    expect(await queued()).toHaveLength(0);
   });
 
   it('queues a purchase for a provider-confirmed order', async () => {

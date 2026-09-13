@@ -20,6 +20,11 @@ export async function activeSession(db: Db, env: Env, agentId: string): Promise<
 export function paymentDto(row: typeof kaspiPayments.$inferSelect) {
   return { id: row.id, orderId: row.orderId, conversationId: row.conversationId, method: row.method, phone: row.phone, amount: row.amount, status: row.status, operationId: row.operationId, qrToken: row.qrToken, paymentUrl: row.paymentUrl, error: row.error ?? (row.notificationStatus === 'unknown' ? 'Доставка сообщения об оплате не подтверждена. Проверьте переписку перед повторной отправкой.' : null), confirmedAt: row.confirmedAt?.toISOString() ?? null };
 }
+/** One sale per deal: once an order is paid (by Kaspi or in the chat), no further invoice is issued. */
+async function refuseAfterPaidOrder(db: Pick<Db, 'select'>, conversationId: string) {
+  const [paid] = await db.select({ id: orders.id }).from(orders).where(and(eq(orders.conversationId, conversationId), eq(orders.status, 'paid'))).limit(1);
+  if (paid) throw new ApiError(409, 'У сделки уже есть оплаченный заказ');
+}
 export async function createKaspiCheckout(db: Db, env: Env, input: { agentId: string; conversationId: string; amount: string; phone: string; method?: 'invoice' | 'qr'; requestKey: string; comment?: string }) {
   const amount = validateAmount(input.amount);
   const method = input.method ?? 'invoice';
@@ -31,6 +36,7 @@ export async function createKaspiCheckout(db: Db, env: Env, input: { agentId: st
     if (existingRequest.conversationId !== input.conversationId || Number(existingRequest.amount) !== Number(amount) || existingRequest.method !== method || existingRequest.phone !== phone) throw new ApiError(409, 'Этот запрос уже использован для другого счёта');
     return paymentDto(existingRequest);
   }
+  await refuseAfterPaidOrder(db, input.conversationId);
   if (method === 'qr') {
     const [open] = await db.select().from(kaspiPayments).where(and(eq(kaspiPayments.agentId, input.agentId), eq(kaspiPayments.conversationId, input.conversationId), eq(kaspiPayments.status, 'pending')));
     if (open?.method === 'invoice' && open.operationId && Number(open.amount) === Number(amount)) {
@@ -49,6 +55,7 @@ export async function createKaspiCheckout(db: Db, env: Env, input: { agentId: st
       if (prior.conversationId !== input.conversationId || Number(prior.amount) !== Number(amount) || prior.method !== method || prior.phone !== phone) throw new ApiError(409, 'Этот запрос уже использован для другого счёта');
       return { row: prior, fresh: false };
     }
+    await refuseAfterPaidOrder(tx, input.conversationId);
     const [open] = await tx.select().from(kaspiPayments).where(and(eq(kaspiPayments.conversationId, input.conversationId), inArray(kaspiPayments.status, ['creating', 'unknown', 'pending'])));
     if (open) throw new ApiError(409, 'В этом диалоге уже есть незавершённый счёт. Проверьте его статус');
     const [agent] = await tx.select().from(agents).where(eq(agents.id, input.agentId));

@@ -3,6 +3,7 @@ import { eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildServer } from '../src/api/server.js';
+import { instagramOAuthFailureKind } from '../src/api/instagram.js';
 import { agents, capiEvents, capiSettings, contacts, conversations, instagramAccounts, instagramContacts, instagramEvents, messages, notes, stages } from '../src/db/schema.js';
 import { applyInstagramPayload, processPendingInstagramEvents } from '../src/lib/instagram/inbound.js';
 import { createAccountWithOwner } from '../src/lib/provision.js';
@@ -10,6 +11,8 @@ import { decryptSecret, encryptSecret } from '../src/lib/secret-box.js';
 import { withDb } from './helpers/db.js';
 import { testEnv } from './helpers/env.js';
 import { fakeGraph } from './helpers/fake-graph.js';
+import { GraphError } from '../src/lib/whatsapp/graph.js';
+import { InstagramMessagingError } from '../src/lib/instagram/messaging-graph.js';
 import { fakeInstagramMessaging } from './helpers/fake-instagram-messaging.js';
 import { fakeLinked } from './helpers/fake-linked.js';
 import { fakeModel } from './helpers/fake-model.js';
@@ -38,15 +41,32 @@ beforeEach(async () => {
 afterEach(async () => { await app.close(); });
 
 describe('Instagram Direct', () => {
+  it('classifies an OAuth redirect error without exposing provider text or credentials', () => {
+    const error = new GraphError('Error validating verification code: redirect_uri differs; secret page-secret', 400, 100);
+    expect(instagramOAuthFailureKind(error)).toBe('redirect_uri');
+    expect(instagramOAuthFailureKind(new Error('page-secret'))).toBe('transport_or_unknown');
+  });
   it('connects with an encrypted Page token and never serializes it', async () => {
-    const response = await app.inject({ method: 'POST', url: `/api/agents/${agentId}/instagram/connect`, cookies: jar, payload: { code: 'oauth-code' } });
+    const response = await app.inject({ method: 'POST', url: `/api/agents/${agentId}/instagram/connect`, cookies: jar, payload: { accessToken: 'short-user-token' } });
     expect(response.statusCode).toBe(200);
-    expect(response.body).not.toContain('page-secret'); expect(response.body).not.toContain('oauth-code');
+    expect(response.body).not.toContain('page-secret'); expect(response.body).not.toContain('short-user-token');
     const [stored] = await db.select().from(instagramAccounts);
     expect(stored!.accessToken).not.toBe('page-secret');
     expect(decryptSecret(stored!.accessToken, key, stored!.instagramUserId)).toBe('page-secret');
     expect(response.json().account).toMatchObject({ username: 'shop', subscribed: true, enabled: true });
     expect(messaging.calls.find((call) => call.method === 'subscribe')?.args).toEqual(['page-1', 'page-secret', env.META_APP_ID]);
+  });
+
+  it('validates and extends a short-lived Direct token before account discovery', async () => {
+    await app.close();
+    const graph = fakeGraph();
+    app = buildServer(env, db, { graph, instagramMessaging: messaging }); await app.ready();
+    const response = await app.inject({ method: 'POST', url: `/api/agents/${agentId}/instagram/connect`,
+      cookies: jar, payload: { accessToken: 'short-user-token' } });
+    expect(response.statusCode).toBe(200);
+    expect(graph.calls.find((call) => call.method === 'exchangeUserToken')?.args)
+      .toEqual(['short-user-token', env.META_APP_ID, env.META_APP_SECRET]);
+    expect(response.body).not.toContain('short-user-token');
   });
 
   it('asks the owner to select when Meta exposes several accounts', async () => {
@@ -56,9 +76,35 @@ describe('Instagram Direct', () => {
       { instagramUserId: 'ig-2', username: 'two', pageId: 'p2', pageName: 'Two', pageToken: 'two-secret' },
     ]);
     app = buildServer(env, db, { graph: fakeGraph(), instagramMessaging: messaging }); await app.ready();
-    const response = await app.inject({ method: 'POST', url: `/api/agents/${agentId}/instagram/connect`, cookies: jar, payload: { code: 'oauth-code' } });
+    const response = await app.inject({ method: 'POST', url: `/api/agents/${agentId}/instagram/connect`, cookies: jar, payload: { accessToken: 'short-user-token' } });
     expect(response.json()).toMatchObject({ account: null, choices: [{ instagramUserId: 'ig-1' }, { instagramUserId: 'ig-2' }] });
     expect(await db.select().from(instagramAccounts)).toEqual([]);
+  });
+
+  it('identifies a token exchange failure without exposing provider text or the token', async () => {
+    await app.close();
+    app = buildServer(env, db, { graph: fakeGraph({ exchangeUserToken: async () => {
+      throw new GraphError('short-user-token page-secret', 400, 190);
+    } }), instagramMessaging: messaging }); await app.ready();
+    const response = await app.inject({ method: 'POST', url: `/api/agents/${agentId}/instagram/connect`, cookies: jar, payload: { accessToken: 'short-user-token' } });
+    expect(response.statusCode).toBe(502);
+    expect(response.json().message).toContain('доступ Instagram');
+    expect(response.body).not.toContain('short-user-token');
+    expect(response.body).not.toContain('page-secret');
+    expect(messaging.calls).toEqual([]);
+  });
+
+  it('identifies account discovery failure without exposing a Page token', async () => {
+    await app.close();
+    messaging = fakeInstagramMessaging(undefined, { discover: async () => {
+      throw new InstagramMessagingError('page-secret', 403, 10, 123);
+    } });
+    app = buildServer(env, db, { graph: fakeGraph(), instagramMessaging: messaging }); await app.ready();
+    const response = await app.inject({ method: 'POST', url: `/api/agents/${agentId}/instagram/connect`, cookies: jar, payload: { accessToken: 'short-user-token' } });
+    expect(response.statusCode).toBe(502);
+    expect(response.json().message).toContain('связанный Instagram');
+    expect(response.body).not.toContain('page-secret');
+    expect(response.body).not.toContain('short-user-token');
   });
 
   it('persists a non-ready account before subscribing so an immediate webhook can route', async () => {
@@ -66,10 +112,10 @@ describe('Instagram Direct', () => {
     let visibleDuringSubscription = false;
     messaging = fakeInstagramMessaging(undefined, { subscribe: async () => {
       const [stored] = await db.select().from(instagramAccounts);
-      visibleDuringSubscription = stored?.subscribedAt === null;
+      visibleDuringSubscription = stored?.subscribedAt === null && stored.enabled === false;
     } });
     app = buildServer(env, db, { graph: fakeGraph(), instagramMessaging: messaging }); await app.ready();
-    const response = await app.inject({ method: 'POST', url: `/api/agents/${agentId}/instagram/connect`, cookies: jar, payload: { code: 'oauth-code' } });
+    const response = await app.inject({ method: 'POST', url: `/api/agents/${agentId}/instagram/connect`, cookies: jar, payload: { accessToken: 'short-user-token' } });
     expect(response.statusCode).toBe(200);
     expect(visibleDuringSubscription).toBe(true);
   });
@@ -78,10 +124,26 @@ describe('Instagram Direct', () => {
     await app.close();
     messaging = fakeInstagramMessaging(undefined, { subscribe: async () => { throw new Error('provider refused page-secret'); } });
     app = buildServer(env, db, { graph: fakeGraph(), instagramMessaging: messaging }); await app.ready();
-    const response = await app.inject({ method: 'POST', url: `/api/agents/${agentId}/instagram/connect`, cookies: jar, payload: { code: 'oauth-code' } });
+    const response = await app.inject({ method: 'POST', url: `/api/agents/${agentId}/instagram/connect`, cookies: jar, payload: { accessToken: 'short-user-token' } });
     expect(response.statusCode).toBe(502); expect(response.body).not.toContain('page-secret');
     const [stored] = await db.select().from(instagramAccounts);
     expect(stored!.subscribedAt).toBeNull();
+    expect(stored!.enabled).toBe(false);
+  });
+  it('preserves a working account when a reconnect subscription fails', async () => {
+    await db.insert(instagramAccounts).values({ agentId, instagramUserId: 'ig-business-1',
+      pageId: 'page-1', username: 'shop', accessToken: encryptSecret('old-token', key, 'ig-business-1'),
+      subscribedAt: new Date(), enabled: true });
+    await app.close();
+    messaging = fakeInstagramMessaging(undefined, { subscribe: async () => { throw new Error('provider refused'); } });
+    app = buildServer(env, db, { graph: fakeGraph(), instagramMessaging: messaging }); await app.ready();
+    const response = await app.inject({ method: 'POST', url: `/api/agents/${agentId}/instagram/connect`,
+      cookies: jar, payload: { accessToken: 'short-user-token' } });
+    expect(response.statusCode).toBe(502);
+    const [stored] = await db.select().from(instagramAccounts);
+    expect(stored!.enabled).toBe(true);
+    expect(stored!.subscribedAt).not.toBeNull();
+    expect(decryptSecret(stored!.accessToken, key, stored!.instagramUserId)).toBe('old-token');
   });
 
   it('stores one inbound text and one conversation across redelivery', async () => {
@@ -238,10 +300,10 @@ describe('Instagram Direct', () => {
 
   it('does not expose a provider error containing a credential', async () => {
     await app.close();
-    messaging = fakeInstagramMessaging([], { discover: async () => { throw new Error('bad page-secret oauth-code'); } });
+    messaging = fakeInstagramMessaging([], { discover: async () => { throw new Error('bad page-secret short-user-token'); } });
     app = buildServer(env, db, { graph: fakeGraph(), instagramMessaging: messaging }); await app.ready();
-    const response = await app.inject({ method: 'POST', url: `/api/agents/${agentId}/instagram/connect`, cookies: jar, payload: { code: 'oauth-code' } });
+    const response = await app.inject({ method: 'POST', url: `/api/agents/${agentId}/instagram/connect`, cookies: jar, payload: { accessToken: 'short-user-token' } });
     expect(response.statusCode).toBe(502);
-    expect(response.body).not.toContain('page-secret'); expect(response.body).not.toContain('oauth-code');
+    expect(response.body).not.toContain('page-secret'); expect(response.body).not.toContain('short-user-token');
   });
 });

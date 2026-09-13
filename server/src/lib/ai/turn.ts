@@ -89,6 +89,8 @@ export interface TurnInput {
   conversationId: string;
   /** The sandbox: everything happens except the writes and the send. */
   dryRun?: boolean;
+  /** A reply launched by the CRM worker may finish only while CRM follows AI scope. */
+  crmOrigin?: boolean;
 }
 
 /**
@@ -268,6 +270,12 @@ async function automationAllowed(
 ): Promise<boolean> {
   const snapshot = await loadAutomationSnapshot(db, input);
   return snapshot !== null && decideAutomation(snapshot, purpose).allowed;
+}
+
+async function crmOriginAllowed(db: Db, input: TurnInput, purpose: AutomationPurpose): Promise<boolean> {
+  const snapshot = await loadAutomationSnapshot(db, input);
+  return snapshot !== null && (!input.crmOrigin || snapshot.crmAnalysisMode === 'follow_ai')
+    && decideAutomation(snapshot, purpose).allowed;
 }
 
 async function handoffReplyAllowed(
@@ -758,7 +766,7 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
     // conversation that a person has to look at, and the customer is left to that person
     // rather than to a third attempt.
     const detail = core.unreadableDetail!;
-    const ownsHandoff = await handOff(db, { conversation, reason: detail, dryRun });
+    const ownsHandoff = await handOff(db, { conversation, reason: detail, dryRun, crmOrigin: input.crmOrigin });
     if (!ownsHandoff) return empty('skipped', 'Оператор взял диалог на себя.');
     if (!dryRun) {
       await db.insert(aiReplies).values({ ...spend(), outcome: 'handoff', detail });
@@ -865,7 +873,8 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
           await queueLead(db, {
             agentId: agent.id,
             conversationId: conversation.id,
-            canQueue: (effectDb) => automationAllowed(effectDb, input, 'crm'),
+            canQueue: (effectDb) => input.crmOrigin
+              ? crmOriginAllowed(effectDb, input, 'crm') : automationAllowed(effectDb, input, 'crm'),
           });
           // Never on the first stage a lead is given, the same rule the operator's move
           // follows: a customer who has just written already has an answer coming.
@@ -875,7 +884,8 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
               {
                 graph: deps.graph,
                 key: deps.key,
-                canSend: (effectDb) => automationAllowed(effectDb, input, 'reply'),
+                canSend: (effectDb) => input.crmOrigin
+                  ? crmOriginAllowed(effectDb, input, 'reply') : automationAllowed(effectDb, input, 'reply'),
               },
               { agentId: agent.id, conversationId: conversation.id, stageId: target.id },
             );
@@ -885,7 +895,7 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
     }
 
     if (handoffReason !== null) {
-      ownsHandoff = await handOff(db, { conversation, reason: handoffReason, dryRun });
+      ownsHandoff = await handOff(db, { conversation, reason: handoffReason, dryRun, crmOrigin: input.crmOrigin });
       if (!ownsHandoff) return empty('skipped', 'Оператор взял диалог на себя.');
     }
   } catch (error) {
@@ -937,11 +947,13 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
           body,
         });
       const sent = handoffReason === null
-        ? await withAutomationEffect(db, input, 'reply', send).then((result) =>
+        ? await withAutomationEffect(db, input, 'reply', (tx, snapshot) =>
+            input.crmOrigin && snapshot.crmAnalysisMode !== 'follow_ai' ? Promise.resolve(null) : send(tx)).then((result) =>
             result.allowed ? result.value : null,
           )
         : await withAgentAutomationLock(db, agent.id, async (tx) => {
             const effectDb = tx as unknown as Db;
+            if (input.crmOrigin && !await crmOriginAllowed(effectDb, input, 'crm')) return null;
             if (!await handoffReplyAllowed(effectDb, input, ownsHandoff, before.lastMessageId)) {
               return null;
             }
@@ -1007,6 +1019,7 @@ async function handOff(
     /** Already passed through `safe`, so it carries no key and no newline. */
     reason: string;
     dryRun: boolean;
+    crmOrigin?: boolean;
   },
 ): Promise<boolean> {
   if (input.dryRun) return true;
@@ -1015,7 +1028,8 @@ async function handOff(
     db,
     { agentId: input.conversation.agentId, conversationId: input.conversation.id },
     'crm',
-    async (tx) => {
+    async (tx, snapshot) => {
+      if (input.crmOrigin && snapshot.crmAnalysisMode !== 'follow_ai') return false;
       const [owned] = await tx
         .update(conversations)
         .set({ aiEnabled: false })

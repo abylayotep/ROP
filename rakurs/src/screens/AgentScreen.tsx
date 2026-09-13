@@ -171,6 +171,7 @@ function AgentSettings({
         contacts={loaded.testContacts}
         onSaved={setSettings}
       />
+      <CrmAnalysisCard agentId={agentId} owner={owner} settings={settings} onSaved={setSettings} />
       <RulesPointerCard agentId={agentId} />
       <ModelCard
         agentId={agentId}
@@ -193,6 +194,26 @@ function AgentSettings({
       )}
     </div>
   );
+}
+
+function CrmAnalysisCard({agentId,owner,settings,onSaved}:{agentId:string;owner:boolean;settings:AiSettings;onSaved:(settings:AiSettings)=>void}) {
+  const toast = useToast();
+  const [saving,setSaving] = useState(false);
+  async function change(mode: AiSettings['crmAnalysisMode']) {
+    if (!owner || saving || mode === settings.crmAnalysisMode) return;
+    setSaving(true);
+    try { onSaved(await api.updateAiSettings(agentId,{crmAnalysisMode:mode})); toast.ok('Режим анализа сохранён'); }
+    catch (error) { toast.fail(error); }
+    finally { setSaving(false); }
+  }
+  return <Card>
+    <CardHead title="Анализ воронки" gap={10} />
+    <p style={{...hint,marginTop:0}}>Независимый анализ обновляет этапы и данные клиента, но не отправляет сообщения, счета и события в Meta. Для него нужен ключ ИИ.</p>
+    <select style={{...control,maxWidth:360}} aria-label="Режим анализа воронки" value={settings.crmAnalysisMode} disabled={!owner || saving} onChange={(event)=>void change(event.target.value as AiSettings['crmAnalysisMode'])}>
+      <option value="follow_ai">По режиму AI</option>
+      <option value="independent">Независимо от автоответов</option>
+    </select>
+  </Card>;
 }
 
 /**

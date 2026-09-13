@@ -8,7 +8,7 @@ import { Card, CardHead, Toggle } from '@/components/ui/primitives';
 import { Async, EmptyState, RowsSkeleton, Skeleton } from '@/components/ui/states';
 import { useToast } from '@/components/ui/Toast';
 import { useApi } from '@/hooks/useApi';
-import { runCoexistenceSignup, runInstagramMessagingLogin } from '@/lib/embedded-signup';
+import { InstagramLoginError, runCoexistenceSignup, runInstagramMessagingLogin } from '@/lib/embedded-signup';
 import { numbersToRenew, tokenDeadline } from '@/lib/whatsapp-token';
 import { useAgent } from '@/store/agent';
 import type {
@@ -159,8 +159,8 @@ export function InstagramDirectCard({ accounts, setup, owner, agentId, onChanged
     setBusy(true);
     setError(null);
     try {
-      const code = await runInstagramMessagingLogin(setup);
-      const result = await api.connectInstagramAccount(agentId, code, instagramAccountId);
+      const token = await runInstagramMessagingLogin(setup);
+      const result = await api.connectInstagramAccount(agentId, token, instagramAccountId);
       if (result.account) {
         setChoices([]);
         toast.ok('Instagram Direct подключён');
@@ -171,7 +171,7 @@ export function InstagramDirectCard({ accounts, setup, owner, agentId, onChanged
         setError('У выбранного профиля Meta нет профессионального Instagram-аккаунта, связанного со Страницей.');
       }
     } catch (caught) {
-      setError(api.humanError(caught));
+      setError(caught instanceof InstagramLoginError ? caught.message : api.humanError(caught));
     } finally {
       setBusy(false);
     }
@@ -200,7 +200,7 @@ export function InstagramDirectCard({ accounts, setup, owner, agentId, onChanged
       </div>}
     </div>)}
     {owner && choices.length > 0 && <div style={{ marginTop: 12 }}>
-      <div style={label}>Выберите аккаунт. Meta попросит войти ещё раз, чтобы выдать новый одноразовый код.</div>
+      <div style={label}>Выберите аккаунт. Meta попросит войти ещё раз, чтобы подтвердить доступ.</div>
       {choices.map((choice) => <button key={choice.instagramUserId} type="button" className="btn" disabled={busy}
         style={{ marginTop: 8, marginRight: 8 }} onClick={() => void connect(choice.instagramUserId)}>
         @{choice.username || choice.instagramUserId} · {choice.pageName}

@@ -19,12 +19,12 @@ it('uses the owner-scoped Direct account routes', async () => {
   expect(fetch.mock.calls[0]?.[1]?.method).toBeUndefined();
 });
 
-it('sends a fresh code and exact selected account id', async () => {
+it('sends a fresh short-lived token and exact selected account id', async () => {
   const fetch = respond({ account: null, choices: [] });
-  await connectInstagramAccount('agent', 'fresh-code', 'ig-42');
+  await connectInstagramAccount('agent', 'short-token', 'ig-42');
   expect(String(fetch.mock.calls[0]?.[0])).toContain('/api/agents/agent/instagram/connect');
   expect(JSON.parse(String(fetch.mock.calls[0]?.[1]?.body))).toEqual({
-    code: 'fresh-code', instagramAccountId: 'ig-42',
+    accessToken: 'short-token', instagramAccountId: 'ig-42',
   });
 });
 

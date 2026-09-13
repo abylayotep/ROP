@@ -25,20 +25,20 @@ describe('funnel cards', () => {
     expect(matchesBoardSearch(card, '+7 701 234 56 78')).toBe(true);
     expect(matchesBoardSearch({ ...card, contactPhone: '+7 (701) 234-56-78' }, '77012345678')).toBe(true);
   });
-  it('shows and searches an Instagram username with one @ prefix', () => {
-    const instagramCard = { ...card, channel: 'instagram' as const, contactAddress: 'anna_shop', contactPhone: null };
-    expect(matchesBoardSearch(instagramCard, '@anna_shop')).toBe(true);
-    fixture.data = { currency: 'KZT', unsorted: [instagramCard], columns: [] };
+  it('searches and labels Instagram identities', () => {
+    const instagram = { ...card, channel: 'instagram' as const, contactAddress: '@shop_handle', contactPhone: null };
+    expect(matchesBoardSearch(instagram, 'SHOP_HANDLE')).toBe(true);
+    fixture.data = { currency: 'KZT', unsorted: [instagram], columns: [] };
     const html = render();
-    expect(html).toContain('@anna_shop');
-    expect(html).not.toContain('@@anna_shop');
-    expect(html).toContain('aria-label="Этап сделки @anna_shop"');
+    expect(html).toContain('@shop_handle');
+    expect(html).not.toContain('@@shop_handle');
+    expect(html).toContain('Instagram');
   });
-  it('keeps a keyboard-accessible conversation link and stage selector', () => {
+  it('keeps a keyboard-accessible conversation button and stage selector', () => {
     fixture.data = { currency: 'KZT', unsorted: [card], columns: [] };
     const html = render();
     expect(html).toContain('Требуют разбора');
-    expect(html).toContain('href="/a/agent/dialogs?conversation=lead-1"');
+    expect(html).toContain('aria-label="Открыть чат с +7 701 234 56 78"');
     expect(html).toContain('+7 701 234 56 78');
     expect(html).not.toContain('Анна');
     expect(html).toContain('aria-label="Этап сделки +7 701 234 56 78"');

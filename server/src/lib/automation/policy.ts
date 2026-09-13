@@ -14,6 +14,7 @@ export type AutomationPurpose = 'reply' | 'crm' | 'checkout';
 
 export interface AutomationSnapshot {
   responseMode: AgentResponseMode;
+  crmAnalysisMode: 'follow_ai' | 'independent';
   testContactId: string | null;
   contactId: string;
   conversationAiEnabled: boolean;
@@ -34,6 +35,9 @@ export function decideAutomation(
   snapshot: AutomationSnapshot,
   purpose: AutomationPurpose,
 ): AutomationDecision {
+  if (purpose === 'crm' && snapshot.crmAnalysisMode === 'independent') {
+    return { allowed: true, reason: 'independent_crm' };
+  }
   if (snapshot.responseMode === 'off') return { allowed: false, reason: 'agent_off' };
   if (snapshot.responseMode === 'test' && !snapshot.testContactId) {
     return { allowed: false, reason: 'test_contact_missing' };
@@ -58,6 +62,7 @@ export async function loadAutomationSnapshot(
   const [snapshot] = await db
     .select({
       responseMode: agents.responseMode,
+      crmAnalysisMode: agents.crmAnalysisMode,
       testContactId: selectedContact.id,
       contactId: contacts.id,
       conversationAiEnabled: conversations.aiEnabled,

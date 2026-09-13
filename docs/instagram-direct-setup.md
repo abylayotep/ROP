@@ -4,15 +4,15 @@ Rakurs receives new Instagram Direct messages through the Meta webhook and can s
 
 ## Meta assets and access
 
-Use the same Meta application configured by `META_APP_ID` and `META_APP_SECRET`. The seller needs an Instagram professional account linked to a Facebook Page and a Facebook user who has the Page `MESSAGING` task.
+Use the same Meta application configured by `META_APP_ID` and `META_APP_SECRET`. The seller needs an Instagram professional account linked to a Facebook Page and a Facebook user with access to manage that Page's messages.
 
-The Direct login requests `instagram_basic`, `pages_show_list`, `instagram_manage_messages`, and `pages_manage_metadata`. The separate knowledge import continues to request `pages_read_engagement` because it reads post captions.
+The Direct login requests `instagram_basic`, `pages_show_list`, `pages_read_engagement`, `instagram_manage_messages`, and `pages_manage_metadata`. The separate knowledge import also requests `pages_read_engagement` because it reads post captions.
 
 In development mode, every Facebook and Instagram user involved in the smoke test must have an eligible role on the Meta application and accept the required access. For customer accounts outside application roles, complete the applicable App Review, Advanced Access, and Business Verification steps before switching the application live.
 
 ## OAuth and webhook
 
-Configure the production cabinet origin and OAuth redirect settings in the Meta application. The browser receives a short-lived authorization code and sends it to Rakurs immediately. Rakurs discovers the Page-linked Instagram account, stores only the encrypted Page token, subscribes the current Meta application to the Page `messages` field, and verifies that subscription before reporting the account as ready.
+Configure the production cabinet origin and Facebook Login settings in the Meta application. The browser receives a short-lived user token from the Meta SDK and sends it to Rakurs over HTTPS. Rakurs verifies that the token belongs to its Meta app, exchanges it for a long-lived user token, discovers the Page-linked Instagram account, and stores only the encrypted Page token. It subscribes the current Meta application to the Page `messages` field and verifies that subscription before reporting the account as ready.
 
 Configure the Instagram webhook callback as:
 

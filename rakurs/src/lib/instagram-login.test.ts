@@ -69,20 +69,35 @@ describe('Instagram login recovery', () => {
   it('requests messaging permissions without changing the knowledge import permissions', async () => {
     vi.useFakeTimers();
     const scopes: string[] = [];
+    const optionsSeen: Array<{ response_type?: string }> = [];
     vi.stubGlobal('window', {
       setTimeout, clearTimeout,
-      FB: { login: (callback: (response: { authResponse?: { code?: string } }) => void, options: { scope: string }) => {
+      FB: { login: (callback: (response: { authResponse?: { code?: string; accessToken?: string } }) => void, options: { scope: string; response_type?: string }) => {
         scopes.push(options.scope);
-        callback({ authResponse: { code: 'code' } });
+        optionsSeen.push(options);
+        callback({ authResponse: { code: 'code', accessToken: 'short-token' } });
       } },
     });
 
     await expect(runInstagramLogin({ appId: 'test' })).resolves.toBe('code');
-    await expect(runInstagramMessagingLogin({ appId: 'test' })).resolves.toBe('code');
+    await expect(runInstagramMessagingLogin({ appId: 'test' })).resolves.toBe('short-token');
 
     expect(scopes).toEqual([
       'instagram_basic,pages_show_list,pages_read_engagement',
-      'instagram_basic,pages_show_list,instagram_manage_messages,pages_manage_metadata',
+      'instagram_basic,pages_show_list,pages_read_engagement,instagram_manage_messages,pages_manage_metadata',
     ]);
+    expect(optionsSeen[0]?.response_type).toBe('code');
+    expect(optionsSeen[1]?.response_type).toBe('token');
+  });
+
+  it('waits through a slow Direct consent and reports a safe timeout', async () => {
+    sdk();
+    const result = runInstagramMessagingLogin({ appId: 'test' });
+    const assertion = expect(result).rejects.toThrow('Meta не ответила');
+    await vi.advanceTimersByTimeAsync(9 * 60 * 1000);
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(60 * 1000);
+    await assertion;
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

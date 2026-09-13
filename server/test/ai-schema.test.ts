@@ -95,6 +95,7 @@ describe('ai schema', () => {
     const settings = {
       aiEnabled: false,
       responseMode: 'test',
+      crmAnalysisMode: 'follow_ai',
       testContact: { id: 'contact-id', name: 'Tester', phone: '77001234567' },
       model: 'openai/gpt-4o-mini',
       temperature: 0.3,

@@ -115,7 +115,7 @@ function deps(model: FakeModel): TurnDeps {
 }
 
 /** One turn on the fixture's conversation. */
-function turn(model: FakeModel, options: { dryRun?: boolean } = {}) {
+function turn(model: FakeModel, options: { dryRun?: boolean; crmOrigin?: boolean } = {}) {
   return runTurn(db, deps(model), { agentId, conversationId, ...options });
 }
 
@@ -522,6 +522,17 @@ describe('retrying once', () => {
     expect(log?.promptTokens).toBe(200);
     expect(log?.completionTokens).toBe(40);
     expect(log?.cost).toBe('0.00020000');
+  });
+
+  it('does not hand off a CRM-origin turn after independent mode takes effect', async () => {
+    const model=racingModel(async ()=>{
+      await db.update(agents).set({crmAnalysisMode:'independent'}).where(eq(agents.id,agentId));
+    },answer({handoff:{reason:'клиент просит человека'}}));
+    const result=await turn(model,{crmOrigin:true});
+    expect(result.outcome).toBe('skipped');
+    expect((await conversationRow()).aiEnabled).toBe(true);
+    expect(await noteRows()).toHaveLength(0);
+    expect(graph.calls.filter((call)=>call.method==='sendText')).toHaveLength(0);
   });
 });
 

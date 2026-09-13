@@ -569,6 +569,7 @@ describe('the settings routes', () => {
     expect(res.json()).toEqual({
       aiEnabled: true,
       responseMode: 'live',
+      crmAnalysisMode: 'follow_ai',
       testContact: null,
       model: 'openai/gpt-4o-mini',
       temperature: 0.3,

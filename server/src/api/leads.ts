@@ -127,7 +127,10 @@ export async function loadLead(
   const paidIds = new Set(confirmed.map((payment)=>payment.orderId));
   return {
     crm: {status:crm?.status ?? (agent.openrouterKey ? 'pending' : 'needs_key'), summary:crm?.summary??null,
-      profile:crm?.profile??{},error:crm?.error??null,analyzedAt:crm?.analyzedAt?.toISOString()??null},
+      profile:crm?.profile??{},error:crm?.error??null,analyzedAt:crm?.analyzedAt?.toISOString()??null,
+      paymentEvidence:confirmed.length ? 'confirmed' : (crm?.profile.paymentEvidence === 'awaiting_payment' || crm?.profile.paymentEvidence === 'needs_verification' ? crm.profile.paymentEvidence : 'unknown'),
+      paymentEvidenceReason:confirmed.length ? 'Оплата подтверждена Kaspi POS.'
+        : (crm?.profile.paymentEvidence === 'awaiting_payment' || crm?.profile.paymentEvidence === 'needs_verification') ? crm.profile.paymentEvidenceReason??null : null},
     sourceId:row.conversation.adSourceId,sourceType:row.conversation.adSourceType,
     conversationId,
     contactName: row.contact.name,

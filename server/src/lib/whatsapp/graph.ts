@@ -58,6 +58,8 @@ export type SmbSyncType = 'smb_app_state_sync' | 'history';
 export interface IssuedToken {
   token: string;
   expiresAt: Date | null;
+  hasPagesReadEngagement?: boolean;
+  grantedPageIds?: string[];
 }
 
 export interface MediaDescriptor {
@@ -92,6 +94,8 @@ export interface GraphClient {
    * only: the app secret goes in the request, and the code dies after thirty seconds.
    */
   exchangeCode(code: string, appId: string, appSecret: string): Promise<IssuedToken>;
+  /** Validates a JS SDK user token belongs to this app, then extends it server-side. */
+  exchangeUserToken(token: string, appId: string, appSecret: string): Promise<IssuedToken>;
   /** The numbers of a WABA; needed when Embedded Signup reports only the WABA. */
   listPhoneNumbers(wabaId: string, token: string): Promise<PhoneNumber[]>;
   /** Asks Meta to stream the phone's contacts or history to the webhook. Once each. */
@@ -255,6 +259,48 @@ export function createGraphClient(): GraphClient {
           // shape of the body would hand one downstream to be stored and encrypted.
         }
         throw new GraphError('Meta вернула ответ без токена', response.status);
+      });
+    },
+
+    async exchangeUserToken(token, appId, appSecret) {
+      return within(TIMEOUT_MS, async () => {
+        // Graph's batch endpoint keeps the token in the POST body while allowing the
+        // documented GET debug_token operation. Neither token enters a server URL.
+        const batch = JSON.stringify([{ method: 'GET', relative_url: `debug_token?input_token=${encodeURIComponent(token)}` }]);
+        const inspected = await fetch(`${GRAPH_ROOT}/`, {
+          method: 'POST', headers: { authorization: `Bearer ${appId}|${appSecret}`, 'content-type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ batch }), signal: AbortSignal.timeout(TIMEOUT_MS),
+        });
+        if (!inspected.ok) throw await failure(inspected);
+        const result = await inspected.json() as Array<{ code?: number; body?: string }>;
+        let data: { app_id?: string; is_valid?: boolean; type?: string; scopes?: string[];
+          granular_scopes?: Array<{ scope?: string; target_ids?: string[] }> } | undefined;
+        try { data = JSON.parse(result[0]?.body ?? '{}').data; }
+        catch { /* Reject malformed provider data below. */ }
+        if (result[0]?.code !== 200 || !data?.is_valid || data.app_id !== appId || data.type !== 'USER') {
+          throw new GraphError('Meta не подтвердила токен этого приложения', 400);
+        }
+        const required = ['instagram_basic', 'instagram_manage_messages', 'pages_show_list',
+          'pages_read_engagement', 'pages_manage_metadata'];
+        if (!required.every((scope) => data.scopes?.includes(scope))) {
+          throw new GraphError('Meta не выдала права Instagram Direct', 403);
+        }
+        const extended = await fetch(`${GRAPH_ROOT}/oauth/access_token`, {
+          method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ client_id: appId, client_secret: appSecret,
+            grant_type: 'fb_exchange_token', fb_exchange_token: token }),
+          signal: AbortSignal.timeout(TIMEOUT_MS),
+        });
+        if (!extended.ok) throw await failure(extended);
+        const payload = await extended.json() as { access_token?: string; expires_in?: number };
+        if (!payload.access_token) throw new GraphError('Meta вернула ответ без токена', extended.status);
+        const pageScopes = ['pages_show_list', 'pages_read_engagement', 'pages_manage_metadata'];
+        const targets = pageScopes.map((scope) => data.granular_scopes?.find((entry) => entry.scope === scope)?.target_ids);
+        const grantedPageIds = targets.every(Array.isArray)
+          ? [...new Set(targets[0]!.filter((id) => targets.slice(1).every((ids) => ids!.includes(id))))]
+          : [];
+        return { token: payload.access_token, expiresAt: expiryFrom(payload.expires_in),
+          hasPagesReadEngagement: data.scopes?.includes('pages_read_engagement') === true, grantedPageIds };
       });
     },
 

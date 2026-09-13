@@ -42,6 +42,7 @@ const number = (over: Partial<WhatsappNumber> = {}): WhatsappNumber => ({
 const ai = (over: Partial<AiSettings> = {}): AiSettings => ({
   aiEnabled: false,
   responseMode: 'off',
+  crmAnalysisMode: 'follow_ai',
   testContact: null,
   model: 'openai/gpt-4o-mini',
   temperature: 0.3,

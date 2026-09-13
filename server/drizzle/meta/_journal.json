@@ -288,6 +288,13 @@
       "when": 1789294800000,
       "tag": "0040_coach_feedback_request_key",
       "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1789295400000,
+      "tag": "0041_crm_analysis_mode",
+      "breakpoints": true
     }
   ]
 }

@@ -24,11 +24,6 @@ export const SECTIONS: SectionDef[] = [
   { path: 'setup', label: 'Запуск', pending: '' },
   { path: 'funnel', label: 'Воронка', pending: '' },
   { path: 'orders', label: 'Заказы', pending: '' },
-  {
-    path: 'dialogs',
-    label: 'Диалоги',
-    pending: '',
-  },
   { path: 'customers', label: 'Клиенты', pending: '' },
   { path: 'knowledge', label: 'База знаний', pending: '' },
   { path: 'coach', label: 'Обучение', pending: '', ownerOnly: true },

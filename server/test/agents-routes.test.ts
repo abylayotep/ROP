@@ -2,7 +2,8 @@ import { eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { buildServer } from '../src/api/server.js';
-import { accountMembers } from '../src/db/schema.js';
+import { accountMembers, agentRules } from '../src/db/schema.js';
+import { SEALHOUSE_PAYMENT_RULE, ensureSealhousePaymentPolicy } from '../src/lib/payment-policy.js';
 import { createAccountWithOwner } from '../src/lib/provision.js';
 import { withDb } from './helpers/db.js';
 import { testEnv } from './helpers/env.js';
@@ -85,6 +86,16 @@ describe('agent routes', () => {
       cookies: jar,
     });
     expect(list.json()).toHaveLength(1);
+  });
+
+  it('adds the exact payment policy only to Sealhouse and remains idempotent', async () => {
+    const ordinary = await createAgent({ name: 'Другой магазин' });
+    const sealhouse = await createAgent({ name: ' SealHouse ' });
+    await ensureSealhousePaymentPolicy(db);
+    const rules = await db.select().from(agentRules);
+    expect(rules).toHaveLength(1);
+    expect(rules[0]).toMatchObject({ agentId: sealhouse.json().id, text: SEALHOUSE_PAYMENT_RULE });
+    expect(rules[0]?.agentId).not.toBe(ordinary.json().id);
   });
 
   it('rejects an agent without a name', async () => {

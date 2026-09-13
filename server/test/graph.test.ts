@@ -303,3 +303,66 @@ describe('withoutSecret', () => {
     expect(withoutSecret('Ключ начинается с sk-or-', '')).toBe('Ключ начинается с sk-or-');
   });
 });
+
+describe('Direct user-token exchange', () => {
+  const scopes = ['instagram_basic', 'instagram_manage_messages', 'pages_show_list',
+    'pages_read_engagement', 'pages_manage_metadata'];
+
+  it('checks app binding through a POST batch and extends the token without putting secrets in URLs', async () => {
+    const responses = [
+      new Response(JSON.stringify([{ code: 200, body: JSON.stringify({ data: {
+        app_id: 'our-app', type: 'USER', is_valid: true, scopes,
+      } }) }]), { status: 200 }),
+      new Response(JSON.stringify({ access_token: 'extended-token', expires_in: 3600 }), { status: 200 }),
+    ];
+    vi.stubGlobal('fetch', vi.fn(async (url: string | URL, init: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return responses.shift()!;
+    }));
+    const issued = await client.exchangeUserToken('short-token', 'our-app', 'app-secret');
+    expect(issued.token).toBe('extended-token');
+    expect(issued.hasPagesReadEngagement).toBe(true);
+    expect(calls).toHaveLength(2);
+    expect(calls.every(({ url, init }) => init.method === 'POST' && !url.includes('short-token') && !url.includes('app-secret'))).toBe(true);
+    expect(String(calls[0]?.init.body)).toContain('short-token');
+    expect(String(calls[1]?.init.body)).toContain('short-token');
+  });
+
+  it('rejects a token issued for another app before attempting the extension', async () => {
+    answerWith([{ code: 200, body: JSON.stringify({ data: {
+      app_id: 'foreign-app', type: 'USER', is_valid: true, scopes,
+    } }) }]);
+    await expect(client.exchangeUserToken('short-token', 'our-app', 'app-secret'))
+      .rejects.toBeInstanceOf(GraphError);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('limits Page discovery to the intersection of granular grants', async () => {
+    const responses = [
+      new Response(JSON.stringify([{ code: 200, body: JSON.stringify({ data: {
+        app_id: 'our-app', type: 'USER', is_valid: true, scopes,
+        granular_scopes: [{ scope: 'pages_show_list', target_ids: ['123', '456'] },
+          { scope: 'pages_read_engagement', target_ids: ['123'] },
+          { scope: 'pages_manage_metadata', target_ids: ['123', '789'] }],
+      } }) }]), { status: 200 }),
+      new Response(JSON.stringify({ access_token: 'extended-token' }), { status: 200 }),
+    ];
+    vi.stubGlobal('fetch', vi.fn(async () => responses.shift()!));
+    const issued = await client.exchangeUserToken('short-token', 'our-app', 'app-secret');
+    expect(issued.grantedPageIds).toEqual(['123']);
+    expect(JSON.stringify(issued)).not.toContain('456');
+  });
+  it('does not infer Page access when a required granular target is absent', async () => {
+    const responses = [
+      new Response(JSON.stringify([{ code: 200, body: JSON.stringify({ data: {
+        app_id: 'our-app', type: 'USER', is_valid: true, scopes,
+        granular_scopes: [{ scope: 'pages_show_list', target_ids: ['123'] },
+          { scope: 'pages_read_engagement', target_ids: ['123'] }],
+      } }) }]), { status: 200 }),
+      new Response(JSON.stringify({ access_token: 'extended-token' }), { status: 200 }),
+    ];
+    vi.stubGlobal('fetch', vi.fn(async () => responses.shift()!));
+    const issued = await client.exchangeUserToken('short-token', 'our-app', 'app-secret');
+    expect(issued.grantedPageIds).toEqual([]);
+  });
+});

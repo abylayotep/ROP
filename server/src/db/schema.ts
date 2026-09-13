@@ -142,6 +142,7 @@ export const agents = pgTable(
     // them, not before.
     aiEnabled: boolean('ai_enabled').notNull().default(false),
     responseMode: text('response_mode').$type<AgentResponseMode>().notNull().default('off'),
+    crmAnalysisMode: text('crm_analysis_mode').$type<'follow_ai' | 'independent'>().notNull().default('follow_ai'),
     testContactId: uuid('test_contact_id').references((): AnyPgColumn => contacts.id, {
       onDelete: 'set null',
     }),
@@ -177,6 +178,7 @@ export const agents = pgTable(
     index('agents_account_id_idx').on(t.accountId),
     unique('agents_account_id_id_key').on(t.accountId, t.id),
     check('agents_response_mode_check', sql`${t.responseMode} in ('off', 'test', 'live')`),
+    check('agents_crm_analysis_mode_check', sql`${t.crmAnalysisMode} in ('follow_ai', 'independent')`),
   ],
 );
 

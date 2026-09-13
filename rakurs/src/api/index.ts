@@ -490,6 +490,7 @@ export const updateAiSettings = (
   body: {
     aiEnabled?: boolean;
     responseMode?: AiSettings['responseMode'];
+    crmAnalysisMode?: AiSettings['crmAnalysisMode'];
     testContactId?: string | null;
     model?: string;
     temperature?: number;

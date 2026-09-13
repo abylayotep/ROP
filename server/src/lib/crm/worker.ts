@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { and, asc, desc, eq, isNull, isNotNull, lt, or, sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
-import { agents, aiReplies, contacts, conversations, crmAnalyses, leadFields, leadValues, messages, stages, whatsappNumbers } from '../../db/schema.js';
+import { agents, aiReplies, contacts, conversations, crmAnalyses, leadFields, leadValues, messages, notes, stages } from '../../db/schema.js';
 import type { ModelClient } from '../ai/openrouter.js';
 import { keyAad } from '../ai/turn.js';
 import { decideAutomation, loadAutomationSnapshot, type AutomationPurpose } from '../automation/policy.js';
@@ -10,7 +10,7 @@ import { queueLead } from '../capi/enqueue.js';
 import { recordStageMove } from '../funnel-history.js';
 import { decryptSecret } from '../secret-box.js';
 import { hasConfirmedKaspiPayment } from '../kaspi/service.js';
-import { crmPrompt, parseCrmAnalysis, resolveCrmStage, type CheckoutIntent } from './analysis.js';
+import { crmPrompt, parseCrmAnalysis, resolveCrmStage, resolvePaymentEvidence, type CheckoutIntent } from './analysis.js';
 
 export interface CrmDeps {
   model: ModelClient; key: Buffer;
@@ -22,7 +22,8 @@ export type AnalysisResult = 'ready' | 'skipped' | 'failed' | 'checkout';
 const PAGE_SIZE = 100;
 const RECENT_SIZE = 50;
 const leaseDeadline = () => new Date(Date.now() + 120_000);
-const messageColumns = { id: messages.id, author: messages.author, body: messages.body, sentAt: messages.sentAt, createdAt: messages.createdAt };
+const messageColumns = { id: messages.id, author: messages.author, body: messages.body, kind: messages.kind,
+  mediaMime: messages.mediaMime, sentAt: messages.sentAt, createdAt: messages.createdAt };
 
 async function automationAllowed(db: Db, input: AnalyzeInput, purpose: AutomationPurpose) {
   const snapshot = await loadAutomationSnapshot(db,input);
@@ -102,7 +103,9 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
     const completion = await deps.model.complete({ key: decryptSecret(agent.openrouterKey!, deps.key, keyAad(agent.id)),
       model: agent.model, temperature: '0', maxTokens: 2200, messages: [
         { role: 'system', content: crmPrompt(funnel, fields) },
-        { role: 'user', content: JSON.stringify({ currentStageId: conversation.stageId, profile: claimed.profile,
+        { role: 'user', content: JSON.stringify({ previousAnalysis: { summary: claimed.summary,
+          stageId: conversation.stageId, payment: resolvePaymentEvidence(claimed.profile.paymentEvidence,
+            claimed.profile.paymentEvidenceReason, null, paid) }, profile: claimed.profile,
           fields: values.map((v) => ({fieldId:v.fieldId,value:v.value})),
           contact: { name: contact.name, phone: contact.phone }, history: inputHistory }) },
       ] });
@@ -154,6 +157,10 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
         const proof = accept(`profile:${key}`,value);
         if (proof) { profile[key] = value; evidence[`profile:${key}`] = proof; }
       }
+      const paymentEvidence = resolvePaymentEvidence(profile.paymentEvidence, profile.paymentEvidenceReason, analysis.payment, paid);
+      profile.paymentEvidence = paymentEvidence.state;
+      if (paymentEvidence.reason) profile.paymentEvidenceReason = paymentEvidence.reason;
+      else delete profile.paymentEvidenceReason;
       for (const [fieldId,value] of Object.entries(analysis.fields)) {
         const proof = accept(`field:${fieldId}`,value);
         if (!proof) continue;
@@ -182,19 +189,26 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
     // Only a persisted live delivery authorizes customer side effects, never a backfill flag.
     if (liveId && last?.id === liveId && last.author === 'client' && Date.now()-last.sentAt.getTime() >= 0
       && Date.now()-last.sentAt.getTime() < 5*60_000) {
-      if (moved && await automationAllowed(db,input,'crm')) {
-        await queueLead(db,{agentId:agent.id,conversationId:conversation.id,
-          canQueue:(effectDb)=>automationAllowed(effectDb,input,'crm')});
-      }
-      const [current] = await db.select({agentEnabled:agents.aiEnabled,conversationEnabled:conversations.aiEnabled})
+      const [current] = await db.select({agentEnabled:agents.aiEnabled,conversationEnabled:conversations.aiEnabled,
+        crmAnalysisMode:agents.crmAnalysisMode})
         .from(conversations).innerJoin(agents,eq(agents.id,conversations.agentId)).where(eq(conversations.id,conversation.id));
+      if (agent.crmAnalysisMode === 'follow_ai' && current?.crmAnalysisMode === 'follow_ai' && moved && await automationAllowed(db,input,'crm')) {
+        await queueLead(db,{agentId:agent.id,conversationId:conversation.id,
+          canQueue:async (effectDb) => {
+            const snapshot=await loadAutomationSnapshot(effectDb,input);
+            return snapshot?.crmAnalysisMode === 'follow_ai' && decideAutomation(snapshot,'crm').allowed;
+          }});
+      }
       const [latest] = await db.select({id:messages.id}).from(messages).where(eq(messages.conversationId,conversation.id))
         .orderBy(desc(messages.sentAt),desc(messages.id)).limit(1);
-      if (current?.agentEnabled && current.conversationEnabled && latest?.id === liveId) {
+      if (agent.crmAnalysisMode === 'follow_ai' && current?.crmAnalysisMode === 'follow_ai' && current.agentEnabled && current.conversationEnabled && latest?.id === liveId) {
         if (deps.checkout && analysis.checkout?.messageId === liveId && analysis.confidence >= 85
           && !await hasConfirmedKaspiPayment(db,agent.id,conversation.id)
           && await automationAllowed(db,input,'checkout')) {
-          if (contact.phone) {
+          if (!contact.phone) {
+            await db.insert(notes).values({ conversationId: conversation.id,
+              body: 'Счёт Kaspi не создан: у клиента нет номера телефона. Добавьте номер в карточку клиента и повторите действие.' });
+          } else {
             await deps.checkout({agentId:agent.id,conversationId:conversation.id,phone:contact.phone,
               intent:analysis.checkout,summary:analysis.summary});
             checkedOut = true;
@@ -231,8 +245,9 @@ export async function drainCrmAnalyses(db: Db, deps: CrmDeps): Promise<void> {
     .innerJoin(agents,eq(agents.id,conversations.agentId))
     .innerJoin(contacts,and(eq(contacts.id,conversations.contactId),eq(contacts.agentId,agents.id)))
     .leftJoin(crmAnalyses,eq(crmAnalyses.conversationId,conversations.id))
-    .where(and(isNotNull(agents.openrouterKey),eq(conversations.aiEnabled,true),
-      or(eq(agents.responseMode,'live'),and(eq(agents.responseMode,'test'),eq(agents.testContactId,contacts.id))),
+    .where(and(isNotNull(agents.openrouterKey),
+      or(eq(agents.crmAnalysisMode,'independent'),and(eq(agents.crmAnalysisMode,'follow_ai'),eq(conversations.aiEnabled,true),
+        or(eq(agents.responseMode,'live'),and(eq(agents.responseMode,'test'),eq(agents.testContactId,contacts.id))))),
       sql`exists (select 1 from messages m where m.conversation_id = ${conversations.id} and m.author <> 'system')`,
       or(sql`${crmAnalyses.analyzedMessageId} is distinct from (select m.id from messages m where m.conversation_id = ${conversations.id} order by m.created_at desc, m.id desc limit 1)`,
         sql`${crmAnalyses.pendingLiveMessageId} is not null and ${crmAnalyses.pendingLiveMessageId} is distinct from ${crmAnalyses.handledLiveMessageId}`),

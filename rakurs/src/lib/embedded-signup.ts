@@ -11,7 +11,7 @@ const FACEBOOK_ORIGIN = /^https:\/\/([a-z0-9-]+\.)*facebook\.com$/;
 interface FacebookSdk {
   init(options: { appId: string; autoLogAppEvents: boolean; xfbml: boolean; version: string }): void;
   login(
-    callback: (response: { authResponse?: { code?: string }; status?: string }) => void,
+    callback: (response: { authResponse?: { code?: string; accessToken?: string }; status?: string }) => void,
     options:
       | {
           config_id: string;
@@ -19,7 +19,8 @@ interface FacebookSdk {
           override_default_response_type: true;
           extras: { setup: Record<string, never>; featureType: string; sessionInfoVersion: string };
         }
-      | { scope: string; response_type: 'code'; override_default_response_type: true },
+      | { scope: string; response_type: 'code'; override_default_response_type: true }
+      | { scope: string; response_type: 'token'; override_default_response_type: true },
   ): void;
 }
 
@@ -189,53 +190,50 @@ export function runCoexistenceSignup(setup: EmbeddedSignupSetup): Promise<Coexis
  */
 const INSTAGRAM_SCOPE = 'instagram_basic,pages_show_list,pages_read_engagement';
 const INSTAGRAM_MESSAGING_SCOPE =
-  'instagram_basic,pages_show_list,instagram_manage_messages,pages_manage_metadata';
+  'instagram_basic,pages_show_list,pages_read_engagement,instagram_manage_messages,pages_manage_metadata';
 
-/**
- * Вход через Meta ради постов Instagram: возвращает код, который живёт секунды.
- *
- * Nothing is stored in the browser and nothing is stored on the server: the code is spent
- * once, the posts are read once, and importing again is this window again. An owner who
- * removes the application in Meta has actually removed our access, with nothing of theirs
- * left behind here.
- */
+export class InstagramLoginError extends Error {
+  constructor(message: string) { super(message); this.name = 'InstagramLoginError'; }
+}
+
+/** The posts import receives a one-use code; Direct receives a short-lived user token. */
 function runScopedInstagramLogin(
   setup: InstagramSetup,
   scope: string,
   signal?: AbortSignal,
+  responseKind: 'code' | 'token' = 'code',
 ): Promise<string> {
   return loadSdkForLogin(setup.appId, signal).then(
     (fb) =>
       new Promise<string>((resolve, reject) => {
         let settled = false;
-        const finish = (code?: string, message = 'Вход через Meta не завершён') => {
+        const finish = (credential?: string, message = 'Вход через Meta не завершён') => {
           if (settled) return;
           settled = true;
           window.clearTimeout(timer);
           signal?.removeEventListener('abort', cancel);
-          if (code) resolve(code);
-          else reject(new Error(message));
+          if (credential) resolve(credential);
+          else reject(new InstagramLoginError(message));
         };
         const cancel = () => finish(undefined, 'Вход отменён. Закройте окно Meta.');
         const timer = window.setTimeout(
           () => finish(undefined, 'Meta не ответила. Закройте окно входа и проверьте настройки приложения Meta.'),
-          2 * 60 * 1000,
+          (responseKind === 'token' ? 10 : 2) * 60 * 1000,
         );
         signal?.addEventListener('abort', cancel, { once: true });
         if (signal?.aborted) { cancel(); return; }
         try {
         fb.login(
           (response) => {
-            finish(response.authResponse?.code);
+            finish(responseKind === 'token' ? response.authResponse?.accessToken : response.authResponse?.code,
+              responseKind === 'token' ? 'Meta не вернула токен входа Instagram.' : 'Meta не вернула код входа.');
           },
-          {
-            scope,
-            response_type: 'code',
-            override_default_response_type: true,
-          },
+          responseKind === 'token'
+            ? { scope, response_type: 'token', override_default_response_type: true }
+            : { scope, response_type: 'code', override_default_response_type: true },
         );
         } catch (error) {
-          finish(undefined, error instanceof Error ? error.message : 'Не удалось открыть Meta');
+          finish(undefined, 'Не удалось открыть Meta. Повторите вход.');
         }
       }),
   );
@@ -250,5 +248,5 @@ export function runInstagramMessagingLogin(
   setup: InstagramSetup,
   signal?: AbortSignal,
 ): Promise<string> {
-  return runScopedInstagramLogin(setup, INSTAGRAM_MESSAGING_SCOPE, signal);
+  return runScopedInstagramLogin(setup, INSTAGRAM_MESSAGING_SCOPE, signal, 'token');
 }

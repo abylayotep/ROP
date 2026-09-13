@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import * as api from '@/api';
-import { tabAfterKey } from '@/components/knowledge/KnowledgeWorkspace';
+import { tabAfterKey } from '@/lib/training-state';
 import { useToast } from '@/components/ui/Toast';
 import { Async, Skeleton } from '@/components/ui/states';
 import { useApi } from '@/hooks/useApi';

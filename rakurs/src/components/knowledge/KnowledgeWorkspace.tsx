@@ -1,4 +1,5 @@
 import type { KeyboardEvent, ReactNode } from 'react';
+import { tabAfterKey } from '@/lib/training-state';
 
 export type KnowledgeTab = 'knowledge' | 'drafts' | 'runs' | 'sources';
 
@@ -8,16 +9,6 @@ const TABS: ReadonlyArray<{ id: KnowledgeTab; label: string }> = [
   { id: 'runs', label: 'Запуски' },
   { id: 'sources', label: 'Источники и загрузка' },
 ];
-
-export function tabAfterKey<T extends string>(ids: readonly T[], current: T, key: string): T | null {
-  const index = ids.indexOf(current);
-  if (index < 0 || ids.length === 0) return null;
-  if (key === 'Home') return ids[0]!;
-  if (key === 'End') return ids[ids.length - 1]!;
-  if (key === 'ArrowRight') return ids[(index + 1) % ids.length]!;
-  if (key === 'ArrowLeft') return ids[(index - 1 + ids.length) % ids.length]!;
-  return null;
-}
 
 export function knowledgeTabFromSearch(params: URLSearchParams): KnowledgeTab {
   const requested = params.get('tab');

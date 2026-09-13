@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import type { KbGenerationRunSummary } from '@/types';
 import { GenerationRunRail, mergeDelayedRunFirstPage, mergeRunPages } from './GenerationRunRail';
-import { KnowledgeWorkspace, knowledgeTabFromSearch, tabAfterKey } from './KnowledgeWorkspace';
+import { KnowledgeWorkspace, knowledgeTabFromSearch } from './KnowledgeWorkspace';
 
 describe('KnowledgeWorkspace', () => {
   it('keeps four page-level tabs instead of stacking every knowledge tool', () => {
@@ -63,15 +63,6 @@ describe('KnowledgeWorkspace', () => {
     expect(html).toContain('aria-pressed="true"');
     expect(html).toContain('Показать ещё запусков');
     expect(html).toContain('8');
-  });
-
-  it('moves tab selection with arrows, Home, and End', () => {
-    const ids = ['knowledge', 'drafts', 'runs', 'sources'] as const;
-    expect(tabAfterKey(ids, 'drafts', 'ArrowRight')).toBe('runs');
-    expect(tabAfterKey(ids, 'knowledge', 'ArrowLeft')).toBe('sources');
-    expect(tabAfterKey(ids, 'runs', 'Home')).toBe('knowledge');
-    expect(tabAfterKey(ids, 'drafts', 'End')).toBe('sources');
-    expect(tabAfterKey(ids, 'drafts', 'Enter')).toBeNull();
   });
 
   it('refreshes the active run summary without losing the rest of the rail', () => {

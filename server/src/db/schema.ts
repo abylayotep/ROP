@@ -49,6 +49,7 @@ import type { CoachSourceSnapshot, CorrectionType } from '@rakurs/contract';
 // what a draft would write and what it was tested against, and the brand is what stops anything
 // but the drafts module filling them.
 import type { DraftBase, DraftOp } from '../lib/drafts/ops.js';
+import type { AutopilotLogEntry, PendingFix } from '../lib/drafts/autopilot-types.js';
 import type {
   GenerationBatchManifest,
   GenerationManifest,
@@ -1501,6 +1502,8 @@ export const testResults = pgTable(
     caseId: uuid('case_id').notNull().references(() => testCases.id, { onDelete: 'cascade' }),
     reply: text('reply'),
     usedChunkIds: jsonb('used_chunk_ids').$type<string[]>().notNull().default([]),
+    // Indexes into the draft's ops at the time of the run; baseline rows keep '{}'.
+    usedOpIndexes: integer('used_op_indexes').array().notNull().default(sql`'{}'`),
     // A run records the stage a rolled-back turn *would* have moved to, and a foreign key would
     // point from surviving data at a row somebody may later delete — so this is a plain uuid,
     // not a reference.
@@ -1517,6 +1520,43 @@ export const testResults = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [unique('test_results_run_case_key').on(t.runId, t.caseId)],
+);
+
+/**
+ * One autopilot pass over a draft. The row is the whole state, so a restart resumes at `step`.
+ * `run_ops` pins the ops a run started with: op indexes in its results mean nothing against a
+ * later version of the draft.
+ */
+export const draftAutopilots = pgTable(
+  'draft_autopilots',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    agentId: uuid('agent_id').notNull().references(() => agents.id, { onDelete: 'cascade' }),
+    draftId: uuid('draft_id').notNull().references(() => kbDrafts.id, { onDelete: 'cascade' }),
+    createdBy: uuid('created_by').notNull().references(() => users.id),
+    // 'running' | 'applied' | 'stopped' | 'cancelled'
+    status: text('status').notNull(),
+    // 'prepare_cases' | 'clean_topics' | 'start_run' | 'await_run' | 'fix_topics' | 'apply'
+    step: text('step').notNull(),
+    caseIds: uuid('case_ids').array().notNull().default(sql`'{}'`),
+    runId: uuid('run_id').references(() => testRuns.id, { onDelete: 'set null' }),
+    runOps: jsonb('run_ops').$type<DraftOp[] | null>(),
+    runsStarted: integer('runs_started').notNull().default(0),
+    runFailures: integer('run_failures').notNull().default(0),
+    noiseRetryUsed: boolean('noise_retry_used').notNull().default(false),
+    topicAttempts: jsonb('topic_attempts').$type<Record<string, number>>().notNull().default({}),
+    pendingFixes: jsonb('pending_fixes').$type<PendingFix[] | null>(),
+    log: jsonb('log').$type<AutopilotLogEntry[]>().notNull().default([]),
+    cost: numeric('cost', { precision: 12, scale: 8 }).notNull().default('0'),
+    stopReason: text('stop_reason'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp('finished_at', { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex('draft_autopilots_one_running').on(t.draftId).where(sql`${t.status} = 'running'`),
+    index('draft_autopilots_running').on(t.status).where(sql`${t.status} = 'running'`),
+  ],
 );
 
 /** Encrypted cashier credentials and an agent-bound, short-lived SMS challenge. */

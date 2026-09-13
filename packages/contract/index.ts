@@ -1383,6 +1383,15 @@ export type DraftOp =
   | { op: 'rule_create'; category: RuleCategory; text: string; warning?: string | null }
   | { op: 'rule_update'; ruleId: string; text?: string; enabled?: boolean };
 
+/** What a draft's ops touched when it was made: `updatedAt` per row, and the display name of a
+ * note or rule an op names by id only. */
+export interface DraftBase {
+  notes?: Record<string, string>;
+  rules?: Record<string, string>;
+  noteNames?: Record<string, string>;
+  ruleNames?: Record<string, string>;
+}
+
 /** A change waiting to be proven. It is applied only after a run at the current version. */
 export interface KbDraft {
   id: string;
@@ -1390,6 +1399,7 @@ export interface KbDraft {
   origin: 'coach' | 'manual';
   status: 'open' | 'applied' | 'discarded';
   ops: DraftOp[];
+  base: DraftBase;
   createdAt: string;
   appliedAt: string | null;
 }
@@ -1450,6 +1460,9 @@ export interface SuggestedCase {
 export interface TestCaseSide {
   reply: string | null;
   usedChunkIds: string[];
+  /** Indexes into the draft's ops (as they were when the run started) whose notes the reply
+   * used. Always empty on a baseline side. */
+  usedOpIndexes: number[];
   stageId: string | null;
   handoff: boolean;
   handoffReason: string | null;

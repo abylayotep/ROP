@@ -428,13 +428,14 @@ async function pairedBaselineRun(
   return row ?? null;
 }
 
-/** The seven `test_results` columns a replay actually fills — never `fields` or `detail`,
+/** The eight `test_results` columns a replay actually fills — never `fields` or `detail`,
  * which `ReplayResult` also carries but which have no column of their own (see that type's
  * comment). Shared by a freshly-run side and one read back out of a reused baseline row, so
  * the response pairs «было» and «стало» in one shape regardless of which of the two paid. */
 interface CaseSide {
   reply: string | null;
   usedChunkIds: string[];
+  usedOpIndexes: number[];
   stageId: string | null;
   handoff: boolean;
   handoffReason: string | null;
@@ -454,6 +455,7 @@ interface CaseSideOut extends CaseSide {
 const sideFromReplay = (result: ReplayResult): CaseSide => ({
   reply: result.reply,
   usedChunkIds: result.usedChunkIds,
+  usedOpIndexes: result.usedOpIndexes,
   stageId: result.stageId,
   handoff: result.handoff,
   handoffReason: result.handoffReason,
@@ -464,6 +466,7 @@ const sideFromReplay = (result: ReplayResult): CaseSide => ({
 const sideFromRow = (row: typeof testResults.$inferSelect): CaseSide => ({
   reply: row.reply,
   usedChunkIds: row.usedChunkIds,
+  usedOpIndexes: row.usedOpIndexes,
   stageId: row.stageId,
   handoff: row.handoff,
   handoffReason: row.handoffReason,
@@ -484,6 +487,7 @@ const resultRow = (
   caseId,
   reply: side.reply,
   usedChunkIds: side.usedChunkIds,
+  usedOpIndexes: side.usedOpIndexes,
   stageId: side.stageId,
   handoff: side.handoff,
   handoffReason: side.handoffReason,

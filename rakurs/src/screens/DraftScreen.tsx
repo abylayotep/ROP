@@ -335,7 +335,14 @@ function Draft({ agentId, draftId, initial }: { agentId: string; draftId: string
 
           <Card>
             <CardHead title="Прогон" />
-            <RunTable agentId={agentId} cases={cases.data ?? []} run={run} requestedCount={requestedCount} />
+            <RunTable
+              agentId={agentId}
+              cases={cases.data ?? []}
+              run={run}
+              requestedCount={requestedCount}
+              ops={draft.ops}
+              base={draft.base}
+            />
           </Card>
 
           <Card className="draft-actionbar">

@@ -647,6 +647,9 @@ describe('running a draft over a set of cases', () => {
     const { before, after } = res.json().results[0]!;
     expect(after.reply).toContain(distinctive);
     expect(before.reply).not.toContain(distinctive);
+    // The draft's one op is what «стало» was built from; a baseline has no ops to name.
+    expect(after.usedOpIndexes).toEqual([0]);
+    expect(before.usedOpIndexes).toEqual([]);
 
     const [baselineRow] = await db
       .select({ reply: testResults.reply })

@@ -37,6 +37,7 @@ import type {
   KbGenerationStartRequest,
   KbNote,
   KbNoteDetail,
+  DraftOp,
   KbDraft,
   KbDraftDetail,
   KbNoteKind,
@@ -798,6 +799,15 @@ export const applyDraft = (agentId: string, draftId: string) =>
  * draft's own status changes. */
 export const discardDraft = (agentId: string, draftId: string) =>
   request<KbDraft>(`/agents/${agentId}/drafts/${draftId}/discard`, { method: 'POST' });
+
+/** Removes one op or rewrites a note op's body. The server deletes the draft's runs, so the
+ * draft must be run again before «Применить». `current` is the op as the screen shows it; a
+ * draft changed elsewhere answers 409. */
+export const editDraftOp = (
+  agentId: string,
+  draftId: string,
+  input: { index: number; current: DraftOp } & ({ action: 'remove' } | { action: 'update'; body: string }),
+) => request<KbDraft>(`/agents/${agentId}/drafts/${draftId}/ops`, { method: 'POST', body: input });
 
 // ── Проверки ──────────────────────────────────────────────────────────────────
 

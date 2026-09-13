@@ -3,7 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import * as api from '@/api';
 import { CaseList } from '@/components/drafts/CaseList';
 import { describeRun } from '@/components/drafts/cost';
-import { OpDiff } from '@/components/drafts/OpDiff';
+import { OpDiff, type OpEdit } from '@/components/drafts/OpDiff';
 import { RunTable } from '@/components/drafts/RunTable';
 import { Badge, Card, CardHead, Segmented, type SegmentItem } from '@/components/ui/primitives';
 import { Async, EmptyState, Skeleton } from '@/components/ui/states';
@@ -11,7 +11,7 @@ import { useToast } from '@/components/ui/Toast';
 import { useApi } from '@/hooks/useApi';
 import { draftOrigin } from '@/lib/training-state';
 import { useAgent } from '@/store/agent';
-import type { KbDraft, KbDraftDetail, TestCase, TestRun } from '@/types';
+import type { DraftOp, KbDraft, KbDraftDetail, TestCase, TestRun } from '@/types';
 import './training-workspace.css';
 
 /**
@@ -255,6 +255,22 @@ function Draft({ agentId, draftId, initial }: { agentId: string; draftId: string
     }
   }
 
+  // Removing or rewriting a topic changes what a run would prove, so the server drops the
+  // draft's runs; the screen forgets the reopened run and «Применить» waits for a new one.
+  async function editOp(index: number, current: DraftOp, edit: OpEdit): Promise<boolean> {
+    try {
+      const updated = await api.editDraftOp(agentId, draftId, { index, current, ...edit });
+      setDraft((prev) => ({ ...prev, ...updated, runs: [], applicable: false }));
+      setRun(null);
+      setRequestedCount(0);
+      toast.ok(edit.action === 'remove' ? 'Тема убрана из черновика' : 'Тема сохранена');
+      return true;
+    } catch (error) {
+      toast.fail(error);
+      return false;
+    }
+  }
+
   async function discard() {
     if (!isOpen || discarding) return;
     if (!window.confirm('Отбросить черновик? Это нельзя отменить.')) return;
@@ -271,6 +287,7 @@ function Draft({ agentId, draftId, initial }: { agentId: string; draftId: string
     }
   }
 
+  const topics = draftOrigin(draft) === 'Из переписки';
   const verdictBadge: Record<KbDraft['status'], { bg: string; fg: string }> = {
     open: { bg: 'var(--seg)', fg: 'var(--text-dim)' },
     applied: { bg: 'var(--accent-a14)', fg: 'var(--accent)' },
@@ -288,12 +305,14 @@ function Draft({ agentId, draftId, initial }: { agentId: string; draftId: string
             </Badge>
           }
         />
+        <DraftBanner status={draft.status} topics={topics} />
         <Segmented items={TABS} value={tab} onChange={setTab} size="sm" />
       </Card>
 
       {tab === 'run' ? (
         <>
-          <OpDiff agentId={agentId} ops={draft.ops} topics={draftOrigin(draft) === 'Из переписки'} />
+          <OpDiff agentId={agentId} ops={draft.ops} topics={topics}
+            onEdit={isOpen && !running ? editOp : undefined} />
 
           <Card>
             <CardHead title="Случаи для прогона" />
@@ -315,38 +334,35 @@ function Draft({ agentId, draftId, initial }: { agentId: string; draftId: string
           </Card>
 
           <Card>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            <CardHead title="Прогон" />
+            <RunTable agentId={agentId} cases={cases.data ?? []} run={run} requestedCount={requestedCount} />
+          </Card>
+
+          <Card className="draft-actionbar">
+            <div className="draft-actionbar__row">
               <button type="button" className="btn" disabled={!canRun || starting} onClick={startRun}>
                 {running ? 'Прогон идёт…' : starting ? 'Запускаем…' : 'Запустить прогон'}
               </button>
-              <span style={{ fontSize: 11.5, color: 'var(--text-dim)' }}>
-                {selectedCases.length === 0
-                  ? 'Отметьте хотя бы один случай.'
-                  : describeRun(selectedCases, baselineIds)}
-              </span>
-            </div>
-
-            <div style={{ marginTop: 16 }}>
-              <RunTable agentId={agentId} cases={cases.data ?? []} run={run} requestedCount={requestedCount} />
-            </div>
-          </Card>
-
-          <Card>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
               <button type="button" className="btn-accent" disabled={!canApply || applying} onClick={apply}>
                 {applying ? 'Применяем…' : 'Применить'}
               </button>
               <button type="button" className="btn" disabled={!isOpen || discarding} onClick={discard}>
                 {discarding ? 'Отбрасываем…' : 'Отбросить'}
               </button>
-              {isOpen && !draft.applicable && (
-                <span style={{ fontSize: 11.5, color: 'var(--text-dim)' }}>
-                  {draft.requiredCaseId && !requiredCase
+              {isOpen && (
+                <span className="draft-actionbar__hint">
+                  {canApply
+                    ? `Прогон пройден — нажмите «Применить», и ${topics ? 'темы попадут в базу знаний' : 'изменение попадёт в базу'}.`
+                    : running
+                    ? 'Прогон идёт — дождитесь «готово».'
+                    : selectedCases.length === 0
+                    ? 'Отметьте хотя бы один случай выше, затем запустите прогон.'
+                    : draft.requiredCaseId && !requiredCase
                     ? 'Обязательный случай исправления не найден. Обновите список; если он удалён, создайте предложение заново.'
                     : draft.requiredCaseId && run?.status === 'done' && run.results.find((result) => result.caseId === draft.requiredCaseId)?.verdict !== 'better'
                       ? 'Исходный случай должен стать лучше. Исправьте предложение и повторите прогон.'
                     : draft.runs.length === 0
-                    ? 'Прогоните черновик хотя бы раз — иначе применить будет нечего проверить.'
+                    ? `Прогоните черновик хотя бы раз. ${describeRun(selectedCases, baselineIds)}`
                     : 'База изменилась после последнего прогона — прогоните черновик заново.'}
                 </span>
               )}
@@ -370,6 +386,28 @@ function Draft({ agentId, draftId, initial }: { agentId: string; draftId: string
           </Async>
         </Card>
       )}
+    </div>
+  );
+}
+
+/** Says, before anything else on the screen, whether this is already in the agent's base and
+ * what the owner does next — the list of topics alone read as if it had already landed. */
+function DraftBanner({ status, topics }: { status: KbDraft['status']; topics: boolean }) {
+  const what = topics ? 'Темы' : 'Изменения';
+  if (status === 'applied') {
+    return <div className="draft-banner" role="status"><span className="draft-banner__title">Применён — {what.toLowerCase()} уже в базе, агент их использует.</span></div>;
+  }
+  if (status === 'discarded') {
+    return <div className="draft-banner" role="status"><span className="draft-banner__title">Отброшен — в базу ничего не попало.</span></div>;
+  }
+  return (
+    <div className="draft-banner" role="status">
+      <span className="draft-banner__title">Это черновик: {what.toLowerCase()} ещё не в базе, агент их пока не использует.</span>
+      <ol>
+        <li>{topics ? 'Уберите лишние темы и поправьте неточные.' : 'Прочитайте изменение ниже.'}</li>
+        <li>Отметьте случаи и нажмите «Запустить прогон» — агент ответит на них с черновиком и без.</li>
+        <li>Когда прогон готов, нажмите «Применить» — {topics ? 'темы появятся во вкладке «Знания»' : 'изменение попадёт в базу'}.</li>
+      </ol>
     </div>
   );
 }

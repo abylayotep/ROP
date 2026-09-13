@@ -7,6 +7,7 @@ import {
   conversations,
   orders,
   stages,
+  whatsappNumbers,
 } from '../../db/schema.js';
 import { withAgentAutomationLock } from '../automation/execution.js';
 import {
@@ -38,7 +39,7 @@ import {
  * language. Meta's own refusals arrive in English and are stored as Meta wrote them; these
  * are ours, and nobody at Meta reads them.
  *
- * Three of them are exported because the queue writes the same three: the dataset can be
+ * Most of them are exported because the queue writes the same ones: the dataset can be
  * turned off — or removed, or the conversation's click id lost with the conversation —
  * between the sale and the pass that reports it, and an owner reading the log must not have
  * to work out that «отключена в интеграциях» and some second wording for the same condition
@@ -52,6 +53,9 @@ export const NO_CLID =
   'и Meta не с чем его сопоставить.';
 export const NON_WHATSAPP =
   'Не отправлено: Meta Conversions API поддерживается только для диалогов WhatsApp.';
+export const NO_WABA =
+  'Не отправлено: номер подключён без аккаунта WhatsApp Business (например, по QR). ' +
+  'Meta принимает покупки из переписки только от номеров на WhatsApp Cloud API.';
 
 /**
  * Why this event cannot go, or null when it can.
@@ -62,6 +66,7 @@ export const NON_WHATSAPP =
 async function skipReason(
   db: Db,
   agentId: string,
+  wabaId: string | null,
   ctwaClid: string | null,
 ): Promise<string | null> {
   const [settings] = await db
@@ -71,6 +76,7 @@ async function skipReason(
 
   if (!settings) return NO_SETTINGS;
   if (!settings.enabled) return DISABLED;
+  if (wabaId === null) return NO_WABA;
   if (ctwaClid === null) return NO_CLID;
   return null;
 }
@@ -132,10 +138,16 @@ export async function queuePurchase(
 ): Promise<void> {
   try {
     const [row] = await db
-      .select({ order: orders, conversation: conversations, contact: contacts })
+      .select({
+        order: orders,
+        conversation: conversations,
+        contact: contacts,
+        wabaId: whatsappNumbers.wabaId,
+      })
       .from(orders)
       .innerJoin(conversations, eq(conversations.id, orders.conversationId))
       .innerJoin(contacts, eq(contacts.id, conversations.contactId))
+      .leftJoin(whatsappNumbers, eq(whatsappNumbers.id, conversations.whatsappNumberId))
       .where(and(eq(orders.id, input.orderId), eq(orders.agentId, input.agentId)));
     if (!row) return;
 
@@ -148,9 +160,10 @@ export async function queuePurchase(
     if (await alreadyQueued(db, eventId)) return;
 
     const ctwaClid = row.conversation.ctwaClid;
+    const wabaId = row.wabaId;
     const reason = row.conversation.whatsappNumberId === null
       ? NON_WHATSAPP
-      : await skipReason(db, input.agentId, ctwaClid);
+      : await skipReason(db, input.agentId, wabaId, ctwaClid);
 
     await insertEvent(db, {
       agentId: input.agentId,
@@ -159,11 +172,12 @@ export async function queuePurchase(
       kind: 'purchase',
       eventId,
       payload:
-        ctwaClid === null || row.contact.phone === null
+        wabaId === null || ctwaClid === null || row.contact.phone === null
           ? UNREPORTABLE_BODY
           : serialiseEvent(
               buildPurchase({
                 orderId: row.order.id,
+                wabaId,
                 ctwaClid,
                 phone: row.contact.phone,
                 amount: row.order.amount,
@@ -199,10 +213,16 @@ export async function queueLead(
   try {
     const queue = async (effectDb: Db) => {
       const [row] = await effectDb
-        .select({ conversation: conversations, contact: contacts, stage: stages })
+        .select({
+          conversation: conversations,
+          contact: contacts,
+          stage: stages,
+          wabaId: whatsappNumbers.wabaId,
+        })
         .from(conversations)
         .innerJoin(contacts, eq(contacts.id, conversations.contactId))
         .innerJoin(stages, eq(stages.id, conversations.stageId))
+        .leftJoin(whatsappNumbers, eq(whatsappNumbers.id, conversations.whatsappNumberId))
         .where(
           and(
             eq(conversations.id, input.conversationId),
@@ -215,9 +235,10 @@ export async function queueLead(
       if (await alreadyQueued(effectDb, eventId)) return;
 
       const ctwaClid = row.conversation.ctwaClid;
+      const wabaId = row.wabaId;
       const reason = row.conversation.whatsappNumberId === null
         ? NON_WHATSAPP
-        : await skipReason(effectDb, input.agentId, ctwaClid);
+        : await skipReason(effectDb, input.agentId, wabaId, ctwaClid);
       await insertEvent(effectDb, {
         agentId: input.agentId,
         conversationId: row.conversation.id,
@@ -225,11 +246,12 @@ export async function queueLead(
         kind: 'lead',
         eventId,
         payload:
-          ctwaClid === null || row.contact.phone === null
+          wabaId === null || ctwaClid === null || row.contact.phone === null
             ? UNREPORTABLE_BODY
             : serialiseEvent(
                 buildLead({
                   conversationId: row.conversation.id,
+                  wabaId,
                   ctwaClid,
                   phone: row.contact.phone,
                   // When the lead got there, not when we got round to reporting it. The column

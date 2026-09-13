@@ -64,6 +64,7 @@ const body = (orderId: string, amount = '15000.00'): CapiEventBody =>
   serialiseEvent(
     buildPurchase({
       orderId,
+      wabaId: 'waba',
       ctwaClid: CLID,
       phone: '77085807932',
       amount,
@@ -278,6 +279,8 @@ describe('saving the settings', () => {
     // that did not happen.
     expect(capi.calls[0]!.testEventCode).toBe('TEST12345');
     expect(capi.calls[0]!.events).toHaveLength(1);
+    // Meta refuses a business-messaging event without the account the chat happened on.
+    expect(capi.calls[0]!.events[0]).toContain('"whatsapp_business_account_id":"waba"');
 
     const settings = await storedSettings();
     expect(settings!.datasetId).toBe('1234567890');
@@ -579,6 +582,23 @@ describe('saving the settings', () => {
 
     expect(capi.calls).toHaveLength(2);
     expect(capi.calls[1]!.datasetId).toBe('9999999999');
+  });
+
+  it('refuses to connect, asking Meta nothing, when no number has a WhatsApp Business Account', async () => {
+    await db.delete(conversations).where(eq(conversations.agentId, agentId));
+    await db.delete(whatsappNumbers).where(eq(whatsappNumbers.agentId, agentId));
+
+    const res = await app.inject({
+      method: 'PUT',
+      url: settingsUrl(),
+      cookies: owner,
+      payload: { datasetId: '1234567890', accessToken: TOKEN },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().message).toContain('Cloud API');
+    expect(capi.calls).toHaveLength(0);
+    expect(await storedSettings()).toBeUndefined();
   });
 
   it('refuses a first save with no token at all', async () => {

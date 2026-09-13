@@ -252,6 +252,7 @@ describe('an order becoming paid', () => {
     expect(event.payload).toContain('"currency":"KZT"');
     expect(event.payload).toContain(`"event_time":${Math.floor(paidAt!.getTime() / 1000)}`);
     expect(event.payload).toContain(`"ctwa_clid":"${CLID}"`);
+    expect(event.payload).toContain('"whatsapp_business_account_id":"waba"');
   });
 
   it('queues a purchase for a provider-confirmed order', async () => {
@@ -314,6 +315,31 @@ describe('an order becoming paid', () => {
     expect(rows[0]!.status).toBe('skipped');
     expect(rows[0]!.error).toContain('отключена');
     expect(rows[0]!.error).not.toContain('ctwa_clid');
+  });
+
+  it('records that a number with no WhatsApp Business Account cannot report', async () => {
+    const [linked] = await db
+      .insert(whatsappNumbers)
+      .values({
+        agentId,
+        connectionKind: 'linked',
+        displayPhone: '+77011234567',
+        linkedJid: '77011234567@s.whatsapp.net',
+        linkedState: 'open',
+      })
+      .returning();
+    await db
+      .update(conversations)
+      .set({ whatsappNumberId: linked!.id })
+      .where(eq(conversations.id, adConversationId));
+
+    await record(adConversationId, { amount: '1000', status: 'paid' });
+
+    const rows = await queued();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.status).toBe('skipped');
+    expect(rows[0]!.error).toContain('WhatsApp Business');
+    expect(rows[0]!.payload).toBe('{}');
   });
 
   it('still marks the order paid when queueing cannot write at all', async () => {

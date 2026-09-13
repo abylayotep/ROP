@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { agents, contacts, conversations, kbDrafts, kbGenerationBatches, kbGenerationProposals, kbGenerationRawFindings, kbGenerationRuns, kbNotes, messages, users, whatsappNumbers, accounts } from '../src/db/schema.js';
 import type { CompletionInput } from '../src/lib/ai/openrouter.js';
 import { keyAad } from '../src/lib/ai/turn.js';
-import { SEED_TOPICS } from '../src/lib/knowledge/generation-consolidate.js';
+import { GENERATION_CONSOLIDATION_MODEL, SEED_TOPICS } from '../src/lib/knowledge/generation-consolidate.js';
 import { cancelGenerationRun, executeGenerationRun, reconcileGenerationRuns, retryGenerationRun, startGenerationRun } from '../src/lib/knowledge/generation-run.js';
 import { previewSelection } from '../src/lib/knowledge/generation-selection.js';
 import { encryptSecret } from '../src/lib/secret-box.js';
@@ -37,20 +37,24 @@ const classified = (
 /**
  * Answers a consolidation call like the two topic prompts: the assign step files each finding
  * under its own path's title (legacy «Скрипт/» findings included), and a write call returns the
- * first finding's body.
+ * first finding's body as a well-formed note (a heading, a link when anything is linkable).
  */
 const consolidationAnswer = (call: CompletionInput): string => {
   const payload = JSON.parse(call.messages[1]!.content) as {
     proposals?: { id: string; path: string }[];
     findings?: { body: string }[];
+    linkableTopics?: string[];
   };
   if (payload.proposals) {
     return JSON.stringify({ assignments: payload.proposals.map((proposal) => ({
       id: proposal.id, topic: proposal.path.slice(proposal.path.lastIndexOf('/') + 1),
     })) });
   }
-  return JSON.stringify({ body: payload.findings![0]!.body, confidence: 'high' });
+  const link = payload.linkableTopics?.[0];
+  return JSON.stringify({ body: `${noteBody(payload.findings![0]!.body)}${link ? `\n\nСвязано: [[${link}]]` : ''}`, confidence: 'high' });
 };
+
+const noteBody = (fact: string): string => `## Факты\n- ${fact}`;
 
 const consolidationModel = (extraction: string) => {
   const model = fakeModel();
@@ -328,7 +332,7 @@ describe('generation runs', () => {
     expect((await db.select().from(kbGenerationRuns).where(eq(kbGenerationRuns.id, run.id)))[0])
       .toMatchObject({ status: 'completed', promptTokens: 200, completionTokens: 40, cost: '0.00020000' });
     expect(await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.runId, run.id)))
-      .toEqual([expect.objectContaining({ path: 'База знаний/Доставка', body: 'Доставка занимает два дня.' })]);
+      .toEqual([expect.objectContaining({ path: 'База знаний/Доставка', body: noteBody('Доставка занимает два дня.') })]);
   });
 
   it('resumes only consolidation after an interruption that followed persisted extraction', async () => {
@@ -368,6 +372,45 @@ describe('generation runs', () => {
     expect(model.calls).toHaveLength(2);
     expect((await db.select().from(kbGenerationRuns).where(eq(kbGenerationRuns.id, run.id)))[0])
       .toMatchObject({ status: 'completed', promptTokens: 160, completionTokens: 28, cost: '0.00016000' });
+  });
+
+  it('extracts on the run model, consolidates on the fixed model, and keeps a link the seller sent in two chats', async () => {
+    const link = 'https://2gis.kz/almaty/firm/70000001234567';
+    const [secondContact] = await db.insert(contacts).values({ agentId, phone: '77000000004' }).returning();
+    const [secondConversation] = await db.insert(conversations).values({
+      agentId, contactId: secondContact!.id, whatsappNumberId: (await db.select().from(whatsappNumbers))[0]!.id,
+    }).returning();
+    await db.update(messages).set({ body: `Delivery takes two days. Мы здесь: ${link}` }).where(eq(messages.id, messageId));
+    await db.insert(messages).values([
+      { conversationId: secondConversation!.id, direction: 'in', author: 'client', kind: 'text', body: 'Where are you?', sentAt: new Date('2026-09-01T11:00:00Z') },
+      { conversationId: secondConversation!.id, direction: 'out', author: 'operator', kind: 'text', body: `Мы здесь: ${link}`, sentAt: new Date('2026-09-01T11:01:00Z') },
+    ]);
+    const preview = await previewSelection(db, agentId, {
+      conversationIds: [conversationId, secondConversation!.id], from: '2026-09-01T00:00:00Z', to: '2026-09-02T00:00:00Z',
+    }, userId);
+    const run = await startGenerationRun(db, agentId, userId, preview.previewId, 'business-contact');
+    const model = fakeModel();
+    model.complete = async (call) => {
+      model.calls.push(call);
+      const payload = JSON.parse(call.messages[1]!.content) as { messages?: { id: string }[] };
+      const text = !payload.messages
+        ? consolidationAnswer(call)
+        : payload.messages.some((message) => message.id === messageId)
+          ? classified([{ path: 'База знаний/Контакты и адрес', body: `Мы здесь: ${link}`, sources: [messageId], warnings: [] }])
+          : JSON.stringify({ classification: { value: 'irrelevant', reason: 'Нет вопроса о покупке.' }, proposals: [] });
+      return { text, promptTokens: 100, completionTokens: 20, cost: '0.00010000' };
+    };
+
+    await executeGenerationRun({ db, model, credentialsKey: key }, run.id);
+
+    expect(model.calls.map((call) => call.model)).toEqual([
+      run.modelId, run.modelId, GENERATION_CONSOLIDATION_MODEL, GENERATION_CONSOLIDATION_MODEL,
+    ]);
+    for (const extraction of model.calls.slice(0, 2)) {
+      expect(JSON.parse(extraction.messages[1]!.content)).toMatchObject({ businessContacts: [link] });
+    }
+    expect(await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.runId, run.id)))
+      .toEqual([expect.objectContaining({ path: 'База знаний/Контакты и адрес', body: noteBody(`Мы здесь: ${link}`) })]);
   });
 
   it('persists classification and excludes proposals from an irrelevant batch', async () => {

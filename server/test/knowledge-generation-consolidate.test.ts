@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { CommunicationStyle, KbGenerationProposalKind, KbGenerationWarning } from '@rakurs/contract';
 import { communicationStyleInstruction } from '../src/lib/ai/communication-style.js';
-import { ModelError, type CompletionInput } from '../src/lib/ai/openrouter.js';
+import { ModelError, MODELS, type CompletionInput } from '../src/lib/ai/openrouter.js';
 import {
   consolidateGenerationProposals,
+  GENERATION_CONSOLIDATION_MODEL,
   GenerationConsolidationError,
   planGenerationTopics,
   SEED_TOPICS,
@@ -27,6 +28,7 @@ const raw = (
     path?: string;
     warnings?: KbGenerationWarning[];
     messageId?: string;
+    conversationId?: string;
   } = {},
 ): RawGenerationProposal => ({
   id,
@@ -34,7 +36,7 @@ const raw = (
   path: options.path ?? 'База знаний/Доставка',
   body,
   warnings: options.warnings ?? [],
-  sources: [source(options.messageId ?? `message-${id}`)],
+  sources: [{ ...source(options.messageId ?? `message-${id}`), ...(options.conversationId ? { conversationId: options.conversationId } : {}) }],
 });
 
 const input = (
@@ -43,11 +45,10 @@ const input = (
   existingTopics: ConsolidationInput['existingTopics'] = [],
 ): ConsolidationInput => ({ proposals, communicationStyle, existingTopics });
 
-const deps = (model: ReturnType<typeof fakeModel>) => ({
+const deps = (model: ReturnType<typeof fakeModel>, temperature = '0.20') => ({
   model,
   key: 'provider-key',
-  modelId: 'openai/test',
-  temperature: '0.20',
+  temperature,
 });
 
 interface AssignPayload {
@@ -60,8 +61,13 @@ interface WritePayload {
   topic: string;
   existingBody?: string;
   linkableTopics: string[];
-  findings: { path: string; body: string; warnings: KbGenerationWarning[] }[];
+  businessContacts?: string[];
+  findings: { path: string; body: string; warnings: KbGenerationWarning[]; chats?: number }[];
 }
+
+/** A body the write check accepts: a heading, and a link when there is something to link. */
+const wellFormed = (payload: WritePayload, facts: string): string =>
+  `## Факты\n${facts}${payload.linkableTopics.length > 0 ? `\n\nСвязано: [[${payload.linkableTopics[0]}]]` : ''}`;
 
 const isAssign = (call: CompletionInput): boolean => call.maxTokens === GENERATION_LIMITS.maxAssignOutputTokens;
 const payloadOf = <T>(call: CompletionInput): T => JSON.parse(call.messages[1]!.content) as T;
@@ -72,8 +78,8 @@ const payloadOf = <T>(call: CompletionInput): T => JSON.parse(call.messages[1]!.
  */
 const topicModel = (
   assign: (payload: AssignPayload, call: number) => { id: string; topic: string | null }[],
-  write: (payload: WritePayload) => { body: string; confidence?: 'high' | 'review' } | string | Error =
-    (payload) => ({ body: `${payload.topic}: ${payload.findings.map((finding) => finding.body).join(' ')}` }),
+  write: (payload: WritePayload, call: CompletionInput) => { body: string; confidence?: 'high' | 'review' } | string | Error =
+    (payload) => ({ body: wellFormed(payload, payload.findings.map((finding) => `- ${finding.body}`).join('\n')) }),
 ) => {
   const model = fakeModel();
   let assignCalls = 0;
@@ -83,7 +89,7 @@ const topicModel = (
     if (isAssign(call)) {
       text = JSON.stringify({ assignments: assign(payloadOf(call), assignCalls++) });
     } else {
-      const answer = write(payloadOf(call));
+      const answer = write(payloadOf(call), call);
       if (answer instanceof Error) throw answer;
       text = typeof answer === 'string' ? answer : JSON.stringify({ confidence: 'high', ...answer });
     }
@@ -99,7 +105,7 @@ const writeCalls = (model: ReturnType<typeof fakeModel>) => model.calls.filter((
 
 describe('generation proposal consolidation', () => {
   it('merges exact raw duplicates, keeps every message source and sums usage of both steps', async () => {
-    const model = topicModel(allTo('Доставка'), () => ({ body: 'Доставка занимает два дня.' }));
+    const model = topicModel(allTo('Доставка'), () => ({ body: '## Факты\n- Доставка занимает два дня.' }));
 
     const result = await consolidateGenerationProposals(deps(model), input([
       raw('p1', 'Доставка занимает два дня.', { messageId: 'seller-1' }),
@@ -114,13 +120,14 @@ describe('generation proposal consolidation', () => {
       items: [{
         kind: 'knowledge',
         path: 'База знаний/Доставка',
-        body: 'Доставка занимает два дня.',
+        body: '## Факты\n- Доставка занимает два дня.',
         confidence: 'high',
         selected: true,
         sourceProposalIds: ['p1', 'p2'],
         warnings: [],
         sources: [source('seller-1'), source('seller-2')],
       }],
+      dropped: 0,
       usage: { promptTokens: 200, completionTokens: 40, cost: '0.00020000' },
     });
   });
@@ -157,14 +164,14 @@ describe('generation proposal consolidation', () => {
     const result = await consolidateGenerationProposals(deps(model), input([
       raw('p1', 'Срочно можно за день.'),
     ], 'warm', [
-      { path: 'База знаний/Заказ/Сроки Выполнения', body: 'Три дня.' },
+      { path: 'База знаний/Заказ/Сроки Выполнения', body: '## Факты\n- Три дня.' },
     ]));
 
     const write = payloadOf<WritePayload>(writeCalls(model)[0]!);
-    expect(write).toMatchObject({ topic: 'Сроки Выполнения', existingBody: 'Три дня.' });
+    expect(write).toMatchObject({ topic: 'Сроки Выполнения', existingBody: '## Факты\n- Три дня.', linkableTopics: [] });
     expect(result.items).toEqual([expect.objectContaining({
       path: 'База знаний/Заказ/Сроки Выполнения',
-      body: 'Три дня.\n- Срочно за день.',
+      body: '## Факты\n- Три дня.\n- Срочно за день.',
     })]);
   });
 
@@ -205,13 +212,13 @@ describe('generation proposal consolidation', () => {
     expect(payloadOf<WritePayload>(writeCalls(model)[0]!).existingBody).toBe('Kaspi.');
   });
 
-  it('drops null topics, missing ids, repeated ids and invented ids in the plan', async () => {
-    const model = topicModel(() => [
+  it('drops null topics, repeated ids, invented ids and ids missing again after one follow-up', async () => {
+    const model = topicModel((_payload, call) => (call > 0 ? [] : [
       { id: 'p1', topic: 'Оплата' },
       { id: 'p1', topic: 'Доставка' },
       { id: 'p2', topic: null },
       { id: 'invented', topic: 'Доставка' },
-    ]);
+    ]));
 
     const plan = await planGenerationTopics(deps(model), input([
       raw('a', 'Оплата Kaspi.'),
@@ -219,11 +226,14 @@ describe('generation proposal consolidation', () => {
       raw('c', 'Доставка два дня.'),
     ]));
 
-    expect(model.calls).toHaveLength(1);
+    expect(model.calls).toHaveLength(2);
+    expect(payloadOf<AssignPayload>(model.calls[1]!).proposals).toEqual([
+      { id: 'p1', path: 'База знаний/Доставка', body: 'Доставка два дня.' },
+    ]);
     expect(plan).toEqual({
       topics: [{ path: 'База знаний/Оплата', proposalIds: ['a'] }],
       droppedProposalIds: ['b', 'c'],
-      usage: { promptTokens: 100, completionTokens: 20, cost: '0.00010000' },
+      usage: { promptTokens: 200, completionTokens: 40, cost: '0.00020000' },
     });
   });
 
@@ -284,7 +294,9 @@ describe('generation proposal consolidation', () => {
         id: proposal.id,
         topic: proposal.path.endsWith('Курьер') ? 'Доставка' : 'Оплата',
       })),
-      (payload) => (payload.topic === 'Оплата' ? { body } : { body: 'Курьер звонит заранее.', confidence: 'review' }),
+      (payload) => (payload.topic === 'Оплата'
+        ? { body }
+        : { body: '## Факты\n- Курьер звонит заранее.\n\nСвязано: [[Оплата]]', confidence: 'review' }),
     );
 
     const result = await consolidateGenerationProposals(deps(model), input([
@@ -297,6 +309,7 @@ describe('generation proposal consolidation', () => {
 
     const [assign, ...writes] = model.calls;
     expect(assign!.messages[0]!.content).toContain('«Запрос города»');
+    expect(assign!.messages[0]!.content).toContain('«Общение с клиентом»');
     expect(assign!.messages[0]!.content).toContain('Kazakh');
     expect(assign!).not.toHaveProperty('timeoutMs');
     expect(writes).toHaveLength(2);
@@ -340,27 +353,27 @@ describe('generation proposal consolidation', () => {
     let slice = 0;
     const model = topicModel(allTo('Доставка'), () => {
       slice += 1;
-      return { body: `Тело ${slice}.`, confidence: slice === 1 ? 'review' : 'high' };
+      return { body: `## Факты\n- Тело ${slice}.`, confidence: slice === 1 ? 'review' : 'high' };
     });
 
     const result = await consolidateGenerationProposals(deps(model), input([
       raw('p1', `${half} 1`),
       raw('p2', `${half} 2`),
-    ], 'warm', [{ path: 'База знаний/Доставка', body: 'Было.' }]));
+    ], 'warm', [{ path: 'База знаний/Доставка', body: '## Факты\n- Было.' }]));
 
     expect(model.calls.filter(isAssign)).toHaveLength(1);
     const writes = writeCalls(model).map((call) => payloadOf<WritePayload>(call));
-    expect(writes.map((write) => write.existingBody)).toEqual(['Было.', 'Тело 1.']);
+    expect(writes.map((write) => write.existingBody)).toEqual(['## Факты\n- Было.', '## Факты\n- Тело 1.']);
     expect(writes.map((write) => write.findings.length)).toEqual([1, 1]);
     expect(result.items).toEqual([expect.objectContaining({
-      body: 'Тело 2.', confidence: 'review', sourceProposalIds: ['p1', 'p2'],
+      body: '## Факты\n- Тело 2.', confidence: 'review', sourceProposalIds: ['p1', 'p2'],
     })]);
   });
 
   it('stops folding once the written body is too long to rewrite, leaving later findings out', async () => {
     const slice = 'Д'.repeat(GENERATION_LIMITS.maxTopicSliceCharacters - 100);
     const model = topicModel(allTo('Доставка'), () => ({
-      body: 'Т'.repeat(GENERATION_LIMITS.maxRewritableBodyCharacters + 1),
+      body: `## Факты\n- ${'Т'.repeat(GENERATION_LIMITS.maxRewritableBodyCharacters + 1)}`,
     }));
 
     const result = await consolidateGenerationProposals(deps(model), input([
@@ -377,7 +390,7 @@ describe('generation proposal consolidation', () => {
     let slice = 0;
     const model = topicModel(allTo('Доставка'), () => {
       slice += 1;
-      return { body: slice === 1 ? 'Тело 1.' : 'Меня зовут Алия.' };
+      return { body: slice === 1 ? '## Факты\n- Тело 1.' : 'Меня зовут Алия.' };
     });
 
     const result = await consolidateGenerationProposals(deps(model), input([
@@ -385,7 +398,7 @@ describe('generation proposal consolidation', () => {
       raw('p2', `${half} 2`),
     ]));
 
-    expect(result.items).toEqual([expect.objectContaining({ body: 'Тело 1.', sourceProposalIds: ['p1'] })]);
+    expect(result.items).toEqual([expect.objectContaining({ body: '## Факты\n- Тело 1.', sourceProposalIds: ['p1'] })]);
   });
 
   it.each([
@@ -441,5 +454,179 @@ describe('generation proposal consolidation', () => {
 
     expect(model.calls).toHaveLength(0);
     expect(result.items).toEqual([]);
+  });
+  it('runs both steps on the fixed consolidation model with the temperature capped', async () => {
+    const model = topicModel(allTo('Доставка'));
+
+    await consolidateGenerationProposals(deps(model, '0.90'), input([raw('p1', 'Два дня.')]));
+    await consolidateGenerationProposals(deps(model, '0.20'), input([raw('p1', 'Два дня.')]));
+
+    expect(MODELS.map((known) => known.id)).toContain(GENERATION_CONSOLIDATION_MODEL);
+    expect(model.calls).toHaveLength(4);
+    expect(model.calls.map((call) => call.model)).toEqual(Array(4).fill(GENERATION_CONSOLIDATION_MODEL));
+    expect(model.calls.map((call) => call.temperature)).toEqual(['0.3', '0.3', '0.20', '0.20']);
+  });
+
+  it('asks once more when a body has no headings and keeps the corrected answer', async () => {
+    let writes = 0;
+    const model = topicModel(allTo('Доставка'), () => {
+      writes += 1;
+      return { body: writes === 1 ? 'Доставка два дня.' : '## Факты\n- Доставка два дня.' };
+    });
+
+    const result = await consolidateGenerationProposals(deps(model), input([raw('p1', 'Два дня.')]));
+
+    const [first, retry] = writeCalls(model);
+    expect(retry!.messages).toHaveLength(4);
+    expect(retry!.messages.slice(0, 2)).toEqual(first!.messages);
+    expect(retry!.messages[2]).toEqual({ role: 'assistant', content: JSON.stringify({ confidence: 'high', body: 'Доставка два дня.' }) });
+    expect(retry!.messages[3]).toMatchObject({ role: 'user' });
+    expect(retry!.messages[3]!.content).toContain('«## Факты»');
+    expect(retry).toMatchObject({ model: GENERATION_CONSOLIDATION_MODEL, maxTokens: GENERATION_LIMITS.maxTopicOutputTokens });
+    expect(result.items).toEqual([expect.objectContaining({ body: '## Факты\n- Доставка два дня.', confidence: 'high' })]);
+    expect(result.usage).toEqual({ promptTokens: 300, completionTokens: 60, cost: '0.00030000' });
+  });
+
+  it.each([
+    ['the same malformed answer', () => ({ body: 'Доставка два дня.\n* Курьер звонит.\n\nСвязано: [[Оплата]], [[Неизвестная]]' })],
+    ['an unparseable answer', (() => {
+      let writes = 0;
+      return () => {
+        writes += 1;
+        return writes === 1 ? { body: 'Доставка два дня.\n* Курьер звонит.\n\nСвязано: [[Оплата]], [[Неизвестная]]' } : 'not json';
+      };
+    })()],
+  ])('normalizes a body without headings after the retry returns %s', async (_name, write) => {
+    const model = topicModel(allTo('Доставка'), write);
+
+    const result = await consolidateGenerationProposals(deps(model), input([raw('p1', 'Два дня.')], 'warm', [
+      { path: 'База знаний/Оплата', body: '## Факты\n- Kaspi.' },
+    ]));
+
+    expect(writeCalls(model)).toHaveLength(2);
+    expect(writeCalls(model)[1]!.messages[3]!.content).not.toContain('Связано');
+    expect(result.items).toEqual([expect.objectContaining({
+      body: '## Факты\n- Доставка два дня.\n- Курьер звонит.\n\nСвязано: [[Оплата]]',
+      confidence: 'review',
+      selected: false,
+    })]);
+    expect(result.usage.promptTokens).toBe(300);
+  });
+
+  it('asks for a missing link once, then keeps the body without inventing one', async () => {
+    const model = topicModel(allTo('Доставка'), () => ({ body: '## Факты\n- Два дня.\n\nСвязано: [[Доставка]]' }));
+
+    const result = await consolidateGenerationProposals(deps(model), input([raw('p1', 'Два дня.')], 'warm', [
+      { path: 'База знаний/Оплата', body: '## Факты\n- Kaspi.' },
+    ]));
+
+    const writes = writeCalls(model);
+    expect(writes).toHaveLength(2);
+    expect(writes[1]!.messages[3]!.content).toContain('(Оплата)');
+    expect(writes[1]!.messages[3]!.content).not.toContain('«## Факты»');
+    expect(result.items).toEqual([expect.objectContaining({ body: '## Факты\n- Два дня.', confidence: 'high' })]);
+  });
+
+  it('strips links to unknown topics and exact duplicate bullets from a well-formed body', async () => {
+    const body = [
+      'Сроки доставки.',
+      '',
+      '## Факты',
+      '- Два дня.',
+      '-  Два дня.',
+      '- Два дня.',
+      '- Подробнее в [[Неизвестная]] и [[Оплата|оплате]].',
+      '',
+      '## Готовые фразы',
+      '- «Доставим за два дня»',
+      '- «Доставим за два дня»',
+      '',
+      'Связано: [[Оплата]], [[Доставка]], [[Неизвестная]]',
+    ].join('\n');
+    const model = topicModel(allTo('Доставка'), () => ({ body }));
+
+    const result = await consolidateGenerationProposals(deps(model), input([raw('p1', 'Два дня.')], 'warm', [
+      { path: 'База знаний/Оплата', body: '## Факты\n- Kaspi.' },
+    ]));
+
+    expect(writeCalls(model)).toHaveLength(1);
+    expect(result.items[0]!.body).toBe([
+      'Сроки доставки.',
+      '',
+      '## Факты',
+      '- Два дня.',
+      '- Подробнее в Неизвестная и [[Оплата|оплате]].',
+      '',
+      '## Готовые фразы',
+      '- «Доставим за два дня»',
+      '',
+      'Связано: [[Оплата]]',
+    ].join('\n'));
+  });
+
+  it('follows up on ids the assign answer left out and counts what no topic took', async () => {
+    const model = topicModel((payload, call) => (call === 0
+      ? [{ id: 'p1', topic: 'Оплата' }, { id: 'p2', topic: null }]
+      : payload.proposals.map((proposal) => ({ id: proposal.id, topic: 'Общение с клиентом' }))));
+
+    const result = await consolidateGenerationProposals(deps(model), input([
+      raw('a', 'Оплата Kaspi.'),
+      raw('b', 'Здравствуйте!'),
+      raw('c', '«Из какого вы города?»'),
+    ]));
+
+    const assigns = model.calls.filter(isAssign).map((call) => payloadOf<AssignPayload>(call));
+    expect(assigns.map((assign) => assign.proposals.map((proposal) => proposal.body))).toEqual([
+      ['Оплата Kaspi.', 'Здравствуйте!', '«Из какого вы города?»'],
+      ['«Из какого вы города?»'],
+    ]);
+    expect(assigns[0]!.topics).toContain('Общение с клиентом');
+    expect(result.items.map((item) => item.path)).toEqual(['База знаний/Оплата', 'База знаний/Общение с клиентом']);
+    expect(result.dropped).toBe(1);
+  });
+
+  it('keeps a business address and map link sent in two conversations and redacts one from a single conversation', async () => {
+    const contact = 'Адрес: Проспект Райымбека, 420\nhttps://2gis.kz/almaty/firm/70000001234567';
+    const model = topicModel(
+      (payload) => payload.proposals.map((proposal) => ({ id: proposal.id, topic: 'Контакты и адрес' })),
+      (payload) => ({ body: `## Факты\n${payload.findings.map((finding) => `- ${finding.body.replace('\n', ' ')}`).join('\n')}` }),
+    );
+
+    const shared = await consolidateGenerationProposals(deps(model), input([
+      raw('p1', contact, { conversationId: 'conversation-1' }),
+      raw('p2', contact, { conversationId: 'conversation-2' }),
+    ]));
+
+    const sharedWrite = payloadOf<WritePayload>(writeCalls(model)[0]!);
+    expect(sharedWrite.findings).toEqual([expect.objectContaining({ body: contact, chats: 2 })]);
+    expect(sharedWrite.businessContacts).toEqual(expect.arrayContaining(['Проспект Райымбека, 420', 'https://2gis.kz/almaty/firm/70000001234567']));
+    expect(payloadOf<AssignPayload>(model.calls[0]!).proposals[0]).toMatchObject({ chats: 2 });
+    expect(shared.items).toEqual([expect.objectContaining({
+      body: '## Факты\n- Адрес: Проспект Райымбека, 420 https://2gis.kz/almaty/firm/70000001234567',
+      sourceProposalIds: ['p1', 'p2'],
+    })]);
+
+    model.calls.length = 0;
+    const single = await consolidateGenerationProposals(deps(model), input([
+      raw('p1', contact, { conversationId: 'conversation-1' }),
+      raw('p2', 'Доставка два дня.', { conversationId: 'conversation-2' }),
+    ]));
+
+    expect(JSON.stringify(model.calls)).not.toContain('70000001234567');
+    expect(JSON.stringify(model.calls)).not.toContain('Райымбека');
+    expect(JSON.stringify(single)).not.toContain('Райымбека');
+  });
+
+  it('never lets a business contact carry a personal introduction through', async () => {
+    const contact = 'Адрес: Проспект Райымбека, 420';
+    const model = topicModel(allTo('Контакты и адрес'), () => ({ body: `## Факты\n- ${contact}\n- Меня зовут Алия.` }));
+
+    const result = await consolidateGenerationProposals(deps(model), input([
+      raw('p1', contact, { conversationId: 'conversation-1' }),
+      raw('p2', contact, { conversationId: 'conversation-2' }),
+    ]));
+
+    expect(result.items).toEqual([]);
+    expect(result.dropped).toBe(2);
   });
 });

@@ -13,6 +13,7 @@ import {
 } from '../src/db/schema.js';
 import type { CompletionInput } from '../src/lib/ai/openrouter.js';
 import { keyAad } from '../src/lib/ai/turn.js';
+import { GENERATION_CONSOLIDATION_MODEL } from '../src/lib/knowledge/generation-consolidate.js';
 import { regroupWhatsAppDrafts } from '../src/lib/knowledge/whatsapp-regroup.js';
 import { encryptSecret } from '../src/lib/secret-box.js';
 import { withDb } from './helpers/db.js';
@@ -26,6 +27,7 @@ let runId: string;
 let noteId: string;
 let legacyScriptId: string;
 let legacyKnowledgeId: string;
+let batchId: string;
 const proposal: Record<'terms' | 'price' | 'delivery' | 'payment', string> = { terms: '', price: '', delivery: '', payment: '' };
 
 const source = (messageId: string) => ({ conversationId: 'c1', messageId, sentAt: '2026-09-01T10:00:00.000Z' });
@@ -42,6 +44,7 @@ beforeEach(async () => {
   const [run] = await db.insert(kbGenerationRuns).values({ agentId, userId: user!.id, requestedPreviewId: crypto.randomUUID(), requestKey: 'regroup', selection, manifest: { messages: [], batches: [] }, counts, modelId: 'run-model', temperature: '0.10', status: 'completed' }).returning();
   runId = run!.id;
   const [batch] = await db.insert(kbGenerationBatches).values({ runId, ordinal: 0, manifest: { ordinal: 0, conversationId: crypto.randomUUID(), messages: [], characterCount: 0 }, status: 'done' }).returning();
+  batchId = batch!.id;
   const [note] = await db.insert(kbNotes).values({ agentId, path: 'База знаний/Оплата', title: 'Оплата', body: 'Kaspi.' }).returning();
   noteId = note!.id;
 
@@ -77,7 +80,8 @@ beforeEach(async () => {
 
 const bodies: Record<string, string> = {
   'Сроки': 'Сроки изготовления.\n\n## Факты\n- Три дня.\n\n## Готовые фразы\n- «Сделаем за три дня.»\n\nСвязано: [[Оплата]]',
-  'Оплата': 'Как оплатить.\n\n## Факты\n- Kaspi.\n- Kaspi QR.',
+  'Оплата': 'Как оплатить.\n\n## Факты\n- Kaspi.\n- Kaspi QR.\n\nСвязано: [[Сроки]]',
+  'Контакты и адрес': '## Факты\n- Адрес: Проспект Райымбека, 420\n\nСвязано: [[Оплата]]',
 };
 
 /** Answers like the two topic prompts: both «сроки» ops go to one topic, payment extends the note, price is dropped. */
@@ -93,7 +97,9 @@ const topicModel = (onCall?: () => Promise<void>) => {
     const text = payload.proposals
       ? JSON.stringify({ assignments: payload.proposals.map((raw) => ({
         id: raw.id,
-        topic: raw.path.includes('Сроки') ? 'Сроки' : raw.path.endsWith('Оплата') ? 'оплата' : null,
+        topic: raw.path.includes('Сроки') ? 'Сроки'
+          : raw.path.endsWith('Оплата') ? 'оплата'
+            : raw.path.includes('Контакты') ? 'Контакты и адрес' : null,
       })) })
       : JSON.stringify({ body: bodies[payload.topic!], confidence: 'high' });
     return { text, promptTokens: 300, completionTokens: 90, cost: '0.00300000' };
@@ -109,16 +115,16 @@ describe('regroupWhatsAppDrafts', () => {
     const results = await regroupWhatsAppDrafts(db, { model, credentialsKey: key, log: (line) => lines.push(line) }, { dryRun: true });
 
     expect(results).toEqual([expect.objectContaining({
-      agentId, outcome: 'dry_run', beforeOps: 4,
-      topics: [{ path: 'База знаний/Сроки', ops: 2 }, { path: 'База знаний/Оплата', ops: 1 }],
+      agentId, outcome: 'dry_run', beforeOps: 4, findings: 4, dropped: 1,
+      topics: [{ path: 'База знаний/Сроки', findings: 2 }, { path: 'База знаний/Оплата', findings: 1 }],
     })]);
     // Only the assign step runs: one cheap call, no topic bodies written.
     expect(model.calls).toHaveLength(1);
-    expect(lines[0]).toContain('4 ops → 2 topics');
+    expect(lines[0]).toContain('4 ops, 4 findings → 2 topics, 1 dropped');
     expect(lines[0]).toContain('300/90 tokens');
-    expect(lines).toContain('  База знаний/Сроки ← 2 ops');
-    expect(lines).toContain('  База знаний/Оплата ← 1 ops');
-    expect(model.calls[0]).toMatchObject({ key: 'provider-key', model: 'run-model', temperature: '0.10' });
+    expect(lines).toContain('  База знаний/Сроки ← 2 findings');
+    expect(lines).toContain('  База знаний/Оплата ← 1 findings');
+    expect(model.calls[0]).toMatchObject({ key: 'provider-key', model: GENERATION_CONSOLIDATION_MODEL, temperature: '0.10' });
     const payload = JSON.parse(model.calls[0]!.messages[1]!.content) as { topics: string[]; proposals: unknown[] };
     expect(payload.topics).toContain('Оплата');
     expect(payload.proposals).toEqual(expect.arrayContaining([
@@ -137,7 +143,8 @@ describe('regroupWhatsAppDrafts', () => {
     const payment = JSON.parse(model.calls[2]!.messages[1]!.content) as { topic: string; existingBody?: string };
     expect(payment).toMatchObject({ topic: 'Оплата', existingBody: 'Kaspi.' });
     expect(lines[0]).toContain('900/270 tokens');
-    expect(lines).toContain('  База знаний/Сроки ← 2 ops');
+    expect(lines[0]).toContain('1 dropped');
+    expect(lines).toContain('  База знаний/Сроки ← 2 findings');
 
     const drafts = await db.select().from(kbDrafts);
     const open = drafts.filter((draft) => draft.status === 'open');
@@ -175,5 +182,51 @@ describe('regroupWhatsAppDrafts', () => {
 
     expect(result).toMatchObject({ outcome: 'skipped', reason: 'drafts_changed' });
     expect((await db.select().from(kbDrafts)).filter((draft) => draft.status === 'open')).toHaveLength(3);
+  });
+  it('adds the ops of --source-draft drafts as findings without repointing their proposals', async () => {
+    const [user] = await db.select().from(users);
+    const [lost] = await db.insert(kbDrafts).values({
+      agentId, title: 'Обучение из переписки', origin: 'manual', base: {}, status: 'discarded', createdBy: user!.id,
+      ops: [
+        { op: 'note_create', path: 'База знаний/Контакты', body: 'Адрес: Проспект Райымбека, 420' },
+        { op: 'note_create', path: 'База знаний/Оплата', body: 'Kaspi QR.' },
+      ],
+    }).returning();
+    const insertLost = (conversationId: string, name: string) => db.insert(kbGenerationProposals).values({
+      runId, batchId, fingerprint: `lost-${name}`, path: 'База знаний/Контакты', body: 'Адрес: Проспект Райымбека, 420',
+      sources: [{ conversationId, messageId: `m-${name}`, sentAt: '2026-09-01T10:00:00.000Z' }],
+      status: 'pending',
+    }).returning();
+    const [first] = await insertLost('c1', 'a');
+    await insertLost('c2', 'b');
+    const lines: string[] = [];
+
+    const [dry] = await regroupWhatsAppDrafts(db, { model: topicModel(), credentialsKey: key, log: (line) => lines.push(line) }, {
+      dryRun: true, sourceDraftIds: [lost!.id, legacyScriptId],
+    });
+
+    expect(dry).toMatchObject({ outcome: 'dry_run', beforeOps: 4, findings: 5, dropped: 1 });
+    expect(lines).toContain('  База знаний/Контакты и адрес ← 1 findings');
+
+    const model = topicModel();
+    const [written] = await regroupWhatsAppDrafts(db, { model, credentialsKey: key, log: () => undefined }, {
+      dryRun: false, sourceDraftIds: [lost!.id],
+    });
+
+    const assign = JSON.parse(model.calls[0]!.messages[1]!.content) as { proposals: { path: string; body: string; chats?: number }[] };
+    // The duplicate «Kaspi QR.» op is sent once; the address sent to two chats is kept, not redacted.
+    expect(assign.proposals.filter((raw) => raw.body === 'Kaspi QR.')).toHaveLength(1);
+    expect(assign.proposals).toContainEqual({ id: expect.any(String), path: 'База знаний/Контакты', body: 'Адрес: Проспект Райымбека, 420', chats: 2 });
+    expect(written).toMatchObject({ outcome: 'written', findings: 5, dropped: 1 });
+    const drafts = await db.select().from(kbDrafts);
+    const open = drafts.filter((draft) => draft.status === 'open');
+    expect(open).toHaveLength(1);
+    expect(open[0]!.ops).toEqual(expect.arrayContaining([
+      expect.objectContaining({ op: 'note_create', path: 'База знаний/Контакты и адрес', body: bodies['Контакты и адрес'] }),
+    ]));
+    expect(drafts.find((draft) => draft.id === lost!.id)?.status).toBe('discarded');
+    const rows = await db.select().from(kbGenerationProposals);
+    expect(rows.find((row) => row.id === first!.id)).toMatchObject({ status: 'pending', draftId: null });
+    expect(rows.find((row) => row.id === proposal.terms)).toMatchObject({ status: 'drafted', draftId: open[0]!.id });
   });
 });

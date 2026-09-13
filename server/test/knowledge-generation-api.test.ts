@@ -80,17 +80,19 @@ function useConsolidatingModel(proposals: { path: string; body: string }[]): voi
       };
     }
     // The two consolidation steps: assign each finding to its own path's title, then write the
-    // topic body from its first finding.
+    // topic body from its first finding, well-formed: a heading and a link when one is possible.
     const payload = JSON.parse(input.messages[1]!.content) as {
       proposals?: { id: string; path: string }[];
       findings?: { body: string }[];
+      linkableTopics?: string[];
     };
+    const link = payload.linkableTopics?.[0];
     return {
       text: payload.proposals
         ? JSON.stringify({ assignments: payload.proposals.map((proposal) => ({
           id: proposal.id, topic: proposal.path.slice(proposal.path.lastIndexOf('/') + 1),
         })) })
-        : JSON.stringify({ body: payload.findings![0]!.body, confidence: 'high' }),
+        : JSON.stringify({ body: `## Факты\n- ${payload.findings![0]!.body}${link ? `\n\nСвязано: [[${link}]]` : ''}`, confidence: 'high' }),
       promptTokens: 10,
       completionTokens: 4,
       cost: '0.00100000',

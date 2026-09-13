@@ -11,7 +11,19 @@ import { communicationStyleInstruction } from '../ai/communication-style.js';
 import { BODY_MAX } from './note.js';
 import { GENERATION_LIMITS } from './generation-limits.js';
 import { isValidGenerationPath, TOPIC_PATH_PREFIX } from './generation-path.js';
-import { redactGenerationText } from './generation-redact.js';
+import { contactSpans, NATURAL_ADDRESS, redactGenerationText } from './generation-redact.js';
+import { parseLinks } from './links.js';
+
+/** gpt-4o-mini lost headings, links and whole findings merging real chats, so both steps use a stronger fixed model. */
+export const GENERATION_CONSOLIDATION_MODEL = 'openai/gpt-4.1';
+
+/** Merging is not a creative task: the run's temperature applies, capped here. */
+const MAX_CONSOLIDATION_TEMPERATURE = 0.3;
+
+export const consolidationTemperature = (temperature: string): string => {
+  const value = Number(temperature);
+  return Number.isFinite(value) && value > MAX_CONSOLIDATION_TEMPERATURE ? String(MAX_CONSOLIDATION_TEMPERATURE) : temperature;
+};
 
 export interface RawGenerationProposal {
   id: string;
@@ -44,6 +56,8 @@ export interface ConsolidationInput {
   communicationStyle: CommunicationStyle;
   /** Reused by exact path with a full merged body, so a topic grows instead of duplicating. */
   existingTopics: ExistingTopic[];
+  /** Contacts already allowed upstream: those the run's seller sent in two or more conversations. */
+  businessContacts?: ReadonlySet<string>;
 }
 
 export interface ConsolidationUsage {
@@ -54,13 +68,15 @@ export interface ConsolidationUsage {
 
 export interface ConsolidationResult {
   items: ConsolidatedProposal[];
+  /** Raw proposals no item cites: marked unusable, left out by the model, or unsafe to write. */
+  dropped: number;
   usage: ConsolidationUsage;
 }
 
+/** The model id is not a dependency: consolidation always runs on `GENERATION_CONSOLIDATION_MODEL`. */
 export interface ConsolidationDeps {
   model: ModelClient;
   key: string;
-  modelId: string;
   temperature: string;
 }
 
@@ -100,6 +116,7 @@ export const SEED_TOPICS: readonly string[] = [
   'Оформление заказа',
   'Сомнения клиента',
   'Контакты и адрес',
+  'Общение с клиентом',
 ];
 
 /** How much of a proposal body the assign step sees: enough to recognise the theme, not to write it. */
@@ -149,22 +166,67 @@ const fingerprint = (proposal: Pick<RawGenerationProposal, 'path' | 'body'>): st
 
 interface ExactGroup {
   representative: RawGenerationProposal;
+  /** The representative body after the per-finding content policy: what the model sees. */
+  body: string;
   proposalIds: string[];
+  /** Distinct conversations the group's sources come from. */
+  chats: number;
 }
 
-const exactGroups = (proposals: readonly RawGenerationProposal[]): ExactGroup[] => {
-  const groups = new Map<string, ExactGroup>();
+/**
+ * Business contacts allowed through: a contact span found in findings whose sources cover two or
+ * more conversations (the seller sends it to many customers), the run's own `businessContacts`,
+ * and any contact already written in an existing topic body, which the owner has seen. A contact from one conversation stays redacted.
+ */
+const allowedContacts = (input: ConsolidationInput): Set<string> => {
+  const conversationsBySpan = new Map<string, Set<string>>();
+  for (const proposal of input.proposals) {
+    for (const span of contactSpans(proposal.body)) {
+      const seen = conversationsBySpan.get(span) ?? new Set<string>();
+      for (const source of proposal.sources) seen.add(source.conversationId);
+      conversationsBySpan.set(span, seen);
+    }
+  }
+  const allowed = new Set([...conversationsBySpan].filter(([, seen]) => seen.size >= 2).map(([span]) => span));
+  for (const contact of input.businessContacts ?? []) allowed.add(contact);
+  for (const topic of input.existingTopics) for (const span of contactSpans(topic.body)) allowed.add(span);
+  return allowed;
+};
+
+/** Exact duplicates merged, the content policy applied per finding; `unusable` has nothing left or cannot fit one call. */
+const exactGroups = (
+  proposals: readonly RawGenerationProposal[],
+  allowed: ReadonlySet<string>,
+): { groups: ExactGroup[]; unusable: ExactGroup[] } => {
+  const byKey = new Map<string, { representative: RawGenerationProposal; proposals: RawGenerationProposal[] }>();
   for (const proposal of proposals) {
     const key = fingerprint(proposal);
-    const existing = groups.get(key);
-    if (existing) existing.proposalIds.push(proposal.id);
-    else groups.set(key, { representative: proposal, proposalIds: [proposal.id] });
+    const existing = byKey.get(key);
+    if (existing) existing.proposals.push(proposal);
+    else byKey.set(key, { representative: proposal, proposals: [proposal] });
   }
-  return [...groups.values()];
+  const groups: ExactGroup[] = [];
+  const unusable: ExactGroup[] = [];
+  for (const { representative, proposals: members } of byKey.values()) {
+    const body = redactGenerationText(representative.body, { allowed });
+    const group: ExactGroup = {
+      representative,
+      body: body ?? '',
+      proposalIds: members.map((member) => member.id),
+      chats: new Set(members.flatMap((member) => member.sources.map((item) => item.conversationId))).size,
+    };
+    // A group must fit one write call whole, so the write step never has to cut a finding in half.
+    if (body === null || inputCharacters(group) > GENERATION_LIMITS.maxConsolidationCharacters) unusable.push(group);
+    else groups.push(group);
+  }
+  return { groups, unusable };
 };
 
 const inputCharacters = (group: ExactGroup): number =>
-  group.representative.path.length + group.representative.body.length;
+  group.representative.path.length + group.body.length;
+
+const contactsIn = (allowed: ReadonlySet<string>, texts: readonly string[]): string[] =>
+  [...allowed].filter((contact) => texts.some((text) => text.includes(contact)));
 
 const previewOf = (body: string): string =>
   body.length <= ASSIGN_BODY_PREVIEW ? body : `${body.slice(0, ASSIGN_BODY_PREVIEW)}…`;
@@ -205,7 +267,10 @@ Too narrow: «Запрос города», «Запрос дизайна», «Р
 Prefer a title from "topics" (existing topics, topics chosen for earlier findings, and suggested broad themes), spelled exactly as listed. Create a new topic only when none of them fits, and keep the whole knowledge base at about ${GENERATION_LIMITS.targetTopics} topics.
 A new title is Russian, one to four words, starts with a capital letter and has no "/". Never write a title in Kazakh or another language, even for a Kazakh finding: «Тапсырыс» goes to «Оформление заказа».
 Never use a title from "closedTopics"; choose another topic for that finding.
-Use topic null for a finding with nothing reusable for answering future customers: personal data, one-off arrangements, internal notes, noise.
+Use topic null only for a finding with no business content at all: a bare greeting such as «Здравствуйте», thanks, emojis. Every other finding goes to the nearest topic, never null:
+- a question the seller asks the customer (the city «Из какого вы города?» / «Қай қаладансыз?», a confirmation, a request for feedback) and general sales phrases go to «Общение с клиентом»;
+- a product line or its options (for example «Торттар»: cakes in sizes M and L) goes to «Товары и услуги»;
+- the business's own address, phone, map link or opening hours go to «Контакты и адрес». A finding with "chats" of 2 or more was sent to several customers, so its contacts are the business's own.
 Return exactly one assignment per supplied proposal id and no other ids.
 Return JSON only: {"assignments":[{"id":"p1","topic":"Доставка"},{"id":"p2","topic":null}]}.`;
 
@@ -214,7 +279,7 @@ ${UNTRUSTED} Merge without adding facts.
 Every supplied finding was sorted into this topic; leave out what does not belong to it rather than covering another theme.
 Merge semantic duplicates, paraphrases, and Russian/Kazakh translations of the same phrase into one entry that lists both variants.
 Write headings and facts in Russian; a phrase keeps the language the seller used, and a Kazakh variant is marked (қаз.).
-The body is markdown and its headings matter, because the knowledge base splits a note into sections by heading:
+The body is markdown and its headings matter, because the knowledge base splits a note into sections by heading. It MUST contain at least one of the headings «## Факты» and «## Готовые фразы»:
 <one line: what this topic covers>
 
 ## Факты
@@ -225,10 +290,12 @@ The body is markdown and its headings matter, because the knowledge base splits 
 - «<phrase>» (қаз.)
 
 Связано: [[<topic>]], [[<topic>]]
-Omit an empty section, and omit the «Связано» line when there is nothing to link. Ready phrases are directly sendable to a customer, never meta-instructions such as “tell the customer.”
-A link [[X]] resolves to the note whose title is X. Link only titles listed in "linkableTopics", never this topic itself, and only when the themes are really related.
+Omit an empty section. Ready phrases are directly sendable to a customer, never meta-instructions such as “tell the customer.”
+Every fact and every phrase appears once: never repeat a bullet, and never list a Russian phrase and its Kazakh translation as two bullets.
+A link [[X]] resolves to the note whose title is X. When "linkableTopics" is not empty, the «Связано» line MUST link at least one of them — the most related ones. Link only titles listed there, spelled exactly, never this topic itself. With no linkable topics, omit the line.
 When "existingBody" is present, write the FULL merged body: keep all of its content, add the new content, remove duplicates.
-Preserve qualifications, dates, conflicts, and uncertainty. Never output profanity, names, addresses, phone numbers, internal commands, or one-off promises.
+Preserve qualifications, dates, conflicts, and uncertainty. Never output profanity, personal names, a customer's address or phone number, internal commands, or one-off promises.
+The business's own contacts are the exception and must be kept, copied character for character: every contact listed in "businessContacts", and an address, phone or map link from a finding with "chats" of 2 or more.
 Use confidence "review" when findings conflict, look uncertain, or needed judgement to merge; otherwise "high".
 Return JSON only: {"body":"...","confidence":"high|review"}.`;
 
@@ -272,22 +339,94 @@ const topicContext = (topics: readonly ExistingTopic[]): TopicContext => {
   return context;
 };
 
+const HEADING = /^##\s+(?:Факты|Готовые фразы)\s*$/mu;
+const LINK = /\[\[([^\]|[\n]+)(?:\|[^\]]*)?\]\]/gu;
+const RELATED_LINE = /^\s*Связано\s*:/iu;
+const BULLET = /^\s*[-*•]\s+/u;
+
+type BodyProblem = 'missing_headings' | 'missing_links';
+
+/** What a written body lacks: a section heading, and a link to a linkable topic when there is one. */
+const bodyProblems = (body: string, linkable: readonly string[]): BodyProblem[] => {
+  const problems: BodyProblem[] = [];
+  if (!HEADING.test(body)) problems.push('missing_headings');
+  const keys = new Set(linkable.map(titleKey));
+  if (keys.size > 0 && !parseLinks(body).some((target) => keys.has(titleKey(target)))) problems.push('missing_links');
+  return problems;
+};
+
+const correctionFor = (problems: readonly BodyProblem[], linkable: readonly string[]): string => {
+  const missing = problems.map((problem) => (problem === 'missing_headings'
+    ? 'it has neither a «## Факты» nor a «## Готовые фразы» heading'
+    : `its «Связано:» line links none of the linkable topics (${linkable.join(', ')})`));
+  return `The note is not usable yet: ${missing.join('; ')}. Fix only that and keep all the content. Return JSON only: {"body":"...","confidence":"high|review"}.`;
+};
+
+/**
+ * Deterministic clean-up of every written body: a link to a title that is not linkable is dropped
+ * from the «Связано» line (the line goes when nothing is left) and unwrapped to plain text
+ * elsewhere, and an exact repeat of a bullet line is removed.
+ */
+const tidyTopicBody = (body: string, linkable: readonly string[]): string => {
+  const keys = new Set(linkable.map(titleKey));
+  const bullets = new Set<string>();
+  const lines: string[] = [];
+  for (const line of body.split('\n')) {
+    if (RELATED_LINE.test(line)) {
+      const kept = parseLinks(line).filter((target) => keys.has(titleKey(target)));
+      if (kept.length > 0) lines.push(`Связано: ${kept.map((target) => `[[${target}]]`).join(', ')}`);
+      continue;
+    }
+    const cleaned = line.replace(LINK, (match, target: string) => (keys.has(titleKey(target)) ? match : target.trim()));
+    if (BULLET.test(cleaned)) {
+      const key = cleaned.trim().replace(/\s+/g, ' ');
+      if (bullets.has(key)) continue;
+      bullets.add(key);
+    }
+    lines.push(cleaned);
+  }
+  return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+};
+
+/**
+ * The fallback for a body still without headings after the retry: every line becomes a bullet
+ * under «## Факты», nothing added. `null` when no line is left.
+ */
+const normalizeTopicBody = (body: string): string | null => {
+  if (HEADING.test(body)) return body;
+  const facts: string[] = [];
+  const related: string[] = [];
+  for (const raw of body.split('\n')) {
+    const line = raw.trim();
+    if (line === '') continue;
+    if (RELATED_LINE.test(line)) {
+      related.push(line);
+      continue;
+    }
+    const text = line.replace(/^(?:#+\s*|[-*•]\s+|\d+[.)]\s+)/u, '').trim();
+    if (text !== '') facts.push(`- ${text}`);
+  }
+  if (facts.length === 0) return null;
+  return ['## Факты', ...facts, ...(related.length > 0 ? ['', ...related] : [])].join('\n');
+};
+
 const PROFANITY = /(?:\b(?:fuck|shit|bitch)\b|(?:^|[^\p{L}])(?:бля\p{L}*|сук\p{L}*|ху[йеяё]\p{L}*|пизд\p{L}*|[её]б\p{L}*))(?=$|[^\p{L}])/iu;
 const PERSONAL_INTRODUCTION = /(?:меня\s+зовут\s+[А-ЯЁ][а-яё]+|менің\s+атым\s+[А-ЯӘҒҚҢӨҰҮҺІЁ][а-яәғқңөұүһіё]+)/iu;
-const NATURAL_ADDRESS = /(?:(?:улиц(?:а|е|ы)|ул\.)\s+[\p{L}.-]+[^\n]{0,48}дом\s*\d+|[\p{L}.-]+\s+көшесі\s*\d+\s*үй)/iu;
 const INTERNAL_COMMAND = /(?:(?:передайте|скажите|сообщите)\s+(?:сотрудник|менеджер|курьер)\p{L}*|(?:сотрудник|менеджер|курьер)\p{L}*\s+(?:надо|нужно|должен)|(?:надо|нужно)\s+(?:упаковать|передать|отправить|позвонить))/iu;
 const ONE_OFF_PROMISE = /(?:я\s+лично\s+(?:привезу|доставлю|позвоню|напишу|верну)|(?:я\s+)?обещаю)/iu;
 
-const violatesFinalContentPolicy = (text: string): boolean =>
+/** `withoutContacts` is the text with allowed business contacts cut out; names are checked on the full text. */
+const violatesFinalContentPolicy = (text: string, withoutContacts: string): boolean =>
   PROFANITY.test(text) ||
   PERSONAL_INTRODUCTION.test(text) ||
-  NATURAL_ADDRESS.test(text) ||
+  NATURAL_ADDRESS.test(withoutContacts) ||
   INTERNAL_COMMAND.test(text) ||
   ONE_OFF_PROMISE.test(text);
 
-const safeGeneratedText = (text: string): string | null => {
-  const redacted = redactGenerationText(text);
-  if (redacted === null || redacted !== text || violatesFinalContentPolicy(text)) return null;
+const safeGeneratedText = (text: string, allowed: ReadonlySet<string> = new Set()): string | null => {
+  const redacted = redactGenerationText(text, { allowed });
+  const withoutContacts = [...allowed].reduce((rest, contact) => rest.replaceAll(contact, ' '), text);
+  if (redacted === null || redacted !== text || violatesFinalContentPolicy(text, withoutContacts)) return null;
   return redacted;
 };
 
@@ -320,12 +459,17 @@ class CallLedger {
   constructor(private readonly deps: ConsolidationDeps) {}
 
   async json(messages: ChatMessage[], maxTokens: number, timeoutMs?: number): Promise<unknown> {
+    return (await this.answer(messages, maxTokens, timeoutMs)).value;
+  }
+
+  /** The raw answer text too, so a follow-up call can put it back into the conversation. */
+  async answer(messages: ChatMessage[], maxTokens: number, timeoutMs?: number): Promise<{ text: string; value: unknown }> {
     let completion: Completion;
     try {
       completion = await this.deps.model.complete({
         key: this.deps.key,
-        model: this.deps.modelId,
-        temperature: this.deps.temperature,
+        model: GENERATION_CONSOLIDATION_MODEL,
+        temperature: consolidationTemperature(this.deps.temperature),
         maxTokens,
         ...(timeoutMs === undefined ? {} : { timeoutMs }),
         messages,
@@ -337,7 +481,7 @@ class CallLedger {
     }
     this.usage = addUsage(this.usage, usageOf(completion));
     try {
-      return JSON.parse(completion.text);
+      return { text: completion.text, value: JSON.parse(completion.text) };
     } catch {
       throw new GenerationConsolidationError('malformed_output', this.usage);
     }
@@ -352,6 +496,8 @@ class CallLedger {
 
 interface GroupPlan {
   context: TopicContext;
+  /** Business contacts the content policy lets through (see `allowedContacts`). */
+  allowed: Set<string>;
   /** Topic path → its groups, in the order topics were first chosen. */
   topics: Map<string, { path: string; groups: ExactGroup[] }>;
   dropped: ExactGroup[];
@@ -359,10 +505,9 @@ interface GroupPlan {
 
 async function assignTopics(ledger: CallLedger, input: ConsolidationInput): Promise<GroupPlan> {
   const context = topicContext(input.existingTopics);
-  // A group must fit one write call whole, so the write step never has to cut a finding in half.
-  const groups = exactGroups(input.proposals)
-    .filter((group) => inputCharacters(group) <= GENERATION_LIMITS.maxConsolidationCharacters);
-  const plan: GroupPlan = { context, topics: new Map(), dropped: [] };
+  const allowed = allowedContacts(input);
+  const { groups, unusable } = exactGroups(input.proposals, allowed);
+  const plan: GroupPlan = { context, allowed, topics: new Map(), dropped: [...unusable] };
 
   const closedTitles = new Set([...context.pathOnly].map((key) => titleKey(titleOf(context.byPath.get(key)!.path))));
   /** Lowercased title → the spelling every later chunk and the written path use. */
@@ -380,9 +525,8 @@ async function assignTopics(ledger: CallLedger, input: ConsolidationInput): Prom
     return [...titles.values()];
   };
 
-  const chunks = chunksOf(groups, (group) =>
-    group.representative.path.length + previewOf(group.representative.body).length);
-  for (const chunk of chunks) {
+  /** One assign call; returns the groups its answer left out. */
+  const assignChunk = async (chunk: ExactGroup[]): Promise<ExactGroup[]> => {
     const aliases = new Map(chunk.map((group, index) => [`p${index + 1}`, group]));
     const output = ledger.parse(assignSchema, await ledger.json([
       { role: 'system', content: ASSIGN_PROMPT },
@@ -394,7 +538,8 @@ async function assignTopics(ledger: CallLedger, input: ConsolidationInput): Prom
           proposals: [...aliases].map(([id, group]) => ({
             id,
             path: group.representative.path,
-            body: previewOf(group.representative.body),
+            body: previewOf(group.body),
+            ...(group.chats >= 2 ? { chats: group.chats } : {}),
           })),
         }),
       },
@@ -414,7 +559,15 @@ async function assignTopics(ledger: CallLedger, input: ConsolidationInput): Prom
       if (topic) topic.groups.push(group);
       else plan.topics.set(pathKey(path), { path, groups: [group] });
     }
-    for (const group of chunk) if (!assigned.has(group)) plan.dropped.push(group);
+    return chunk.filter((group) => !assigned.has(group));
+  };
+
+  const chunks = chunksOf(groups, (group) => group.representative.path.length + previewOf(group.body).length);
+  for (const chunk of chunks) {
+    const missing = await assignChunk(chunk);
+    // An answer that skipped ids gets one follow-up with only those; what it skips again is dropped.
+    const stillMissing = missing.length === 0 ? [] : await assignChunk(missing);
+    plan.dropped.push(...stillMissing);
   }
   return plan;
 }
@@ -443,6 +596,61 @@ function topicPath(
   return path;
 }
 
+type WriteOutput = z.infer<typeof writeSchema>;
+
+/** The follow-up answer, or `null` when it does not parse: the first answer is normalized instead. */
+async function retryWrite(ledger: CallLedger, messages: ChatMessage[]): Promise<WriteOutput | null> {
+  try {
+    const answer = await ledger.answer(messages, GENERATION_LIMITS.maxTopicOutputTokens, GENERATION_LIMITS.topicWriteTimeoutMs);
+    return ledger.parse(writeSchema, answer.value);
+  } catch (error) {
+    if (error instanceof GenerationConsolidationError && error.code !== 'provider_error') return null;
+    throw error;
+  }
+}
+
+/**
+ * One slice's body: written, checked, corrected once by the model when it lacks headings or a
+ * link, then normalized without the model, and always tidied. `null` when the slice is unusable.
+ */
+async function writeSlice(
+  ledger: CallLedger,
+  request: ChatMessage[],
+  linkable: readonly string[],
+  allowed: ReadonlySet<string>,
+): Promise<{ body: string; confidence: KbGenerationConfidence } | null> {
+  const first = await ledger.answer(request, GENERATION_LIMITS.maxTopicOutputTokens, GENERATION_LIMITS.topicWriteTimeoutMs);
+  const output = ledger.parse(writeSchema, first.value);
+  let body = safeGeneratedText(output.body, allowed);
+  // An unsafe answer is not corrected: the slice is left out.
+  if (body === null) return null;
+  let confidence: KbGenerationConfidence = output.confidence;
+  let problems = bodyProblems(body, linkable);
+  if (problems.length > 0) {
+    const retried = await retryWrite(ledger, [
+      ...request,
+      { role: 'assistant', content: first.text },
+      { role: 'user', content: correctionFor(problems, linkable) },
+    ]);
+    const retriedBody = retried === null ? null : safeGeneratedText(retried.body, allowed);
+    if (retried !== null && retriedBody !== null) {
+      body = retriedBody;
+      confidence = retried.confidence;
+      problems = bodyProblems(body, linkable);
+    }
+    if (problems.includes('missing_headings')) {
+      const normalized = normalizeTopicBody(body);
+      if (normalized === null) return null;
+      body = normalized;
+      // Restructured without the model: the owner should read it.
+      confidence = 'review';
+    }
+  }
+  const tidy = tidyTopicBody(body, linkable);
+  if (tidy === '' || tidy.length > BODY_MAX || safeGeneratedText(tidy, allowed) === null) return null;
+  return { body: tidy, confidence };
+}
+
 async function writeTopic(
   ledger: CallLedger,
   input: ConsolidationInput,
@@ -451,34 +659,37 @@ async function writeTopic(
   linkableTopics: string[],
 ): Promise<ConsolidatedProposal | null> {
   const title = titleOf(topic.path);
+  const linkable = linkableTopics.filter((candidate) => titleKey(candidate) !== titleKey(title));
   let body = plan.context.byPath.get(pathKey(topic.path))?.body;
   const written: ExactGroup[] = [];
   let confidence: KbGenerationConfidence = 'high';
   for (const slice of chunksOf(topic.groups, inputCharacters, GENERATION_LIMITS.maxTopicSliceCharacters)) {
     // The next slice would have to rewrite a body too long for one answer; the rest waits for a later run.
     if (body !== undefined && body.length > GENERATION_LIMITS.maxRewritableBodyCharacters) break;
-    const output = ledger.parse(writeSchema, await ledger.json([
+    const contacts = contactsIn(plan.allowed, [...slice.map((group) => group.body), ...(body === undefined ? [] : [body])]);
+    const result = await writeSlice(ledger, [
       { role: 'system', content: writePromptFor(input.communicationStyle) },
       {
         role: 'user',
         content: JSON.stringify({
           topic: title,
           ...(body === undefined ? {} : { existingBody: body }),
-          linkableTopics: linkableTopics.filter((linkable) => titleKey(linkable) !== titleKey(title)),
+          linkableTopics: linkable,
+          ...(contacts.length === 0 ? {} : { businessContacts: contacts }),
           findings: slice.map((group) => ({
             path: group.representative.path,
-            body: group.representative.body,
+            body: group.body,
             warnings: group.representative.warnings,
+            ...(group.chats >= 2 ? { chats: group.chats } : {}),
           })),
         }),
       },
-    ], GENERATION_LIMITS.maxTopicOutputTokens, GENERATION_LIMITS.topicWriteTimeoutMs));
-    const safeBody = safeGeneratedText(output.body);
-    // An unsafe slice is left out; what earlier slices wrote still stands.
-    if (safeBody === null) continue;
-    body = safeBody;
+    ], linkable, plan.allowed);
+    // An unusable slice is left out; what earlier slices wrote still stands.
+    if (result === null) continue;
+    body = result.body;
     written.push(...slice);
-    if (output.confidence === 'review') confidence = 'review';
+    if (result.confidence === 'review') confidence = 'review';
   }
   if (written.length === 0 || body === undefined) return null;
 
@@ -524,7 +735,8 @@ export async function planGenerationTopics(
  * Consolidation into one note per broad customer topic, in two bounded steps. Assign: chunked
  * calls that return only a topic title per proposal. Write: one call per topic (more when its
  * findings exceed one call's budget, each folding into the body so far) that returns the full
- * body. Every input kind goes through it: legacy «Скрипт/» findings come out as knowledge topics.
+ * body, checked and corrected once. Every input kind goes through it: legacy «Скрипт/» findings
+ * come out as knowledge topics.
  */
 export async function consolidateGenerationProposals(
   deps: ConsolidationDeps,
@@ -543,5 +755,6 @@ export async function consolidateGenerationProposals(
     const item = await writeTopic(ledger, input, plan, topic, [...linkable.values()]);
     if (item) items.push(item);
   }
-  return { items, usage: ledger.usage };
+  const cited = new Set(items.flatMap((item) => item.sourceProposalIds));
+  return { items, dropped: input.proposals.filter((proposal) => !cited.has(proposal.id)).length, usage: ledger.usage };
 }

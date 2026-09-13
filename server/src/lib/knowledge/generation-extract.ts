@@ -22,6 +22,11 @@ export interface GenerationExtractionDeps {
   temperature: string;
 }
 
+export interface GenerationExtractionOptions {
+  /** Contacts the seller sent in two or more conversations of the run (`sharedBusinessContacts`). */
+  businessContacts?: ReadonlySet<string>;
+}
+
 export interface GenerationExtractionUsage {
   promptTokens: number;
   completionTokens: number;
@@ -98,6 +103,7 @@ Classify as customer only when a real customer asks about or discusses buying th
 Classify friends, the seller's own messages, staff chats, suppliers, and unrelated businesses as irrelevant. Use uncertain when the evidence does not confirm either case.
 Every proposal must cite one or more supplied seller messages authored by phone or operator.
 Preserve dates, qualifications, and uncertainty. Never include profanity, personal names, addresses, phone numbers, internal commands, or one-off promises.
+The only exception is "businessContacts", when present: the business's own address, phone or map link, which the seller sends to many customers. Copy such a contact exactly, character for character, into «База знаний/Контакты и адрес».
 Write every user-facing path and body in Russian.
 Write classification.reason in Russian. Keep it short and omit personal or sensitive details.
 For customer classification, classification.evidence must contain short exact quotes tied to supplied messageId values from both the customer and seller. Never cite text outside the messages.
@@ -145,6 +151,7 @@ export function hasBothConversationSides(
 export async function extractGenerationBatch(
   deps: GenerationExtractionDeps,
   messages: readonly GenerationExtractionMessage[],
+  options: GenerationExtractionOptions = {},
 ): Promise<GenerationExtractionResult> {
   if (
     messages.length > GENERATION_LIMITS.maxBatchMessages ||
@@ -152,11 +159,14 @@ export async function extractGenerationBatch(
   ) {
     throw new GenerationExtractionError('invalid_batch', emptyUsage());
   }
+  const allowed = options.businessContacts ?? new Set<string>();
   const safeMessages = messages.flatMap((message) => {
-    const body = redactGenerationText(message.body);
+    const body = redactGenerationText(message.body, { allowed });
     return body === null ? [] : [{ ...message, body }];
   });
-  if (safeMessages.reduce((total, message) => total + message.body.length, 0) > GENERATION_LIMITS.maxBatchCharacters) {
+  // Sized as the preview sized the batch, fully redacted: a kept contact must not overflow it.
+  const redactedCharacters = messages.reduce((total, message) => total + (redactGenerationText(message.body)?.length ?? 0), 0);
+  if (redactedCharacters > GENERATION_LIMITS.maxBatchCharacters) {
     throw new GenerationExtractionError('invalid_batch', emptyUsage());
   }
   if (!hasBothConversationSides(safeMessages)) {
@@ -173,6 +183,7 @@ export async function extractGenerationBatch(
       .map((message) => message.id),
   );
   const suppliedIds = new Set(safeMessages.map((message) => message.id));
+  const batchContacts = [...allowed].filter((contact) => safeMessages.some((message) => message.body.includes(contact)));
   let completion: Completion;
   try {
     completion = await deps.model.complete({
@@ -185,6 +196,7 @@ export async function extractGenerationBatch(
         {
           role: 'user',
           content: JSON.stringify({
+            ...(batchContacts.length === 0 ? {} : { businessContacts: batchContacts }),
             messages: safeMessages.map((message) => ({
               id: message.id,
               author: message.author,
@@ -236,7 +248,7 @@ export async function extractGenerationBatch(
     if (!sourceMessageIds.some((id) => sellerIds.has(id))) continue;
     if (
       redactGenerationText(proposal.path) !== proposal.path ||
-      redactGenerationText(proposal.body) !== proposal.body
+      redactGenerationText(proposal.body, { allowed: batchContacts }) !== proposal.body
     ) {
       throw new GenerationExtractionError('unsafe_output', usage);
     }

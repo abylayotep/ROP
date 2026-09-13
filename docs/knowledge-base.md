@@ -407,20 +407,36 @@ variants of one phrase in one entry) and a «Связано: [[…]]» line. A l
 topic's title — the last path segment — so the graph gets edges once the notes are applied.
 
 Consolidation is two bounded steps (`server/src/lib/knowledge/generation-consolidate.ts`), so no
-call has to emit many bodies at once:
+call has to emit many bodies at once. Both run on `GENERATION_CONSOLIDATION_MODEL` (GPT-4.1)
+whatever the agent's model — gpt-4o-mini lost headings, links and findings — at the run's
+temperature capped to 0.3; extraction keeps the run's model.
 1. **Assign.** Chunks of up to 40 findings / 20,000 characters (bodies previewed) go out with the
    topic list — existing topic titles, topics chosen by earlier chunks and a few broad seed themes
    — and the model returns only `{id, topic}` pairs. It prefers listed topics, aims for about 12,
-   never names a single question or a Kazakh title, and may drop a finding (`null`). Titles match
-   case-insensitively and reuse an existing topic's exact path; at most 20 topics per run.
+   never names a single question or a Kazakh title. `null` is only for text with no business
+   content (a bare greeting, thanks); seller questions go to «Общение с клиентом», contacts to
+   «Контакты и адрес». Ids the answer omits get one follow-up call; what it omits again is
+   dropped and counted (`dropped`). Titles match case-insensitively and reuse an existing topic's
+   exact path; at most 20 topics per run.
 2. **Write.** One call per topic (120 s deadline, 3,000 output tokens) returns the full body,
    merging the existing body when the topic already exists. A topic whose findings exceed one
-   call is written in slices, each folding into the body so far.
+   call is written in slices, each folding into the body so far. A body needs a `## Факты` or
+   `## Готовые фразы` heading and, when other topics exist, a link to one. Otherwise the model
+   gets one correction turn; still without headings, every line becomes a bullet under
+   `## Факты` and the topic goes to review. Links to unknown titles and repeated bullets are
+   always removed.
 
 Existing topics are notes under `База знаний/` and the open chat draft's note ops, bodies up to
 40,000 characters in total; a topic past that budget is closed — never offered, never rewritten,
 and findings the model still puts there are dropped.
 Unsafe titles or bodies are dropped; a failing call fails the run with the usage spent so far.
+
+**Business contacts.** Redaction removes phones, «Адрес: …» lines and long-id map links. A
+contact the seller sent in two or more conversations is the business's own and is kept verbatim:
+the run computes them from its seller messages (`sharedBusinessContacts` in
+`generation-redact.ts`) for extraction and consolidation, and consolidation also allows a contact
+whose findings' sources span two conversations. Anything else in the same match — and personal
+names always — is still redacted.
 
 **One draft.** An agent has at most one open «Обучение из переписки». A new selection does not
 add a second draft: the open one — and any legacy «База знаний из WhatsApp» / «Скрипт продаж из
@@ -432,10 +448,11 @@ merge that contains them. The rebuilt draft has to be checked again. Rules live 
 
 **Regrouping old drafts.** `server/src/scripts/regroup-whatsapp-drafts.ts` runs the topic
 consolidation once over the ops of the per-phrase drafts made before this change and leaves one
-topic draft per agent (`--dry-run` runs only the assign step, prints `topic ← N ops` and writes
-nothing; `--agent <id>`
-limits it to one agent). It calls the agent's OpenRouter key; the command is in the file's doc
-comment.
+topic draft per agent (`--dry-run` runs only the assign step, prints `topic ← N findings` and the
+dropped count and writes nothing; `--agent <id>` limits it to one agent). `--source-draft <id>`
+(repeatable) adds the note ops of any draft of that agent, discarded ones included, deduplicated
+by path and body — to recover what an earlier regroup dropped; only proposals of open drafts are
+repointed. It calls the agent's OpenRouter key; the command is in the file's doc comment.
 
 Below the wizard, **«История разборов (N)»** lists earlier analyses with date, status and
 «найдено фактов: N»; choosing one opens it in the wizard. **«Подробности разбора»** is one

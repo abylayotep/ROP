@@ -30,6 +30,7 @@ import {
   type GenerationExtractionUsage,
 } from './generation-extract.js';
 import { GENERATION_LIMITS } from './generation-limits.js';
+import { sharedBusinessContacts } from './generation-redact.js';
 import { generationContentHash, loadPreview } from './generation-selection.js';
 import { LEGACY_RAW_FINGERPRINT_PATTERN } from './generation-types.js';
 import { loadExistingTopics } from './whatsapp-drafts.js';
@@ -155,6 +156,22 @@ async function addRunUsage(db: Db, runId: string, usage: ConsolidationUsage) {
   }).where(eq(kbGenerationRuns.id, runId));
 }
 
+/**
+ * Contacts the seller sent in two or more of the run's conversations, so extraction keeps the
+ * business's own address, phone and map link. Reads only seller messages of the run's manifest.
+ */
+async function runBusinessContacts(db: Db, agentId: string, messageIds: string[]): Promise<Set<string>> {
+  if (messageIds.length === 0) return new Set();
+  const rows = await db.select({
+    conversationId: messages.conversationId,
+    author: messages.author,
+    body: messages.body,
+  }).from(messages).innerJoin(conversations, and(
+    eq(conversations.id, messages.conversationId), eq(conversations.agentId, agentId),
+  )).where(and(inArray(messages.id, messageIds), inArray(messages.author, ['phone', 'operator'])));
+  return sharedBusinessContacts(rows.flatMap((row) => (row.body === null ? [] : [{ ...row, body: row.body }])));
+}
+
 /** Executes pending batches sequentially. No failure is retried without an owner request. */
 async function executeClaimedGenerationRun(deps: GenerationRunDeps, runId: string): Promise<void> {
   const { db } = deps;
@@ -181,6 +198,8 @@ async function executeClaimedGenerationRun(deps: GenerationRunDeps, runId: strin
   const batches = await db.select().from(kbGenerationBatches).where(and(
     eq(kbGenerationBatches.runId, runId), eq(kbGenerationBatches.status, 'pending'),
   )).orderBy(asc(kbGenerationBatches.ordinal));
+  // Read once for extraction and again for consolidation, which may run alone after a retry.
+  const businessContacts = await runBusinessContacts(db, run.agentId, run.manifest.messages.map((entry) => entry.messageId));
 
   for (const batch of batches) {
     const [state] = await db.select({ cancelRequestedAt: kbGenerationRuns.cancelRequestedAt }).from(kbGenerationRuns).where(eq(kbGenerationRuns.id, runId));
@@ -229,7 +248,11 @@ async function executeClaimedGenerationRun(deps: GenerationRunDeps, runId: strin
         sentAt: message.sentAt,
         body: message.body!,
       }));
-      const result = await extractGenerationBatch({ model: deps.model, key, modelId: run.modelId, temperature: run.temperature }, input);
+      const result = await extractGenerationBatch(
+        { model: deps.model, key, modelId: run.modelId, temperature: run.temperature },
+        input,
+        { businessContacts },
+      );
       await addUsage(db, runId, batch.id, result.usage);
       const sourceById = new Map(input.map((message) => [message.id, message]));
       const proposals = result.proposals.map((proposal) => ({
@@ -314,12 +337,12 @@ async function executeClaimedGenerationRun(deps: GenerationRunDeps, runId: strin
     }));
     // Topics already in the knowledge base or the open chat draft grow instead of duplicating.
     const existingTopics = await loadExistingTopics(db, run.agentId, true);
+    // Consolidation runs on its own fixed model, whatever model extraction used.
     const result = await consolidateGenerationProposals({
       model: deps.model,
       key,
-      modelId: run.modelId,
       temperature: run.temperature,
-    }, { proposals: raw, communicationStyle: agent.communicationStyle, existingTopics });
+    }, { proposals: raw, communicationStyle: agent.communicationStyle, existingTopics, businessContacts });
     await addRunUsage(db, runId, result.usage);
 
     const candidateFingerprints = result.items.map((proposal) => fingerprint(proposal.path, proposal.body));

@@ -5,7 +5,11 @@ import {
   hasBothConversationSides,
   type GenerationExtractionMessage,
 } from '../src/lib/knowledge/generation-extract.js';
-import { redactGenerationText } from '../src/lib/knowledge/generation-redact.js';
+import {
+  contactSpans,
+  redactGenerationText,
+  sharedBusinessContacts,
+} from '../src/lib/knowledge/generation-redact.js';
 import { ModelError } from '../src/lib/ai/openrouter.js';
 import { fakeModel } from './helpers/fake-model.js';
 
@@ -110,6 +114,43 @@ describe('generation redaction', () => {
 
   it('omits text that contains no usable content after redaction', () => {
     expect(redactGenerationText('buyer@example.com')).toBeNull();
+  });
+});
+
+describe('business contacts', () => {
+  const office = 'Наш адрес: Проспект Райымбека, 420\nhttps://2gis.kz/almaty/firm/70000001234567\nТел. +7 701 123 45 67';
+
+  it('finds a map link redaction would cut, a phone and a labelled address without its label', () => {
+    expect(contactSpans(office)).toEqual([
+      'https://2gis.kz/almaty/firm/70000001234567',
+      '+7 701 123 45 67',
+      'Проспект Райымбека, 420',
+    ]);
+    expect(contactSpans('https://example.com/catalog\nДоставка два дня.')).toEqual([]);
+  });
+
+  it('allows only seller contacts repeated in two or more conversations', () => {
+    const contacts = sharedBusinessContacts([
+      { conversationId: 'c1', author: 'phone', body: office },
+      { conversationId: 'c1', author: 'operator', body: 'Звоните +7 777 000 11 22' },
+      { conversationId: 'c2', author: 'operator', body: 'Адрес: Проспект Райымбека, 420.\nhttps://2gis.kz/almaty/firm/70000001234567' },
+      { conversationId: 'c2', author: 'client', body: 'Тел. +7 701 123 45 67' },
+      { conversationId: 'c3', author: 'client', body: 'Звоните +7 777 000 11 22' },
+    ]);
+
+    expect([...contacts].sort()).toEqual(['https://2gis.kz/almaty/firm/70000001234567', 'Проспект Райымбека, 420']);
+  });
+
+  it('keeps allowed contacts and still redacts everything around them', () => {
+    const allowed = ['Проспект Райымбека, 420', 'https://2gis.kz/almaty/firm/70000001234567'];
+
+    expect(redactGenerationText(office, { allowed })).toBe(
+      'Наш адрес: Проспект Райымбека, 420\nhttps://2gis.kz/almaty/firm/70000001234567\nТел. [redacted]',
+    );
+    expect(redactGenerationText(office)).toBe('Наш [redacted]\nhttps://2gis.kz/almaty/firm/[redacted]\nТел. [redacted]');
+    expect(redactGenerationText('Доставка завтра.\nАдрес: Проспект Райымбека, 420, кв. 5', { allowed }))
+      .toBe('Доставка завтра.\n[redacted]');
+    expect(redactGenerationText('Напишите Алексею о доставке', { allowed: ['Алексею'] })).toBe('[redacted] о доставке');
   });
 });
 
@@ -282,6 +323,28 @@ describe('generation extraction', () => {
     expect(prompt).not.toContain('buyer@example.com');
     expect(prompt).not.toContain('+7 777 123 45 67');
     expect(prompt).toContain('[redacted]');
+  });
+
+  it('keeps a business contact from the run in the batch and in a proposal, redacting others', async () => {
+    const link = 'https://2gis.kz/almaty/firm/70000001234567';
+    const body = `Мы находимся здесь: ${link}`;
+    const model = fakeModel(answer(['seller-1'], body));
+
+    const result = await extractGenerationBatch(deps(model), [
+      customer(),
+      seller({ body: `Delivery costs 1,500 tenge. Мы находимся здесь: ${link}. Мой личный +7 777 000 11 22` }),
+    ], { businessContacts: new Set([link, 'Проспект Абая, 1']) });
+
+    const payload = JSON.parse(model.calls[0]!.messages[1]!.content) as { businessContacts: string[]; messages: { body: string }[] };
+    expect(payload.businessContacts).toEqual([link]);
+    expect(payload.messages[1]!.body).toBe(`Delivery costs 1,500 tenge. Мы находимся здесь: ${link}. Мой личный [redacted]`);
+    expect(model.calls[0]!.messages[0]!.content).toContain('businessContacts');
+    expect(result.proposals).toEqual([expect.objectContaining({ body })]);
+
+    const strict = fakeModel(answer(['seller-1'], body));
+    await expect(extractGenerationBatch(deps(strict), [customer(), seller({ body: `Delivery costs 1,500 tenge. ${link}` })]))
+      .rejects.toMatchObject({ code: 'unsafe_output' });
+    expect(strict.calls[0]!.messages[1]!.content).not.toContain('70000001234567');
   });
 
   it.each([

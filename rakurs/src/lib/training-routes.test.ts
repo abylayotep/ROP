@@ -6,9 +6,10 @@ const p = (s: string) => new URLSearchParams(s);
 const owner = { owner: true, noteCount: 5 };
 
 describe('training routes', () => {
-  it('shows four tabs to the owner and two to others', () => {
-    expect(visibleTabs(true)).toEqual(['knowledge', 'replies', 'teach', 'review']);
-    expect(visibleTabs(false)).toEqual(['knowledge', 'replies']);
+  it('shows five tabs to the owner and three to others', () => {
+    expect(visibleTabs(true)).toEqual(['knowledge', 'products', 'replies', 'teach', 'review']);
+    expect(visibleTabs(false)).toEqual(['knowledge', 'products', 'replies']);
+    expect(trainingTabFromSearch(p('tab=products'), { owner: false, noteCount: 5 })).toBe('products');
   });
   it('honours a valid tab and ignores tabs a non-owner cannot see', () => {
     expect(trainingTabFromSearch(p('tab=review'), owner)).toBe('review');

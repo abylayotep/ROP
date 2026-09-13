@@ -52,6 +52,12 @@ export function TeachTab({
   return (
     <div className="training-teach">
       <button type="button" className="btn-link training-teach__back" onClick={() => onMode(null)}>← Все способы</button>
+      {/* The chosen way names itself, so a deep link into a mode still says where the owner is. */}
+      {mode !== 'chats' && (
+        <p className="training-tab__intro">
+          <b>{WAYS.find((way) => way.id === mode)!.title}.</b> {WAYS.find((way) => way.id === mode)!.text}.
+        </p>
+      )}
       {mode === 'chats' && (
         <GenerationWizard
           key={`${agentId}:chats`}

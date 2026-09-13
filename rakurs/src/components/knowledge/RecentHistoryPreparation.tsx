@@ -40,8 +40,8 @@ export function RecentHistoryPreparation({ agentId, busy, onStart }: { agentId: 
       Сообщений за период: {preview.counts.selectedMessages}. Подходит для обработки: {preview.counts.eligibleMessages}.
       {excluded > 0 && <> Не войдёт в обработку: {excluded}.</>}
     </p>}
-    {!source.loading && !source.error && !preview && <p>История ещё не загружена. Подключите WhatsApp и дождитесь сообщений.</p>}
-    {preview?.counts.eligibleMessages === 0 && <p>Пока нет подходящих переписок с ответами продавца. Ничего не будет отправлено в AI.</p>}
+    {!source.loading && !source.error && !preview && <p style={{ fontSize: 13 }}>История ещё не загружена. Подключите WhatsApp и дождитесь сообщений.</p>}
+    {preview?.counts.eligibleMessages === 0 && <p style={{ fontSize: 13 }}>Пока нет подходящих переписок с ответами продавца. Ничего не будет отправлено в AI.</p>}
     {preview?.truncated && <p role="alert">Не весь объём вошёл в обработку. Разбор остановлен, чтобы не потерять часть истории.</p>}
     {source.error !== undefined && <p role="alert" style={{ color: 'var(--danger)' }}>
       Не удалось проверить весь объём: {api.humanError(source.error)} Ничего не отправлено в AI.

@@ -46,7 +46,7 @@ interface Snapshot {
   notes: { path: string; body: string }[] | null;
 }
 
-interface RealConversation { id: string; msgs: { a: string; k: string; b: string | null }[] }
+interface RealConversation { id: string; msgs: { a: string; k: string; b: string | null }[]; script?: string[] }
 
 interface Exchange { client: string; reply: string | null; stage: string | null; outcome: string; detail: string | null }
 
@@ -65,6 +65,10 @@ const { values: args } = parseArgs({
     baseline: { type: 'boolean', default: false },
     // Answer with another model than the exported agent uses.
     model: { type: 'string' },
+    // Comma-separated conversation id prefixes to replay instead of the first --count.
+    ids: { type: 'string' },
+    // JSON file of fixed scenarios, [{ id, messages: [...] }]: the customer says exactly these lines.
+    scenarios: { type: 'string' },
   },
 });
 
@@ -72,7 +76,11 @@ const { values: args } = parseArgs({
 // Claude as actor and judge cost more than every reply it graded.
 const URL = process.env.EVAL_DATABASE_URL ?? 'postgres://rakurs:rakurs@localhost:55432/rakurs_eval';
 const snapshot = JSON.parse(readFileSync(args.snapshot!, 'utf8')) as Snapshot;
-const conversations = JSON.parse(readFileSync(args.conversations!, 'utf8')) as RealConversation[];
+const conversations = args.scenarios
+  ? (JSON.parse(readFileSync(args.scenarios, 'utf8')) as { id: string; messages: string[] }[])
+    .map(({ id, messages }) => ({ id, script: messages,
+      msgs: messages.map((b) => ({ a: 'client', k: 'text', b })) }))
+  : JSON.parse(readFileSync(args.conversations!, 'utf8')) as RealConversation[];
 const prodKey = Buffer.from(readFileSync(process.env.EVAL_CREDENTIALS_KEY_FILE!, 'utf8').trim(), 'base64');
 const openrouterKey = decryptSecret(snapshot.agent.openrouter_key, prodKey, keyAad(snapshot.agent.id));
 const localKey = Buffer.alloc(32, 7);
@@ -190,7 +198,10 @@ async function play(db: Db, scope: { accountId: string; agentId: string }, conve
   const dialogue: Exchange[] = [];
   let revision = 0;
   for (let turn = 0; turn < Number(args.turns); turn += 1) {
-    const next = await clientMessage(conversation, dialogue);
+    if (conversation.script && turn >= conversation.script.length) break;
+    const next = conversation.script
+      ? { message: conversation.script[turn]!, done: false }
+      : await clientMessage(conversation, dialogue);
     if (next.done && turn > 0) break;
     if (next.message.trim() === '') break;
     const result = await runSimulatorTurn(db, deps, {
@@ -210,6 +221,7 @@ async function main(): Promise<void> {
   const chosen = conversations
     .filter((c) => c.msgs[0]?.a === 'client')
     .filter((c) => c.msgs.filter((m) => m.a === 'client' && (m.b ?? '').trim() !== '').length >= 2)
+    .filter((c) => !args.ids || args.ids.split(',').some((id) => c.id.startsWith(id)))
     .slice(Number(args.offset), Number(args.offset) + Number(args.count));
   const results: { id: string; dialogue: Exchange[]; verdict: Verdict | null; error?: string }[] = [];
   const queue = [...chosen];

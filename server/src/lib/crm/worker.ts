@@ -117,14 +117,17 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
     // A paid claim the model is unsure of is not stored, so it can neither move the lead nor stick.
     const payment = analysis.payment?.state === 'paid' && analysis.confidence < 65 ? null : analysis.payment;
     // Chat evidence of money counts only when written after the last paid order, Kaspi or chat:
-    // after a sale the old transfer and price stay in the thread and must not sell again.
-    const [lastPaid] = await db.select({paidAt:orders.paidAt}).from(orders)
+    // after a sale the old transfer and price stay in the thread and must not sell again. The later
+    // of paid_at and created_at, because a chat order is backdated to when the lead entered the sale
+    // stage, which can precede the very messages it was recorded from.
+    const recordedAt = sql<Date>`greatest(${orders.paidAt}, ${orders.createdAt})`.mapWith(orders.createdAt);
+    const [lastPaid] = await db.select({at:recordedAt}).from(orders)
       .where(and(eq(orders.conversationId,conversation.id),eq(orders.status,'paid'),isNotNull(orders.paidAt)))
-      .orderBy(desc(orders.paidAt)).limit(1);
-    const fresh = (messageId: string | null | undefined) => !lastPaid?.paidAt
-      || (history.find((m) => m.id === messageId)?.sentAt.getTime() ?? -Infinity) > lastPaid.paidAt.getTime();
+      .orderBy(desc(recordedAt)).limit(1);
+    const fresh = (messageId: string | null | undefined) => !lastPaid
+      || (history.find((m) => m.id === messageId)?.sentAt.getTime() ?? -Infinity) > lastPaid.at.getTime();
     const chatPaid = payment?.state === 'paid' && fresh(payment.messageId) && (!analysis.paidAmount || fresh(analysis.paidAmountMessageId));
-    const chatAmount = analysis.paidAmount && (!lastPaid?.paidAt || (chatPaid && fresh(analysis.paidAmountMessageId))) ? analysis.paidAmount : null;
+    const chatAmount = analysis.paidAmount && (!lastPaid || (chatPaid && fresh(analysis.paidAmountMessageId))) ? analysis.paidAmount : null;
     // An operator who took the lead out of the sale stage has overruled the chat; only Kaspi money moves it back.
     const target = resolveCrmStage(funnel, analysis.confidence >= 65 ? analysis.stageId : null,
       { paid: paid || (!undone && chatPaid), currentStageId: conversation.stageId });

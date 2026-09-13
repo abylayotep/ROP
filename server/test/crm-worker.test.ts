@@ -612,6 +612,33 @@ describe('chat payment', () => {
     expect((await db.select().from(capiEvents)).filter((e) => e.kind === 'purchase')).toHaveLength(1);
   });
 
+  it('records no second order after out-and-back when the first chat order was backdated to an operator\'s earlier move', async () => {
+    // Regression: the operator put the lead into sale before the price and transfer, so the chat order's
+    // paid_at is that earlier move; the transfer must still count as the recorded sale's.
+    await operatorMoves((await sale()).id);
+    await db.update(conversations).set({ stageSetAt: new Date(Date.now() - 10_000) }).where(eq(conversations.id, conversationId));
+    const [offer] = await db.insert(messages).values({ conversationId, direction: 'out', author: 'phone', kind: 'text',
+      body: 'Размер 40 мм — 6.990 тенге', sentAt: new Date(Date.now() - 9_000) }).returning();
+    const [transfer] = await db.insert(messages).values({ conversationId, direction: 'in', author: 'client', kind: 'text',
+      body: 'Перевела 6990, спасибо', sentAt: new Date(Date.now() - 8_000) }).returning();
+    model.complete.mockResolvedValue({ text: JSON.stringify({ stageId: null, summary: 'Оплатила', confidence: 90, profile: {}, fields: {}, checkout: null,
+      payment: { state: 'paid', messageId: transfer!.id, quote: 'Перевела 6990', reason: 'Клиент перевёл оплату' },
+      paidAmount: { value: '6990', messageId: offer!.id, quote: '6.990 тенге' } }), promptTokens: 1, completionTokens: 1, cost: '0' });
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+    const [first] = await db.select().from(orders);
+    expect(first!.paidAt!.getTime()).toBeLessThan(transfer!.sentAt.getTime());
+    await tick();
+    await operatorMoves(targetId);
+    await tick();
+    await operatorMoves((await sale()).id);
+    await db.insert(messages).values({ conversationId, direction: 'in', author: 'client', kind: 'text', body: 'Спасибо', sentAt: new Date() });
+
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+
+    expect(await db.select().from(orders)).toHaveLength(1);
+    expect((await db.select().from(capiEvents)).filter((e) => e.kind === 'purchase')).toHaveLength(1);
+  });
+
   it('does not move a lead back into the sale stage on the earlier sale\'s transfer', async () => {
     await paidChat();
     await analyzeConversation(db, { model, key }, { agentId, conversationId });

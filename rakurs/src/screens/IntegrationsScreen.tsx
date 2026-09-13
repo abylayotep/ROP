@@ -9,6 +9,7 @@ import { Async, EmptyState, RowsSkeleton, Skeleton } from '@/components/ui/state
 import { useToast } from '@/components/ui/Toast';
 import { useApi } from '@/hooks/useApi';
 import { InstagramLoginError, runCoexistenceSignup, runInstagramMessagingLogin } from '@/lib/embedded-signup';
+import { whatsappQrPairingEnabled } from '@/lib/features';
 import { numbersToRenew, tokenDeadline } from '@/lib/whatsapp-token';
 import { useAgent } from '@/store/agent';
 import type {
@@ -103,10 +104,12 @@ export function IntegrationsScreen() {
           {/* Способы подключения показываются, только пока подключать нечего: кабинет
               работает с одним номером, и три карточки над уже подключённым номером
               предлагают то, что всё равно не выйдет сделать. */}
+          {/* New QR pairing is behind a build flag; already paired numbers above keep
+              their reconnect card either way. */}
           {owner && numbers.length === 0 && (
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 16 }}>
               <PhoneNumberCard agentId={agent.id} onConnected={query.reload} />
-              <LinkedPhoneCard agentId={agent.id} onConnected={query.reload} />
+              {whatsappQrPairingEnabled() && <LinkedPhoneCard agentId={agent.id} onConnected={query.reload} />}
               <ConnectForm agentId={agent.id} onConnected={query.reload} />
             </div>
           )}

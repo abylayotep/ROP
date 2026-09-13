@@ -296,6 +296,7 @@ describe('turning a coach proposal into a draft', () => {
       method: 'POST',
       cookies: jar,
       url: `/api/agents/${agentId}/coach/messages/${message.id}/draft`,
+      payload: { revision: message.revision },
     });
 
     expect(res.statusCode).toBe(200);
@@ -336,6 +337,7 @@ describe('turning a coach proposal into a draft', () => {
         method: 'POST',
         cookies: jar,
         url: `/api/agents/${agentId}/coach/messages/${message.id}/draft`,
+        payload: { revision: message.revision },
       });
       expect(res.statusCode).toBe(200);
       expect(res.json().ops).toEqual([op]);
@@ -352,6 +354,7 @@ describe('turning a coach proposal into a draft', () => {
       method: 'POST',
       cookies: jar,
       url: `/api/agents/${agentId}/coach/messages/${message!.id}/draft`,
+      payload: { revision: message!.revision },
     });
 
     expect(res.statusCode).toBe(400);
@@ -363,6 +366,7 @@ describe('turning a coach proposal into a draft', () => {
       method: 'POST',
       cookies: jar,
       url: `/api/agents/${agentId}/coach/messages/${message.id}/draft`,
+      payload: { revision: message.revision },
     });
     expect(first.statusCode).toBe(200);
 
@@ -370,6 +374,7 @@ describe('turning a coach proposal into a draft', () => {
       method: 'POST',
       cookies: jar,
       url: `/api/agents/${agentId}/coach/messages/${message.id}/draft`,
+      payload: { revision: message.revision },
     });
     expect(second.statusCode).toBe(409);
   });
@@ -380,6 +385,7 @@ describe('turning a coach proposal into a draft', () => {
       method: 'POST',
       cookies: memberJar,
       url: `/api/agents/${agentId}/coach/messages/${message.id}/draft`,
+      payload: { revision: message.revision },
     });
     expect(res.statusCode).toBe(403);
   });
@@ -410,6 +416,7 @@ describe('turning a coach proposal into a draft', () => {
       method: 'POST',
       cookies: jar,
       url: `/api/agents/${agentId}/coach/messages/${message.id}/draft`,
+      payload: { revision: message.revision },
     });
 
     expect(res.statusCode).toBe(409);
@@ -452,6 +459,7 @@ describe('turning a coach proposal into a draft', () => {
       method: 'POST',
       cookies: jar,
       url: `/api/agents/${agentId}/coach/messages/${message.id}/draft`,
+      payload: { revision: message.revision },
     });
 
     expect(res.statusCode).toBe(409);

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { describeProposal } from './ProposalCard.js';
+import { proposalWithText } from './proposal';
 
 const rules = [{ id: 'r1', category: 'tone' as const, text: 'На «вы».', enabled: true,
   origin: 'manual' as const, position: 0, warning: null, updatedAt: '' }];
@@ -34,5 +35,19 @@ describe('describeProposal', () => {
   it('names a note_edit without a path, since this function is never handed notes', () => {
     expect(describeProposal({ kind: 'note_edit', noteId: 'n1', body: 'Доставка бесплатна от 10000 ₸.' }, rules))
       .toEqual({ title: 'Правка заметки', body: 'Доставка бесплатна от 10000 ₸.' });
+  });
+});
+
+describe('proposalWithText', () => {
+  it('replaces only the editable content of a rule edit', () => {
+    expect(proposalWithText({ kind: 'rule_edit', ruleId: 'target', enabled: false, text: 'Old' }, 'New')).toEqual({
+      kind: 'rule_edit', ruleId: 'target', enabled: false, text: 'New',
+    });
+  });
+
+  it('replaces note content without changing its target', () => {
+    expect(proposalWithText({ kind: 'note_edit', noteId: 'target', body: 'Old' }, 'New')).toEqual({
+      kind: 'note_edit', noteId: 'target', body: 'New',
+    });
   });
 });

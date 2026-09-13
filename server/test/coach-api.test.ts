@@ -581,6 +581,61 @@ describe('the coaching conversation', () => {
     expect(await db.select().from(agentRules)).toEqual([]);
   });
 
+  it('saves an edited proposal with revision CAS and drafts exactly that edit', async () => {
+    model.reply({ message: 'Suggested.', proposal: { kind: 'rule', category: 'tone', text: 'Original text.' } });
+    const said = await say('Change the tone.');
+    const id = said.json().id as string;
+    const edited = { kind: 'rule', category: 'tone', text: 'Use the edited wording.' };
+    const patch = (revision: number, proposal: unknown) => app.inject({ method: 'PATCH', url: `${coach()}/${id}/proposal`, cookies: jar, payload: { revision, proposal } });
+
+    const saved = await patch(1, edited);
+    expect(saved.statusCode).toBe(200);
+    expect(saved.json()).toMatchObject({ revision: 2, proposal: edited });
+    expect((await db.select().from(coachMessages).where(eq(coachMessages.id, id)))[0]!.proposal).toEqual(edited);
+    expect((await patch(1, { ...edited, text: 'Stale overwrite.' })).statusCode).toBe(409);
+    expect((await app.inject({ method: 'POST', url: `${coach()}/${id}/draft`, cookies: jar, payload: { revision: 1 } })).statusCode).toBe(409);
+    const draft = await app.inject({ method: 'POST', url: `${coach()}/${id}/draft`, cookies: jar, payload: { revision: 2 } });
+    expect(draft.statusCode).toBe(200);
+    expect(draft.json().ops).toEqual([{ op: 'rule_create', category: 'tone', text: 'Use the edited wording.' }]);
+    expect((await patch(2, edited)).statusCode).toBe(409);
+  });
+
+  it('rejects malformed and foreign edit targets without changing the proposal', async () => {
+    model.reply({ message: 'Suggested.', proposal: { kind: 'rule', category: 'tone', text: 'Original text.' } });
+    const said = await say('Change the tone.');
+    const id = said.json().id as string;
+    for (const proposal of [
+      { kind: 'rule', category: 'tone', text: '' },
+      { kind: 'rule_edit', ruleId: randomUUID(), text: 'Foreign target.' },
+      { kind: 'note_edit', noteId: randomUUID(), body: 'Foreign target.' },
+    ]) {
+      const res = await app.inject({ method: 'PATCH', url: `${coach()}/${id}/proposal`, cookies: jar, payload: { revision: 1, proposal } });
+      expect([400, 404]).toContain(res.statusCode);
+    }
+    expect((await db.select().from(coachMessages).where(eq(coachMessages.id, id)))[0]).toMatchObject({ revision: 1, proposal: { kind: 'rule', text: 'Original text.' } });
+  });
+
+  it('does not edit a rejected proposal', async () => {
+    model.reply({ message: 'Suggested.', proposal: { kind: 'rule', category: 'tone', text: 'Original text.' } });
+    const said = await say('Change the tone.');
+    const id = said.json().id as string;
+    expect((await app.inject({ method: 'POST', url: `${coach()}/${id}/reject`, cookies: jar })).statusCode).toBe(200);
+    const res = await app.inject({ method: 'PATCH', url: `${coach()}/${id}/proposal`, cookies: jar,
+      payload: { revision: 1, proposal: { kind: 'rule', category: 'tone', text: 'Edited text.' } } });
+    expect(res.statusCode).toBe(409);
+    expect((await db.select().from(coachMessages).where(eq(coachMessages.id, id)))[0]!.proposal).toMatchObject({ text: 'Original text.' });
+  });
+
+  it('keeps the original proposal target during editing', async () => {
+    const [first] = await db.insert(kbNotes).values({ agentId, path: 'First.md', title: 'First' }).returning();
+    const [second] = await db.insert(kbNotes).values({ agentId, path: 'Second.md', title: 'Second' }).returning();
+    model.reply({ message: 'Suggested.', proposal: { kind: 'note_edit', noteId: first!.id, body: 'Original.' } });
+    const said = await say('Correct the note.');
+    const res = await app.inject({ method: 'PATCH', url: `${coach()}/${said.json().id}/proposal`, cookies: jar,
+      payload: { revision: 1, proposal: { kind: 'note_edit', noteId: second!.id, body: 'Retargeted.' } } });
+    expect(res.statusCode).toBe(400);
+  });
+
   it('refuses a member', async () => {
     const list = await app.inject({ method: 'GET', url: coach(), cookies: memberJar });
     expect(list.statusCode).toBe(403);

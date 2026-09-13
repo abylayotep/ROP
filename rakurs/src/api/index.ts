@@ -147,10 +147,10 @@ export const listInstagramAccounts = (agentId: string, signal?: AbortSignal) =>
 
 export const connectInstagramAccount = (
   agentId: string,
-  code: string,
+  accessToken: string,
   instagramAccountId?: InstagramAccountChoice['instagramUserId'],
 ) => request<InstagramDirectConnectResult>(`/agents/${agentId}/instagram/connect`, {
-  method: 'POST', body: { code, ...(instagramAccountId ? { instagramAccountId } : {}) },
+  method: 'POST', body: { accessToken, ...(instagramAccountId ? { instagramAccountId } : {}) },
 });
 
 export const setInstagramAccountEnabled = (agentId: string, accountId: string, enabled: boolean) =>
@@ -703,10 +703,13 @@ export const sendCoachMessage = (
 export const rejectCoachMessage = (agentId: string, messageId: string) =>
   request<CoachMessage>(`/agents/${agentId}/coach/messages/${messageId}/reject`, { method: 'POST' });
 
+export const updateCoachProposal = (agentId: string, messageId: string, revision: number, proposal: CoachProposal) =>
+  request<CoachMessage>(`/agents/${agentId}/coach/messages/${messageId}/proposal`, { method: 'PATCH', body: { revision, proposal } });
+
 /** Where a coaching proposal becomes a draft — the route `ProposalCard`'s own comment names
  * as the one thing standing between «В черновик» and a live button. */
-export const draftCoachMessage = (agentId: string, messageId: string) =>
-  request<KbDraft>(`/agents/${agentId}/coach/messages/${messageId}/draft`, { method: 'POST' });
+export const draftCoachMessage = (agentId: string, messageId: string, revision: number) =>
+  request<KbDraft>(`/agents/${agentId}/coach/messages/${messageId}/draft`, { method: 'POST', body: { revision } });
 
 // ── Черновики и прогоны ──────────────────────────────────────────────────────
 

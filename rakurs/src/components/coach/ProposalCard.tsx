@@ -4,6 +4,8 @@ import * as api from '@/api';
 import { useToast } from '@/components/ui/Toast';
 import { ruleCategoryPhrase } from '@/lib/rule-categories';
 import type { AgentRule, CoachMessage, CoachProposal } from '@/types';
+import { ApiError } from '@/api/client';
+import { proposalWithText } from './proposal';
 
 /**
  * What a coaching turn proposed, and the two answers an owner may give it today.
@@ -83,16 +85,44 @@ export function ProposalCard({
   const described = useMemo(() => describeProposal(proposal, rules), [proposal, rules]);
 
   const [text, setText] = useState(described.body);
+  const [savedMessage, setSavedMessage] = useState(message);
+  const [saving, setSaving] = useState(false);
+  const [conflict, setConflict] = useState(false);
   const [rejecting, setRejecting] = useState(false);
   const [drafting, setDrafting] = useState(false);
 
-  const decided = message.status !== 'pending';
+  const decided = savedMessage.status !== 'pending';
+  const dirty = text !== describeProposal(savedMessage.proposal ?? proposal, rules).body;
+
+  async function save() {
+    if (saving || decided || !dirty) return;
+    setSaving(true);
+    try {
+      const updated = await api.updateCoachProposal(agentId, message.id, savedMessage.revision ?? 1, proposalWithText(savedMessage.proposal ?? proposal, text));
+      setSavedMessage(updated);
+      setConflict(false);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        try {
+          const latest = (await api.listCoachMessages(agentId)).find((item) => item.id === message.id);
+          if (latest) setSavedMessage(latest);
+        } catch (reloadError) {
+          toast.fail(reloadError);
+        }
+        setConflict(true);
+      } else toast.fail(error);
+    } finally {
+      setSaving(false);
+    }
+  }
 
   async function reject() {
     if (rejecting || decided) return;
     setRejecting(true);
     try {
-      onRejected(await api.rejectCoachMessage(agentId, message.id));
+      const updated = await api.rejectCoachMessage(agentId, message.id);
+      setSavedMessage(updated);
+      onRejected(updated);
     } catch (error) {
       toast.fail(error);
     } finally {
@@ -100,19 +130,11 @@ export function ProposalCard({
     }
   }
 
-  /**
-   * `text` in the box above is not sent — the coach's proposal writes exactly the note or
-   * rule text it already produced, and this route (`server/src/api/drafts.ts`'s own file
-   * comment, "Mapping a `CoachProposal` onto a `DraftOp`") maps that proposal one to one, with
-   * no room for the owner's own edit of the field to ride along. Polishing the wording before
-   * it becomes a real rule or note stays what «+ Добавить правило» and the note editor are
-   * for, same as it always was — the box here is a preview, not a draft of its own.
-   */
   async function toDraft() {
-    if (drafting || decided) return;
+    if (drafting || decided || dirty || saving || conflict) return;
     setDrafting(true);
     try {
-      const draft = await api.draftCoachMessage(agentId, message.id);
+      const draft = await api.draftCoachMessage(agentId, message.id, savedMessage.revision ?? 1);
       navigate(`../drafts/${draft.id}`);
     } catch (error) {
       toast.fail(error);
@@ -138,8 +160,13 @@ export function ProposalCard({
         onChange={(e) => setText(e.target.value)}
       />
 
+      {conflict && <div role="alert" style={{ fontSize: 11.5, color: 'var(--warn)' }}>Предложение изменилось. Ваш текст сохранён в поле; проверьте его и сохраните снова.</div>}
+
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <button type="button" className="btn-sm" disabled={drafting || decided} onClick={() => void toDraft()}>
+        <button type="button" className="btn-sm" disabled={saving || !dirty || decided} onClick={() => void save()}>
+          {saving ? 'Сохраняем…' : 'Сохранить правку'}
+        </button>
+        <button type="button" className="btn-sm" disabled={drafting || decided || dirty || saving || conflict} onClick={() => void toDraft()}>
           {drafting ? 'Открываем…' : 'В черновик'}
         </button>
         <button type="button" className="btn-sm" disabled={rejecting || decided} onClick={reject}>

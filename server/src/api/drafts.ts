@@ -1208,6 +1208,8 @@ export function registerDraftRoutes(
       const agentId = req.agent!.id;
       const { id } = req.params as { id: string };
       if (!isUuid(id)) throw new ApiError(404, 'Сообщение не найдено');
+      const draftRequest = z.object({ revision: z.number().int().positive() }).safeParse(req.body);
+      if (!draftRequest.success) throw new ApiError(400, 'Укажите версию предложения');
 
       const [message] = await db
         .select()
@@ -1216,6 +1218,7 @@ export function registerDraftRoutes(
       if (!message) throw new ApiError(404, 'Сообщение не найдено');
       if (message.proposal === null) throw new ApiError(400, 'В этом сообщении нет предложения');
       if (message.status !== 'pending') throw new ApiError(409, 'Предложение уже обработано');
+      if (message.revision !== draftRequest.data.revision) throw new ApiError(409, 'Предложение изменилось');
 
       const op = toDraftOp(message.proposal);
       const base = await baseOf(db, agentId, [op]);
@@ -1244,10 +1247,12 @@ export function registerDraftRoutes(
           .insert(kbDrafts)
           .values({ agentId, title, origin: 'coach', status: 'open', ops: [op], base, createdBy: req.user!.id })
           .returning();
-        await tx
+        const [claimed] = await tx
           .update(coachMessages)
           .set({ status: 'drafted', draftId: row!.id })
-          .where(eq(coachMessages.id, id));
+          .where(and(eq(coachMessages.id, id), eq(coachMessages.agentId, agentId), eq(coachMessages.status, 'pending'), eq(coachMessages.revision, draftRequest.data.revision)))
+          .returning();
+        if (!claimed) throw new ApiError(409, 'Предложение изменилось');
         return row!;
       });
 

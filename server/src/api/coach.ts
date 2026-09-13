@@ -63,7 +63,7 @@
  * the prompt — the transcript already carries whatever the agent actually sent, and guessing
  * which section produced a *correct* answer is not this feature's job.
  */
-import { and, asc, desc, eq, inArray, lte } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, lte, sql } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
@@ -97,6 +97,7 @@ import { ApiError } from '../lib/errors.js';
 import { credentialsKey } from '../lib/secret-box.js';
 import { isUuid } from '../lib/uuid.js';
 import { requireAgent } from './require-agent.js';
+import { ownsProposalTarget } from '../lib/ai/fact-check.js';
 
 export interface CoachApiDeps {
   model: ModelClient;
@@ -136,6 +137,16 @@ const postBody = z.object({
     correctionType: z.enum(['fact', 'behavior']),
     note: z.string().trim().min(1).max(COACH_LIMIT),
   }).optional(),
+});
+
+const proposalEditBody = z.object({
+  revision: z.number().int().positive(),
+  proposal: z.discriminatedUnion('kind', [
+    z.object({ kind: z.literal('rule'), category: z.enum(['business', 'tone', 'order', 'forbid']), text: z.string().trim().min(1).max(500) }),
+    z.object({ kind: z.literal('rule_edit'), ruleId: z.string().uuid(), text: z.string().trim().min(1).max(500).optional(), enabled: z.boolean().optional() }).refine((value) => value.text !== undefined || value.enabled !== undefined),
+    z.object({ kind: z.literal('note'), path: z.string().trim().min(1).max(400).refine((path) => !path.startsWith('/') && !path.endsWith('/') && path.split('/').length <= 10 && path.split('/').every((part) => part.trim() !== '')), body: z.string().min(1).max(100_000) }),
+    z.object({ kind: z.literal('note_edit'), noteId: z.string().uuid(), body: z.string().min(1).max(100_000) }),
+  ]),
 });
 
 const toMessage = (row: typeof coachMessages.$inferSelect) => ({
@@ -499,6 +510,44 @@ export function registerCoachRoutes(
       } finally {
         releaseTurnSlot();
       }
+    },
+  );
+
+  app.patch(
+    '/api/agents/:agentId/coach/messages/:id/proposal',
+    { preHandler: [guard, ownerOnly] },
+    async (req) => {
+      const agentId = req.agent!.id;
+      const { id } = req.params as { id: string };
+      if (!isUuid(id)) throw new ApiError(404, 'Сообщение не найдено');
+      const parsed = proposalEditBody.safeParse(req.body);
+      if (!parsed.success) throw new ApiError(400, 'Некорректное предложение');
+      const { revision, proposal } = parsed.data;
+      const [current] = await db.select().from(coachMessages)
+        .where(and(eq(coachMessages.id, id), eq(coachMessages.agentId, agentId)));
+      if (!current) throw new ApiError(404, 'Сообщение не найдено');
+      if (current.role !== 'model' || !current.proposal) throw new ApiError(400, 'В этом сообщении нет предложения');
+      if (current.status !== 'pending' || current.revision !== revision) throw new ApiError(409, 'Предложение изменилось');
+      const original = current.proposal;
+      if (original.kind !== proposal.kind ||
+        (original.kind === 'rule' && proposal.kind === 'rule' && original.category !== proposal.category) ||
+        (original.kind === 'rule_edit' && proposal.kind === 'rule_edit' && original.ruleId !== proposal.ruleId) ||
+        (original.kind === 'note' && proposal.kind === 'note' && original.path !== proposal.path) ||
+        (original.kind === 'note_edit' && proposal.kind === 'note_edit' && original.noteId !== proposal.noteId)) {
+        throw new ApiError(400, 'Нельзя изменить цель предложения');
+      }
+      if (current.feedbackId) {
+        const [feedback] = await db.select().from(responseFeedback).where(eq(responseFeedback.id, current.feedbackId));
+        if (feedback?.correctionType === 'fact' && (proposal.kind === 'rule' || proposal.kind === 'rule_edit')) {
+          throw new ApiError(400, 'Фактическое исправление должно быть заметкой');
+        }
+      }
+      if (!await ownsProposalTarget(db, agentId, proposal)) throw new ApiError(404, 'Цель предложения не найдена');
+      const [saved] = await db.update(coachMessages).set({ proposal, revision: sql`${coachMessages.revision} + 1` })
+        .where(and(eq(coachMessages.id, id), eq(coachMessages.agentId, agentId), eq(coachMessages.status, 'pending'), eq(coachMessages.revision, revision)))
+        .returning();
+      if (!saved) throw new ApiError(409, 'Предложение изменилось');
+      return toMessage(saved);
     },
   );
 

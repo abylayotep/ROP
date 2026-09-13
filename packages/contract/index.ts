@@ -714,6 +714,15 @@ export interface CoachMessage {
   createdAt: string;
 }
 
+export interface CoachProposalUpdateRequest {
+  revision: number;
+  proposal: CoachProposal;
+}
+
+export interface CoachDraftRequest {
+  revision: number;
+}
+
 /** A knowledge record an answer was built from, named so the screen can show which. */
 export interface AiTurnItem {
   id: string;

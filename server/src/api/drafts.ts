@@ -228,15 +228,23 @@
  *
  * The run, apply and op-edit bodies moved to `lib/drafts/run.ts`, `apply.ts` and `edit-op.ts`
  * so the autopilot engine calls the same code as these routes; the sections above still
- * describe them. `runningDrafts`, `runReplay` and `missingRowMessage` are in `run.ts`.
+ * describe them. `runningDrafts`, `runReplay` and `missingRowMessage` are in `run.ts`; reading a
+ * run back (`pairedBaselineRun`, `readRun`) is in `run-read.ts`.
+ *
+ * ## The autopilot
+ *
+ * `…/autopilot` starts, reads and cancels `lib/drafts/autopilot.ts`. While one is running, run,
+ * apply, discard and op edit answer 409: the engine reads attribution against the ops it started
+ * a run with, and a manual change underneath would make that read wrong.
  */
 import type { TestRun } from '@rakurs/contract';
-import { and, asc, desc, eq, gte, inArray, isNull, notLike, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, notLike, sql } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
 import {
   coachMessages,
+  draftAutopilots,
   kbDrafts,
   kbGenerationDrafts,
   kbGenerationProposals,
@@ -250,12 +258,19 @@ import type { Env } from '../env.js';
 import type { CoachProposal } from '../lib/ai/coach.js';
 import { isDraftApplicable } from '../lib/drafts/applicable.js';
 import { applyDraft } from '../lib/drafts/apply.js';
-import { baselineResults } from '../lib/drafts/baseline.js';
+import {
+  advanceAutopilot,
+  defaultAutopilotOps,
+  isAutopilotBusy,
+  toAutopilotDto,
+  type AutopilotDeps,
+} from '../lib/drafts/autopilot.js';
 import { editDraftOp, opTitle } from '../lib/drafts/edit-op.js';
 import { baseOf, type DraftOp } from '../lib/drafts/ops.js';
 import type { AiDeps } from '../lib/drafts/replay.js';
-import { isDraftRunning, sideFromRow, startDraftRun } from '../lib/drafts/run.js';
-import { ApiError } from '../lib/errors.js';
+import { isDraftRunning, MAX_CASES, startDraftRun } from '../lib/drafts/run.js';
+import { pairedBaselineRun, readRun } from '../lib/drafts/run-read.js';
+import { ApiError, isDuplicate } from '../lib/errors.js';
 import { LEGACY_RAW_FINGERPRINT_PATTERN } from '../lib/knowledge/generation-types.js';
 import { BODY_MAX } from '../lib/knowledge/note.js';
 import { credentialsKey } from '../lib/secret-box.js';
@@ -318,46 +333,6 @@ const toDraft = (row: typeof kbDrafts.$inferSelect) => ({
   createdAt: row.createdAt.toISOString(),
   appliedAt: row.appliedAt === null ? null : row.appliedAt.toISOString(),
 });
-
-/**
- * The baseline run a given draft run's own POST paired with, if it needed one — found without
- * a column linking the two, because the POST that makes a draft run inserts the two back to
- * back, in the same request, with nothing awaited in between: any baseline run at the same
- * `agentId`/`configVersion`/`model` that started at or after `run` did is the one that POST
- * created for it. `baselineResults` can answer a case from an *older* baseline too (one that
- * already existed and was simply reused) — those necessarily started before `run` did, since
- * the POST read them before `run`'s own row was even inserted — so the `>=` here is what tells
- * "paid by this run" apart from "reused from an earlier one". This can misattribute a case to
- * a different, unrelated run that happens to start immediately after `run` and share its
- * agent/version/model while `run` itself needed no fresh baseline at all — accepted as the
- * rare edge a heuristic without a new column has to leave, not a case this feature promises to
- * get right.
- *
- * Shared between `GET .../runs/:runId` (the route this heuristic was written for) and
- * `GET .../drafts/:draftId`'s own run list, so a run's reported `baselineCost` means the same
- * thing regardless of which route asked.
- */
-async function pairedBaselineRun(
-  db: Db,
-  run: typeof testRuns.$inferSelect,
-): Promise<typeof testRuns.$inferSelect | null> {
-  const [row] = await db
-    .select()
-    .from(testRuns)
-    .where(
-      and(
-        eq(testRuns.agentId, run.agentId),
-        isNull(testRuns.draftId),
-        eq(testRuns.configVersion, run.configVersion),
-        eq(testRuns.model, run.model),
-        gte(testRuns.startedAt, run.startedAt),
-      ),
-    )
-    .orderBy(asc(testRuns.startedAt))
-    .limit(1);
-  return row ?? null;
-}
-
 
 /**
  * Marks every run this process finds still `running` at boot as `failed` — see the file
@@ -435,6 +410,22 @@ export function registerDraftRoutes(
     if (!row) throw new ApiError(404, 'Черновик не найден');
     return row;
   }
+
+  /** The manual routes stay out of a draft the autopilot is driving: an edit or run under it
+   * would change the ops its attribution is read against. */
+  async function assertNoAutopilot(draftId: string): Promise<void> {
+    if (await isAutopilotBusy(db, draftId)) {
+      throw new ApiError(409, 'Черновик проверяется автоматически — остановите проверку, чтобы менять его вручную');
+    }
+  }
+
+  const autopilotDeps: AutopilotDeps = {
+    db,
+    deps,
+    key,
+    log: (obj, msg) => app.log.error(obj, msg),
+    ops: defaultAutopilotOps,
+  };
 
 
   app.post(
@@ -536,6 +527,7 @@ export function registerDraftRoutes(
       const agentId = req.agent!.id;
       const { draftId } = req.params as { draftId: string };
       const draft = await loadDraft(agentId, draftId);
+      await assertNoAutopilot(draft.id);
       // The running check, the body parse and every refusal after them live in `startDraftRun`,
       // in the order this route always answered them.
       return startDraftRun(
@@ -564,53 +556,7 @@ export function registerDraftRoutes(
         .where(and(eq(testRuns.id, runId), eq(testRuns.agentId, agentId), eq(testRuns.draftId, draft.id)));
       if (!run) throw new ApiError(404, 'Прогон не найден');
 
-      const rows = await db.select().from(testResults).where(eq(testResults.runId, runId));
-      // Paired the same way the POST that made this run did — a reload must not show «стало»
-      // with nothing beside it. `baselineResults` always answers with the *newest* done
-      // baseline at this run's own `configVersion`/`model`, which is exactly what «было» meant
-      // at the time this run was scored (and, if a later run has since refreshed it, the
-      // freshest known answer at that same version — still the right thing to show).
-      const caseIds = rows.map((row) => row.caseId);
-      const baselines = await baselineResults(db, agentId, caseIds, run.configVersion, run.model);
-
-      // The baseline run *this* draft run's own POST paired with, if it needed one — see
-      // `pairedBaselineRun`'s own comment for the heuristic and what it can misattribute.
-      const pairedBaseline = await pairedBaselineRun(db, run);
-
-      const results = rows.map((row) => {
-        const baseline = baselines.get(row.caseId);
-        // `'paid'` exactly when this case's «было» lives in the baseline run paired with `run`
-        // itself — the row this run's own POST is what wrote — and `'reused'` when it instead
-        // answers from an older run's own already-`done` row. Both are reads, as every `GET`
-        // is; the label describes which run originally spent the money, not whether this
-        // particular request did.
-        const beforeOrigin: 'paid' | 'reused' = pairedBaseline && baseline?.runId === pairedBaseline.id ? 'paid' : 'reused';
-        return {
-          caseId: row.caseId,
-          before: baseline ? { ...sideFromRow(baseline), origin: beforeOrigin } : null,
-          after: { ...sideFromRow(row), origin: 'paid' as const },
-          // Written only onto the draft's own «стало» row (`resultRow`, above) — `row` here
-          // is exactly that row, never the baseline's, so reading it straight off is safe. A
-          // reload used to drop both columns entirely: `sideFromRow` never carried them, even
-          // though `annotate` had already written them, so a screen polling this route could
-          // never show the hint it asked the model for in the first place.
-          verdict: row.verdict as 'better' | 'worse' | 'same' | null,
-          verdictReason: row.verdictReason,
-        };
-      });
-
-      return {
-        id: run.id,
-        draftId: run.draftId,
-        configVersion: run.configVersion,
-        model: run.model,
-        status: run.status as 'running' | 'done' | 'failed',
-        draftCost: run.cost,
-        baselineCost: pairedBaseline?.cost ?? '0',
-        startedAt: run.startedAt.toISOString(),
-        finishedAt: run.finishedAt === null ? null : run.finishedAt.toISOString(),
-        results,
-      };
+      return readRun(db, run);
     },
   );
 
@@ -623,6 +569,7 @@ export function registerDraftRoutes(
       const { draftId } = req.params as { draftId: string };
       // Fast 404 before opening a transaction; everything is re-read under lock inside it.
       await loadDraft(agentId, draftId);
+      await assertNoAutopilot(draftId);
       const applied = await applyDraft(db, { agentId, draftId });
       return toDraft(applied);
     },
@@ -637,6 +584,7 @@ export function registerDraftRoutes(
       const agentId = req.agent!.id;
       const { draftId } = req.params as { draftId: string };
       await loadDraft(agentId, draftId);
+      await assertNoAutopilot(draftId);
       const row = await db.transaction(async (tx) => {
         const [draft] = await tx.select().from(kbDrafts).where(and(
           eq(kbDrafts.id, draftId), eq(kbDrafts.agentId, agentId),
@@ -694,6 +642,7 @@ export function registerDraftRoutes(
       const agentId = req.agent!.id;
       const { draftId } = req.params as { draftId: string };
       await loadDraft(agentId, draftId);
+      await assertNoAutopilot(draftId);
       const parsed = editOpBody.safeParse(req.body);
       if (!parsed.success) throw new ApiError(400, 'Не удалось разобрать правку черновика');
       // Stays in the route: the autopilot engine only edits when no run is in flight.
@@ -703,6 +652,92 @@ export function registerDraftRoutes(
 
       const row = await editDraftOp(db, { agentId, draftId, edit: parsed.data });
       return toDraft(row);
+    },
+  );
+
+  const autopilotBody = z.object({ caseIds: z.array(z.string()) });
+
+  /** Starts the autopilot on a draft — see `lib/drafts/autopilot.ts`. Refuses up front what would
+   * only stop it on its first tick, so the owner hears why at the button. */
+  app.post(
+    '/api/agents/:agentId/drafts/:draftId/autopilot',
+    { preHandler: [guard, ownerOnly], config: { rateLimit: { max: 20, timeWindow: '1 minute' } } },
+    async (req) => {
+      const agentId = req.agent!.id;
+      const { draftId } = req.params as { draftId: string };
+      const draft = await loadDraft(agentId, draftId);
+      const parsed = autopilotBody.safeParse(req.body);
+      if (!parsed.success) throw new ApiError(400, 'Не удалось разобрать список случаев');
+      const caseIds = [...new Set(parsed.data.caseIds)];
+      if (caseIds.some((id) => !isUuid(id))) throw new ApiError(404, 'Случай не найден');
+      if (caseIds.length > MAX_CASES) {
+        throw new ApiError(400, 'За один прогон можно проверить не больше двадцати случаев');
+      }
+      if (draft.status !== 'open') throw new ApiError(409, 'Черновик уже применён или отклонён');
+      if (isDraftRunning(draft.id)) {
+        throw new ApiError(409, 'Этот черновик уже проверяется — дождитесь окончания прогона');
+      }
+      const busy = new ApiError(409, 'Черновик уже проверяется автоматически');
+      if (await isAutopilotBusy(db, draft.id)) throw busy;
+      if (!req.agent!.openrouterKey) throw new ApiError(409, 'Нет ключа OpenRouter');
+
+      let row;
+      try {
+        [row] = await db.insert(draftAutopilots).values({
+          agentId,
+          draftId: draft.id,
+          createdBy: req.user!.id,
+          status: 'running',
+          step: 'prepare_cases',
+          caseIds,
+        }).returning();
+      } catch (error) {
+        // Two clicks that both passed the check above meet at the one-running-per-draft index.
+        if (isDuplicate(error)) throw busy;
+        throw error;
+      }
+
+      // The first step starts now instead of waiting for the drain timer.
+      const id = row!.id;
+      setImmediate(() => {
+        advanceAutopilot(autopilotDeps, id).catch((error) => {
+          app.log.error({ error, autopilotId: id }, 'draft autopilot: first step failed');
+        });
+      });
+      return toAutopilotDto(row!);
+    },
+  );
+
+  /** The newest autopilot of the draft, or `null` when it never had one. */
+  app.get(
+    '/api/agents/:agentId/drafts/:draftId/autopilot',
+    { preHandler: [guard, ownerOnly] },
+    async (req) => {
+      const { draftId } = req.params as { draftId: string };
+      const draft = await loadDraft(req.agent!.id, draftId);
+      const [row] = await db.select().from(draftAutopilots).where(eq(draftAutopilots.draftId, draft.id))
+        .orderBy(desc(draftAutopilots.createdAt)).limit(1);
+      return row ? toAutopilotDto(row) : null;
+    },
+  );
+
+  /** Cancelling is a status flip; a run already in flight finishes on its own and the engine
+   * never starts another. A second click answers the row as it already is. */
+  app.post(
+    '/api/agents/:agentId/drafts/:draftId/autopilot/cancel',
+    { preHandler: [guard, ownerOnly] },
+    async (req) => {
+      const { draftId } = req.params as { draftId: string };
+      const draft = await loadDraft(req.agent!.id, draftId);
+      const [cancelled] = await db.update(draftAutopilots)
+        .set({ status: 'cancelled', finishedAt: new Date(), updatedAt: new Date() })
+        .where(and(eq(draftAutopilots.draftId, draft.id), eq(draftAutopilots.status, 'running')))
+        .returning();
+      if (cancelled) return toAutopilotDto(cancelled);
+      const [latest] = await db.select().from(draftAutopilots).where(eq(draftAutopilots.draftId, draft.id))
+        .orderBy(desc(draftAutopilots.createdAt)).limit(1);
+      if (!latest) throw new ApiError(404, 'Проверка не найдена');
+      return toAutopilotDto(latest);
     },
   );
 

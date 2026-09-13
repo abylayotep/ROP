@@ -83,4 +83,18 @@ describe('GenerationWizard layout', () => {
     expect(details[0]!.findAll((node) => node.props['aria-label'] === 'Статус разбора')).toHaveLength(1);
     expect(renderer!.root.findAll((node) => node.type === 'section' && node.props['aria-label'] === 'Статус разбора')).toHaveLength(1);
   });
+
+  it('folds batch errors of a completed run into one count under details', async () => {
+    const detail = completedRun();
+    detail.run.errors = [8, 11, 19].map((ordinal) => ({ batchId: `b${ordinal}`, ordinal, code: 'unsafe_output' }));
+    detail.run.batchCount = 83;
+    vi.mocked(api.getKnowledgeGenerationRun).mockResolvedValue(detail);
+    vi.mocked(api.listKnowledgeGenerationRuns).mockResolvedValue({ items: [], nextCursor: null });
+    await act(async () => { renderer = create(wizard('run-1')); });
+    expect(renderer!.root.findAll((node) => node.props.role === 'alert' && String(node.props.className).includes('generation-review__notice'))).toHaveLength(0);
+    const folded = renderer!.root.findAll((node) => node.type === 'details' && node.props.className === 'generation-run-errors');
+    expect(folded).toHaveLength(1);
+    expect(JSON.stringify(folded[0]!.findByType('summary').children)).toContain('Не обработано частей: 3 из 83.');
+    expect(folded[0]!.findAllByType('p')).toHaveLength(3);
+  });
 });

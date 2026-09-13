@@ -469,3 +469,8 @@
   .knowledge-load-more,
   .knowledge-source-card__chevron { transition: none; }
 }
+
+/* Batch errors of a finished run: one count, the list on demand. */
+.generation-run-errors summary { cursor: pointer; }
+.generation-run-errors[open] summary { margin-bottom: 4px; }
+.generation-run-errors p { margin: 2px 0 0; }

@@ -1,13 +1,15 @@
-import { useState, type CSSProperties } from 'react';
+import { useMemo, useState, type CSSProperties } from 'react';
 import { Link } from 'react-router-dom';
 import * as api from '@/api';
 import { Card, CardHead } from '@/components/ui/primitives';
 import { Async, EmptyState, Skeleton } from '@/components/ui/states';
 import { useApi, useDebounced } from '@/hooks/useApi';
+import { pluralRu } from '@/lib/training-state';
+import { groupSources } from './note-sources';
 import type { KbLinkRef, KbNoteDetail, KbSection } from '@/types';
 
 /**
- * The right pane: what points at this note, what it points at, its tags and its source, and
+ * The right pane: what points at this note, what it points at, where its text came from, and
  * the owner's own honest test of what the agent would find for a customer's question.
  *
  * That last box calls the exact route stage 5's agent calls (`GET /search`), the same way
@@ -27,19 +29,13 @@ const control: CSSProperties = {
   outline: 'none',
 };
 
-const tagChip: CSSProperties = {
-  fontSize: 11,
-  padding: '3px 8px',
-  borderRadius: 6,
-  background: 'var(--sunken-2)',
-  border: '1px solid var(--line)',
-  color: 'var(--text-3)',
-};
-
 function preview(content: string): string {
   const flat = content.replace(/\s+/g, ' ').trim();
   return flat.length > 160 ? `${flat.slice(0, 160)}…` : flat;
 }
+
+/** Source rows shown before «Показать все»: enough to see what backs the note, not a wall. */
+const SOURCES_SHOWN = 3;
 
 export function NotePanel({
   agentId,
@@ -50,56 +46,31 @@ export function NotePanel({
   detail: KbNoteDetail;
   onOpenNote: (noteId: string) => void;
 }) {
+  const hasLinks = detail.backlinks.length > 0 || detail.links.length > 0;
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+    <div className="knowledge-context__stack">
       <Card>
-        <CardHead title="Ссылки" gap={10} />
-        <LinkSection
-          title="Ссылаются сюда"
-          empty="Пока никто не ссылается."
-          items={detail.backlinks}
-          onOpenNote={onOpenNote}
-        />
-        <div style={{ height: 14 }} />
-        <LinkSection
-          title="Ссылки из заметки"
-          empty="Заметка ни на что не ссылается."
-          items={detail.links}
-          onOpenNote={onOpenNote}
-        />
+        <CardHead title="Связи" gap={10} />
+        {hasLinks ? (
+          <>
+            {detail.backlinks.length > 0 && (
+              <LinkSection title="Ссылаются сюда" items={detail.backlinks} onOpenNote={onOpenNote} />
+            )}
+            {detail.links.length > 0 && (
+              <LinkSection title="Ссылки из заметки" items={detail.links} onOpenNote={onOpenNote} />
+            )}
+          </>
+        ) : (
+          <p className="knowledge-context__hint">
+            Заметка ни с чем не связана. Напишите в тексте «[[Название]]» другой заметки — ссылка
+            появится здесь и линией в графе.
+          </p>
+        )}
       </Card>
 
       <Card>
-        <CardHead title="Теги и источник" gap={10} />
-        {detail.tags.length === 0 ? (
-          <div style={{ fontSize: 11.5, color: 'var(--text-dim)' }}>Тегов нет.</div>
-        ) : (
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-            {detail.tags.map((tag) => (
-              <span key={tag} style={tagChip}>
-                #{tag}
-              </span>
-            ))}
-          </div>
-        )}
-        <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 10 }}>
-          {(detail.generationSources?.length ?? 0) > 0
-            ? 'Из диалогов WhatsApp'
-            : detail.sourceTitle ? `Источник: ${detail.sourceTitle}` : 'Добавлено вручную'}
-        </div>
-        {(detail.generationSources?.length ?? 0) > 0 && (
-          <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
-            {detail.generationSources!.map((source) => source.available ? (
-              <Link key={source.messageId} className="btn-link" to={`../dialogs?conversation=${encodeURIComponent(source.conversationId)}&message=${encodeURIComponent(source.messageId)}`}>
-                Диалог · {new Date(source.sentAt).toLocaleDateString('ru-RU')}{source.excerpt ? ` · ${preview(source.excerpt)}` : ''}
-              </Link>
-            ) : (
-              <span key={source.messageId} style={{ fontSize: 11.5, color: 'var(--text-dim)' }}>
-                Источник недоступен
-              </span>
-            ))}
-          </div>
-        )}
+        <CardHead title="Откуда взято" gap={10} />
+        <NoteOrigin detail={detail} />
       </Card>
 
       <Card>
@@ -110,49 +81,97 @@ export function NotePanel({
   );
 }
 
+function NoteOrigin({ detail }: { detail: KbNoteDetail }) {
+  const [all, setAll] = useState(false);
+  const groups = useMemo(() => groupSources(detail.generationSources ?? []), [detail.generationSources]);
+
+  if (groups.length === 0) {
+    return (
+      <p className="knowledge-context__hint">
+        {detail.sourceTitle ? `Источник: ${detail.sourceTitle}` : 'Добавлено вручную.'}
+      </p>
+    );
+  }
+
+  const messages = groups.reduce((sum, group) => sum + group.count, 0);
+  const shown = all ? groups : groups.slice(0, SOURCES_SHOWN);
+  return (
+    <>
+      <p className="knowledge-context__hint">
+        {messages} {pluralRu(messages, 'сообщение', 'сообщения', 'сообщений')} из WhatsApp
+        {groups.length < messages && ` · ${groups.length} ${pluralRu(groups.length, 'разный текст', 'разных текста', 'разных текстов')}`}
+      </p>
+      <ul className="knowledge-sources">
+        {shown.map((group) => {
+          const date = new Date(group.latestAt).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
+          const body = (
+            <>
+              <span className="knowledge-sources__meta">
+                {date}
+                {group.count > 1 && <span className="knowledge-sources__count">×{group.count}</span>}
+              </span>
+              <span className="knowledge-sources__text">{group.excerpt ?? 'Сообщение без текста'}</span>
+            </>
+          );
+          return (
+            <li key={group.key}>
+              {group.open ? (
+                <Link
+                  className="knowledge-sources__row"
+                  title="Открыть в диалогах"
+                  to={`../dialogs?conversation=${encodeURIComponent(group.open.conversationId)}&message=${encodeURIComponent(group.open.messageId)}`}
+                >
+                  {body}
+                </Link>
+              ) : (
+                <div className="knowledge-sources__row is-unavailable" title="Диалог больше недоступен">{body}</div>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+      {groups.length > SOURCES_SHOWN && (
+        <button type="button" className="btn-link knowledge-sources__more" onClick={() => setAll(!all)}>
+          {all ? 'Свернуть' : `Показать все (${groups.length})`}
+        </button>
+      )}
+    </>
+  );
+}
+
 /** A row of resolved and broken links, shared between backlinks and outgoing links. */
 function LinkSection({
   title,
-  empty,
   items,
   onOpenNote,
 }: {
   title: string;
-  empty: string;
   items: KbLinkRef[];
   onOpenNote: (noteId: string) => void;
 }) {
   return (
-    <div>
-      <div className="eyebrow-sm" style={{ marginBottom: 6 }}>
-        {title}
-      </div>
-      {items.length === 0 ? (
-        <div style={{ fontSize: 11.5, color: 'var(--text-dim)' }}>{empty}</div>
-      ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-          {items.map((item, i) => {
-            const noteId = item.noteId;
-            return noteId ? (
-              <button
-                key={`${noteId}-${i}`}
-                type="button"
-                className="btn-link"
-                style={{ fontSize: 12, textAlign: 'left' }}
-                onClick={() => onOpenNote(noteId)}
-              >
-                {item.title}
-              </button>
-            ) : (
-              // No `noteId` is not a loading state — it is the point of showing this row at
-              // all: a link the agent's answer would name and then have nothing behind.
-              <span key={`${item.title}-${i}`} title="В базе нет заметки с таким названием" style={{ fontSize: 12, color: 'var(--danger)' }}>
-                {item.title} · заметки нет
-              </span>
-            );
-          })}
-        </div>
-      )}
+    <div className="knowledge-links">
+      <div className="eyebrow-sm">{title}</div>
+      <ul>
+        {items.map((item, i) => {
+          const noteId = item.noteId;
+          return (
+            <li key={`${noteId ?? item.title}-${i}`}>
+              {noteId ? (
+                <button type="button" className="knowledge-links__item" onClick={() => onOpenNote(noteId)}>
+                  {item.title}
+                </button>
+              ) : (
+                // No `noteId` is not a loading state — it is the point of showing this row at
+                // all: a link the agent's answer would name and then have nothing behind.
+                <span className="knowledge-links__item is-broken" title="В базе нет заметки с таким названием">
+                  {item.title} · заметки нет
+                </span>
+              )}
+            </li>
+          );
+        })}
+      </ul>
     </div>
   );
 }

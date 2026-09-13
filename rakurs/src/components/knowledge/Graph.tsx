@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useMemo,
   useRef,
   useState,
   type PointerEvent as ReactPointerEvent,
@@ -7,6 +8,7 @@ import {
 } from 'react';
 import { layout, type Point } from './layout.js';
 import { EmptyState, Skeleton } from '@/components/ui/states';
+import { pluralRu } from '@/lib/training-state';
 import { useAppState } from '@/store/app-state';
 import type { KbGraph } from '@/types';
 
@@ -21,14 +23,18 @@ import type { KbGraph } from '@/types';
  * only move the camera, never the vault.
  */
 
-const MIN_SCALE = 0.15;
+const MIN_SCALE = 0.05;
 const MAX_SCALE = 5;
 /** Below this zoom, titles would overlap into noise faster than they'd help — so they wait
  * until the owner has zoomed in enough for a label per node to make sense. */
 const LABEL_SCALE_THRESHOLD = 0.6;
+/** A vault this small has room for every title at any zoom the fit picks. */
+const ALWAYS_LABEL_NOTES = 40;
 const NODE_RADIUS = 5;
+/** Each link a note takes part in grows its dot a little, up to this radius. */
+const MAX_NODE_RADIUS = 11;
 /** Generous past the drawn radius: a precise click on a 5px dot is not a fair ask. */
-const HIT_RADIUS = 10;
+const HIT_RADIUS = 12;
 /** A drag under this many pixels reads as a click that wobbled, not a pan. */
 const DRAG_THRESHOLD = 4;
 
@@ -48,6 +54,38 @@ function truncateLabel(title: string): string {
   return title.length > 28 ? `${title.slice(0, 27)}…` : title;
 }
 
+function nodeRadius(degree: number): number {
+  return Math.min(MAX_NODE_RADIUS, NODE_RADIUS + Math.sqrt(degree) * 2);
+}
+
+/** The camera that frames every position with a margin, or null when there is nothing to frame. */
+function fitCamera(positions: Map<string, Point>, size: Size): Camera | null {
+  if (positions.size === 0 || size.width === 0 || size.height === 0) return null;
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (const p of positions.values()) {
+    minX = Math.min(minX, p.x);
+    maxX = Math.max(maxX, p.x);
+    minY = Math.min(minY, p.y);
+    maxY = Math.max(maxY, p.y);
+  }
+  // Wider on the right: labels are drawn to the right of their dot.
+  const padX = 180;
+  const padY = 70;
+  const spanX = Math.max(maxX - minX, 1);
+  const spanY = Math.max(maxY - minY, 1);
+  const fitScale = Math.min(
+    Math.max(size.width - padX, 40) / spanX,
+    Math.max(size.height - padY, 40) / spanY,
+    1.6,
+  );
+  const scale = Math.max(MIN_SCALE, fitScale);
+  // Nudged left by a label's width so the rightmost titles are not clipped.
+  return { scale, x: -((minX + maxX) / 2) * scale - 50, y: -((minY + maxY) / 2) * scale };
+}
+
 export function Graph({
   graph,
   onOpenNote,
@@ -64,6 +102,8 @@ export function Graph({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [size, setSize] = useState<Size>({ width: 0, height: 0, dpr: 1 });
   const [camera, setCamera] = useState<Camera>({ scale: 1, x: 0, y: 0 });
+  // The note under the pointer: it and its neighbours stay bright, the rest of the vault dims.
+  const [hovered, setHovered] = useState<string | null>(null);
   // The last drawn screen position of every node, so a click can hit-test against exactly
   // what is on screen without recomputing the world-to-screen transform by hand.
   const screenRef = useRef<Map<string, Point>>(new Map());
@@ -136,34 +176,32 @@ export function Graph({
   // of five hundred both open already fitted to the canvas instead of at a fixed zoom that
   // suits neither.
   useEffect(() => {
-    if (size.width === 0 || size.height === 0) return;
     // Still computing (or about to start over for a newer graph) — nothing to fit yet.
-    if (!positions) return;
+    if (!positions || size.width === 0 || size.height === 0) return;
     if (fittedRef.current === positions) return;
     fittedRef.current = positions;
-    if (positions.size === 0) return;
+    const next = fitCamera(positions, size);
+    if (next) setCamera(next);
+  }, [positions, size]);
 
-    let minX = Infinity;
-    let maxX = -Infinity;
-    let minY = Infinity;
-    let maxY = -Infinity;
-    for (const p of positions.values()) {
-      minX = Math.min(minX, p.x);
-      maxX = Math.max(maxX, p.x);
-      minY = Math.min(minY, p.y);
-      maxY = Math.max(maxY, p.y);
+  const degree = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const link of graph.links) {
+      counts.set(link.from, (counts.get(link.from) ?? 0) + 1);
+      counts.set(link.to, (counts.get(link.to) ?? 0) + 1);
     }
-    const padding = 60;
-    const spanX = Math.max(maxX - minX, 1);
-    const spanY = Math.max(maxY - minY, 1);
-    const fitScale = Math.min(
-      (size.width - padding) / spanX,
-      (size.height - padding) / spanY,
-      MAX_SCALE,
-    );
-    const scale = Math.max(MIN_SCALE, fitScale);
-    setCamera({ scale, x: -((minX + maxX) / 2) * scale, y: -((minY + maxY) / 2) * scale });
-  }, [positions, size.width, size.height]);
+    return counts;
+  }, [graph]);
+
+  const neighbours = useMemo(() => {
+    if (!hovered) return null;
+    const set = new Set<string>([hovered]);
+    for (const link of graph.links) {
+      if (link.from === hovered) set.add(link.to);
+      if (link.to === hovered) set.add(link.from);
+    }
+    return set;
+  }, [graph, hovered]);
 
   // The draw pass. `theme` is a dependency purely to force a redraw when the owner flips
   // light/dark — the canvas reads colours from CSS custom properties at paint time rather
@@ -181,10 +219,14 @@ export function Graph({
     if (!positions) return;
 
     const styles = getComputedStyle(document.documentElement);
-    const lineColor = styles.getPropertyValue('--line-strong').trim() || '#888';
-    const nodeFill = styles.getPropertyValue('--accent-2').trim() || '#0d9668';
-    const nodeStroke = styles.getPropertyValue('--accent-4').trim() || '#0b7a55';
-    const labelColor = styles.getPropertyValue('--text-3').trim() || '#888';
+    const token = (name: string, fallback: string) => styles.getPropertyValue(name).trim() || fallback;
+    // `--line-strong` is a border colour and all but vanishes on the canvas's own ground.
+    const lineColor = token('--text-dim', '#6f7c78');
+    const accent = token('--accent', '#12b37d');
+    const nodeFill = token('--accent-2', '#0d9668');
+    const lonelyFill = token('--text-dim', '#6f7c78');
+    const labelColor = token('--text-3', '#b9c4c1');
+    const haloColor = token('--sunken', '#0f1413');
 
     const screen = new Map<string, Point>();
     for (const note of graph.notes) {
@@ -197,40 +239,64 @@ export function Graph({
     }
     screenRef.current = screen;
 
-    ctx.strokeStyle = lineColor;
-    ctx.lineWidth = 1;
-    ctx.beginPath();
+    const dimmed = (id: string) => neighbours !== null && !neighbours.has(id);
+
+    ctx.lineWidth = 1.2;
     for (const link of graph.links) {
       const a = screen.get(link.from);
       const b = screen.get(link.to);
       if (!a || !b) continue;
+      const lit = hovered !== null && (link.from === hovered || link.to === hovered);
+      ctx.globalAlpha = lit ? 1 : neighbours === null ? 0.7 : 0.12;
+      ctx.strokeStyle = lit ? accent : lineColor;
+      ctx.beginPath();
       ctx.moveTo(a.x, a.y);
       ctx.lineTo(b.x, b.y);
+      ctx.stroke();
     }
-    ctx.stroke();
 
-    const showLabels = camera.scale >= LABEL_SCALE_THRESHOLD;
-    ctx.font = '11px system-ui, sans-serif';
+    const showLabels = graph.notes.length <= ALWAYS_LABEL_NOTES || camera.scale >= LABEL_SCALE_THRESHOLD;
+    ctx.font = '500 12px "Golos Text", system-ui, sans-serif';
     ctx.textBaseline = 'middle';
+    ctx.lineJoin = 'round';
 
     for (const note of graph.notes) {
       const p = screen.get(note.id);
       if (!p) continue;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, NODE_RADIUS, 0, Math.PI * 2);
-      ctx.fillStyle = nodeFill;
-      ctx.fill();
-      ctx.strokeStyle = nodeStroke;
-      ctx.lineWidth = 1;
-      ctx.stroke();
+      const links = degree.get(note.id) ?? 0;
+      const r = nodeRadius(links);
+      const isHovered = note.id === hovered;
+      ctx.globalAlpha = dimmed(note.id) ? 0.2 : 1;
 
-      if (showLabels) {
-        ctx.fillStyle = labelColor;
-        ctx.fillText(truncateLabel(note.title), p.x + NODE_RADIUS + 4, p.y);
+      if (isHovered) {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, r + 5, 0, Math.PI * 2);
+        ctx.fillStyle = accent;
+        ctx.globalAlpha = 0.22;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+      // A note nothing links to, and that links nowhere, is drawn grey: the one thing the
+      // picture can say about it is that it stands alone.
+      ctx.fillStyle = isHovered ? accent : links === 0 ? lonelyFill : nodeFill;
+      ctx.fill();
+
+      if (showLabels || isHovered) {
+        const label = truncateLabel(note.title);
+        const lx = p.x + r + 6;
+        // A halo in the canvas's own ground keeps a title readable where it crosses a line.
+        ctx.strokeStyle = haloColor;
+        ctx.lineWidth = 4;
+        ctx.strokeText(label, lx, p.y);
+        ctx.fillStyle = isHovered ? accent : labelColor;
+        ctx.fillText(label, lx, p.y);
       }
     }
+    ctx.globalAlpha = 1;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [graph, positions, camera, size, theme]);
+  }, [graph, positions, camera, size, theme, hovered, neighbours, degree]);
 
   function hitTest(mx: number, my: number): string | null {
     let found: string | null = null;
@@ -276,7 +342,12 @@ export function Graph({
 
   function onPointerMove(e: ReactPointerEvent<HTMLCanvasElement>) {
     const drag = dragRef.current;
-    if (!drag) return;
+    if (!drag) {
+      const rect = e.currentTarget.getBoundingClientRect();
+      const hit = hitTest(e.clientX - rect.left, e.clientY - rect.top);
+      if (hit !== hovered) setHovered(hit);
+      return;
+    }
     const dx = e.clientX - drag.x;
     const dy = e.clientY - drag.y;
     if (Math.abs(dx) > DRAG_THRESHOLD || Math.abs(dy) > DRAG_THRESHOLD) drag.moved = true;
@@ -294,6 +365,12 @@ export function Graph({
     const rect = canvas.getBoundingClientRect();
     const hit = hitTest(e.clientX - rect.left, e.clientY - rect.top);
     if (hit) onOpenNote(hit);
+  }
+
+  function refit() {
+    if (!positions) return;
+    const next = fitCamera(positions, size);
+    if (next) setCamera(next);
   }
 
   if (graph.notes.length === 0) {
@@ -320,8 +397,9 @@ export function Graph({
   return (
     <div>
       {graph.links.length === 0 && (
-        <div style={{ padding: '0 2px 10px', fontSize: 11.5, color: 'var(--text-dim)' }}>
-          Связей пока нет: они появляются из ссылок [[Название]] в тексте заметок.
+        <div style={{ padding: '0 2px 10px', fontSize: 12, lineHeight: 1.5, color: 'var(--text-dim)' }}>
+          Связей пока нет: они появляются из ссылок [[Название]] в тексте заметок. Серые точки —
+          заметки, которые ни с чем не связаны; нажмите на точку, чтобы открыть заметку.
         </div>
       )}
       {graph.truncated && (
@@ -351,8 +429,18 @@ export function Graph({
           onPointerCancel={() => {
             dragRef.current = null;
           }}
-          style={{ width: '100%', height: '100%', display: 'block', cursor: 'grab', touchAction: 'none' }}
+          onPointerLeave={() => {
+            if (!dragRef.current) setHovered(null);
+          }}
+          aria-label="Граф связей между заметками"
+          style={{ width: '100%', height: '100%', display: 'block', cursor: hovered ? 'pointer' : 'grab', touchAction: 'none' }}
         />
+        {positions && (
+          <div className="knowledge-graph__toolbar">
+            <span>{graph.notes.length} {pluralRu(graph.notes.length, 'заметка', 'заметки', 'заметок')} · {graph.links.length} {pluralRu(graph.links.length, 'связь', 'связи', 'связей')}</span>
+            <button type="button" className="btn-sm" onClick={refit}>Вписать</button>
+          </div>
+        )}
         {/* Canvas stays mounted underneath — its own sizing effect must not lose its ref —
             but blank, while this covers it: the owner sees the wait, not a frozen tab. */}
         {!positions && (

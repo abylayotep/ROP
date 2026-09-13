@@ -53,29 +53,39 @@ domain. It occurs five times: two `server_name`, the two certificate paths, and 
 on the first line. `try_files … /index.html` is required: the router is client-side, and
 without it a refresh on `/a/:agentId/dialogs` returns 404.
 
-## Updating
+## Releasing
 
-Back up PostgreSQL and retain the current API image and frontend before updating. Rehearse
-new migrations on an isolated restored database. Build first, migrate before starting the
-new API, and publish the frontend only after the API health check succeeds. In particular,
-the knowledge-generation startup reconciliation requires migration `0021` to exist.
+Production runs `origin/main` and nothing else. Merge to main, push, then from any checkout:
 
 ```bash
-npm --prefix rakurs run build
-docker compose -f deploy/compose.yml --env-file deploy/.env build api
-docker compose -f deploy/compose.yml --env-file deploy/.env run --rm --no-deps api npm run migrate
-docker compose -f deploy/compose.yml --env-file deploy/.env up -d --no-deps api
-curl --fail --retry 12 --retry-all-errors --retry-delay 1 --max-time 3 http://127.0.0.1:3000/api/health
-rsync -a --exclude=index.html rakurs/dist/ vps:/var/www/rakurs/
-rsync -a rakurs/dist/index.html vps:/var/www/rakurs/index.html.next
-ssh vps 'mv /var/www/rakurs/index.html.next /var/www/rakurs/index.html'
+deploy/release.sh --dry-run
+deploy/release.sh
 ```
 
-These Compose commands run on the VPS; build and transfer the frontend from the release
-checkout. Keep old hashed assets for already-open browser sessions; do not use `--delete`
-during the cutover. For an application rollback, retain additive migration tables and
-restore the previous image and frontend. Restoring production data is a separate recovery
-decision, not an automatic rollback step.
+The script ignores the local branch and working tree: it builds from `git archive` of
+`origin/main`, refuses to run if production's `/opt/rakurs/.release.sha` is not contained in
+main, and then, on the host, in this order:
+
+1. dumps PostgreSQL to `/opt/rakurs-backups/` and tags the running image `rakurs-api:rollback`;
+2. syncs the release into `/opt/rakurs`, keeping `deploy/.env`; files main does not track, and
+   files it replaces, are moved to `/opt/rakurs-releases/replaced-<time>/`, not deleted;
+3. builds `api`, runs the migrations, restarts `api` and waits for `/api/health`;
+4. records the commit in `.release.sha`, then publishes the frontend, keeping old hashed
+   assets for browsers that still have the previous page open.
+
+`RAKURS_DEPLOY_HOST` and `RAKURS_DEPLOY_KEY` override the SSH target and key. Never copy
+files onto the host by hand: the next release overwrites them, and a hand-copied fix that
+main does not contain is how production and main drifted apart before.
+
+Migrations are append-only. `server/test/migration-journal.test.ts` pins the history
+production has applied; drizzle skips any migration older than the newest one a database has
+recorded, so renumbering or retiming an applied entry silently skips schema. Rehearse a new
+migration on a copy of production's schema before releasing it. A local database migrated
+with a journal that was since rewritten must be recreated.
+
+Rollback of the application: `docker tag rakurs-api:rollback rakurs-api:latest`, then
+`up -d --no-deps api`, and republish the previous frontend. Additive migration tables stay.
+Restoring the database dump is a separate recovery decision, not a rollback step.
 
 The `media` volume survives `down` and `up` — WhatsApp attachments are not lost on an
 update. Only `docker compose down -v`, or removing the `media` volume directly, deletes

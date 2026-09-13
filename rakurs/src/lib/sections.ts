@@ -32,6 +32,7 @@ export const SECTIONS: SectionDef[] = [
   { path: 'customers', label: 'Клиенты', pending: '' },
   { path: 'knowledge', label: 'База знаний', pending: '' },
   { path: 'coach', label: 'Обучение', pending: '', ownerOnly: true },
+  { path: 'testing', label: 'Тестирование', pending: '', ownerOnly: true },
   { path: 'agent', label: 'Агент', pending: '' },
   {
     path: 'integrations',

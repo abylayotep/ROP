@@ -1,4 +1,5 @@
 import { useState, type CSSProperties, type FormEvent } from 'react';
+import { Link } from 'react-router-dom';
 import { humanError } from '@/api';
 import { useAuth } from '@/store/auth';
 
@@ -40,8 +41,12 @@ export function LoginScreen() {
     <div
       style={{
         minHeight: '100vh',
-        display: 'grid',
-        placeItems: 'center',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 16,
+        padding: '24px 16px',
         background: 'var(--page)',
         color: 'var(--text)',
       }}
@@ -50,6 +55,7 @@ export function LoginScreen() {
         onSubmit={onSubmit}
         style={{
           width: 340,
+          maxWidth: '100%',
           padding: 28,
           background: 'var(--card)',
           border: '1px solid var(--line)',
@@ -111,6 +117,14 @@ export function LoginScreen() {
           {busy ? 'Входим…' : 'Войти'}
         </button>
       </form>
+
+      <nav style={{ fontSize: 12, color: 'var(--text-dim)', textAlign: 'center' }}>
+        <Link to="/privacy">Политика конфиденциальности</Link>
+        {' · '}
+        <Link to="/terms">Условия</Link>
+        {' · '}
+        <Link to="/data-deletion">Удаление данных</Link>
+      </nav>
     </div>
   );
 }

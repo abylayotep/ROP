@@ -1,5 +1,7 @@
 import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { Layout } from '@/components/layout/Layout';
+import { LEGAL_PAGE_IDS } from '@/legal/content';
+import { LegalPage } from '@/legal/LegalPage';
 import { SECTIONS } from '@/lib/sections';
 import { AgentScreen } from '@/screens/AgentScreen';
 import { AgentSettingsScreen } from '@/screens/AgentSettingsScreen';
@@ -22,7 +24,14 @@ import { AuthProvider, useAuth } from '@/store/auth';
 export function App() {
   return (
     <AuthProvider>
-      <AuthGate />
+      <Routes>
+        {/* Public and outside the gate: Meta App Review and our businesses' customers open
+            these without an account, and a signed-in user sees them without the app chrome. */}
+        {LEGAL_PAGE_IDS.map((id) => (
+          <Route key={id} path={`/${id}`} element={<LegalPage id={id} />} />
+        ))}
+        <Route path="*" element={<AuthGate />} />
+      </Routes>
     </AuthProvider>
   );
 }

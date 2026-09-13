@@ -6,11 +6,22 @@ import type { Db } from '../db/client.js';
 import { whatsappNumbers } from '../db/schema.js';
 import type { Env } from '../env.js';
 import { ApiError } from '../lib/errors.js';
-import { credentialsKey, encryptSecret } from '../lib/secret-box.js';
+import { credentialsKey, decryptSecret, encryptSecret } from '../lib/secret-box.js';
 import { isUuid } from '../lib/uuid.js';
-import { GraphError, withoutSecret, type GraphClient } from '../lib/whatsapp/graph.js';
-import { asCloudNumber } from '../lib/whatsapp/cloud-number.js';
+import {
+  GraphError,
+  withoutSecret,
+  type GraphClient,
+  type WebhookCallback,
+} from '../lib/whatsapp/graph.js';
+import { asCloudNumber, isCloudNumber } from '../lib/whatsapp/cloud-number.js';
 import { requireAgent } from './require-agent.js';
+
+/** Where Meta delivers this cabinet's WhatsApp webhooks, and the handshake secret for it. */
+export const webhookCallback = (env: Env): WebhookCallback => ({
+  url: `${env.PUBLIC_URL}/api/whatsapp/webhook`,
+  verifyToken: env.META_WEBHOOK_VERIFY_TOKEN,
+});
 
 const connection = z.object({
   phoneNumberId: z.string().trim().min(1),
@@ -153,6 +164,21 @@ export function registerWhatsappNumberRoutes(
         throw error;
       }
 
+      // The Meta app's own callback URL belongs to another product sharing the app, so the
+      // number's webhooks are pointed here explicitly. Meta checks the address with a
+      // handshake before accepting it.
+      try {
+        await graph.setWebhookOverride(phoneNumberId, accessToken, webhookCallback(env));
+      } catch (error) {
+        if (error instanceof GraphError) {
+          throw new ApiError(
+            400,
+            `Номер проверен, но Meta не приняла адрес для входящих сообщений: ${withoutSecret(error.message, accessToken)}`,
+          );
+        }
+        throw error;
+      }
+
       try {
         const [row] = await db
           .insert(whatsappNumbers)
@@ -248,9 +274,26 @@ export function registerWhatsappNumberRoutes(
       const { numberId } = req.params as { numberId: string };
       if (!isUuid(numberId)) throw new ApiError(404, 'Номер не найден');
 
+      const owned = and(eq(whatsappNumbers.id, numberId), eq(whatsappNumbers.agentId, req.agent!.id));
+      const [current] = await db.select().from(whatsappNumbers).where(owned);
+      if (!current) throw new ApiError(404, 'Номер не найден');
+
+      // Hand the number's webhooks back to the app default, so whatever used the number
+      // before it was connected here hears its messages again. Best effort: an expired or
+      // unreadable token must not keep an owner from removing the number.
+      if (isCloudNumber(current)) {
+        try {
+          const token = decryptSecret(current.accessToken, credentialsKey(env), current.phoneNumberId);
+          await graph.setWebhookOverride(current.phoneNumberId, token, null);
+        } catch {
+          // Nothing to do: the row goes regardless, and Meta keeps delivering to this cabinet,
+          // which now drops messages for a number it no longer has.
+        }
+      }
+
       const [row] = await db
         .delete(whatsappNumbers)
-        .where(and(eq(whatsappNumbers.id, numberId), eq(whatsappNumbers.agentId, req.agent!.id)))
+        .where(owned)
         .returning({ id: whatsappNumbers.id });
 
       if (!row) throw new ApiError(404, 'Номер не найден');
@@ -263,9 +306,6 @@ export function registerWhatsappNumberRoutes(
     // Owner only: the verification string is a shared secret with Meta, and anyone holding
     // it plus the address can complete a handshake in our name.
     { preHandler: [guard, ownerOnly] },
-    async (): Promise<WebhookSetup> => ({
-      url: `${env.PUBLIC_URL}/api/whatsapp/webhook`,
-      verifyToken: env.META_WEBHOOK_VERIFY_TOKEN,
-    }),
+    async (): Promise<WebhookSetup> => webhookCallback(env),
   );
 }

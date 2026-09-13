@@ -96,8 +96,11 @@ export const PRODUCT_LIMIT = 50;
  */
 export const PRODUCT_DESCRIPTION_LIMIT = 300;
 
-/** How many photos one reply may send. Four images in a row is a gallery, not an answer. */
-export const PHOTO_SEND_LIMIT = 3;
+/**
+ * How many photos one reply may send. Four, because a design catalog is often split over four
+ * sheets that answer one question together; five in a row is a gallery, not an answer.
+ */
+export const PHOTO_SEND_LIMIT = 4;
 
 /** The reason recorded when a model asks for a handoff without saying why. */
 export const HANDOFF_REQUESTED = 'модель запросила передачу';

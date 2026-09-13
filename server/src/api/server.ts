@@ -32,6 +32,7 @@ import { requireSession } from './require-session.js';
 import { registerProductRoutes } from './products.js';
 import { registerPromotionRoutes } from './promotions.js';
 import { registerRuleRoutes } from './rules.js';
+import { registerSalesScriptRoutes } from './sales-script.js';
 import { registerStageRoutes } from './stages.js';
 import { registerStatsRoutes } from './stats.js';
 import { registerTestCaseRoutes } from './test-cases.js';
@@ -155,6 +156,7 @@ export function buildServer(env: Env, db: Db, deps: ServerDeps = {}): FastifyIns
     registerKnowledgeRoutes(app, db, env, guard, { pageFetcher, graph, instagram });
     registerKnowledgeGenerationRoutes(app, db, env, guard, { model });
     registerRuleRoutes(app, db, guard);
+    registerSalesScriptRoutes(app, db, guard);
     registerProductRoutes(app, db, env, guard);
     registerPromotionRoutes(app, db, guard);
     registerAiRoutes(app, db, env, guard, { model, graph, linked });

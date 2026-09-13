@@ -67,10 +67,10 @@ async function login(email = 'owner@example.com') {
 }
 
 /**
- * A company with an agent, a number and the default nine-stage funnel.
+ * A company with an agent, a number and the default eight-stage funnel.
  *
  * The seeded funnel is used rather than a hand-written one on purpose: «Отказ» sits at
- * position 8, *after* «Продажа», and that ordering is exactly what the chain has to refuse
+ * position 7, *after* «Оплачено», and that ordering is exactly what the chain has to refuse
  * to walk through. A three-stage fixture with the refusal at the end would agree with a
  * route that had no such rule.
  */
@@ -260,7 +260,7 @@ describe('the funnel over a period', () => {
     await addLead();
 
     const answer = await body();
-    // Empty and not nine zeros: a chain of zeros reads as «ни один лид никуда не дошёл»,
+    // Empty and not eight zeros: a chain of zeros reads as «ни один лид никуда не дошёл»,
     // while the truth is that nobody was asked to move anybody.
     expect(answer.funnel).toEqual([]);
     expect(answer.failureEntries).toBe(0);
@@ -286,17 +286,16 @@ describe('the funnel over a period', () => {
   });
 
   it('measures a step against the nearest stage above that anyone entered', async () => {
-    // Four leads down a nine-stage funnel, and nobody is ever routed through
-    // «Предложение отправлено» or «Готов к покупке». A stage list longer than the deals
-    // that run through it is ordinary, and it must not turn into a report of two stages
-    // where every deal dies.
+    // Four leads down an eight-stage funnel, and nobody is ever routed through
+    // «Предложение отправлено». A stage list longer than the deals that run through it is
+    // ordinary, and it must not turn into a report of a stage where every deal dies.
     const aigul = await addLead();
     const erzhan = await addLead();
     const dana = await addLead();
     const marat = await addLead();
     const road = ['Новый лид', 'В диалоге', 'Интерес проявлен', 'Квалифицирован'];
-    await walk(aigul, [...road, 'Заказано', 'Оплачено']);
-    await walk(erzhan, [...road, 'Заказано']);
+    await walk(aigul, [...road, 'Готов к покупке', 'Оплачено']);
+    await walk(erzhan, [...road, 'Готов к покупке']);
     await walk(dana, road.slice(0, 3));
     await walk(marat, ['Новый лид', 'В диалоге', 'Отказ']);
 
@@ -314,10 +313,9 @@ describe('the funnel over a period', () => {
       // Nobody was sent here, so there is no share to state — not «0%», which is the
       // plausible-looking lie this rule exists to refuse.
       ['Предложение отправлено', 0, null],
-      ['Готов к покупке', 0, null],
-      // And the stage below the two skipped ones is not silent: two of the two leads that
-      // were qualified got an invoice.
-      ['Заказано', 2, 1],
+      // And the stage below the skipped one is not silent: two of the two leads that were
+      // qualified became ready to buy.
+      ['Готов к покупке', 2, 1],
       ['Оплачено', 1, 0.5],
     ]);
     expect(answer.failureEntries).toBe(1);
@@ -336,7 +334,7 @@ describe('the funnel over a period', () => {
     // lead never stood in.
     expect(step(answer, 'Квалифицирован')!.entered).toBe(0);
     expect(step(answer, 'Предложение отправлено')!.entered).toBe(0);
-    expect(step(answer, 'Заказано')!.entered).toBe(0);
+    expect(step(answer, 'Готов к покупке')!.entered).toBe(0);
   });
 
   it('counts a lead once in a stage it entered twice', async () => {
@@ -382,10 +380,10 @@ describe('the funnel over a period', () => {
     await move(lead, fixture.stage('Отказ').id);
 
     const answer = await body();
-    // «Отказ» is at position 8, after «Продажа» at 7. In the chain it would read as the
+    // «Отказ» is at position 7, after «Оплачено» at 6. In the chain it would read as the
     // step a sale leads to.
     expect(answer.funnel.map((row: { name: string }) => row.name)).not.toContain('Отказ');
-    expect(answer.funnel).toHaveLength(8);
+    expect(answer.funnel).toHaveLength(7);
     expect(answer.failureEntries).toBe(1);
   });
 
@@ -400,7 +398,7 @@ describe('the funnel over a period', () => {
 
   it('orders the chain by position, whatever order the moves happened in', async () => {
     const lead = await addLead();
-    await move(lead, fixture.stage('Заказано').id);
+    await move(lead, fixture.stage('Готов к покупке').id);
     await move(lead, fixture.stage('Новый лид').id);
 
     const answer = await body();
@@ -515,7 +513,7 @@ describe('the funnel over a period', () => {
 
     const answer = await body();
     expect(step(answer, 'Новый лид')!.entered).toBe(1);
-    expect(answer.funnel.map((row: { name: string }) => row.name)).toHaveLength(8);
+    expect(answer.funnel.map((row: { name: string }) => row.name)).toHaveLength(7);
   });
 });
 

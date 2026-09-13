@@ -591,7 +591,7 @@ export const stages = pgTable(
       .references(() => agents.id, { onDelete: 'cascade' }),
     name: text('name').notNull(),
     color: text('color').notNull(),
-    // 'active' | 'qualified' | 'awaiting_payment' | 'success' | 'failure'
+    // 'active' | 'qualified' | 'success' | 'failure'
     kind: text('kind').notNull(),
     position: integer('position').notNull(),
     description: text('description').notNull().default(''),
@@ -719,7 +719,7 @@ export const stageTransitions = pgTable(
     // Null exactly when the lead came from nowhere — its first stage.
     fromName: text('from_name'),
     toName: text('to_name').notNull(),
-    // 'active' | 'qualified' | 'awaiting_payment' | 'success' | 'failure'
+    // 'active' | 'qualified' | 'success' | 'failure'; rows before migration 0046 may say 'awaiting_payment'
     toKind: text('to_kind').notNull(),
     fromPosition: integer('from_position'),
     toPosition: integer('to_position').notNull(),

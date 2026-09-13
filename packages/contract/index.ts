@@ -185,7 +185,7 @@ export interface ConversationThread extends ConversationSummary {
 /* ── Воронка ────────────────────────────────────────────────────────────────
  * The funnel an owner shapes, and the fields it asks to be filled. */
 
-export type StageKind = 'active' | 'qualified' | 'awaiting_payment' | 'success' | 'failure';
+export type StageKind = 'active' | 'qualified' | 'success' | 'failure';
 
 export interface Stage {
   id: string;
@@ -242,7 +242,7 @@ export interface Order {
 
 export interface Lead {
   crm?: { status: string; summary: string | null; profile: Record<string, string>; error: string | null; analyzedAt: string | null;
-    paymentEvidence: 'unknown' | 'awaiting_payment' | 'needs_verification' | 'confirmed'; paymentEvidenceReason: string | null };
+    paymentEvidence: 'unknown' | 'awaiting_payment' | 'needs_verification' | 'paid' | 'confirmed'; paymentEvidenceReason: string | null };
   sourceId?: string | null;
   sourceType?: string | null;
   conversationId: string;

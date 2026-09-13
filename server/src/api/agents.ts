@@ -12,7 +12,6 @@ import { agents } from '../db/schema.js';
 import { normalizeOperatorPhone } from '../lib/ai/operator-alert.js';
 import { bumpConfigVersion } from '../lib/drafts/version.js';
 import { ApiError } from '../lib/errors.js';
-import { ensureSealhousePaymentPolicy } from '../lib/payment-policy.js';
 import { seedFunnel } from '../lib/funnel.js';
 import { requireAccount } from './require-account.js';
 import { requireAgent } from './require-agent.js';
@@ -96,7 +95,6 @@ export function registerAgentRoutes(
         await seedFunnel(tx, created!.id);
         return created!;
       });
-      if (row.name.trim().toLocaleLowerCase() === 'sealhouse') await ensureSealhousePaymentPolicy(db, row.id);
       return toApi(row);
     },
   );
@@ -135,7 +133,6 @@ export function registerAgentRoutes(
         if (bumps) await bumpConfigVersion(tx as unknown as Db, req.agent!.id);
         return updated!;
       });
-      if (row.name.trim().toLocaleLowerCase() === 'sealhouse') await ensureSealhousePaymentPolicy(db, row.id);
       return toApi(row);
     },
   );

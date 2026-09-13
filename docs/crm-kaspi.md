@@ -62,7 +62,8 @@ A conversation holds the customer's whole relationship, so repeat purchases work
 standing in the sale stage with a paid order gets no new Kaspi invoice, manual or
 automatic, but once moved out of the sale stage it can be invoiced again, and a manager
 who moves it back into the sale stage lets the next chat payment record a new order and
-Purchase. Payments from an earlier sale never move the lead back.
+Purchase. Payments from an earlier sale never move the lead back: chat evidence counts only
+when both the payment and the quoted price were written after the latest paid order.
 
 ## Dialog performance
 

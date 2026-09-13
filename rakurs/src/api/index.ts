@@ -57,7 +57,10 @@ import type {
   WhatsappNumber,
 } from '@/types';
 import { API_URL, LONG_TIMEOUT_MS, request } from './client';
-import type { WhatsappHistoryRun, WhatsappHistoryOverview } from '@rakurs/contract';
+import type {
+  AiSandboxCreateRequest, AiSandboxSessionDetail, AiSandboxSessionSummary,
+  AiSandboxTurn, AiSandboxTurnRequest, WhatsappHistoryRun, WhatsappHistoryOverview,
+} from '@rakurs/contract';
 
 export type WhatsappHistoryArchivePacket = {
   id: string;
@@ -523,6 +526,23 @@ export const runAiSandbox = (agentId: string, text: string) =>
     // The model has sixty seconds on the server; the default client deadline is thirty.
     timeoutMs: LONG_TIMEOUT_MS,
   });
+
+const sandboxSessions = (agentId: string) => `/agents/${agentId}/ai/sandbox/sessions`;
+
+export const listAiSandboxSessions = (agentId: string, signal?: AbortSignal) =>
+  request<AiSandboxSessionSummary[]>(sandboxSessions(agentId), { signal });
+
+export const createAiSandboxSession = (agentId: string, body: AiSandboxCreateRequest = {}) =>
+  request<AiSandboxSessionSummary>(sandboxSessions(agentId), { method: 'POST', body });
+
+export const getAiSandboxSession = (agentId: string, sessionId: string, signal?: AbortSignal) =>
+  request<AiSandboxSessionDetail>(`${sandboxSessions(agentId)}/${sessionId}`, { signal });
+
+export const sendAiSandboxTurn = (
+  agentId: string, sessionId: string, body: AiSandboxTurnRequest,
+) => request<AiSandboxTurn>(`${sandboxSessions(agentId)}/${sessionId}/turns`, {
+  method: 'POST', body, timeoutMs: LONG_TIMEOUT_MS,
+});
 
 /** Any member: the operator watching the agent go wrong is the one who has to stop it. */
 export const setConversationAi = (agentId: string, conversationId: string, aiEnabled: boolean) =>

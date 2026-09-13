@@ -15,6 +15,7 @@ import { registerInstagramWebhook } from './instagram-webhook.js';
 import { createGraphClient, type GraphClient } from '../lib/whatsapp/graph.js';
 import { registerAgentRoutes } from './agents.js';
 import { registerAiRoutes } from './ai.js';
+import { registerAiSandboxRoutes } from './ai-sandbox.js';
 import { registerAuthRoutes } from './auth.js';
 import { registerBoardRoutes } from './board.js';
 import { registerCapiRoutes } from './capi.js';
@@ -153,6 +154,7 @@ export function buildServer(env: Env, db: Db, deps: ServerDeps = {}): FastifyIns
     registerKnowledgeGenerationRoutes(app, db, env, guard, { model });
     registerRuleRoutes(app, db, guard);
     registerAiRoutes(app, db, env, guard, { model, graph, linked });
+    registerAiSandboxRoutes(app, db, guard, turnDeps);
     // The coach writes only `coach_messages` — see the file's own comment for why a
     // proposal never reaches `agent_rules` or `kb_notes` from here.
     registerCoachRoutes(app, db, env, guard, { model });

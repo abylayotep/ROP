@@ -61,13 +61,15 @@ const sellerReceived = /(?:получил[аи]?|пришл[аи](?!те)|пос
 const bareReceipt = /^(?:(?:спасибо|рахмет)[,!.\s]+получил[аи]?|получил[аи]?[,!.\s]+(?:спасибо|рахмет))[.!\s]*$/iu;
 // A seller asking for proof: «пришли чек», «пришлите скрин оплаты».
 const receiptRequest = /пришл(?:и|ите)\s+(?:чек|скрин|фото)/iu;
-const negated = /(?:^|[^а-яёәіңғүұқөһa-z])(?:не|ещё не|еще не|пока не)\s+\S*|жоқ|емес/iu;
-// Conditionals and indirect questions: «если оплачено», «поступили ли деньги».
-const conditional = /(?:^|[^а-яёәіңғүұқөһa-z])(?:если|ли|егер)(?:$|[^а-яёәіңғүұқөһa-z])/iu;
-/** Body clauses overlapping the quote, so a trimmed quote cannot hide «не», «?» or «если» next to it. */
-const clauseOf = (body: string, quote: string) => {
+const negated = /(?:^|[^а-яёәіңғүұқөһa-z])(?:(?:не|ещё не|еще не|пока не)\s+\S*|нет(?:$|[^а-яёәіңғүұқөһa-z]))|жоқ|емес/iu;
+// Conditionals and indirect questions: «если оплачено», «поступили ли деньги», «перевела бы».
+const conditional = /(?:^|[^а-яёәіңғүұқөһa-z])(?:если|ли|бы|егер)(?:$|[^а-яёәіңғүұқөһa-z])/iu;
+// A payment link, invoice or requisites mentioned with payment is an instruction, not a receipt.
+const paymentInstrument = /(?:ссылк|сч[её]т|реквизит|\bqr\b|кью ?ар)/iu;
+/** Body parts (sentence clauses or comma fragments) overlapping the quote, so a trimmed quote cannot hide the text next to it. */
+const partsAround = (body: string, quote: string, part: RegExp) => {
   const start = body.indexOf(quote), end = start + quote.length;
-  return [...body.matchAll(/[^.!?;\n]+[.!?;\n]*/g)].filter((m) => m.index! < end && m.index! + m[0].length > start).map((m) => m[0]).join(' ').trim();
+  return [...body.matchAll(part)].filter((m) => m.index! < end && m.index! + m[0].length > start).map((m) => m[0].trim());
 };
 /** Numbers followed by a currency, digit groups joined: «6.990 тенге» → «6990», «1 200 000 ₸» → «1200000»; «40 мм» is not a price. */
 const pricesIn = (text: string): string[] => [...text.replace(/(\d)[\s .,](?=\d{3}(?!\d))/g, '$1')
@@ -112,12 +114,14 @@ export function parseCrmAnalysis(raw: string, history: EvidenceMessage[], fields
     const quoted = !!source && source.kind !== 'unsupported' && !!quote && !!source.body?.includes(quote);
     const attachment = source?.author === 'client' && !!source.kind && source.kind !== 'text'
       && (!!source.mediaMime || ['image', 'document', 'unsupported'].includes(source.kind));
-    const clause = quoted ? clauseOf(source!.body!, quote) : '';
+    const clause = quoted ? partsAround(source!.body!, quote, /[^.!?;\n]+[.!?;\n]*/g).join(' ') : '';
+    // Money and arrival must meet in one fragment: «Заказ получили, оплата через Kaspi» is not a receipt.
+    const fragments = quoted ? partsAround(source!.body!, quote, /[^.!?;\n,:—-]+[.!?;\n,:—-]*/g) : [];
     const doubtful = clause.includes('?') || negated.test(clause) || conditional.test(clause);
     const paidClaim = state === 'paid' && quoted && !doubtful && source?.author === 'client'
       && (clientPaid.test(clause) || (clientSent.test(clause) && moneyWord.test(clause)));
     const paidReceipt = state === 'paid' && quoted && !doubtful && SELLER.includes(source!.author) && !receiptRequest.test(clause)
-      && ((moneyWord.test(clause) && sellerReceived.test(clause)) || bareReceipt.test(clause));
+      && (fragments.some((f) => moneyWord.test(f) && sellerReceived.test(f) && !paymentInstrument.test(f)) || bareReceipt.test(clause));
     const groundedText = state !== 'paid' && source?.author === 'client' && quoted;
     const unreadAttachment = attachment && (state === 'needs_verification' || state === 'paid');
     if (unreadAttachment) payment = { state: 'needs_verification', reason: 'Вложение требует проверки', messageId: result.payment.messageId };

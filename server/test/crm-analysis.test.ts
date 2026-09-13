@@ -217,3 +217,11 @@ it('takes the paid amount only from a number followed by a currency', () => {
   expect(amount('40')).toBeNull();
   expect(amount('6990')).toBe('6990');
 });
+
+it('checks a seller confirmation in the comma fragment of the quote and never in a payment instrument', () => {
+  for (const body of ['Kaspi перевод по номеру, получили заказ', 'Заказ получили, оплата через Kaspi', 'Заказ получили, ссылку на оплату отправим',
+    'Заказ получили, можете оплатить', 'Товар поступил, сумма 6990 ₸', 'Вам пришла ссылка на оплату']) expect(paidState('phone', body), body).toBeNull();
+  for (const body of ['Оплату получили', 'Оплата прошла', 'Деньги пришли', 'Ақша келді', 'Спасибо, получили', 'Получили, спасибо', 'Оплату получили, спасибо'])
+    expect(paidState('phone', body), body).toBe('paid');
+  expect(paidState('client', 'Перевела бы, но карты нет')).toBeNull();
+});

@@ -35,7 +35,7 @@ Tasks 1–3 are here. Tasks 4–5 are in `2026-09-14-draft-autopilot-part2.md`.
 
 | File | Responsibility |
 |---|---|
-| `server/drizzle/0046_draft_autopilot.sql` + meta | column + table (Task 1) |
+| `server/drizzle/0051_draft_autopilot.sql` + meta | column + table (Task 1) |
 | `server/src/db/schema.ts` | `testResults.usedOpIndexes`, `draftAutopilots` (Task 1) |
 | `server/src/lib/drafts/replay.ts` | return `usedOpIndexes` (Task 1) |
 | `server/src/lib/drafts/run.ts` | `startDraftRun`, `isDraftRunning`, `runReplay` (Task 2) |
@@ -54,7 +54,7 @@ Tasks 1–3 are here. Tasks 4–5 are in `2026-09-14-draft-autopilot-part2.md`.
 ### Task 1: Attribute a reply to draft topics
 
 **Files:**
-- Create: `server/drizzle/0046_draft_autopilot.sql` (+ journal/snapshot via the repo's drizzle-kit generate script; check `server/package.json` for its name and follow how 0045 was produced)
+- Create: `server/drizzle/0051_draft_autopilot.sql` (+ journal/snapshot via the repo's drizzle-kit generate script; check `server/package.json` for its name and follow how 0050 was produced)
 - Modify: `server/src/db/schema.ts` (`testResults` near line 1372; new `draftAutopilots` table)
 - Modify: `server/src/lib/drafts/replay.ts` (`ReplayResult`, `replayCase` ~line 249)
 - Modify: `server/src/api/drafts.ts` (`CaseSide`, `sideFromReplay`, `sideFromRow`, `resultRow`)

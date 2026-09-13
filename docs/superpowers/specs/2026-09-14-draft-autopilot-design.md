@@ -60,7 +60,7 @@ Topic identity across rewrites and removals uses a stable key, not an index:
 
 ## Data model
 
-Migration `0046_draft_autopilot.sql` (next free number; check `server/drizzle/meta/_journal.json`).
+Migration `0051_draft_autopilot.sql` (next free number; check `server/drizzle/meta/_journal.json`).
 
 ```sql
 alter table test_results add column used_op_indexes integer[] not null default '{}';

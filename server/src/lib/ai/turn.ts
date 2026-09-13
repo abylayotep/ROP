@@ -58,6 +58,7 @@ import { queueLead } from '../capi/enqueue.js';
 import { recordStageMove } from '../funnel-history.js';
 import { sendStageMessage } from '../funnel-message.js';
 import { loadProducts, removeStoredFiles } from '../catalog/products.js';
+import { loadEffectivePromotion, settleExpiredPromotions } from '../catalog/promotions.js';
 import { knowledgeForTurn } from '../knowledge/for-turn.js';
 import { decryptSecret } from '../secret-box.js';
 import { GraphError, withoutSecret, type GraphClient } from '../whatsapp/graph.js';
@@ -70,6 +71,7 @@ import { notifyOperator } from './operator-alert.js';
 import {
   buildMessages,
   formatPrice,
+  formatPromotionEnd,
   HISTORY_LIMIT,
   KNOWLEDGE_LIMIT,
   PHOTO_SEND_LIMIT,
@@ -641,6 +643,10 @@ export async function executeAiCore(db: Db, deps: TurnDeps, input: AiCoreInput):
   const hits = await knowledgeForTurn(db, agent.id, customerSaid, KNOWLEDGE_LIMIT);
   const instructions = assembleRules(await loadRules(db, agent.id));
   const catalog = await loadProducts(db, agent.id, { activeOnly: true });
+  // Evaluated here, not trusted from a flag: a promotion past its end is not in effect even
+  // before anything has switched it off.
+  const promotion = await loadEffectivePromotion(db, agent.id);
+  const promoPrice = (variantId: string) => promotion?.prices.get(variantId) ?? null;
   const context: TurnContext = {
     agent: { name: agent.name, timezone: agent.timezone, instructions,
       replyLanguage: agent.replyLanguage, communicationStyle: agent.communicationStyle },
@@ -655,8 +661,12 @@ export async function executeAiCore(db: Db, deps: TurnDeps, input: AiCoreInput):
         ? stageRows.find((stage) => stage.id === input.stageId)?.name ?? null : input.stageName,
       values: input.values },
     products: catalog.map(({ id, name, description, variants, photos }) => ({
-      id, name, description, variants, photos })),
+      id, name, description, photos,
+      variants: variants.map(({ id: variantId, label, price }) => ({ label, price, promoPrice: promoPrice(variantId) })) })),
     currency: agent.currency,
+    ...(promotion === null ? {} : {
+      promotion: { name: promotion.name, description: promotion.description, endsAt: promotion.endsAt },
+    }),
     sentPhotoIds: input.sentPhotoIds,
   };
   const prompt = buildMessages(context);
@@ -711,7 +721,15 @@ export async function executeAiCore(db: Db, deps: TurnDeps, input: AiCoreInput):
     // The whole catalog the model was shown, not only what it cited: products carry no
     // citation, and a price read from ТОВАРЫ is sourced whichever product it came from.
     ...shownProducts.flatMap((product) => [product.name, product.description,
-      ...product.variants.flatMap((variant) => [variant.label, formatPrice(variant.price, agent.currency)])]),
+      ...product.variants.flatMap((variant) => {
+        const promo = promoPrice(variant.id);
+        return [variant.label, formatPrice(variant.price, agent.currency),
+          ...(promo === null ? [] : [formatPrice(promo, agent.currency)])];
+      })]),
+    // A promotional price is sourced exactly as a catalog price is; its name, conditions and
+    // end date are sourced too, since the agent is told it may repeat them.
+    ...(promotion === null ? [] : [promotion.name, promotion.description,
+      ...(promotion.endsAt === null ? [] : [formatPromotionEnd(promotion.endsAt, agent.timezone)])]),
   ];
   const invented = reply === null ? null : unsourcedNumber(reply.reply, sources);
   const reasons: string[] = [];
@@ -779,6 +797,9 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
     return empty('skipped', AUTOMATION_DISABLED);
   }
 
+  // Before the agent row is read, so a promotion that just ended is switched off and the
+  // version this turn records is the one its answer was built at.
+  await settleExpiredPromotions(db, input.agentId);
   const [agent] = await db.select().from(agents).where(eq(agents.id, input.agentId));
   if (!agent) return empty('skipped', 'Агент не найден.');
 

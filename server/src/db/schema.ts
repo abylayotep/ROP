@@ -934,6 +934,55 @@ export const productPhotos = pgTable(
 );
 
 /**
+ * A promotion preset («акция»): promotional prices for some catalog variants, prepared ahead
+ * and switched on with a click.
+ *
+ * In effect while `active` and before `ends_at` (never, when null). Nothing flips the row when
+ * the date passes; every reader evaluates it, and `settleExpiredPromotions` turns an expired
+ * active row off — bumping `config_version` — the first time a request or a turn sees it.
+ * At most one active row per agent: the partial unique index is the guarantee, the activate
+ * route's own «switch the others off» is only what keeps it from ever firing.
+ */
+export const promotions = pgTable(
+  'promotions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    agentId: uuid('agent_id').notNull().references(() => agents.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    // Extra conditions the agent may mention, «упаковка в подарок». Data, never a rule.
+    description: text('description').notNull().default(''),
+    active: boolean('active').notNull().default(false),
+    endsAt: timestamp('ends_at', { withTimezone: true }),
+    position: integer('position').notNull().default(0),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('promotions_agent_position_idx').on(t.agentId, t.position),
+    uniqueIndex('promotions_one_active_per_agent').on(t.agentId).where(sql`${t.active}`),
+  ],
+);
+
+/**
+ * One variant's price while its promotion is in effect. The final price, not a discount: the
+ * owner thinks «6990», and the agent quotes exactly what the owner typed. Removing the variant
+ * from the catalog removes it from every promotion.
+ */
+export const promotionItems = pgTable(
+  'promotion_items',
+  {
+    promotionId: uuid('promotion_id').notNull().references(() => promotions.id, { onDelete: 'cascade' }),
+    variantId: uuid('variant_id').notNull().references(() => productVariants.id, { onDelete: 'cascade' }),
+    promoPrice: integer('promo_price').notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.promotionId, t.variantId] }),
+    index('promotion_items_variant_idx').on(t.variantId),
+    check('promotion_items_promo_price_check', sql`${t.promoPrice} >= 0`),
+  ],
+);
+
+/**
  * One turn the model took, whether or not it produced a message.
  *
  * It exists so an owner choosing a model can see what the choice costs, and so a bad answer

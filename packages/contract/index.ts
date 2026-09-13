@@ -731,6 +731,12 @@ export interface Product {
 }
 
 export interface ProductVariantInput {
+  /**
+   * The existing variant this row edits. Kept, so a promotion that names the variant survives
+   * the owner saving the product; a row without one is a new variant, and a variant the list
+   * no longer names is removed — from every promotion too.
+   */
+  id?: string;
   label: string;
   price: number;
 }
@@ -763,6 +769,52 @@ export interface ProductPhotoOrderRequest {
 export interface ProductPhotoUpdateRequest {
   /** Empty clears it. */
   caption: string;
+}
+
+/* ── Акции ──────────────────────────────────────────────────────────────────
+ * Promotion presets: promotional prices for some catalog variants, prepared ahead and
+ * switched on one at a time. */
+
+/** One variant in a promotion, with what the catalog says about it now. */
+export interface PromotionItem {
+  variantId: string;
+  productId: string;
+  productName: string;
+  variantLabel: string;
+  /** The catalog price, which the promotion replaces while it is in effect. */
+  regularPrice: number;
+  /** The final price while the promotion is in effect — not a discount. */
+  promoPrice: number;
+}
+
+export interface Promotion {
+  id: string;
+  name: string;
+  description: string;
+  /** Switched on by the owner. Only one per agent. */
+  active: boolean;
+  /** ISO instant, or null for «until switched off». */
+  endsAt: string | null;
+  /** `active` and not past `endsAt`: what the agent is quoting right now. */
+  effective: boolean;
+  position: number;
+  items: PromotionItem[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PromotionItemInput {
+  variantId: string;
+  promoPrice: number;
+}
+
+/** Create and update take the same body: the items are replaced as a whole. */
+export interface PromotionSaveRequest {
+  name: string;
+  description?: string;
+  /** ISO instant, or null for no end date. */
+  endsAt?: string | null;
+  items: PromotionItemInput[];
 }
 
 /* ── Агент ──────────────────────────────────────────────────────────────────

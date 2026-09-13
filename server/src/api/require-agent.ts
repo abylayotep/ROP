@@ -2,6 +2,7 @@ import { and, eq } from 'drizzle-orm';
 import type { FastifyReply, FastifyRequest, preHandlerHookHandler } from 'fastify';
 import type { Db } from '../db/client.js';
 import { accountMembers, agents } from '../db/schema.js';
+import { settleExpiredPromotions } from '../lib/catalog/promotions.js';
 import { isUuid } from '../lib/uuid.js';
 
 declare module 'fastify' {
@@ -45,7 +46,12 @@ export function requireAgent(
       return reply.code(403).send({ message: 'Недостаточно прав' });
     }
 
-    req.agent = row.agent;
+    // A promotion whose end date passed is switched off here, before any route reads the
+    // agent's `configVersion`: the drafts routes reuse answers keyed on it, and an answer
+    // quoted at the promotional price must not pass for the agent as it now stands. After the
+    // membership check, so a stranger's URL writes nothing. See `lib/catalog/promotions.ts`.
+    const settled = await settleExpiredPromotions(db, agentId);
+    req.agent = settled === null ? row.agent : { ...row.agent, configVersion: settled };
     req.membershipRole = row.role === 'owner' ? 'owner' : 'member';
   };
 }

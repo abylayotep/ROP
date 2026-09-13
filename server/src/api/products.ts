@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Product } from '@rakurs/contract';
-import { and, count, eq, max, sql } from 'drizzle-orm';
+import { and, count, eq, inArray, max, sql } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
@@ -33,6 +33,7 @@ const CAPTION_MAX = 200;
 const PRICE_MAX = 1_000_000_000;
 
 const variantInput = z.object({
+  id: z.string().optional(),
   label: z.string().trim().max(LABEL_MAX),
   price: z.number().int().min(0).max(PRICE_MAX),
 });
@@ -108,11 +109,32 @@ export function registerProductRoutes(
     return product;
   }
 
+  /**
+   * The size table, as the owner saved it. A row naming one of this product's variants updates
+   * it in place, so its id — and every promotion price pointing at it — survives a save that
+   * only changed a label or the description. Any other id is a new row; a variant the list no
+   * longer names is deleted, and the cascade takes it out of every promotion with it.
+   */
   async function writeVariants(tx: Tx, productId: string, variants: z.infer<typeof variantList>) {
-    await tx.delete(productVariants).where(eq(productVariants.productId, productId));
-    if (variants.length === 0) return;
-    await tx.insert(productVariants).values(variants.map((variant, position) => ({
-      productId, label: variant.label, price: variant.price, position,
+    const existing = new Set((await tx.select({ id: productVariants.id }).from(productVariants)
+      .where(eq(productVariants.productId, productId))).map((row) => row.id));
+    const kept = new Set<string>();
+    const rows = variants.map((variant, position) => {
+      const id = variant.id !== undefined && existing.has(variant.id) && !kept.has(variant.id) ? variant.id : null;
+      if (id !== null) kept.add(id);
+      return { id, label: variant.label, price: variant.price, position };
+    });
+    const dropped = [...existing].filter((id) => !kept.has(id));
+    if (dropped.length > 0) await tx.delete(productVariants).where(inArray(productVariants.id, dropped));
+    for (const row of rows) {
+      if (row.id === null) continue;
+      await tx.update(productVariants).set({ label: row.label, price: row.price, position: row.position })
+        .where(eq(productVariants.id, row.id));
+    }
+    const added = rows.filter((row) => row.id === null);
+    if (added.length === 0) return;
+    await tx.insert(productVariants).values(added.map(({ label, price, position }) => ({
+      productId, label, price, position,
     })));
   }
 

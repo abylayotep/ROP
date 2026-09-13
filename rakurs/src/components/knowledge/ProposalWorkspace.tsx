@@ -194,7 +194,11 @@ export function ProposalWorkspace({
       ? proposal
       : { ...proposal, selected: optimisticSelections[proposal.id]! }
   )), [detail.proposals.items, optimisticSelections]);
-  const visible = useMemo(() => proposals.filter((proposal) => proposal.kind === kind), [kind, proposals]);
+  // Runs made before topic notes split sales phrases into `script` proposals; only those still
+  // need a knowledge/script switch. New runs put everything into knowledge topics.
+  const hasScript = proposals.some((proposal) => proposal.kind === 'script');
+  const shownKind: KbGenerationProposalKind = hasScript ? kind : 'knowledge';
+  const visible = useMemo(() => proposals.filter((proposal) => proposal.kind === shownKind), [shownKind, proposals]);
   const selectedCount = proposals.filter((proposal) => proposal.status === 'pending' && proposal.selected).length;
   const visibleEligible = visible.filter((proposal) => proposal.status === 'pending');
 
@@ -268,7 +272,7 @@ export function ProposalWorkspace({
     try {
       const complete = onLoadAllProposals ? await onLoadAllProposals() : proposals;
       const changes = selected
-        ? planVisibleSelection(complete, kind, MAX_SELECTED_PROPOSALS, new Set(visible.map((proposal) => proposal.id)))
+        ? planVisibleSelection(complete, shownKind, MAX_SELECTED_PROPOSALS, new Set(visible.map((proposal) => proposal.id)))
         : planClearSelection(complete);
       for (const proposal of changes) await persistSelection(proposal, selected);
     } catch (error) {
@@ -313,12 +317,12 @@ export function ProposalWorkspace({
       <header className="proposal-workspace__header">
         <div>
           <p className="knowledge-kicker">Найденные факты</p>
-          <h2>{kind === 'knowledge' ? 'База знаний' : 'Скрипт продаж'}</h2>
+          <h2>{shownKind === 'knowledge' ? 'Темы базы знаний' : 'Скрипт продаж'}</h2>
         </div>
         <span className="proposal-workspace__selection">Выбрано <b>{selectedCount}</b></span>
       </header>
 
-      <nav className="proposal-kind-tabs" role="tablist" aria-label="Тип найденных фактов">
+      {hasScript && <nav className="proposal-kind-tabs" role="tablist" aria-label="Тип найденных фактов">
         {([
           ['knowledge', 'База знаний'],
           ['script', 'Скрипт продаж'],
@@ -344,12 +348,12 @@ export function ProposalWorkspace({
             <b>{proposals.filter((proposal) => proposal.kind === id).length}</b>
           </button>
         ))}
-      </nav>
+      </nav>}
 
       <div
-        id={`proposal-panel-${kind}`}
-        role="tabpanel"
-        aria-labelledby={`proposal-tab-${kind}`}
+        id={`proposal-panel-${shownKind}`}
+        role={hasScript ? 'tabpanel' : undefined}
+        aria-labelledby={hasScript ? `proposal-tab-${shownKind}` : undefined}
       >
         {!readOnly && visibleEligible.length > 0 && (
           <div className="proposal-workspace__bulk" aria-label="Групповой выбор">
@@ -365,7 +369,7 @@ export function ProposalWorkspace({
 
         {visible.length === 0 ? (
           <div className="knowledge-inline-state proposal-workspace__empty">
-            <p>{kind === 'knowledge' ? 'Новых фактов для базы знаний нет.' : 'Новых фраз для скрипта продаж нет.'}</p>
+            <p>{shownKind === 'knowledge' ? 'Новых тем для базы знаний нет.' : 'Новых фраз для скрипта продаж нет.'}</p>
             <span>Ничего не опубликовано автоматически.</span>
           </div>
         ) : (

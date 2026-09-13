@@ -9,6 +9,8 @@ export const GENERATION_LIMITS = {
   maxConsolidationItems: 40,
   maxConsolidationCharacters: 20_000,
   maxConsolidationMergePasses: 4,
+  maxExistingTopicCharacters: 40_000,
+  maxConsolidationOutputTokens: 8_000,
   previewTtlMs: 15 * 60 * 1_000,
   slotAcquisitionTimeoutMs: 60 * 1_000,
   maxOutputTokens: 2_000,

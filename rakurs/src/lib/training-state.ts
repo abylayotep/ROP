@@ -52,13 +52,49 @@ export function nextStep(input: {
 
 export type DraftOriginLabel = 'Тренер' | 'Из переписки' | 'Вручную';
 
-/** Chat-generation drafts carry `origin: 'manual'`; the server titles them «База знаний из WhatsApp»
- * and «Скрипт продаж из WhatsApp» (`server/src/lib/knowledge/whatsapp-drafts.ts`). Older ones
- * ended with « · N», the number of changes. */
+/** The one draft chat generation fills (`server/src/lib/knowledge/whatsapp-drafts.ts`). */
+export const WHATSAPP_DRAFT_TITLE = 'Обучение из переписки';
+/** Titles of the two per-kind drafts chat generation made before topic notes. Still open on
+ * some agents until the regroup script runs, so they are read the same way. */
+export const LEGACY_WHATSAPP_DRAFT_TITLES = ['База знаний из WhatsApp', 'Скрипт продаж из WhatsApp'] as const;
+
+/** Whether `title` names a chat-generation draft, current or legacy, with or without the
+ * « · N» change count older drafts ended with. */
+export function isWhatsAppDraftTitle(title: string, base?: string): boolean {
+  const bases = base === undefined ? [WHATSAPP_DRAFT_TITLE, ...LEGACY_WHATSAPP_DRAFT_TITLES] : [base];
+  return bases.some((name) => title === name
+    || (title.startsWith(`${name} · `) && /^\d+$/.test(title.slice(name.length + 3))));
+}
+
+/** Chat-generation drafts carry `origin: 'manual'`; only their title tells them apart. */
 export function draftOrigin(draft: Pick<KbDraft, 'origin' | 'title'>): DraftOriginLabel {
   if (draft.origin === 'coach') return 'Тренер';
-  if (/ из WhatsApp( · \d+)?$/.test(draft.title)) return 'Из переписки';
+  if (isWhatsAppDraftTitle(draft.title)) return 'Из переписки';
   return 'Вручную';
+}
+
+export interface DraftTopics {
+  /** Every note op, updates included. */
+  count: number;
+  /** Topic names of the new notes, in draft order. A `note_update` carries only a note id, so
+   * its name is unknown without fetching the note and is left out. */
+  names: string[];
+}
+
+/** A generated note is one topic; its name is the last segment of its path. */
+export function topicName(path: string): string {
+  const segments = path.split('/').map((segment) => segment.trim()).filter(Boolean);
+  return segments[segments.length - 1] ?? path;
+}
+
+export function draftTopics(draft: Pick<KbDraft, 'ops'>): DraftTopics {
+  let count = 0;
+  const names: string[] = [];
+  for (const op of draft.ops) {
+    if (op.op === 'note_create') names.push(topicName(op.path));
+    if (op.op === 'note_create' || op.op === 'note_update') count += 1;
+  }
+  return { count, names };
 }
 
 /** Russian plural form for a count: 1 черновик, 3 черновика, 5 черновиков, 21 черновик. */

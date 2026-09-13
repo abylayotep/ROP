@@ -215,7 +215,7 @@ describe('knowledge generation API', () => {
   it('creates no automatic drafts and returns an explicit draft independently of proposal pagination', async () => {
     useConsolidatingModel([
       { path: 'База знаний/Доставка', body: 'Доставка занимает два дня.' },
-      { path: 'Скрипт/Доставка', body: 'Доставка займёт два дня. Подскажите, пожалуйста, адрес.' },
+      { path: 'База знаний/Сроки', body: 'Доставка займёт два дня. Подскажите, пожалуйста, адрес.' },
     ]);
     const base = `/api/agents/${agentId}/knowledge/generation`;
     const preview = await app.inject({ method: 'POST', url: `${base}/preview`, cookies: jar, payload: {
@@ -243,18 +243,16 @@ describe('knowledge generation API', () => {
       },
     });
     expect(explicit.statusCode).toBe(200);
-    expect(explicit.json().draftIds).toHaveLength(2);
+    expect(explicit.json().draftIds).toHaveLength(1);
     expect(explicit.json().draftId).toBe(explicit.json().draftIds[0]);
 
     const paged = await app.inject({
       method: 'GET', url: `${base}/runs/${started.json().id}?cursor=20`, cookies: jar,
     });
     expect(paged.json().proposals.items).toEqual([]);
-    expect(paged.json().drafts).toHaveLength(2);
-    expect(paged.json().drafts).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: explicit.json().draftIds[0], title: 'База знаний из WhatsApp' }),
-      expect.objectContaining({ id: explicit.json().draftIds[1], title: 'Скрипт продаж из WhatsApp' }),
-    ]));
+    expect(paged.json().drafts).toEqual([
+      expect.objectContaining({ id: explicit.json().draftId, title: 'Обучение из переписки' }),
+    ]);
     expect(paged.json().draftsNextCursor).toBeNull();
   });
 

@@ -101,9 +101,9 @@ Preserve dates, qualifications, and uncertainty. Never include profanity, person
 Write every user-facing path and body in Russian.
 Write classification.reason in Russian. Keep it short and omit personal or sensitive details.
 For customer classification, classification.evidence must contain short exact quotes tied to supplied messageId values from both the customer and seller. Never cite text outside the messages.
-Put durable facts under paths beginning with "База знаний/".
-Put seller-supported sales wording under paths beginning with "Скрипт/". If the seller messages do not support a sales script, do not invent one.
-Each path must use one of those two prefixes. Warnings may contain dated, conflict, or context_limited.
+Every path must begin with "База знаний/" followed by a broad customer topic such as "База знаний/Доставка" or "База знаний/Оплата", never one path per message.
+Put durable facts under their topic. Seller-supported sales wording is extracted too: put it under the same topic as the facts it answers, quoted as a ready-to-send phrase in «…». If the seller messages do not support such wording, do not invent it.
+Warnings may contain dated, conflict, or context_limited.
 Return JSON only, for example: {"classification":{"value":"customer","reason":"Клиент уточняет условия доставки.","evidence":[{"messageId":"customer-id","quote":"Когда будет доставка?"},{"messageId":"seller-id","quote":"Доставка завтра."}]},"proposals":[{"path":"База знаний/Доставка","body":"...","sources":["seller-id"],"warnings":[]}]}.`;
 
 const normalizeEvidenceText = (text: string): string => text.trim().replace(/\s+/g, ' ').toLocaleLowerCase('ru');

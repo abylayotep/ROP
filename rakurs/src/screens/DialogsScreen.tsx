@@ -104,7 +104,7 @@ export function DialogsScreen() {
     <>
       <div style={{ marginBottom: 16, fontSize: 12, color: 'var(--text-dim)' }}>
         Новые сообщения обновляются автоматически каждые 5 секунд, пока вкладка открыта.
-        {' '}Загрузка истории, создание базы и скрипта — в разделе{' '}
+        {' '}Загрузка истории и создание базы знаний — в разделе{' '}
         <Link to={`/a/${agent.id}/training?tab=teach`}>Обучение агента</Link>.
       </div>
       <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start', flexWrap: 'wrap' }}>

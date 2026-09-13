@@ -1,18 +1,17 @@
 import { Link } from 'react-router-dom';
+import { isWhatsAppDraftTitle, LEGACY_WHATSAPP_DRAFT_TITLES, WHATSAPP_DRAFT_TITLE } from '@/lib/training-state';
 
+/** Chat generation keeps one draft, «Обучение из переписки». An agent whose old per-kind
+ * drafts have not been regrouped yet still gets a link to one of those instead. */
 export function GenerationDraftLinks({ drafts }: { drafts: { id: string; title: string }[] }) {
-  const categoryDraft = (title: string) => drafts.find(draft => draft.title === title || draft.title.startsWith(`${title} · `));
-  const knowledge = categoryDraft('База знаний из WhatsApp');
-  const script = categoryDraft('Скрипт продаж из WhatsApp');
+  const draft = [WHATSAPP_DRAFT_TITLE, ...LEGACY_WHATSAPP_DRAFT_TITLES]
+    .map((title) => drafts.find((item) => isWhatsAppDraftTitle(item.title, title)))
+    .find((item) => item !== undefined);
   return <section aria-label="Результат подготовки" style={{ margin: '14px 0' }}>
     <div style={{ fontWeight: 700 }}>Результат подготовки</div>
-    <p style={{ fontSize: 13 }}>Ничего не опубликовано. Откройте черновики, проверьте текст и источники.</p>
-    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>
-      {knowledge ? <Link className="btn" to={`../drafts/${knowledge.id}`}>Открыть базу знаний</Link>
-        : <span>Новый черновик базы знаний не создан.</span>}
-      {script ? <Link className="btn" to={`../drafts/${script.id}`}>Открыть скрипт</Link>
-        : <span>Новый черновик скрипта не создан.</span>}
-    </div>
-    {(!knowledge || !script) && <p style={{ fontSize: 12, color: 'var(--text-dim)' }}>В эту часть не попало ни одного отобранного предложения. У агента всегда один черновик базы знаний и один черновик скрипта: новые предложения добавляются в них, более новый текст заменяет старый.</p>}
+    <p style={{ fontSize: 13 }}>Ничего не опубликовано. Откройте черновик, проверьте темы и источники.</p>
+    {draft ? <Link className="btn" to={`../drafts/${draft.id}`}>Открыть черновик</Link>
+      : <span>Черновик не создан: не выбрано ни одной темы.</span>}
+    <p style={{ fontSize: 12, color: 'var(--text-dim)' }}>Все отобранные темы собираются в один черновик. Новая версия темы заменяет старую.</p>
   </section>;
 }

@@ -9,7 +9,7 @@ import { BODY_MAX } from './note.js';
 import { GENERATION_LIMITS } from './generation-limits.js';
 import { isValidGenerationPath } from './generation-path.js';
 import { LEGACY_RAW_FINGERPRINT_PATTERN } from './generation-types.js';
-import { rebuildWhatsAppDraft, WHATSAPP_DRAFT_KINDS } from './whatsapp-drafts.js';
+import { rebuildWhatsAppDraft } from './whatsapp-drafts.js';
 
 const fingerprint = (path: string, body: string): string =>
   createHash('sha256')
@@ -121,9 +121,7 @@ export async function createGenerationDraft(
           eq(kbGenerationDrafts.requestKey, requestKey),
         ));
       if (allDrafted && links.length === draftIds.length) {
-        const ordered = WHATSAPP_DRAFT_KINDS.flatMap(({ kind }) =>
-          [...new Set(requestedRows.filter((row) => row.kind === kind).map((row) => row.draftId!))]);
-        return { draftId: ordered[0]!, draftIds: ordered };
+        return { draftId: draftIds[0]!, draftIds };
       }
       throw new ApiError(409, 'Эти предложения уже входят в другой запрос черновика');
     }
@@ -151,22 +149,19 @@ export async function createGenerationDraft(
       eq(kbNotes.agentId, agentId), inArray(kbNotes.id, targetIds),
     ));
     if (targets.length !== new Set(targetIds).size) throw new ApiError(404, 'Заметка для обновления не найдена');
-    const draftIds: string[] = [];
-    for (const { kind } of WHATSAPP_DRAFT_KINDS) {
-      const kindRows = rows.filter((proposal) => proposal.kind === kind);
-      if (kindRows.length === 0) continue;
-      const newEntries = kindRows.map((proposal) => {
-        const noteId = input.updateTargets?.[proposal.id];
-        const op: DraftOp = noteId
-          ? { op: 'note_update', noteId, body: proposal.body }
-          : { op: 'note_create', path: proposal.path, body: proposal.body };
-        return { op, proposalId: proposal.id };
-      });
-      const draftId = await rebuildWhatsAppDraft(tx as unknown as Db, {
-        agentId, userId, kind, newEntries, request: { runId, requestKey },
-      });
-      if (draftId) draftIds.push(draftId);
-    }
+    // Every kind goes into the one chat draft. A path that already names a note becomes an
+    // update of that note inside `rebuildWhatsAppDraft`, so no explicit target is needed for it.
+    const newEntries = rows.map((proposal) => {
+      const noteId = input.updateTargets?.[proposal.id];
+      const op: DraftOp = noteId
+        ? { op: 'note_update', noteId, body: proposal.body }
+        : { op: 'note_create', path: proposal.path, body: proposal.body };
+      return { op, proposalId: proposal.id };
+    });
+    const draftId = await rebuildWhatsAppDraft(tx as unknown as Db, {
+      agentId, userId, newEntries, request: { runId, requestKey },
+    });
+    const draftIds = draftId ? [draftId] : [];
     return { draftId: draftIds[0]!, draftIds };
   });
 }

@@ -65,7 +65,7 @@ function linkTargets(detail: KbNoteDetail): Map<string, string> {
   return map;
 }
 
-function renderInline(node: InlineNode, key: number, onOpenNote: ((noteId: string) => void) | undefined, targets: Map<string, string>): ReactNode {
+function renderInline(node: InlineNode, key: number, onOpenNote: ((noteId: string) => void) | undefined, targets: Map<string, string> | null): ReactNode {
   switch (node.kind) {
     case 'text':
       return node.text;
@@ -80,6 +80,11 @@ function renderInline(node: InlineNode, key: number, onOpenNote: ((noteId: strin
         </code>
       );
     case 'link': {
+      // No `targets` at all: the text is not a saved note (a draft's proposed body), so its
+      // links may point at topics the same draft creates. Shown as a link, never as broken.
+      if (targets === null) {
+        return <span key={key} style={{ color: 'var(--accent)', fontWeight: 600 }}>{node.label}</span>;
+      }
       const target = targets.get(node.target);
       // `!target` alone, never `node.broken`: `node.broken` comes from the client's own
       // title set, which is capped at `LIST_LIMIT` (see `KnowledgeTab`'s `vault` fetch),
@@ -110,14 +115,15 @@ function renderInline(node: InlineNode, key: number, onOpenNote: ((noteId: strin
 }
 
 /** Groups the flat node stream back into paragraphs, lists, headings, quotes and code. */
-function MarkdownView({
+export function MarkdownView({
   nodes,
   onOpenNote,
   targets,
 }: {
   nodes: MarkdownNode[];
   onOpenNote?: (noteId: string) => void;
-  targets: Map<string, string>;
+  /** `null` renders every link as inert text — see `renderInline`. */
+  targets: Map<string, string> | null;
 }) {
   const blocks: ReactNode[] = [];
   let run: InlineNode[] = [];

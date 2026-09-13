@@ -267,6 +267,13 @@
       "when": 1789293000000,
       "tag": "0037_coach_snapshot_immutable",
       "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1789293600000,
+      "tag": "0038_live_reply_config_version",
+      "breakpoints": true
     }
   ]
 }

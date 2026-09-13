@@ -683,7 +683,8 @@ export interface CoachFeedbackRequest {
 export interface CoachSourceSnapshot {
   transcript: string;
   responseText: string;
-  configVersion: number;
+  /** Null for live replies recorded before generation-time version tracking. */
+  configVersion: number | null;
   sourceIds: string[];
   sourceRecords: { id: string; title: string; content: string }[];
 }

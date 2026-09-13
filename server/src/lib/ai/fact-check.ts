@@ -49,6 +49,24 @@ import { isUuid } from '../uuid.js';
 import type { CoachProposal } from './coach.js';
 import { unsourcedNumber } from './turn.js';
 
+/** A model may name an edit target only when it belongs to this agent. A factual correction
+ * additionally narrows note edits to notes actually cited by the selected response. */
+export async function ownsProposalTarget(db: Db, agentId: string, proposal: CoachProposal,
+  citedNoteIds?: readonly string[]): Promise<boolean> {
+  if (proposal.kind === 'rule' || proposal.kind === 'note') return true;
+  if (proposal.kind === 'rule_edit') {
+    if (!isUuid(proposal.ruleId)) return false;
+    const [row] = await db.select({ id: agentRules.id }).from(agentRules)
+      .where(and(eq(agentRules.id, proposal.ruleId), eq(agentRules.agentId, agentId)));
+    return row !== undefined;
+  }
+  if (!isUuid(proposal.noteId) ||
+      (citedNoteIds !== undefined && !citedNoteIds.includes(proposal.noteId))) return false;
+  const [row] = await db.select({ id: kbNotes.id }).from(kbNotes)
+    .where(and(eq(kbNotes.id, proposal.noteId), eq(kbNotes.agentId, agentId)));
+  return row !== undefined;
+}
+
 /** Every chunk's text and every enabled rule's text — see the file comment for why. */
 async function knownSources(db: Db, agentId: string): Promise<string[]> {
   const chunks = await db

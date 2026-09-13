@@ -729,7 +729,7 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
     canMoveToSuccess: () => hasConfirmedKaspiPayment(db, agent.id, conversation.id),
   });
   const spend = () => ({ agentId: agent.id, conversationId: conversation.id,
-    model: agent.model, ...core.usage });
+    model: agent.model, configVersion: agent.configVersion, ...core.usage });
   if (core.kind !== 'ready') {
     if (!dryRun && core.kind === 'failed') {
       await db.insert(aiReplies).values({ ...spend(), outcome: 'failed', detail: core.detail });

@@ -40,13 +40,12 @@
  * model answering the owner in English once, which is the failure this product cannot afford
  * twice in one codebase.
  */
-import { and, eq } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { z } from 'zod';
 import type { Db } from '../../db/client.js';
-import { agentRules, agents, kbNotes } from '../../db/schema.js';
-import { checkProposal } from './fact-check.js';
+import { agents } from '../../db/schema.js';
+import { checkProposal, ownsProposalTarget } from './fact-check.js';
 import { decryptSecret } from '../secret-box.js';
-import { isUuid } from '../uuid.js';
 import type { ChatMessage, ModelClient } from './openrouter.js';
 import { mintGuard } from './prompt.js';
 import { addCost, extractJson, keyAad } from './turn.js';
@@ -596,28 +595,15 @@ export async function runCoach(
   const correction = input.context.correction;
   if (correction) {
     if (correction.type === 'fact') {
-      if (proposal.kind === 'note_edit') {
-        const proposedNoteId = proposal.noteId;
-        const target = correction.evidence.find((row) => row.noteId === proposedNoteId);
-        if (!target) {
-          const first = correction.evidence[0];
-          proposal = first ? { ...proposal, noteId: first.noteId } : null;
-        }
-      } else if (proposal.kind !== 'note') proposal = null;
-    } else if (proposal.kind === 'rule_edit') {
-      if (!isUuid(proposal.ruleId)) proposal = null;
-      else {
-        const [owned] = await db.select({ id: agentRules.id }).from(agentRules)
-          .where(and(eq(agentRules.id, proposal.ruleId), eq(agentRules.agentId, input.agentId)));
-        if (!owned) proposal = null;
-      }
-    } else if (proposal.kind !== 'rule') proposal = null;
-    if (proposal?.kind === 'note_edit') {
-      const [owned] = await db.select({ id: kbNotes.id }).from(kbNotes)
-        .where(and(eq(kbNotes.id, proposal.noteId), eq(kbNotes.agentId, input.agentId)));
-      if (!owned) proposal = null;
-    }
+      if (proposal.kind !== 'note' && proposal.kind !== 'note_edit') proposal = null;
+    } else if (proposal.kind !== 'rule' && proposal.kind !== 'rule_edit') proposal = null;
+    if (proposal && !await ownsProposalTarget(db, input.agentId, proposal,
+      correction.type === 'fact' ? correction.evidence.map((row) => row.noteId) : undefined)) proposal = null;
     if (!proposal) warning = 'Предложение не соответствует типу исправления или источнику';
+  }
+  if (proposal && !await ownsProposalTarget(db, input.agentId, proposal)) {
+    proposal = null;
+    warning = 'Цель предложения не принадлежит этому агенту';
   }
   return { text: result.message, proposal, warning, cost };
 }

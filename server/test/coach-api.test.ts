@@ -242,7 +242,8 @@ afterEach(async () => {
 describe('the coaching conversation', () => {
   it('captures owned reply evidence and targets its note for a factual correction', async () => {
     const { conversationId, aiReplyId } = await agentAnswered('Delivery costs 1500 KZT.');
-    model.reply({ message: 'Corrected.', proposal: { kind: 'note_edit', noteId: randomUUID(), body: 'Delivery costs 1000 KZT.' } });
+    const [note] = await db.select().from(kbNotes);
+    model.reply({ message: 'Corrected.', proposal: { kind: 'note_edit', noteId: note!.id, body: 'Delivery costs 1000 KZT.' } });
     const res = await app.inject({ method: 'POST', url: coach(), cookies: jar, payload: {
       text: 'Use 1000 KZT.', feedback: { source: { kind: 'conversation_reply', conversationId, aiReplyId }, correctionType: 'fact', note: 'Correct delivery price.' },
     } });
@@ -253,6 +254,32 @@ describe('the coaching conversation', () => {
     expect(feedback!.snapshot.sourceRecords[0]!.content).toContain('1500 KZT');
     expect(res.json().proposal.noteId).toBe((await db.select().from(kbNotes))[0]!.id);
     expect(await db.select().from(agentRules)).toEqual([]);
+  });
+
+  it('uses generation-time version and excludes later live messages', async () => {
+    const { conversationId, aiReplyId } = await agentAnswered('Original answer');
+    await db.update(aiReplies).set({ configVersion: 2 }).where(eq(aiReplies.id, aiReplyId));
+    await db.update(agents).set({ configVersion: 9 }).where(eq(agents.id, agentId));
+    await db.insert(messages).values({ conversationId, direction: 'in', author: 'client',
+      kind: 'text', body: 'Future private message', sentAt: new Date(Date.now() + 60_000) });
+    model.reply({ message: 'Noted.', proposal: null });
+    const res = await app.inject({ method: 'POST', url: coach(), cookies: jar, payload: {
+      text: 'Correct it.', feedback: { source: { kind: 'conversation_reply', conversationId, aiReplyId }, correctionType: 'fact', note: 'Correct it.' },
+    } });
+    expect(res.statusCode).toBe(200);
+    expect((await db.select().from(responseFeedback))[0]!.snapshot.configVersion).toBe(2);
+    expect((await db.select().from(responseFeedback))[0]!.snapshot.transcript).not.toContain('Future private message');
+    expect(model.lastMessages[0]!.content).not.toContain('Future private message');
+  });
+
+  it('preserves an unknown legacy live version as null', async () => {
+    const { conversationId, aiReplyId } = await agentAnswered('Legacy answer');
+    model.reply({ message: 'Noted.', proposal: null });
+    const res = await app.inject({ method: 'POST', url: coach(), cookies: jar, payload: {
+      text: 'Correct it.', feedback: { source: { kind: 'conversation_reply', conversationId, aiReplyId }, correctionType: 'fact', note: 'Correct it.' },
+    } });
+    expect(res.statusCode).toBe(200);
+    expect((await db.select().from(responseFeedback))[0]!.snapshot.configVersion).toBeNull();
   });
 
   it('returns 404 for a foreign sandbox correction source', async () => {
@@ -281,12 +308,47 @@ describe('the coaching conversation', () => {
     expect(await db.select().from(agentRules)).toEqual([]);
   });
 
+  it('excludes sandbox turns after the selected reply', async () => {
+    const accountId = (await db.select({ accountId: agents.accountId }).from(agents).where(eq(agents.id, agentId)))[0]!.accountId;
+    const [session] = await db.insert(aiSandboxSessions).values({ accountId, agentId }).returning();
+    const [selected] = await db.insert(aiSandboxTurns).values({ accountId, agentId, sessionId: session!.id,
+      revision: 1, userText: 'First question', reply: 'First answer', configVersion: 1, model: 'test', outcome: 'replied' }).returning();
+    await db.insert(aiSandboxTurns).values({ accountId, agentId, sessionId: session!.id,
+      revision: 2, userText: 'Future secret', reply: 'Later answer', configVersion: 1, model: 'test', outcome: 'replied' });
+    model.reply({ message: 'Noted.', proposal: null });
+    const res = await app.inject({ method: 'POST', url: coach(), cookies: jar, payload: {
+      text: 'Correct it.', feedback: { source: { kind: 'sandbox_turn', sessionId: session!.id, turnId: selected!.id }, correctionType: 'behavior', note: 'Correct it.' },
+    } });
+    expect(res.statusCode).toBe(200);
+    expect((await db.select().from(responseFeedback))[0]!.snapshot.transcript).not.toContain('Future secret');
+  });
+
   it('rejects a factual correction proposal that tries to change a rule', async () => {
     const { conversationId, aiReplyId } = await agentAnswered('Wrong fact');
     model.reply({ message: 'Changed.', proposal: { kind: 'rule', category: 'business', text: 'Invent a price.' } });
     const res = await app.inject({ method: 'POST', url: coach(), cookies: jar, payload: {
       text: 'Correct the fact.', feedback: { source: { kind: 'conversation_reply', conversationId, aiReplyId }, correctionType: 'fact', note: 'Correct the fact.' },
     } });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().proposal).toBeNull();
+    expect(await db.select().from(agentRules)).toEqual([]);
+  });
+
+  it('rejects a note edit aimed at a different note instead of retargeting it', async () => {
+    const { conversationId, aiReplyId } = await agentAnswered('Original answer');
+    const [other] = await db.insert(kbNotes).values({ agentId, path: 'Other.md', title: 'Other' }).returning();
+    model.reply({ message: 'Corrected.', proposal: { kind: 'note_edit', noteId: other!.id, body: 'New body' } });
+    const res = await app.inject({ method: 'POST', url: coach(), cookies: jar, payload: {
+      text: 'Correct it.', feedback: { source: { kind: 'conversation_reply', conversationId, aiReplyId }, correctionType: 'fact', note: 'Correct it.' },
+    } });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().proposal).toBeNull();
+    expect((await db.select().from(kbNotes).where(eq(kbNotes.id, other!.id)))[0]!.body).toBe('');
+  });
+
+  it('rejects a foreign rule edit in an ordinary coach turn', async () => {
+    model.reply({ message: 'Changed.', proposal: { kind: 'rule_edit', ruleId: randomUUID(), text: 'New rule' } });
+    const res = await say('Change the rule.');
     expect(res.statusCode).toBe(200);
     expect(res.json().proposal).toBeNull();
     expect(await db.select().from(agentRules)).toEqual([]);

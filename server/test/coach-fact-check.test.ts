@@ -3,7 +3,7 @@ import { eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { Db } from '../src/db/client.js';
 import { agentRules, agents, kbNotes } from '../src/db/schema.js';
-import { checkProposal } from '../src/lib/ai/fact-check.js';
+import { checkProposal, ownsProposalTarget } from '../src/lib/ai/fact-check.js';
 import { saveNote } from '../src/lib/knowledge/notes.js';
 import { createAccountWithOwner } from '../src/lib/provision.js';
 import { withDb } from './helpers/db.js';
@@ -25,6 +25,16 @@ beforeEach(async () => {
 });
 
 describe('checkProposal', () => {
+  it('rejects an edit target that is not an agent-owned cited note', async () => {
+    const [owned] = await db.insert(kbNotes).values({ agentId, path: 'Owned.md', title: 'Owned' }).returning();
+    const foreignAgentId = randomUUID();
+    const accountId = (await db.select({ accountId: agents.accountId }).from(agents).where(eq(agents.id, agentId)))[0]!.accountId;
+    await db.insert(agents).values({ id: foreignAgentId, accountId, name: 'Foreign' });
+    const [foreign] = await db.insert(kbNotes).values({ agentId: foreignAgentId, path: 'Foreign.md', title: 'Foreign' }).returning();
+    expect(await ownsProposalTarget(db, agentId, { kind: 'note_edit', noteId: owned!.id, body: 'Changed' }, [owned!.id])).toBe(true);
+    expect(await ownsProposalTarget(db, agentId, { kind: 'note_edit', noteId: owned!.id, body: 'Changed' }, [])).toBe(false);
+    expect(await ownsProposalTarget(db, agentId, { kind: 'note_edit', noteId: foreign!.id, body: 'Changed' }, [foreign!.id])).toBe(false);
+  });
   it('turns a rule carrying an unknown number into a note proposal', async () => {
     const checked = await checkProposal(db, agentId, {
       kind: 'rule',

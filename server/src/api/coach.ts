@@ -63,13 +63,12 @@
  * the prompt — the transcript already carries whatever the agent actually sent, and guessing
  * which section produced a *correct* answer is not this feature's job.
  */
-import { and, asc, desc, eq, inArray } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, lte } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
 import {
   agentRules,
-  agents,
   aiReplies,
   aiSandboxSessions,
   aiSandboxTurns,
@@ -191,11 +190,13 @@ async function recentHistory(db: Db, agentId: string): Promise<CoachTurn[]> {
 
 /** The named conversation's last `TRANSCRIPT_LIMIT` messages, oldest first — data for the
  * coach to read, never an instruction, exactly as `buildCoachMessages` fences it. */
-async function transcriptFor(db: Db, conversationId: string): Promise<TranscriptLine[]> {
+async function transcriptFor(db: Db, conversationId: string,
+  cutoff?: { sentAt: Date; createdAt: Date }): Promise<TranscriptLine[]> {
   const rows = await db
     .select({ author: messages.author, body: messages.body })
     .from(messages)
-    .where(eq(messages.conversationId, conversationId))
+    .where(and(eq(messages.conversationId, conversationId),
+      cutoff ? and(lte(messages.sentAt, cutoff.sentAt), lte(messages.createdAt, cutoff.createdAt)) : undefined))
     .orderBy(desc(messages.sentAt))
     .limit(TRANSCRIPT_LIMIT);
   return rows.reverse().map((row) => ({ author: row.author, text: row.body ?? '' }));
@@ -281,21 +282,22 @@ async function resolveFeedback(db: Db, agentId: string, accountId: string,
   let transcript: TranscriptLine[];
   let responseText: string;
   let sourceIds: string[];
-  let configVersion: number;
+  let configVersion: number | null;
   if (source.kind === 'conversation_reply') {
     if (!isUuid(source.conversationId)) throw new ApiError(404, 'Ответ агента не найден');
     conversationId = await ownConversation(db, agentId, source.conversationId);
     const reply = await ownReply(db, agentId, conversationId, source.aiReplyId);
     aiReplyId = reply.id;
     sourceIds = reply.usedItemIds;
-    const [replyRow] = await db.select({ body: messages.body }).from(aiReplies)
+    const [replyRow] = await db.select({ body: messages.body, sentAt: messages.sentAt,
+      createdAt: messages.createdAt, configVersion: aiReplies.configVersion }).from(aiReplies)
       .leftJoin(messages, and(eq(aiReplies.messageId, messages.id), eq(messages.conversationId, conversationId)))
       .where(eq(aiReplies.id, aiReplyId));
     if (!replyRow?.body) throw new ApiError(404, 'Ответ агента не найден');
     responseText = replyRow.body;
-    transcript = await transcriptFor(db, conversationId);
-    const [agent] = await db.select({ configVersion: agents.configVersion }).from(agents).where(eq(agents.id, agentId));
-    configVersion = agent!.configVersion;
+    transcript = await transcriptFor(db, conversationId,
+      { sentAt: replyRow.sentAt!, createdAt: replyRow.createdAt! });
+    configVersion = replyRow.configVersion;
   } else {
     if (!isUuid(source.sessionId) || !isUuid(source.turnId)) throw new ApiError(404, 'Ответ агента не найден');
     const [turn] = await db.select().from(aiSandboxTurns).innerJoin(aiSandboxSessions,
@@ -310,7 +312,8 @@ async function resolveFeedback(db: Db, agentId: string, accountId: string,
     sourceIds = turn.ai_sandbox_turns.sourceIds;
     configVersion = turn.ai_sandbox_turns.configVersion;
     const turns = await db.select({ userText: aiSandboxTurns.userText, reply: aiSandboxTurns.reply })
-      .from(aiSandboxTurns).where(and(eq(aiSandboxTurns.sessionId, sessionId), eq(aiSandboxTurns.agentId, agentId)))
+      .from(aiSandboxTurns).where(and(eq(aiSandboxTurns.sessionId, sessionId), eq(aiSandboxTurns.agentId, agentId),
+        lte(aiSandboxTurns.revision, turn.ai_sandbox_turns.revision)))
       .orderBy(desc(aiSandboxTurns.revision)).limit(10);
     transcript = turns.reverse().flatMap((row) => [
       { author: 'client', text: row.userText }, { author: 'ai', text: row.reply ?? '' },

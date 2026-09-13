@@ -171,6 +171,7 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
         summary:analysis.summary,profile,fieldEvidence:evidence,confidence:analysis.confidence,
         analyzedAt:new Date(),updatedAt:new Date(),leaseUntil:leaseDeadline(),error:null}).where(ownLease);
       await tx.insert(aiReplies).values({agentId:agent.id,conversationId:conversation.id,model:agent.model,
+        configVersion:agent.configVersion,
         promptTokens:completion.promptTokens,completionTokens:completion.completionTokens,cost:completion.cost,
         outcome:'applied',detail:'CRM analysis completed',usedItemIds:[]});
       applied = true;

@@ -878,6 +878,7 @@ export const aiReplies = pgTable(
     // here is a list of chunk ids, and an `unknown` would make each caller assert that
     // separately.
     usedItemIds: jsonb('used_item_ids').$type<string[]>().notNull().default([]),
+    configVersion: integer('config_version'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index('ai_replies_agent_created_idx').on(t.agentId, t.createdAt),
@@ -907,7 +908,7 @@ export const responseFeedback = pgTable('response_feedback', {
   check('response_feedback_one_source_check', sql`(${t.conversationId} is not null and ${t.aiReplyId} is not null and ${t.sessionId} is null and ${t.sandboxTurnId} is null) or (${t.conversationId} is null and ${t.aiReplyId} is null and ${t.sessionId} is not null and ${t.sandboxTurnId} is not null)`),
   check('response_feedback_type_check', sql`${t.correctionType} in ('fact', 'behavior')`),
   check('response_feedback_revision_check', sql`${t.revision} > 0`),
-  check('response_feedback_snapshot_bounds_check', sql`jsonb_typeof(${t.snapshot}) = 'object' and (${t.snapshot} - 'transcript' - 'responseText' - 'configVersion' - 'sourceIds' - 'sourceRecords') = '{}'::jsonb and jsonb_typeof(${t.snapshot}->'transcript') = 'string' and length(${t.snapshot}->>'transcript') <= 12000 and jsonb_typeof(${t.snapshot}->'responseText') = 'string' and length(${t.snapshot}->>'responseText') <= 4000 and jsonb_typeof(${t.snapshot}->'configVersion') = 'number' and jsonb_typeof(${t.snapshot}->'sourceIds') = 'array' and jsonb_array_length(${t.snapshot}->'sourceIds') <= 30 and jsonb_typeof(${t.snapshot}->'sourceRecords') = 'array' and jsonb_array_length(${t.snapshot}->'sourceRecords') <= 30 and pg_column_size(${t.snapshot}) <= 32768`),
+  check('response_feedback_snapshot_bounds_check', sql`jsonb_typeof(${t.snapshot}) = 'object' and (${t.snapshot} - 'transcript' - 'responseText' - 'configVersion' - 'sourceIds' - 'sourceRecords') = '{}'::jsonb and jsonb_typeof(${t.snapshot}->'transcript') = 'string' and length(${t.snapshot}->>'transcript') <= 12000 and jsonb_typeof(${t.snapshot}->'responseText') = 'string' and length(${t.snapshot}->>'responseText') <= 4000 and jsonb_typeof(${t.snapshot}->'configVersion') in ('number', 'null') and jsonb_typeof(${t.snapshot}->'sourceIds') = 'array' and jsonb_array_length(${t.snapshot}->'sourceIds') <= 30 and jsonb_typeof(${t.snapshot}->'sourceRecords') = 'array' and jsonb_array_length(${t.snapshot}->'sourceRecords') <= 30 and pg_column_size(${t.snapshot}) <= 32768`),
   index('response_feedback_agent_created_idx').on(t.agentId, t.createdAt),
 ]);
 

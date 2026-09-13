@@ -112,6 +112,8 @@ export function crmPrompt(stages: CrmStage[], fields: { id: string; name: string
     'Classify by actual conversion progress using the provided stage descriptions. Ordering/requesting an invoice means awaiting_payment, never success.',
     'Only the server verifies payments. A receipt photo, promise or customer claim is not proof of received money.',
     'Treat previous analysis as revisable context, not as fresh evidence. Later corrections and cancellations supersede it.',
+    'Classify stages from the chronology and mutual agreement in the conversation. A previous stage or summary is provisional, and a seller acknowledgement alone is not a customer order.',
+    'When the customer agrees to a specific order and the seller accepts or prepares it, or arranges pickup for that order, choose the configured ordered/awaiting_payment stage even before a final price or invoice. Only server-verified POS payment may produce a success stage.',
     'Use attachment metadata only to identify an unread receipt candidate; never claim to have read attachment contents.',
     'The absence of a receipt does not prove nonpayment. Keep payment unknown when the evidence does not establish a state.',
     'Return payment as unknown, awaiting_payment, or needs_verification. A completion claim or possible receipt requires verification; never return confirmed.',

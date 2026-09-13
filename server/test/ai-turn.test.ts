@@ -19,6 +19,8 @@ import {
 import type { Db } from '../src/db/client.js';
 import { seedFunnel } from '../src/lib/funnel.js';
 import * as automationPolicy from '../src/lib/automation/policy.js';
+import * as capiEnqueue from '../src/lib/capi/enqueue.js';
+import * as funnelMessage from '../src/lib/funnel-message.js';
 import { deleteNote, saveNote } from '../src/lib/knowledge/notes.js';
 import { createAccountWithOwner } from '../src/lib/provision.js';
 import { encryptSecret } from '../src/lib/secret-box.js';
@@ -762,32 +764,31 @@ describe('applying what the model asked for', () => {
     expect(atSendTime).toHaveLength(1);
   });
 
-  it('does not queue a lead when response mode changes inside the queue helper', async () => {
+  it('does not queue a lead when response mode turns off before the queue effect', async () => {
     const target = (await db.select().from(stages).where(eq(stages.agentId, agentId))).find(
       (stage) => stage.kind === 'qualified',
     )!;
     const model = fakeModel(answer({ stageId: target.id }));
-    const originalLoad = automationPolicy.loadAutomationSnapshot;
+    const originalQueue = capiEnqueue.queueLead;
     let modeChanged = false;
-    const load = vi
-      .spyOn(automationPolicy, 'loadAutomationSnapshot')
+    const queue = vi
+      .spyOn(capiEnqueue, 'queueLead')
       .mockImplementation(async (...args) => {
-        const snapshot = await originalLoad(...args);
         const [current] = await db
           .select({ stageId: conversations.stageId })
           .from(conversations)
           .where(eq(conversations.id, conversationId));
-        if (!modeChanged && snapshot?.responseMode === 'live' && current?.stageId === target.id) {
+        if (!modeChanged && current?.stageId === target.id) {
           modeChanged = true;
           await db.update(agents).set({ responseMode: 'off' }).where(eq(agents.id, agentId));
         }
-        return snapshot;
+        return originalQueue(...args);
       });
 
     try {
       await turn(model);
     } finally {
-      load.mockRestore();
+      queue.mockRestore();
     }
 
     expect(modeChanged).toBe(true);
@@ -795,30 +796,31 @@ describe('applying what the model asked for', () => {
     expect(await db.select().from(capiEvents)).toHaveLength(0);
   });
 
-  it('rechecks policy inside a stage message immediately before transport send', async () => {
+  it('rechecks policy after the stage move but before the stage message effect', async () => {
     const first = await stageNamed('Новый лид');
     const second = await stageNamed('В диалоге');
     await db.update(stages).set({ autoMessage: 'Мы на связи!' }).where(eq(stages.id, second.id));
     await db.update(conversations).set({ stageId: first.id }).where(eq(conversations.id, conversationId));
     const model = fakeModel(answer({ stageId: second.id, reply: 'Уточняю детали.' }));
-    const originalLoad = automationPolicy.loadAutomationSnapshot;
-    let checksAfterMove = 0;
-    const load = vi.spyOn(automationPolicy, 'loadAutomationSnapshot').mockImplementation(async (...args) => {
-      const snapshot = await originalLoad(...args);
+    const originalSend = funnelMessage.sendStageMessage;
+    let modeChanged = false;
+    const sendStage = vi.spyOn(funnelMessage, 'sendStageMessage').mockImplementation(async (...args) => {
       const [current] = await db.select({ stageId: conversations.stageId }).from(conversations)
         .where(eq(conversations.id, conversationId));
-      if (snapshot?.responseMode === 'live' && current?.stageId === second.id && ++checksAfterMove === 2) {
+      if (!modeChanged && current?.stageId === second.id) {
+        modeChanged = true;
         await db.update(agents).set({ responseMode: 'off' }).where(eq(agents.id, agentId));
       }
-      return snapshot;
+      return originalSend(...args);
     });
 
     try {
       expect((await turn(model)).outcome).toBe('skipped');
     } finally {
-      load.mockRestore();
+      sendStage.mockRestore();
     }
 
+    expect(modeChanged).toBe(true);
     expect((await conversationRow()).stageId).toBe(second.id);
     expect(graph.calls.filter((call) => call.method === 'sendText')).toHaveLength(0);
   });

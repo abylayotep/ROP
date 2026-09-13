@@ -104,15 +104,15 @@ The interface is in Russian; English meanings of the labels are given in bracket
    There is no public sign-up; we created this account for review.
 2. Open the company in the list, then "Интеграции" (Integrations) in the left sidebar.
 3. WhatsApp (whatsapp_business_management, whatsapp_business_messaging): the test company already
-   has a WhatsApp number connected through Embedded Signup. Send a WhatsApp message to
-   `<TEST NUMBER>`. Open "Диалоги" (Dialogs): the message appears in the list. Open it, type a
+   has a WhatsApp number connected through Embedded Signup; the number is shown on the
+   Integrations screen. Send a WhatsApp message to that number. Open "Диалоги" (Dialogs): the message appears in the list. Open it, type a
    reply and press send; the reply arrives in WhatsApp. To see Embedded Signup itself, watch the
    screencast: a new number is connected with "Подключить через Meta" (Connect with Meta).
 4. Instagram (instagram_basic, instagram_manage_messages, pages_show_list, pages_manage_metadata,
-   pages_read_engagement): on "Интеграции" the card "Instagram Direct" shows the connected account
-   `<TEST IG USERNAME>`. "Переподключить" (Reconnect) opens Facebook Login, lists your Pages with
-   their Instagram accounts, and subscribes the selected Page. Send a Direct message to
-   `<TEST IG USERNAME>`; it appears in "Диалоги"; reply from there.
+   pages_read_engagement): on "Интеграции" the card "Instagram Direct" shows the connected account.
+   "Переподключить" (Reconnect) opens Facebook Login, lists your Pages with their Instagram
+   accounts, and subscribes the selected Page. Send a Direct message to the connected account; it
+   appears in "Диалоги"; reply from there.
 5. Knowledge base (instagram_basic): "База знаний" (Knowledge base) → "Забрать из Instagram"
    (Import from Instagram) imports captions of the account's own posts.
 6. Legal pages: https://rop.tasbaqa.ru/privacy?lang=en, /terms?lang=en, /data-deletion?lang=en.

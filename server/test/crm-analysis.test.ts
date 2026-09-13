@@ -177,7 +177,7 @@ it('grounds the paid amount in a seller price message', () => {
   expect(parseCrmAnalysis(output(amount('o1', '699', '6.990 тенге')), [offer, client], []).paidAmount).toBeNull();
   expect(parseCrmAnalysis(output(amount('c1', '6990', 'за 6990')), [offer, client], []).paidAmount).toBeNull();
   expect(parseCrmAnalysis(output(amount('o1', '6990', '7 000 тенге')), [offer, client], []).paidAmount).toBeNull();
-  expect(parseCrmAnalysis(output(amount('o1', '1200000', '1 200 000')), [{ ...offer, body: 'Итого 1 200 000 ₸' }], []).paidAmount).toBe('1200000');
+  expect(parseCrmAnalysis(output(amount('o1', '1200000', '1 200 000 ₸')), [{ ...offer, body: 'Итого 1 200 000 ₸' }], []).paidAmount).toBe('1200000');
 });
 
 it('keeps paid evidence until Kaspi confirms or a new paid reason arrives', () => {
@@ -185,4 +185,35 @@ it('keeps paid evidence until Kaspi confirms or a new paid reason arrives', () =
   expect(resolvePaymentEvidence('paid', 'Клиент перевёл', { state: 'unknown', reason: 'нет данных', messageId: 'm' }, false))
     .toEqual({ state: 'paid', reason: 'Клиент перевёл' });
   expect(resolvePaymentEvidence('paid', 'Клиент перевёл', null, true).state).toBe('confirmed');
+});
+
+/** State accepted for a paid claim quoted without the trailing punctuation, so the checks must read the body clause. */
+const paidState = (author: string, body: string, quote = body.replace(/[?!.]+$/, '')) => parseCrmAnalysis(output({ payment:
+  { state: 'paid', messageId: 'x', quote, reason: 'Оплата' } }), [{ id: 'x', author, kind: 'text', body }], []).payment?.state ?? null;
+
+it('checks negation in the body clause around a trimmed quote', () => {
+  expect(paidState('client', 'Ещё не оплатила, вечером', 'оплатила')).toBeNull();
+  expect(paidState('phone', 'Оплата ещё не поступила', 'поступила')).toBeNull();
+  expect(paidState('phone', 'Итого 6.990 ₸. Оплату получили, спасибо', 'Оплату получили')).toBe('paid');
+});
+
+it('needs a money word for a seller confirmation and rejects questions, conditionals and receipt requests', () => {
+  for (const body of ['Заказ получили, скоро отправим', 'Тапсырысыңызды қабылдадық', 'Тапсырысыңызды алдық', 'Товар поступил на склад',
+    'Размеры пришли', 'Қара түсті бар', 'Вы получили ссылку на оплату?', 'Получили счёт?', 'Оплачено?', 'Если оплачено, пришлите чек',
+    'Проверю, поступили ли деньги', 'пришли чек', 'Пришли скрин оплаты']) expect(paidState('operator', body), body).toBeNull();
+  for (const body of ['Оплата прошла', 'Деньги пришли', 'Ақша келді', 'оплату получили', 'Спасибо, получили!', 'Получили, спасибо'])
+    expect(paidState('phone', body), body).toBe('paid');
+});
+
+it('accepts client payment verbs only as statements and «скинула» only with money', () => {
+  for (const body of ['скинула адрес', 'скинул фото', 'Оплатила?', 'Вы перевели мне сдачу?']) expect(paidState('client', body), body).toBeNull();
+  for (const body of ['Төлеп жібердім', 'Аударып жібердім', 'оплату отправила', 'Скинула деньги на Kaspi'])
+    expect(paidState('client', body), body).toBe('paid');
+});
+
+it('takes the paid amount only from a number followed by a currency', () => {
+  const offer = { id: 'o1', author: 'phone', kind: 'text', body: 'Стандартный размер 40 мм — 6.990 тенге' };
+  const amount = (value: string) => parseCrmAnalysis(output({ paidAmount: { value, messageId: 'o1', quote: '40 мм — 6.990 тенге' } }), [offer], []).paidAmount;
+  expect(amount('40')).toBeNull();
+  expect(amount('6990')).toBe('6990');
 });

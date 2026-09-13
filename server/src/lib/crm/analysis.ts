@@ -49,12 +49,29 @@ const refusal = /(?:^|[^а-яёәіңғүұқөһa-z])(?:не|нет|жоқ|жо
 const totalAmount = /(?:итого|к оплате|общая сумма|сумма заказа|барлығы|жалпы|төлеуге)[^\d\n]{0,24}(\d(?:[\d \u00a0]*\d)?(?:[.,]\d{1,2})?)\s*(?:₸|тенге|тг\b|kzt)/iu;
 const qrRequest = /(?:\bqr\b|ку[аә]р|кью[ -]?ар)/iu;
 const SELLER = ['phone', 'operator', 'ai'];
-const clientPaid = /(?:оплатил[аи]?|оплачено|перев[её]л[аи]?|перевели|скинул[аи]?|отправил[аи]? (?:деньги|оплату)|аудардым|төледім|төлеп қойдым)/iu;
-// «пришли» but not «пришлите»: a seller asking for a receipt has not received money.
-const sellerReceived = /(?:получил[аи]?|пришла|пришли(?!те)|поступил[аи]?|оплачено|алдық|түсті|қабылдадық)/iu;
+// Client statements of a finished payment.
+const clientPaid = /(?:оплатил[аи]?|оплачено|перев[её]л[аи]?|перевели|отправил[аи]? (?:деньги|оплату)|(?:деньги|оплату) отправил[аи]?|аудардым|төледім|төлеп (?:қойдым|жібердім)|аударып жібердім)/iu;
+// «скинула» is a payment only next to a money word: «скинула адрес» is not.
+const clientSent = /скинул[аи]?/iu;
+// Ties a clause to money rather than an order, stock or a link.
+const moneyWord = /(?:оплат|оплач|деньг|перевод|сумм|төлем|ақша|kaspi|каспи)/iu;
+// Seller verbs of arrival; they confirm payment only with a money word. «пришлите» asks, it does not confirm.
+const sellerReceived = /(?:получил[аи]?|пришл[аи](?!те)|поступил[аи]?|прошл[аи]|оплачено|келді|түсті|алдық|қабылдадық)/iu;
+// The bare «спасибо, получили» acknowledgement with no other object.
+const bareReceipt = /^(?:(?:спасибо|рахмет)[,!.\s]+получил[аи]?|получил[аи]?[,!.\s]+(?:спасибо|рахмет))[.!\s]*$/iu;
+// A seller asking for proof: «пришли чек», «пришлите скрин оплаты».
+const receiptRequest = /пришл(?:и|ите)\s+(?:чек|скрин|фото)/iu;
 const negated = /(?:^|[^а-яёәіңғүұқөһa-z])(?:не|ещё не|еще не|пока не)\s+\S*|жоқ|емес/iu;
-/** Digit groups joined: «6.990» → «6990», «1 200 000» → «1200000». */
-const numbersIn = (text: string): string[] => text.replace(/(\d)[\s .,](?=\d{3}(?!\d))/g, '$1').match(/\d+/g) ?? [];
+// Conditionals and indirect questions: «если оплачено», «поступили ли деньги».
+const conditional = /(?:^|[^а-яёәіңғүұқөһa-z])(?:если|ли|егер)(?:$|[^а-яёәіңғүұқөһa-z])/iu;
+/** Body clauses overlapping the quote, so a trimmed quote cannot hide «не», «?» or «если» next to it. */
+const clauseOf = (body: string, quote: string) => {
+  const start = body.indexOf(quote), end = start + quote.length;
+  return [...body.matchAll(/[^.!?;\n]+[.!?;\n]*/g)].filter((m) => m.index! < end && m.index! + m[0].length > start).map((m) => m[0]).join(' ').trim();
+};
+/** Numbers followed by a currency, digit groups joined: «6.990 тенге» → «6990», «1 200 000 ₸» → «1200000»; «40 мм» is not a price. */
+const pricesIn = (text: string): string[] => [...text.replace(/(\d)[\s .,](?=\d{3}(?!\d))/g, '$1')
+  .matchAll(/(\d+)\s?(?:тенге|теңге|тг|₸|kzt)/giu)].map((m) => m[1]!);
 
 /** Values must be traceable to real message text; unknown properties cannot become CRM columns. */
 export function parseCrmAnalysis(raw: string, history: EvidenceMessage[], fields: { id: string; kind: string }[]): CrmAnalysis {
@@ -95,8 +112,12 @@ export function parseCrmAnalysis(raw: string, history: EvidenceMessage[], fields
     const quoted = !!source && source.kind !== 'unsupported' && !!quote && !!source.body?.includes(quote);
     const attachment = source?.author === 'client' && !!source.kind && source.kind !== 'text'
       && (!!source.mediaMime || ['image', 'document', 'unsupported'].includes(source.kind));
-    const paidClaim = state === 'paid' && quoted && source?.author === 'client' && clientPaid.test(quote) && !negated.test(quote);
-    const paidReceipt = state === 'paid' && quoted && SELLER.includes(source!.author) && sellerReceived.test(quote) && !negated.test(quote);
+    const clause = quoted ? clauseOf(source!.body!, quote) : '';
+    const doubtful = clause.includes('?') || negated.test(clause) || conditional.test(clause);
+    const paidClaim = state === 'paid' && quoted && !doubtful && source?.author === 'client'
+      && (clientPaid.test(clause) || (clientSent.test(clause) && moneyWord.test(clause)));
+    const paidReceipt = state === 'paid' && quoted && !doubtful && SELLER.includes(source!.author) && !receiptRequest.test(clause)
+      && ((moneyWord.test(clause) && sellerReceived.test(clause)) || bareReceipt.test(clause));
     const groundedText = state !== 'paid' && source?.author === 'client' && quoted;
     const unreadAttachment = attachment && (state === 'needs_verification' || state === 'paid');
     if (unreadAttachment) payment = { state: 'needs_verification', reason: 'Вложение требует проверки', messageId: result.payment.messageId };
@@ -107,7 +128,7 @@ export function parseCrmAnalysis(raw: string, history: EvidenceMessage[], fields
     const source = messages.get(result.paidAmount.messageId);
     const { value, quote } = result.paidAmount;
     if (source && SELLER.includes(source.author) && source.body?.includes(quote) && Number(value) > 0
-      && numbersIn(quote).includes(value)) paidAmount = value;
+      && pricesIn(quote).includes(value)) paidAmount = value;
   }
   const acceptedEvidence = Object.fromEntries([
     ...Object.keys(profile).map((key) => [`profile:${key}`, {messageId: result.profile[key]!.messageId}]),

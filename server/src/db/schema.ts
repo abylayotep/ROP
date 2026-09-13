@@ -44,6 +44,7 @@ import type { CapiEventBody } from '../lib/capi/events.js';
 // Type-only, so this stays a leaf module at runtime. `coach_messages.proposal` holds what the
 // coach suggested, and the brand is what stops anything but a real proposal filling it.
 import type { CoachProposal } from '../lib/ai/coach.js';
+import type { CoachSourceSnapshot, CorrectionType } from '../../../packages/contract/index.js';
 // Type-only, so this stays a leaf module at runtime. `kb_drafts.ops` and `kb_drafts.base` hold
 // what a draft would write and what it was tested against, and the brand is what stops anything
 // but the drafts module filling them.
@@ -249,6 +250,7 @@ export const aiSandboxTurns = pgTable(
       name: 'ai_sandbox_turns_session_scope_fk',
     }).onDelete('cascade'),
     unique('ai_sandbox_turns_session_revision_key').on(t.sessionId, t.revision),
+    unique('ai_sandbox_turns_scope_id_key').on(t.accountId, t.agentId, t.sessionId, t.id),
     index('ai_sandbox_turns_session_revision_idx').on(t.sessionId, t.revision),
     check('ai_sandbox_turns_revision_check', sql`${t.revision} > 0`),
   ],
@@ -879,8 +881,35 @@ export const aiReplies = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index('ai_replies_agent_created_idx').on(t.agentId, t.createdAt),
+    unique('ai_replies_agent_conversation_id_key').on(t.agentId, t.conversationId, t.id),
     index('ai_replies_message_idx').on(t.messageId)],
 );
+
+/** Immutable evidence captured when an owner corrects a particular AI response. */
+export const responseFeedback = pgTable('response_feedback', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  accountId: uuid('account_id').notNull(),
+  agentId: uuid('agent_id').notNull(),
+  conversationId: uuid('conversation_id'),
+  aiReplyId: uuid('ai_reply_id'),
+  sessionId: uuid('session_id'),
+  sandboxTurnId: uuid('sandbox_turn_id'),
+  correctionType: text('correction_type').$type<CorrectionType>().notNull(),
+  note: text('note').notNull(),
+  snapshot: jsonb('snapshot').$type<CoachSourceSnapshot>().notNull(),
+  revision: integer('revision').notNull().default(1),
+  status: text('status').$type<'pending' | 'proposed' | 'drafted'>().notNull().default('pending'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  foreignKey({ columns: [t.accountId, t.agentId], foreignColumns: [agents.accountId, agents.id], name: 'response_feedback_agent_scope_fk' }).onDelete('cascade'),
+  foreignKey({ columns: [t.agentId, t.conversationId, t.aiReplyId], foreignColumns: [aiReplies.agentId, aiReplies.conversationId, aiReplies.id], name: 'response_feedback_live_scope_fk' }),
+  foreignKey({ columns: [t.accountId, t.agentId, t.sessionId, t.sandboxTurnId], foreignColumns: [aiSandboxTurns.accountId, aiSandboxTurns.agentId, aiSandboxTurns.sessionId, aiSandboxTurns.id], name: 'response_feedback_sandbox_scope_fk' }),
+  check('response_feedback_one_source_check', sql`(${t.conversationId} is not null and ${t.aiReplyId} is not null and ${t.sessionId} is null and ${t.sandboxTurnId} is null) or (${t.conversationId} is null and ${t.aiReplyId} is null and ${t.sessionId} is not null and ${t.sandboxTurnId} is not null)`),
+  check('response_feedback_type_check', sql`${t.correctionType} in ('fact', 'behavior')`),
+  check('response_feedback_revision_check', sql`${t.revision} > 0`),
+  check('response_feedback_snapshot_bounds_check', sql`jsonb_typeof(${t.snapshot}) = 'object' and (${t.snapshot} - 'transcript' - 'responseText' - 'configVersion' - 'sourceIds' - 'sourceRecords') = '{}'::jsonb and jsonb_typeof(${t.snapshot}->'transcript') = 'string' and length(${t.snapshot}->>'transcript') <= 12000 and jsonb_typeof(${t.snapshot}->'responseText') = 'string' and length(${t.snapshot}->>'responseText') <= 4000 and jsonb_typeof(${t.snapshot}->'configVersion') = 'number' and jsonb_typeof(${t.snapshot}->'sourceIds') = 'array' and jsonb_array_length(${t.snapshot}->'sourceIds') <= 30 and jsonb_typeof(${t.snapshot}->'sourceRecords') = 'array' and jsonb_array_length(${t.snapshot}->'sourceRecords') <= 30 and pg_column_size(${t.snapshot}) <= 32768`),
+  index('response_feedback_agent_created_idx').on(t.agentId, t.createdAt),
+]);
 
 /**
  * Every webhook delivery, exactly as it arrived.
@@ -1071,6 +1100,9 @@ export const coachMessages = pgTable(
     // the agent actually answered rather than what the owner remembers of it.
     conversationId: uuid('conversation_id').references(() => conversations.id, { onDelete: 'set null' }),
     aiReplyId: uuid('ai_reply_id').references(() => aiReplies.id, { onDelete: 'set null' }),
+    feedbackId: uuid('feedback_id').references((): AnyPgColumn => responseFeedback.id, { onDelete: 'set null' }),
+    revision: integer('revision').notNull().default(1),
+    sourceSnapshot: jsonb('source_snapshot').$type<CoachSourceSnapshot>(),
     // The draft this message's proposal became, once one was opened. Null on the owner's own
     // lines, on a plain reply, and before the proposal has been drafted.
     draftId: uuid('draft_id').references((): AnyPgColumn => kbDrafts.id, { onDelete: 'set null' }),

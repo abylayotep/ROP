@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildServer } from '../src/api/server.js';
@@ -8,6 +8,8 @@ import {
   agentRules,
   agents,
   aiReplies,
+  aiSandboxSessions,
+  aiSandboxTurns,
   coachMessages,
   contacts,
   conversations,
@@ -476,6 +478,43 @@ describe('the coaching conversation', () => {
       payload: { text: 'Так нельзя.' },
     });
     expect(post.statusCode).toBe(403);
+  });
+
+  it('requires one owned response and preserves the original feedback evidence', async () => {
+    const { conversationId, aiReplyId } = await agentAnswered('Original answer');
+    const accountId = (await db.select({ accountId: agents.accountId }).from(agents).where(eq(agents.id, agentId)))[0]!.accountId;
+    const snapshot = { transcript: 'Customer: question\nAI: Original answer', responseText: 'Original answer', configVersion: 1, sourceIds: [], sourceRecords: [] };
+    const insert = () => db.execute(sql`
+      insert into response_feedback (account_id, agent_id, conversation_id, ai_reply_id, correction_type, note, snapshot)
+      values (${accountId}, ${agentId}, ${conversationId}, ${aiReplyId}, 'fact', 'Correct this', ${JSON.stringify(snapshot)}::jsonb)
+      returning id, revision, snapshot
+    `);
+    const rows = await insert();
+    expect(rows[0]!.revision).toBe(1);
+    expect(rows[0]!.snapshot).toEqual(snapshot);
+    await expect(db.execute(sql`update response_feedback set snapshot = '{}'::jsonb where id = ${rows[0]!.id}`)).rejects.toThrow();
+    await expect(db.execute(sql`insert into response_feedback (account_id, agent_id, ai_reply_id, sandbox_turn_id, correction_type, note, snapshot)
+      values (${accountId}, ${agentId}, ${aiReplyId}, ${randomUUID()}, 'fact', 'Wrong', '{}'::jsonb)`)).rejects.toThrow();
+    await expect(db.execute(sql`insert into response_feedback (account_id, agent_id, ai_reply_id, correction_type, note, snapshot)
+      values (${randomUUID()}, ${agentId}, ${aiReplyId}, 'fact', 'Wrong tenant', '{}'::jsonb)`)).rejects.toThrow();
+    await expect(db.execute(sql`insert into response_feedback (account_id, agent_id, conversation_id, ai_reply_id, correction_type, note, snapshot)
+      values (${accountId}, ${randomUUID()}, ${conversationId}, ${aiReplyId}, 'fact', 'Wrong agent', ${JSON.stringify(snapshot)}::jsonb)`)).rejects.toThrow();
+    await expect(db.execute(sql`insert into response_feedback (account_id, agent_id, conversation_id, ai_reply_id, correction_type, note, snapshot)
+      values (${accountId}, ${agentId}, ${conversationId}, ${aiReplyId}, 'fact', 'Oversized', ${JSON.stringify({ ...snapshot, transcript: 'x'.repeat(12001) })}::jsonb)`)).rejects.toThrow();
+
+    const [session] = await db.insert(aiSandboxSessions).values({ accountId, agentId }).returning();
+    const [turn] = await db.insert(aiSandboxTurns).values({
+      accountId, agentId, sessionId: session!.id, revision: 1, userText: 'Question', reply: 'Answer',
+      configVersion: 1, model: 'test-model', outcome: 'replied',
+    }).returning();
+    const sandbox = await db.execute(sql`insert into response_feedback
+      (account_id, agent_id, session_id, sandbox_turn_id, correction_type, note, snapshot)
+      values (${accountId}, ${agentId}, ${session!.id}, ${turn!.id}, 'behavior', 'Correct tone', ${JSON.stringify(snapshot)}::jsonb)
+      returning revision`);
+    expect(sandbox[0]!.revision).toBe(1);
+    await expect(db.execute(sql`insert into response_feedback
+      (account_id, agent_id, session_id, sandbox_turn_id, correction_type, note, snapshot)
+      values (${accountId}, ${agentId}, ${randomUUID()}, ${turn!.id}, 'behavior', 'Wrong session', ${JSON.stringify(snapshot)}::jsonb)`)).rejects.toThrow();
   });
 
   it('refuses a fourth call in flight with 429', async () => {

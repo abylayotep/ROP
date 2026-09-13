@@ -667,6 +667,35 @@ export type CoachProposal =
   | { kind: 'note'; path: string; body: string }
   | { kind: 'note_edit'; noteId: string; body: string };
 
+export type CoachSource =
+  | { kind: 'conversation_reply'; conversationId: string; aiReplyId: string }
+  | { kind: 'sandbox_turn'; sessionId: string; turnId: string };
+
+export type CorrectionType = 'fact' | 'behavior';
+
+export interface CoachFeedbackRequest {
+  source: CoachSource;
+  correctionType: CorrectionType;
+  note: string;
+}
+
+/** A bounded, verified copy of the response context, never an internal prompt or credential. */
+export interface CoachSourceSnapshot {
+  transcript: string;
+  responseText: string;
+  configVersion: number;
+  sourceIds: string[];
+  sourceRecords: { id: string; title: string; content: string }[];
+}
+
+export interface ResponseFeedback extends CoachFeedbackRequest {
+  id: string;
+  revision: number;
+  snapshot: CoachSourceSnapshot;
+  status: 'pending' | 'proposed' | 'drafted';
+  createdAt: string;
+}
+
 export interface CoachMessage {
   id: string;
   role: 'owner' | 'model';
@@ -678,6 +707,9 @@ export interface CoachMessage {
   /** Set once the proposal became a draft. The drafts plan fills this in. */
   draftId: string | null;
   conversationId: string | null;
+  revision?: number;
+  feedbackId?: string | null;
+  sourceSnapshot?: CoachSourceSnapshot | null;
   createdAt: string;
 }
 

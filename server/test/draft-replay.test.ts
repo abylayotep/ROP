@@ -43,6 +43,8 @@ interface ScriptedModel extends ModelClient {
     stageId?: string | null;
     fields?: Record<string, string>;
     handoff?: { reason: string } | null;
+    /** Cite only the records whose text contains this; every record shown when omitted. */
+    cites?: string;
   }): void;
   /** The `CompletionInput` of the call at this position, or undefined if it never happened. */
   callsAt(index: number): CompletionInput | undefined;
@@ -65,15 +67,17 @@ function scriptedModel(): ScriptedModel {
 
   return {
     calls,
-    reply({ text, stageId = null, fields = {}, handoff = null }) {
-      answers.push(JSON.stringify({ reply: text, stageId, fields, handoff, usedItemIds: [] }));
+    reply({ text, stageId = null, fields = {}, handoff = null, cites }) {
+      answers.push(JSON.stringify({ reply: text, stageId, fields, handoff, usedItemIds: [], cites }));
     },
     async complete(input) {
       calls.push(input);
       const scripted = answers[Math.min(calls.length - 1, answers.length - 1)] ?? '{}';
-      const parsed = JSON.parse(scripted) as Record<string, unknown>;
+      const { cites, ...parsed } = JSON.parse(scripted) as Record<string, unknown>;
       const prompt = input.messages.map((message) => message.content).join('\n');
-      const usedItemIds = [...prompt.matchAll(/<запись id="([^"]+)"/g)].map((match) => match[1]);
+      const usedItemIds = [...prompt.matchAll(/<запись id="([^"]+)"[^>]*>([\s\S]*?)<\/запись>/g)]
+        .filter((match) => typeof cites !== 'string' || (match[2] ?? '').includes(cites))
+        .map((match) => match[1]);
       return {
         text: JSON.stringify({ ...parsed, usedItemIds }),
         promptTokens: 100,
@@ -294,7 +298,9 @@ describe('replaying a case', () => {
     await db.transaction((tx) =>
       saveNote(tx as unknown as Db, { agentId, path: 'Доставка', body: 'Доставка 1000 тенге' }),
     );
-    model.reply({ text: 'Доставка 1000 тенге.' });
+    // A small store travels whole, so the draft's own note is shown too; the reply cites
+    // only the untouched one.
+    model.reply({ text: 'Доставка 1000 тенге.', cites: 'Доставка 1000 тенге' });
 
     const result = await runCase({
       agentId,

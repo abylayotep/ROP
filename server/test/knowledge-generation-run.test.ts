@@ -1,7 +1,9 @@
 import { eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { agents, contacts, conversations, kbDrafts, kbGenerationBatches, kbGenerationProposals, kbGenerationRawFindings, kbGenerationRuns, kbNotes, messages, users, whatsappNumbers, accounts } from '../src/db/schema.js';
+import type { CompletionInput } from '../src/lib/ai/openrouter.js';
 import { keyAad } from '../src/lib/ai/turn.js';
+import { SEED_TOPICS } from '../src/lib/knowledge/generation-consolidate.js';
 import { cancelGenerationRun, executeGenerationRun, reconcileGenerationRuns, retryGenerationRun, startGenerationRun } from '../src/lib/knowledge/generation-run.js';
 import { previewSelection } from '../src/lib/knowledge/generation-selection.js';
 import { encryptSecret } from '../src/lib/secret-box.js';
@@ -32,30 +34,30 @@ const classified = (
   proposals,
 });
 
-const consolidated = (items: unknown[]) => JSON.stringify({ items });
+/**
+ * Answers a consolidation call like the two topic prompts: the assign step files each finding
+ * under its own path's title (legacy «Скрипт/» findings included), and a write call returns the
+ * first finding's body.
+ */
+const consolidationAnswer = (call: CompletionInput): string => {
+  const payload = JSON.parse(call.messages[1]!.content) as {
+    proposals?: { id: string; path: string }[];
+    findings?: { body: string }[];
+  };
+  if (payload.proposals) {
+    return JSON.stringify({ assignments: payload.proposals.map((proposal) => ({
+      id: proposal.id, topic: proposal.path.slice(proposal.path.lastIndexOf('/') + 1),
+    })) });
+  }
+  return JSON.stringify({ body: payload.findings![0]!.body, confidence: 'high' });
+};
 
 const consolidationModel = (extraction: string) => {
   const model = fakeModel();
   model.complete = async (call) => {
     model.calls.push(call);
-    if (model.calls.length === 1) {
-      return { text: extraction, promptTokens: 100, completionTokens: 20, cost: '0.00010000' };
-    }
-    const payload = JSON.parse(call.messages[1]!.content) as {
-      proposals: { id: string; path: string; body: string }[];
-    };
-    return {
-      // Like the real prompt, legacy «Скрипт/» findings come back as knowledge topics.
-      text: consolidated(payload.proposals.map((proposal) => ({
-        path: proposal.path.replace(/^Скрипт\//, 'База знаний/'),
-        body: proposal.body,
-        confidence: 'high',
-        sourceProposalIds: [proposal.id],
-      }))),
-      promptTokens: 100,
-      completionTokens: 20,
-      cost: '0.00010000',
-    };
+    const text = model.calls.length === 1 ? extraction : consolidationAnswer(call);
+    return { text, promptTokens: 100, completionTokens: 20, cost: '0.00010000' };
   };
   return model;
 };
@@ -245,8 +247,10 @@ describe('generation runs', () => {
     expect(proposals).toHaveLength(2);
     expect(await db.select().from(kbGenerationRawFindings).where(eq(kbGenerationRawFindings.runId, run.id)))
       .toHaveLength(2);
+    // Extraction, one assign call and one write call per topic.
+    expect(model.calls).toHaveLength(4);
     expect((await db.select().from(kbGenerationRuns).where(eq(kbGenerationRuns.id, run.id)))[0])
-      .toMatchObject({ status: 'completed', promptTokens: 200, completionTokens: 40, cost: '0.00020000' });
+      .toMatchObject({ status: 'completed', promptTokens: 400, completionTokens: 80, cost: '0.00040000' });
   });
 
   it('tells consolidation about knowledge-base topics and the open chat draft', async () => {
@@ -260,16 +264,15 @@ describe('generation runs', () => {
       ops: [{ op: 'note_create', path: 'База знаний/Сроки', body: 'Два дня.' }],
     });
     const model = consolidationModel(classified([
-      { path: 'База знаний/Доставка', body: 'Доставка занимает два дня.', sources: [messageId], warnings: [] },
+      { path: 'База знаний/Сроки', body: 'Доставка занимает два дня.', sources: [messageId], warnings: [] },
     ]));
 
     await executeGenerationRun({ db, model, credentialsKey: key }, run.id);
 
-    const payload = JSON.parse(model.calls[1]!.messages[1]!.content) as { existingTopics: unknown[] };
-    expect(payload.existingTopics).toEqual([
-      { path: 'База знаний/Оплата', body: 'Kaspi.' },
-      { path: 'База знаний/Сроки', body: 'Два дня.' },
-    ]);
+    const assign = JSON.parse(model.calls[1]!.messages[1]!.content) as { topics: string[] };
+    expect(assign.topics).toEqual(['Оплата', 'Сроки', ...SEED_TOPICS.filter((seed) => seed !== 'Оплата')]);
+    const write = JSON.parse(model.calls[2]!.messages[1]!.content) as { topic: string; existingBody?: string };
+    expect(write).toEqual(expect.objectContaining({ topic: 'Сроки', existingBody: 'Два дня.' }));
   });
 
   it('keeps grounded raw findings and reports an honest error when consolidation fails', async () => {
@@ -306,22 +309,11 @@ describe('generation runs', () => {
     }, run.id);
 
     await expect(retryGenerationRun(db, agentId, run.id)).resolves.toMatchObject({ status: 'queued' });
-    const model = fakeModel(consolidated([{
-      path: 'База знаний/Доставка',
-      body: 'Доставка занимает два дня.',
-      confidence: 'high',
-      sourceProposalIds: [],
-    }]));
+    const model = fakeModel();
     model.complete = async (call) => {
       model.calls.push(call);
-      const payload = JSON.parse(call.messages[1]!.content) as { proposals: { id: string }[] };
       return {
-        text: consolidated([{
-          path: 'База знаний/Доставка',
-          body: 'Доставка занимает два дня.',
-          confidence: 'high',
-          sourceProposalIds: [payload.proposals[0]!.id],
-        }]),
+        text: consolidationAnswer(call),
         promptTokens: 50,
         completionTokens: 10,
         cost: '0.00005000',
@@ -330,11 +322,13 @@ describe('generation runs', () => {
 
     await executeGenerationRun({ db, model, credentialsKey: key }, run.id);
 
-    expect(model.calls).toHaveLength(1);
+    expect(model.calls).toHaveLength(2);
     expect((await db.select().from(kbGenerationBatches).where(eq(kbGenerationBatches.runId, run.id)))[0])
       .toMatchObject({ status: 'done', attempts: 1, promptTokens: 100, completionTokens: 20 });
     expect((await db.select().from(kbGenerationRuns).where(eq(kbGenerationRuns.id, run.id)))[0])
-      .toMatchObject({ status: 'completed', promptTokens: 150, completionTokens: 30, cost: '0.00015000' });
+      .toMatchObject({ status: 'completed', promptTokens: 200, completionTokens: 40, cost: '0.00020000' });
+    expect(await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.runId, run.id)))
+      .toEqual([expect.objectContaining({ path: 'База знаний/Доставка', body: 'Доставка занимает два дня.' })]);
   });
 
   it('resumes only consolidation after an interruption that followed persisted extraction', async () => {
@@ -361,14 +355,8 @@ describe('generation runs', () => {
     const model = fakeModel();
     model.complete = async (call) => {
       model.calls.push(call);
-      const payload = JSON.parse(call.messages[1]!.content) as { proposals: { id: string }[] };
       return {
-        text: consolidated([{
-          path: 'База знаний/Доставка',
-          body: 'Доставка занимает два дня.',
-          confidence: 'high',
-          sourceProposalIds: [payload.proposals[0]!.id],
-        }]),
+        text: consolidationAnswer(call),
         promptTokens: 40,
         completionTokens: 8,
         cost: '0.00004000',
@@ -377,9 +365,9 @@ describe('generation runs', () => {
 
     await executeGenerationRun({ db, model, credentialsKey: key }, run.id);
 
-    expect(model.calls).toHaveLength(1);
+    expect(model.calls).toHaveLength(2);
     expect((await db.select().from(kbGenerationRuns).where(eq(kbGenerationRuns.id, run.id)))[0])
-      .toMatchObject({ status: 'completed', promptTokens: 120, completionTokens: 20, cost: '0.00012000' });
+      .toMatchObject({ status: 'completed', promptTokens: 160, completionTokens: 28, cost: '0.00016000' });
   });
 
   it('persists classification and excludes proposals from an irrelevant batch', async () => {

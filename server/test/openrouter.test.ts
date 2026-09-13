@@ -164,6 +164,18 @@ describe('a completion', () => {
     expect(calls[0]!.init.signal).toBeInstanceOf(AbortSignal);
     deadline.mockRestore();
   });
+
+  it('uses a caller-supplied deadline instead of the default', async () => {
+    answerWith(completion('{}'));
+    const deadline = vi.spyOn(AbortSignal, 'timeout');
+
+    await client.complete({ ...input, timeoutMs: 120_000 });
+
+    expect(deadline).toHaveBeenCalledWith(120_000);
+    expect(deadline).not.toHaveBeenCalledWith(TIMEOUT_MS);
+    expect(body()).not.toHaveProperty('timeoutMs');
+    deadline.mockRestore();
+  });
 });
 
 describe('audio transcription', () => {

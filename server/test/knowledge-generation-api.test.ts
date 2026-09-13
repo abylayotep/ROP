@@ -58,8 +58,6 @@ beforeEach(async () => {
 
 afterEach(async () => app.close());
 
-const consolidated = (items: unknown[]) => JSON.stringify({ items });
-
 function useConsolidatingModel(proposals: { path: string; body: string }[]): void {
   model.complete = async (input) => {
     model.calls.push(input);
@@ -81,16 +79,18 @@ function useConsolidatingModel(proposals: { path: string; body: string }[]): voi
         cost: '0.00100000',
       };
     }
+    // The two consolidation steps: assign each finding to its own path's title, then write the
+    // topic body from its first finding.
     const payload = JSON.parse(input.messages[1]!.content) as {
-      proposals: { id: string; path: string; body: string }[];
+      proposals?: { id: string; path: string }[];
+      findings?: { body: string }[];
     };
     return {
-      text: consolidated(payload.proposals.map((proposal) => ({
-        path: proposal.path,
-        body: proposal.body,
-        confidence: 'high',
-        sourceProposalIds: [proposal.id],
-      }))),
+      text: payload.proposals
+        ? JSON.stringify({ assignments: payload.proposals.map((proposal) => ({
+          id: proposal.id, topic: proposal.path.slice(proposal.path.lastIndexOf('/') + 1),
+        })) })
+        : JSON.stringify({ body: payload.findings![0]!.body, confidence: 'high' }),
       promptTokens: 10,
       completionTokens: 4,
       cost: '0.00100000',

@@ -80,9 +80,9 @@ capture, pagination and source links. Local fake transports do not establish tha
 production cashier session is connected. After deployment, verify a small real
 invoice and its confirmed payment before enabling unattended checkout.
 
-## Releasing migration 0046
+## Releasing migration 0050
 
-Migration `0046_merge_awaiting_payment` moves every lead in an awaiting-payment stage into
+Migration `0050_merge_awaiting_payment` moves every lead in an awaiting-payment stage into
 its agent's sale stage. It does not reset those leads' analyses: `deploy/release.sh` runs
 migrations while the previous API is still serving, and restarts the previous API when the
 new one fails its health check, so an analysis reset inside the migration would let the old
@@ -110,6 +110,6 @@ WHERE ca.conversation_id = c.id
 
 On the host: `cd /opt/rakurs && docker compose -f deploy/compose.yml --env-file deploy/.env
 exec -T postgres psql -U rakurs rakurs`, then paste the statement. The merged transition is
-recognised by its deleted source stage (`from_stage_id` is null once 0046 deletes it) and a
+recognised by its deleted source stage (`from_stage_id` is null once 0050 deletes it) and a
 system move into the sale stage; the two-day bound keeps it to the release, so run it the
 same day. Running it twice only re-analyses the same leads again.

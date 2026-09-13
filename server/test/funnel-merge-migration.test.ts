@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { DEFAULT_STAGES } from '../src/lib/funnel.js';
 import { ADMIN_URL, DRIZZLE_DIR, runMigration, tagsBefore, withDatabase } from './helpers/migration-db.js';
 
 /**
@@ -63,10 +64,14 @@ describe('migration 0050: awaiting_payment stages merge into the sale stage', ()
     const agentB = b!.id as string;
 
     newLeadIdA = await stage(agentA, 'Новый лид', 'active', 0);
-    await stage(agentA, 'Готов к покупке', 'active', 1);
+    const readyA = await stage(agentA, 'Готов к покупке', 'active', 1);
     const orderedA = await stage(agentA, 'Заказано', 'awaiting_payment', 2);
     saleIdA = await stage(agentA, 'Оплачено', 'success', 3);
     await stage(agentA, 'Отказ', 'failure', 4);
+    // As 0046_stage_agent_goal left them: default texts, except a goal the owner rewrote.
+    await sql`UPDATE stages SET description = 'Клиент сказал, что берёт, и согласовал, что именно заказывает.',
+      agent_goal = 'Подтверди состав заказа, назови итоговую сумму и уточни данные для доставки. Затем предложи способ оплаты.' WHERE id = ${readyA}`;
+    await sql`UPDATE stages SET description = 'Оплата подтверждена.', agent_goal = 'Своя цель владельца' WHERE id = ${saleIdA}`;
 
     const numberA = await number(agentA, 'a-136');
     movedIds = [
@@ -122,6 +127,13 @@ describe('migration 0050: awaiting_payment stages merge into the sale stage', ()
     // Left for the post-release reset: an old worker still running must not re-analyse the lead.
     expect(analysis).toMatchObject({ analyzed_message_id: analyzedMessageId, status: 'ready' });
     expect(analysis!.lease_token).not.toBeNull();
+    const ready = DEFAULT_STAGES.find((d) => d.name === 'Готов к покупке')!;
+    const paid = DEFAULT_STAGES.find((d) => d.name === 'Оплачено')!;
+    const texts = await sql`SELECT name, description, agent_goal FROM stages WHERE agent_id = ${agentA} AND name IN ('Готов к покупке', 'Оплачено') ORDER BY position`;
+    expect(texts).toEqual([
+      { name: 'Готов к покупке', description: ready.description, agent_goal: ready.agentGoal },
+      { name: 'Оплачено', description: paid.description, agent_goal: 'Своя цель владельца' },
+    ]);
     // agent B keeps its lead and the stage becomes active
     expect(stageB).toMatchObject({ name: 'Ждёт', kind: 'active' });
     expect(conversationB!.stage_id).toBe(stageB!.id);
@@ -130,7 +142,7 @@ describe('migration 0050: awaiting_payment stages merge into the sale stage', ()
 
   it('re-queues analysis of merged leads only, with the post-release statement from docs/crm-kaspi.md', async () => {
     const doc = readFileSync(path.join(DRIZZLE_DIR, '../../docs/crm-kaspi.md'), 'utf8');
-    const section = doc.slice(doc.indexOf('## Releasing migration 0046'));
+    const section = doc.slice(doc.indexOf('## Releasing migration 0050'));
     const statement = /```sql\n([\s\S]*?)```/.exec(section)?.[1];
     expect(statement).toBeDefined();
 

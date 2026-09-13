@@ -22,3 +22,16 @@ DELETE FROM stages WHERE kind = 'awaiting_payment';
 UPDATE stages SET position = r.pos
 FROM (SELECT id, (row_number() OVER (PARTITION BY agent_id ORDER BY position, id) - 1)::int AS pos FROM stages) r
 WHERE stages.id = r.id AND stages.position <> r.pos;
+--> statement-breakpoint
+-- The default texts 0046_stage_agent_goal wrote for the stages around the merged one: the
+-- ready-to-buy goal takes over helping the customer pay, and the sale stage is no longer
+-- only a Kaspi confirmation. Texts an owner has changed are left alone.
+UPDATE stages SET
+  description = CASE WHEN description = 'Клиент сказал, что берёт, и согласовал, что именно заказывает.'
+    THEN 'Клиент сказал, что берёт, и согласовал, что именно заказывает. Сюда же — заказ согласован и ждём оплату.' ELSE description END,
+  agent_goal = CASE WHEN agent_goal = 'Подтверди состав заказа, назови итоговую сумму и уточни данные для доставки. Затем предложи способ оплаты.'
+    THEN 'Подтверди состав заказа, назови итоговую сумму и уточни данные для доставки. Затем предложи способ оплаты и помоги оплатить по инструкциям владельца. Никогда не говори, что оплата получена.' ELSE agent_goal END
+WHERE btrim(name) = 'Готов к покупке';
+--> statement-breakpoint
+UPDATE stages SET description = 'Оплата прошла: её подтвердил Kaspi, клиент написал, что оплатил, или продавец подтвердил поступление денег.'
+WHERE btrim(name) = 'Оплачено' AND kind = 'success' AND description = 'Оплата подтверждена.';

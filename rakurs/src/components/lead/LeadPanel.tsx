@@ -566,6 +566,7 @@ const CRM_FIELDS: Record<string,string> = {
 function CrmDetails({lead}:{lead:Lead}) {
   const crm = lead.crm;
   const payment = crm?.paymentEvidence === 'confirmed' ? 'Подтверждена'
+    : crm?.paymentEvidence === 'paid' ? 'Оплачено по переписке'
     : crm?.paymentEvidence === 'needs_verification' ? 'Требует проверки'
     : crm?.paymentEvidence === 'awaiting_payment' ? 'Ожидается'
     : 'Нет подтверждённых данных';

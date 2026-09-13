@@ -21,7 +21,6 @@ const control: CSSProperties = {
 const KINDS: { id: Stage['kind']; label: string }[] = [
   { id: 'active', label: 'В работе' },
   { id: 'qualified', label: 'Квалифицирован' },
-  { id: 'awaiting_payment', label: 'Ждёт оплаты' },
   { id: 'success', label: 'Продажа' },
   { id: 'failure', label: 'Отказ' },
 ];

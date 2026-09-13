@@ -46,8 +46,30 @@ describe('durable Kaspi checkout', () => {
     expect(order?.paidAt).toBeTruthy();
     expect((await db.select().from(stageTransitions))).toHaveLength(1);
     expect((await db.select().from(conversations))[0]?.stageSetBy).toBe('system');
+    // The order is paid at the very moment the lead enters the sale stage: one sale episode.
+    expect((await db.select().from(conversations))[0]?.stageSetAt?.getTime()).toBe(order!.paidAt!.getTime());
     await reconcileKaspiPayment(db, env, agentId, created.id);
     expect(fetcher).toHaveBeenCalledTimes(3);
+  });
+  it('refuses a new invoice while the paid deal stands in the sale stage, and allows a repeat purchase once moved out', async () => {
+    const [sale] = await db.select().from(stages).where(eq(stages.agentId, agentId));
+    const [work] = await db.insert(stages).values({ agentId, name: 'Work', color: '#8a94a6', kind: 'active', position: 0 }).returning();
+    await db.update(conversations).set({ stageId: sale!.id, stageSetAt: new Date() }).where(eq(conversations.id, conversationId));
+    await db.insert(orders).values({ agentId, conversationId, amount: '6990', currency: 'KZT', status: 'paid', comment: 'Оплата по переписке', paidAt: new Date() });
+    await expect(createKaspiCheckout(db, env, input())).rejects.toMatchObject({ statusCode: 409, message: 'У сделки уже есть оплаченный заказ' });
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(await db.select().from(kaspiPayments)).toHaveLength(0);
+
+    await db.update(conversations).set({ stageId: work!.id, stageSetAt: new Date() }).where(eq(conversations.id, conversationId));
+    fetcher.mockResolvedValueOnce(reply({ QrOperationId: 'operation-repeat' }));
+    expect((await createKaspiCheckout(db, env, input())).status).toBe('pending');
+  });
+  it('invoices a repeat customer moved out of the sale stage and back, past an earlier paid order', async () => {
+    const [sale] = await db.select().from(stages).where(eq(stages.agentId, agentId));
+    await db.insert(orders).values({ agentId, conversationId, amount: '6990', currency: 'KZT', status: 'paid', comment: 'Оплата по переписке', paidAt: new Date(Date.now() - 86_400_000) });
+    await db.update(conversations).set({ stageId: sale!.id, stageSetAt: new Date() }).where(eq(conversations.id, conversationId));
+    fetcher.mockResolvedValueOnce(reply({ QrOperationId: 'operation-episode' }));
+    expect((await createKaspiCheckout(db, env, input())).status).toBe('pending');
   });
   it('retains an unknown create and never sends a second invoice after a timeout', async () => {
     fetcher.mockRejectedValue(new Error('timeout'));

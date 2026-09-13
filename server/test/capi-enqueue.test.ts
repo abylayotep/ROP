@@ -1,5 +1,5 @@
 import { confirmKaspiOrder } from './helpers/kaspi.js';
-import { queuePurchase } from '../src/lib/capi/enqueue.js';
+import { queueMissingPurchases, queuePurchase } from '../src/lib/capi/enqueue.js';
 import { randomUUID } from 'node:crypto';
 import { asc, eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
@@ -253,6 +253,29 @@ describe('an order becoming paid', () => {
     expect(event.payload).toContain(`"event_time":${Math.floor(paidAt!.getTime() / 1000)}`);
     expect(event.payload).toContain(`"ctwa_clid":"${CLID}"`);
     expect(event.payload).toContain('"whatsapp_business_account_id":"waba"');
+  });
+
+  it('recovers a recent paid order whose purchase was never queued, once', async () => {
+    const [order] = await db.insert(orders).values({ agentId, conversationId: adConversationId, amount: '6990', currency: 'KZT',
+      status: 'paid', comment: 'Оплата по переписке', paidAt: new Date() }).returning();
+    await db.insert(orders).values({ agentId, conversationId: adConversationId, amount: '100', currency: 'KZT',
+      status: 'paid', paidAt: new Date(Date.now() - 30 * 86_400_000) });
+
+    expect(await queueMissingPurchases(db)).toEqual([]);
+    expect(await queueMissingPurchases(db)).toEqual([]);
+
+    const rows = await queued();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.eventId).toBe(purchaseEventId(order!.id));
+  });
+
+  it('names the orders a sweep still could not queue a purchase for', async () => {
+    const [order] = await db.insert(orders).values({ agentId, conversationId: adConversationId, amount: '6990', currency: 'KZT',
+      status: 'paid', comment: 'Оплата по переписке', paidAt: new Date() }).returning();
+
+    // queuePurchase swallows its failures, so a failing one is one that leaves no row.
+    expect(await queueMissingPurchases(db, async () => {})).toEqual([order!.id]);
+    expect(await queued()).toHaveLength(0);
   });
 
   it('queues a purchase for a provider-confirmed order', async () => {

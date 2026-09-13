@@ -3,11 +3,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { withDb } from './helpers/db.js';
 import { createAccountWithOwner } from '../src/lib/provision.js';
-import { agents, aiReplies, capiEvents, contacts, conversations, crmAnalyses, leadFields, leadValues, messages, notes, stages, whatsappNumbers } from '../src/db/schema.js';
+import { agents, aiReplies, capiEvents, contacts, conversations, crmAnalyses, kaspiPayments, leadFields, leadValues, messages, notes, orders, stages, whatsappNumbers } from '../src/db/schema.js';
 import { seedFunnel } from '../src/lib/funnel.js';
 import { encryptSecret } from '../src/lib/secret-box.js';
 import { analyzeConversation, drainCrmAnalyses } from '../src/lib/crm/worker.js';
+import { hasVisiblePayment, operatorLeftSale } from '../src/lib/crm/payment.js';
+import { recordStageMove } from '../src/lib/funnel-history.js';
 import * as automationPolicy from '../src/lib/automation/policy.js';
+import { ApiError } from '../src/lib/errors.js';
 
 let db: Awaited<ReturnType<typeof withDb>>;
 let agentId: string; let conversationId: string; let messageId: string; let targetId: string;
@@ -401,4 +404,347 @@ describe('independent CRM analysis', () => {
     expect((await db.select().from(crmAnalyses))[0]?.handledLiveMessageId).toBe(messageId);
   });
 
+});
+
+describe('chat payment', () => {
+  const sale = async () => (await db.select().from(stages).where(eq(stages.agentId, agentId))).find((s) => s.kind === 'success')!;
+  const paidChat = async () => {
+    const [offer] = await db.insert(messages).values({ conversationId, direction: 'out', author: 'phone', kind: 'text',
+      body: 'Размер 40 мм — 6.990 тенге', sentAt: new Date('2026-01-01T00:01:00Z') }).returning();
+    const [transfer] = await db.insert(messages).values({ conversationId, direction: 'in', author: 'client', kind: 'text',
+      body: 'Перевела 6990, спасибо', sentAt: new Date('2026-01-01T00:02:00Z') }).returning();
+    model.complete.mockResolvedValue({ text: JSON.stringify({ stageId: null, summary: 'Оплатила переводом', confidence: 90, profile: {}, fields: {},
+      checkout: null, payment: { state: 'paid', messageId: transfer!.id, quote: 'Перевела 6990', reason: 'Клиент перевёл оплату' },
+      paidAmount: { value: '6990', messageId: offer!.id, quote: '6.990 тенге' } }), promptTokens: 1, completionTokens: 1, cost: '0' });
+  };
+
+  it('moves a lead that paid by transfer to the sale stage and records one paid order', async () => {
+    await paidChat();
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+    const [conversation] = await db.select().from(conversations).where(eq(conversations.id, conversationId));
+    expect(conversation?.stageId).toBe((await sale()).id);
+    const rows = await db.select().from(orders).where(eq(orders.conversationId, conversationId));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ amount: '6990.00', status: 'paid', comment: 'Оплата по переписке' });
+    expect(rows[0]!.paidAt?.getTime()).toBe(conversation!.stageSetAt!.getTime());
+    expect((await db.select().from(capiEvents)).filter((e) => e.kind === 'purchase')).toHaveLength(1);
+    const [analysis] = await db.select().from(crmAnalyses).where(eq(crmAnalyses.conversationId, conversationId));
+    expect(analysis?.profile.paymentEvidence).toBe('paid');
+  });
+
+  it('does not record a second order when the conversation is analysed again', async () => {
+    await paidChat();
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+    await db.insert(messages).values({ conversationId, direction: 'in', author: 'client', kind: 'text', body: 'Когда отправите?', sentAt: new Date('2026-01-01T00:03:00Z') });
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+    expect(await db.select().from(orders)).toHaveLength(1);
+    expect((await db.select().from(capiEvents)).filter((e) => e.kind === 'purchase')).toHaveLength(1);
+  });
+
+  it('gives an operator-moved sale its order once the amount is found, and never leaves the sale stage', async () => {
+    await db.update(conversations).set({ stageId: (await sale()).id, stageSetAt: new Date('2026-01-02T00:00:00Z') }).where(eq(conversations.id, conversationId));
+    await paidChat();
+    const text = JSON.parse((await model.complete.getMockImplementation()!()).text);
+    model.complete.mockResolvedValue({ text: JSON.stringify({ ...text, stageId: targetId, payment: null }), promptTokens: 1, completionTokens: 1, cost: '0' });
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+    expect((await db.select().from(conversations))[0]?.stageId).toBe((await sale()).id);
+    expect((await db.select().from(orders))[0]?.paidAt?.toISOString()).toBe('2026-01-02T00:00:00.000Z');
+  });
+
+  it('records no chat order while a Kaspi invoice is pending', async () => {
+    await paidChat();
+    const [order] = await db.insert(orders).values({ agentId, conversationId, amount: '6990', currency: 'KZT' }).returning();
+    await db.insert(kaspiPayments).values({ agentId, conversationId, orderId: order!.id, requestKey: 'chat-payment-test', method: 'invoice',
+      phone: '77011234567', amount: '6990', status: 'pending' });
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+    expect((await db.select().from(orders)).filter((o) => o.status === 'paid')).toHaveLength(0);
+  });
+
+  it('records no order when an operator moves the lead out of the sale stage during the model call', async () => {
+    await db.update(conversations).set({ stageId: (await sale()).id, stageSetAt: new Date('2026-01-02T00:00:00Z') }).where(eq(conversations.id, conversationId));
+    await paidChat();
+    const original = model.complete.getMockImplementation()!;
+    model.complete.mockImplementationOnce(async (...args: unknown[]) => {
+      await db.update(conversations).set({ stageId: targetId, stageSetAt: new Date(), stageSetBy: 'operator' }).where(eq(conversations.id, conversationId));
+      return original(...args);
+    });
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+    expect((await db.select().from(conversations))[0]?.stageId).toBe(targetId);
+    expect(await db.select().from(orders)).toHaveLength(0);
+    expect((await db.select().from(capiEvents)).filter((e) => e.kind === 'purchase')).toHaveLength(0);
+  });
+
+  it('does not use the quoted amount when the analysis is unsure', async () => {
+    await db.update(conversations).set({ stageId: (await sale()).id, stageSetAt: new Date('2026-01-02T00:00:00Z') }).where(eq(conversations.id, conversationId));
+    await paidChat();
+    const text = JSON.parse((await model.complete.getMockImplementation()!()).text);
+    model.complete.mockResolvedValue({ text: JSON.stringify({ ...text, payment: null, confidence: 50 }), promptTokens: 1, completionTokens: 1, cost: '0' });
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+    expect(await db.select().from(orders)).toHaveLength(0);
+  });
+
+  it('does not start a Kaspi checkout for a sale already paid in the chat', async () => {
+    await db.update(agents).set({ aiEnabled: true }).where(eq(agents.id, agentId));
+    const [offer] = await db.insert(messages).values({ conversationId, direction: 'out', author: 'operator', kind: 'text',
+      body: 'Итого 5000 ₸', sentAt: new Date(Date.now() - 60_000) }).returning();
+    await db.update(messages).set({ body: 'Отправьте счёт, пожалуйста', sentAt: new Date() }).where(eq(messages.id, messageId));
+    await db.update(conversations).set({ stageId: (await sale()).id, stageSetAt: new Date(Date.now() - 1000) }).where(eq(conversations.id, conversationId));
+    await db.insert(orders).values({ agentId, conversationId, amount: '5000', currency: 'KZT', status: 'paid', comment: 'Оплата по переписке', paidAt: new Date() });
+    await db.insert(crmAnalyses).values({ conversationId, pendingLiveMessageId: messageId });
+    model.complete.mockResolvedValueOnce({ text: JSON.stringify({ stageId: targetId, summary: 'Хочет оплатить', confidence: 95, profile: {}, fields: {},
+      checkout: { method: 'invoice', messageId, quote: 'Отправьте счёт', amount: '5000', amountMessageId: offer!.id } }),
+      promptTokens: 1, completionTokens: 1, cost: '0' });
+    const checkout = vi.fn(); const reply = vi.fn();
+    await analyzeConversation(db, { model, key, checkout, reply }, { agentId, conversationId, live: true });
+    expect(checkout).not.toHaveBeenCalled();
+    expect(reply).toHaveBeenCalledWith(agentId, conversationId);
+  });
+
+  /** What the leads API does when an operator drags a lead: move it and record the move. */
+  const operatorMoves = async (toId: string, movedBy: 'operator' | 'ai' | 'scenario' = 'operator') => {
+    const funnel = await db.select().from(stages).where(eq(stages.agentId, agentId));
+    const [current] = await db.select().from(conversations).where(eq(conversations.id, conversationId));
+    const to = funnel.find((s) => s.id === toId)!;
+    await db.update(conversations).set({ stageId: to.id, stageSetAt: new Date(), stageSetBy: movedBy }).where(eq(conversations.id, conversationId));
+    await recordStageMove(db, { agentId, conversationId, from: funnel.find((s) => s.id === current!.stageId) ?? null, to, movedBy });
+  };
+
+  it('leaves a lead an operator took out of the sale stage there, with no second chat order', async () => {
+    await paidChat();
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+    expect((await db.select().from(conversations))[0]?.stageId).toBe((await sale()).id);
+    await operatorMoves(targetId);
+    await db.delete(orders).where(eq(orders.conversationId, conversationId));
+    expect(await operatorLeftSale(db, conversationId)).toBe(true);
+    await db.insert(messages).values({ conversationId, direction: 'in', author: 'client', kind: 'text', body: 'Спасибо!', sentAt: new Date('2026-01-01T00:03:00Z') });
+
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+
+    expect((await db.select().from(conversations))[0]?.stageId).toBe(targetId);
+    expect(await db.select().from(orders)).toHaveLength(0);
+    expect((await db.select().from(capiEvents)).filter((e) => e.kind === 'purchase')).toHaveLength(1);
+    expect(await hasVisiblePayment(db, agentId, conversationId)).toBe(false);
+  });
+
+  it('still lets the lead move among the other stages after the operator undid the sale', async () => {
+    await paidChat();
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+    await operatorMoves(targetId);
+    const other = (await db.select().from(stages).where(eq(stages.agentId, agentId))).find((s) => s.kind === 'active' && s.id !== targetId)!;
+    const text = JSON.parse((await model.complete.getMockImplementation()!()).text);
+    model.complete.mockResolvedValue({ text: JSON.stringify({ ...text, stageId: other.id }), promptTokens: 1, completionTokens: 1, cost: '0' });
+    await db.insert(messages).values({ conversationId, direction: 'in', author: 'client', kind: 'text', body: 'Спасибо!', sentAt: new Date('2026-01-01T00:03:00Z') });
+
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+    expect((await db.select().from(conversations))[0]?.stageId).toBe(other.id);
+    // The AI's own move does not wipe out the operator's undo.
+    expect(await operatorLeftSale(db, conversationId)).toBe(true);
+    await db.insert(messages).values({ conversationId, direction: 'in', author: 'client', kind: 'text', body: 'Жду', sentAt: new Date('2026-01-01T00:04:00Z') });
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+    expect((await db.select().from(conversations))[0]?.stageId).toBe(other.id);
+  });
+
+  it('moves a lead the operator took out of the sale stage back once Kaspi confirms the money', async () => {
+    await paidChat();
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+    await operatorMoves(targetId);
+    await db.delete(orders).where(eq(orders.conversationId, conversationId));
+    const [order] = await db.insert(orders).values({ agentId, conversationId, amount: '6990', currency: 'KZT', status: 'paid', paidAt: new Date() }).returning();
+    await db.insert(kaspiPayments).values({ agentId, conversationId, orderId: order!.id, requestKey: 'undo-kaspi', method: 'invoice',
+      phone: '77011234567', amount: '6990', status: 'paid', operationId: 'undo-operation', confirmedAt: new Date() });
+    await db.insert(messages).values({ conversationId, direction: 'in', author: 'client', kind: 'text', body: 'Оплатила счёт', sentAt: new Date('2026-01-01T00:03:00Z') });
+
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+
+    expect((await db.select().from(conversations))[0]?.stageId).toBe((await sale()).id);
+    expect(await hasVisiblePayment(db, agentId, conversationId)).toBe(true);
+  });
+
+  it('forgets the undo once an operator puts the lead back into the sale stage', async () => {
+    await operatorMoves((await sale()).id);
+    expect(await operatorLeftSale(db, conversationId)).toBe(false);
+    await operatorMoves(targetId);
+    expect(await operatorLeftSale(db, conversationId)).toBe(true);
+    await operatorMoves((await sale()).id);
+    expect(await operatorLeftSale(db, conversationId)).toBe(false);
+  });
+
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
+
+  it('records a second chat order and Purchase when a customer buys again in a new sale episode', async () => {
+    await paidChat();
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+    await tick();
+    await operatorMoves(targetId);
+    await tick();
+    await operatorMoves((await sale()).id);
+    const [offer] = await db.insert(messages).values({ conversationId, direction: 'out', author: 'phone', kind: 'text',
+      body: 'Второй ремешок — 4.500 тенге', sentAt: new Date(Date.now() + 1000) }).returning();
+    const [transfer] = await db.insert(messages).values({ conversationId, direction: 'in', author: 'client', kind: 'text',
+      body: 'Перевела 4500', sentAt: new Date(Date.now() + 2000) }).returning();
+    model.complete.mockResolvedValue({ text: JSON.stringify({ stageId: null, summary: 'Купила ещё раз', confidence: 90, profile: {}, fields: {},
+      checkout: null, payment: { state: 'paid', messageId: transfer!.id, quote: 'Перевела 4500', reason: 'Клиент перевёл оплату' },
+      paidAmount: { value: '4500', messageId: offer!.id, quote: '4.500 тенге' } }), promptTokens: 1, completionTokens: 1, cost: '0' });
+
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+    expect((await db.select().from(orders)).map((o) => o.amount).sort()).toEqual(['4500.00', '6990.00']);
+    expect((await db.select().from(capiEvents)).filter((e) => e.kind === 'purchase')).toHaveLength(2);
+
+    // Analysed again inside the same episode: still one order for it.
+    await db.insert(messages).values({ conversationId, direction: 'in', author: 'client', kind: 'text', body: 'Спасибо', sentAt: new Date(Date.now() + 3000) });
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+    expect(await db.select().from(orders)).toHaveLength(2);
+    expect((await db.select().from(capiEvents)).filter((e) => e.kind === 'purchase')).toHaveLength(2);
+  });
+
+  it('records no second order from the earlier sale\'s messages after the lead goes out of the sale stage and back', async () => {
+    await paidChat();
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+    await tick();
+    await operatorMoves(targetId);
+    await tick();
+    await operatorMoves((await sale()).id);
+    await db.insert(messages).values({ conversationId, direction: 'in', author: 'client', kind: 'text', body: 'Спасибо', sentAt: new Date(Date.now() + 1000) });
+
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+
+    expect(await db.select().from(orders)).toHaveLength(1);
+    expect((await db.select().from(capiEvents)).filter((e) => e.kind === 'purchase')).toHaveLength(1);
+  });
+
+  it('records no second order after out-and-back when the first chat order was backdated to an operator\'s earlier move', async () => {
+    // Regression: the operator put the lead into sale before the price and transfer, so the chat order's
+    // paid_at is that earlier move; the transfer must still count as the recorded sale's.
+    await operatorMoves((await sale()).id);
+    await db.update(conversations).set({ stageSetAt: new Date(Date.now() - 10_000) }).where(eq(conversations.id, conversationId));
+    const [offer] = await db.insert(messages).values({ conversationId, direction: 'out', author: 'phone', kind: 'text',
+      body: 'Размер 40 мм — 6.990 тенге', sentAt: new Date(Date.now() - 9_000) }).returning();
+    const [transfer] = await db.insert(messages).values({ conversationId, direction: 'in', author: 'client', kind: 'text',
+      body: 'Перевела 6990, спасибо', sentAt: new Date(Date.now() - 8_000) }).returning();
+    model.complete.mockResolvedValue({ text: JSON.stringify({ stageId: null, summary: 'Оплатила', confidence: 90, profile: {}, fields: {}, checkout: null,
+      payment: { state: 'paid', messageId: transfer!.id, quote: 'Перевела 6990', reason: 'Клиент перевёл оплату' },
+      paidAmount: { value: '6990', messageId: offer!.id, quote: '6.990 тенге' } }), promptTokens: 1, completionTokens: 1, cost: '0' });
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+    const [first] = await db.select().from(orders);
+    expect(first!.paidAt!.getTime()).toBeLessThan(transfer!.sentAt.getTime());
+    await tick();
+    await operatorMoves(targetId);
+    await tick();
+    await operatorMoves((await sale()).id);
+    await db.insert(messages).values({ conversationId, direction: 'in', author: 'client', kind: 'text', body: 'Спасибо', sentAt: new Date() });
+
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+
+    expect(await db.select().from(orders)).toHaveLength(1);
+    expect((await db.select().from(capiEvents)).filter((e) => e.kind === 'purchase')).toHaveLength(1);
+  });
+
+  it('does not move a lead back into the sale stage on the earlier sale\'s transfer', async () => {
+    await paidChat();
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+    await tick();
+    // Not an operator undo: only the age of the evidence stands in the way.
+    await operatorMoves(targetId, 'scenario');
+    await db.insert(messages).values({ conversationId, direction: 'in', author: 'client', kind: 'text', body: 'Спасибо', sentAt: new Date(Date.now() + 1000) });
+
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+
+    expect((await db.select().from(conversations))[0]?.stageId).toBe(targetId);
+    expect(await db.select().from(orders)).toHaveLength(1);
+    // Nor does the live agent: the stored claim belongs to the sale already recorded.
+    expect(await hasVisiblePayment(db, agentId, conversationId)).toBe(false);
+  });
+
+  it('does not record a chat order next to an earlier Kaspi sale from messages that predate it', async () => {
+    await paidChat();
+    const paidAt = new Date(Date.now() - 60_000);
+    const [order] = await db.insert(orders).values({ agentId, conversationId, amount: '6990', currency: 'KZT', status: 'paid', paidAt }).returning();
+    await db.insert(kaspiPayments).values({ agentId, conversationId, orderId: order!.id, requestKey: 'kaspi-earlier', method: 'invoice',
+      phone: '77011234567', amount: '6990', status: 'paid', operationId: 'kaspi-earlier', confirmedAt: paidAt });
+    await db.update(conversations).set({ stageId: (await sale()).id, stageSetAt: new Date(), stageSetBy: 'operator' }).where(eq(conversations.id, conversationId));
+
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+
+    expect(await db.select().from(orders)).toHaveLength(1);
+  });
+
+  it('starts a Kaspi checkout for a repeat customer moved out of the sale stage and back', async () => {
+    await db.update(agents).set({ aiEnabled: true }).where(eq(agents.id, agentId));
+    const [offer] = await db.insert(messages).values({ conversationId, direction: 'out', author: 'operator', kind: 'text',
+      body: 'Итого 5000 ₸', sentAt: new Date(Date.now() - 60_000) }).returning();
+    await db.update(messages).set({ body: 'Отправьте счёт, пожалуйста', sentAt: new Date() }).where(eq(messages.id, messageId));
+    await db.insert(orders).values({ agentId, conversationId, amount: '5000', currency: 'KZT', status: 'paid', comment: 'Оплата по переписке', paidAt: new Date(Date.now() - 86_400_000) });
+    await db.update(conversations).set({ stageId: (await sale()).id, stageSetAt: new Date(Date.now() - 3_600_000) }).where(eq(conversations.id, conversationId));
+    await db.insert(crmAnalyses).values({ conversationId, pendingLiveMessageId: messageId });
+    model.complete.mockResolvedValueOnce({ text: JSON.stringify({ stageId: null, summary: 'Хочет купить ещё', confidence: 95, profile: {}, fields: {},
+      checkout: { method: 'invoice', messageId, quote: 'Отправьте счёт', amount: '5000', amountMessageId: offer!.id } }),
+      promptTokens: 1, completionTokens: 1, cost: '0' });
+    const checkout = vi.fn(); const reply = vi.fn();
+    await analyzeConversation(db, { model, key, checkout, reply }, { agentId, conversationId, live: true });
+    expect(checkout).toHaveBeenCalledTimes(1);
+  });
+
+  it('writes a note and still replies when Kaspi refuses the checkout', async () => {
+    await db.update(agents).set({ aiEnabled: true }).where(eq(agents.id, agentId));
+    const [offer] = await db.insert(messages).values({ conversationId, direction: 'out', author: 'operator', kind: 'text',
+      body: 'Итого 5000 ₸', sentAt: new Date(Date.now() - 60_000) }).returning();
+    await db.update(messages).set({ body: 'Отправьте счёт, пожалуйста', sentAt: new Date() }).where(eq(messages.id, messageId));
+    await db.insert(crmAnalyses).values({ conversationId, pendingLiveMessageId: messageId });
+    model.complete.mockResolvedValueOnce({ text: JSON.stringify({ stageId: targetId, summary: 'Хочет оплатить', confidence: 95, profile: {}, fields: {},
+      checkout: { method: 'invoice', messageId, quote: 'Отправьте счёт', amount: '5000', amountMessageId: offer!.id } }),
+      promptTokens: 1, completionTokens: 1, cost: '0' });
+    const checkout = vi.fn().mockRejectedValue(new ApiError(409, 'У сделки уже есть оплаченный заказ')); const reply = vi.fn();
+
+    const result = await analyzeConversation(db, { model, key, checkout, reply }, { agentId, conversationId, live: true });
+
+    expect(result).toBe('ready');
+    expect(reply).toHaveBeenCalledWith(agentId, conversationId);
+    expect((await db.select().from(notes)).map((n) => n.body)).toEqual(['Счёт Kaspi не создан: У сделки уже есть оплаченный заказ']);
+    expect((await db.select().from(crmAnalyses))[0]?.status).not.toBe('failed');
+  });
+
+  it('does not return a repeat customer to the sale stage on a Kaspi payment from an earlier sale', async () => {
+    const paidAt = new Date(Date.now() - 60_000);
+    await db.update(conversations).set({ stageId: (await sale()).id, stageSetAt: paidAt, stageSetBy: 'system' }).where(eq(conversations.id, conversationId));
+    const [order] = await db.insert(orders).values({ agentId, conversationId, amount: '6990', currency: 'KZT', status: 'paid', paidAt }).returning();
+    await db.insert(kaspiPayments).values({ agentId, conversationId, orderId: order!.id, requestKey: 'earlier-sale', method: 'invoice',
+      phone: '77011234567', amount: '6990', status: 'paid', operationId: 'earlier-operation', confirmedAt: paidAt });
+    await operatorMoves(targetId);
+
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+
+    expect((await db.select().from(conversations))[0]?.stageId).toBe(targetId);
+    expect(await hasVisiblePayment(db, agentId, conversationId)).toBe(false);
+  });
+
+  it('starts a Kaspi checkout for a repeat customer moved back into work after an earlier paid sale', async () => {
+    await db.update(agents).set({ aiEnabled: true }).where(eq(agents.id, agentId));
+    const [offer] = await db.insert(messages).values({ conversationId, direction: 'out', author: 'operator', kind: 'text',
+      body: 'Итого 5000 ₸', sentAt: new Date(Date.now() - 60_000) }).returning();
+    await db.update(messages).set({ body: 'Отправьте счёт, пожалуйста', sentAt: new Date() }).where(eq(messages.id, messageId));
+    await db.insert(orders).values({ agentId, conversationId, amount: '5000', currency: 'KZT', status: 'paid', comment: 'Оплата по переписке', paidAt: new Date(Date.now() - 86_400_000) });
+    await db.update(conversations).set({ stageId: targetId, stageSetAt: new Date(Date.now() - 3_600_000) }).where(eq(conversations.id, conversationId));
+    await db.insert(crmAnalyses).values({ conversationId, pendingLiveMessageId: messageId });
+    model.complete.mockResolvedValueOnce({ text: JSON.stringify({ stageId: targetId, summary: 'Хочет купить ещё', confidence: 95, profile: {}, fields: {},
+      checkout: { method: 'invoice', messageId, quote: 'Отправьте счёт', amount: '5000', amountMessageId: offer!.id } }),
+      promptTokens: 1, completionTokens: 1, cost: '0' });
+    const checkout = vi.fn(); const reply = vi.fn();
+    await analyzeConversation(db, { model, key, checkout, reply }, { agentId, conversationId, live: true });
+    expect(checkout).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['paid', 'confirmed'])('treats stored %s payment evidence as visible payment', async (state) => {
+    expect(await hasVisiblePayment(db, agentId, conversationId)).toBe(false);
+    await db.insert(crmAnalyses).values({ conversationId, profile: { paymentEvidence: state } });
+    expect(await hasVisiblePayment(db, agentId, conversationId)).toBe(true);
+  });
+
+  it('does not move on a paid claim below the confidence threshold', async () => {
+    await paidChat();
+    const text = JSON.parse((await model.complete.getMockImplementation()!()).text);
+    model.complete.mockResolvedValue({ text: JSON.stringify({ ...text, confidence: 50 }), promptTokens: 1, completionTokens: 1, cost: '0' });
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+    expect((await db.select().from(conversations))[0]?.stageId).not.toBe((await sale()).id);
+    expect(await db.select().from(orders)).toHaveLength(0);
+  });
 });

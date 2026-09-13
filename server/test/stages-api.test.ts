@@ -121,12 +121,22 @@ describe('stages', () => {
     expect(res.json().autoMessage).toBeNull();
   });
 
+  it('refuses the removed awaiting_payment kind', async () => {
+    const created = await app.inject({ method: 'POST', url: `/api/agents/${agentId}/stages`, cookies: jar,
+      payload: { name: 'Ждёт оплаты', color: '#e0a13a', kind: 'awaiting_payment' } });
+    expect(created.statusCode).toBe(400);
+    const ready = await stageNamed('Готов к покупке');
+    const patched = await app.inject({ method: 'PATCH', url: `/api/agents/${agentId}/stages/${ready.id}`, cookies: jar,
+      payload: { kind: 'awaiting_payment' } });
+    expect(patched.statusCode).toBe(400);
+  });
+
   it('moves the sale when another stage is promoted', async () => {
-    const invoice = await stageNamed('Заказано');
+    const ready = await stageNamed('Готов к покупке');
 
     const res = await app.inject({
       method: 'PATCH',
-      url: `/api/agents/${agentId}/stages/${invoice.id}`,
+      url: `/api/agents/${agentId}/stages/${ready.id}`,
       cookies: jar,
       payload: { kind: 'success' },
     });

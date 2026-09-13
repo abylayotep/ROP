@@ -10,7 +10,7 @@ import type { Executor } from '../lib/funnel.js';
 import { isUuid } from '../lib/uuid.js';
 import { requireAgent } from './require-agent.js';
 
-const KINDS = ['active', 'qualified', 'awaiting_payment', 'success', 'failure'] as const;
+const KINDS = ['active', 'qualified', 'success', 'failure'] as const;
 const FIELD_KINDS = ['text', 'number', 'date'] as const;
 
 const createStage = z.object({

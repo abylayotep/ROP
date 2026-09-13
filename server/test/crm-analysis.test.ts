@@ -5,11 +5,11 @@ const messageId = '8a81e6fe-95f7-4f90-8314-e83830862921';
 const history = [{ id: messageId, author: 'client', body: 'Меня зовут Айгуль. Алматы. Закажу два фильтра, отправьте счёт.' }];
 const stages = [
   { id: 'new', name: 'Новый лид', kind: 'active', position: 0 },
-  { id: 'ordered', name: 'Заказано', kind: 'awaiting_payment', position: 1 },
+  { id: 'ready', name: 'Готов к покупке', kind: 'active', position: 1 },
   { id: 'paid', name: 'Оплачено', kind: 'success', position: 2 },
 ];
 const proof = (value: string) => ({ value, messageId, quote: value });
-const output = (patch = {}) => JSON.stringify({ stageId: 'ordered', summary: 'Заказал фильтры', confidence: 95,
+const output = (patch = {}) => JSON.stringify({ stageId: 'ready', summary: 'Заказал фильтры', confidence: 95,
   profile: { name: proof('Айгуль'), city: proof('Алматы') }, fields: {}, checkout: null, ...patch });
 
 describe('CRM extraction evidence', () => {
@@ -23,9 +23,9 @@ describe('CRM extraction evidence', () => {
     expect(result.fields).toEqual({ known: 'Алматы' });
   });
   it('does not treat a customer claim as paid or invent a stage', () => {
-    expect(resolveCrmStage(stages, 'paid', false)?.id).toBe('ordered');
-    expect(resolveCrmStage(stages, 'invented', false)).toBeNull();
-    expect(resolveCrmStage(stages, 'ordered', true)?.id).toBe('paid');
+    expect(resolveCrmStage(stages, 'paid', { paid: false, currentStageId: null })).toBeNull();
+    expect(resolveCrmStage(stages, 'invented', { paid: false, currentStageId: null })).toBeNull();
+    expect(resolveCrmStage(stages, 'ready', { paid: true, currentStageId: null })?.id).toBe('paid');
   });
   it('rejects malformed model output instead of clearing customer fields', () => {
     expect(() => parseCrmAnalysis('not json', history, [])).toThrow();
@@ -64,14 +64,14 @@ it('does not interpret a question about QR as authorization to create a payment'
 it('preserves classification and grounded fields when the model returns malformed optional evidence', () => {
   const result=parseCrmAnalysis(output({profile:{name:null,phone:'77010000000',city:proof('Алматы')},
     fields:{known:proof('Алматы'),broken:'Алматы'}}),history,[{id:'known',kind:'text'},{id:'broken',kind:'text'}]);
-  expect(result.stageId).toBe('ordered');
+  expect(result.stageId).toBe('ready');
   expect(result.profile).toEqual({city:'Алматы'});
   expect(result.fields).toEqual({known:'Алматы'});
 });
 
 it('ignores malformed optional checkout without discarding a valid stage', () => {
   const result=parseCrmAnalysis(output({profile:[],fields:'unknown',checkout:{method:'qr'}}),history,[]);
-  expect(result.stageId).toBe('ordered');
+  expect(result.stageId).toBe('ready');
   expect(result.profile).toEqual({});
   expect(result.fields).toEqual({});
   expect(result.checkout).toBeNull();
@@ -82,7 +82,7 @@ it('grounds unverified payment evidence without treating it as confirmation', ()
     state: 'needs_verification', messageId, quote: 'отправьте счёт', reason: 'Клиент сообщил об оплате',
   } }), history, []);
   expect(result.payment).toEqual({ state: 'needs_verification', reason: 'Клиент сообщил об оплате', messageId });
-  expect(resolveCrmStage(stages, 'paid', false)?.id).toBe('ordered');
+  expect(resolveCrmStage(stages, 'paid', { paid: false, currentStageId: null })).toBeNull();
 });
 
 it('rejects payment evidence quoted from seller instructions or an unknown message', () => {
@@ -98,7 +98,7 @@ it('grounds a Kazakh customer payment claim while leaving confirmation to POS', 
     state: 'needs_verification', messageId: client.id, quote: 'Halyk арқылы аудардым', reason: 'Клиент сообщил о переводе',
   } }), [client], []);
   expect(result.payment).toEqual({ state: 'needs_verification', messageId: client.id, reason: 'Клиент сообщил о переводе' });
-  expect(resolveCrmStage(stages, 'paid', false)?.id).toBe('ordered');
+  expect(resolveCrmStage(stages, 'paid', { paid: false, currentStageId: null })).toBeNull();
 });
 
 it('does not present attachment metadata as a read receipt', () => {
@@ -137,4 +137,93 @@ it('never retains a confirmed label without current provider confirmation', () =
   expect(resolvePaymentEvidence('confirmed', 'old label', null, false)).toEqual({ state: 'unknown', reason: null });
   expect(resolvePaymentEvidence('needs_verification', 'Проверьте чек', null, false)).toEqual({ state: 'needs_verification', reason: 'Проверьте чек' });
   expect(resolvePaymentEvidence('unknown', null, null, true)).toEqual({ state: 'confirmed', reason: 'Оплата подтверждена Kaspi POS.' });
+});
+
+it('moves to the sale stage only on payment and never out of it', () => {
+  const none = { paid: false, currentStageId: null };
+  expect(resolveCrmStage(stages, 'paid', none)).toBeNull();
+  expect(resolveCrmStage(stages, 'ready', none)?.id).toBe('ready');
+  expect(resolveCrmStage(stages, 'ready', { paid: true, currentStageId: 'new' })?.id).toBe('paid');
+  expect(resolveCrmStage(stages, 'new', { paid: false, currentStageId: 'paid' })).toBeNull();
+});
+
+it('accepts a client transfer claim as paid', () => {
+  const client = { id: 'c1', author: 'client', kind: 'text', body: 'Добрый день, перевела 6990 на Kaspi' };
+  const result = parseCrmAnalysis(output({ payment: { state: 'paid', messageId: 'c1', quote: 'перевела 6990', reason: 'Клиент перевёл оплату' } }), [client], []);
+  expect(result.payment).toEqual({ state: 'paid', messageId: 'c1', reason: 'Клиент перевёл оплату' });
+});
+
+it('accepts a seller receipt confirmation as paid but not payment instructions', () => {
+  const thanks = { id: 's1', author: 'phone', kind: 'text', body: 'Спасибо, оплату получили!' };
+  const requisites = { id: 's2', author: 'operator', kind: 'text', body: 'Kaspi перевод +77066241022, Құралай А.' };
+  const paid = (messageId: string, quote: string) => ({ payment: { state: 'paid', messageId, quote, reason: 'Продавец подтвердил' } });
+  expect(parseCrmAnalysis(output(paid('s1', 'оплату получили')), [thanks], []).payment?.state).toBe('paid');
+  expect(parseCrmAnalysis(output(paid('s2', 'Kaspi перевод')), [requisites], []).payment).toBeNull();
+});
+
+it('rejects paid on a negated claim and downgrades an attachment to verification', () => {
+  const negated = { id: 'n1', author: 'client', kind: 'text', body: 'Ещё не оплатила, вечером' };
+  expect(parseCrmAnalysis(output({ payment: { state: 'paid', messageId: 'n1', quote: 'не оплатила', reason: 'x' } }), [negated], []).payment).toBeNull();
+  const photo = { id: 'p1', author: 'client', kind: 'image', mediaMime: 'image/jpeg', body: 'оплатила' };
+  expect(parseCrmAnalysis(output({ payment: { state: 'paid', messageId: 'p1', quote: 'оплатила', reason: 'Чек' } }), [photo], []).payment)
+    .toEqual({ state: 'needs_verification', messageId: 'p1', reason: 'Вложение требует проверки' });
+});
+
+it('grounds the paid amount in a seller price message', () => {
+  const offer = { id: 'o1', author: 'phone', kind: 'text', body: 'Стандартный размер 40 мм — 6.990 тенге' };
+  const client = { id: 'c1', author: 'client', kind: 'text', body: 'Беру за 6990' };
+  const amount = (messageId: string, value: string, quote: string) => ({ paidAmount: { value, messageId, quote } });
+  expect(parseCrmAnalysis(output(amount('o1', '6990', '6.990 тенге')), [offer, client], []).paidAmount).toBe('6990');
+  expect(parseCrmAnalysis(output(amount('o1', '6990', '6.990 тенге')), [offer, client], []).paidAmountMessageId).toBe('o1');
+  expect(parseCrmAnalysis(output(amount('o1', '699', '6.990 тенге')), [offer, client], []).paidAmountMessageId).toBeNull();
+  expect(parseCrmAnalysis(output(amount('o1', '699', '6.990 тенге')), [offer, client], []).paidAmount).toBeNull();
+  expect(parseCrmAnalysis(output(amount('c1', '6990', 'за 6990')), [offer, client], []).paidAmount).toBeNull();
+  expect(parseCrmAnalysis(output(amount('o1', '6990', '7 000 тенге')), [offer, client], []).paidAmount).toBeNull();
+  expect(parseCrmAnalysis(output(amount('o1', '1200000', '1 200 000 ₸')), [{ ...offer, body: 'Итого 1 200 000 ₸' }], []).paidAmount).toBe('1200000');
+});
+
+it('keeps paid evidence until Kaspi confirms or a new paid reason arrives', () => {
+  expect(resolvePaymentEvidence('paid', 'Клиент перевёл', null, false)).toEqual({ state: 'paid', reason: 'Клиент перевёл' });
+  expect(resolvePaymentEvidence('paid', 'Клиент перевёл', { state: 'unknown', reason: 'нет данных', messageId: 'm' }, false))
+    .toEqual({ state: 'paid', reason: 'Клиент перевёл' });
+  expect(resolvePaymentEvidence('paid', 'Клиент перевёл', null, true).state).toBe('confirmed');
+});
+
+/** State accepted for a paid claim quoted without the trailing punctuation, so the checks must read the body clause. */
+const paidState = (author: string, body: string, quote = body.replace(/[?!.]+$/, '')) => parseCrmAnalysis(output({ payment:
+  { state: 'paid', messageId: 'x', quote, reason: 'Оплата' } }), [{ id: 'x', author, kind: 'text', body }], []).payment?.state ?? null;
+
+it('checks negation in the body clause around a trimmed quote', () => {
+  expect(paidState('client', 'Ещё не оплатила, вечером', 'оплатила')).toBeNull();
+  expect(paidState('phone', 'Оплата ещё не поступила', 'поступила')).toBeNull();
+  expect(paidState('phone', 'Итого 6.990 ₸. Оплату получили, спасибо', 'Оплату получили')).toBe('paid');
+});
+
+it('needs a money word for a seller confirmation and rejects questions, conditionals and receipt requests', () => {
+  for (const body of ['Заказ получили, скоро отправим', 'Тапсырысыңызды қабылдадық', 'Тапсырысыңызды алдық', 'Товар поступил на склад',
+    'Размеры пришли', 'Қара түсті бар', 'Вы получили ссылку на оплату?', 'Получили счёт?', 'Оплачено?', 'Если оплачено, пришлите чек',
+    'Проверю, поступили ли деньги', 'пришли чек', 'Пришли скрин оплаты']) expect(paidState('operator', body), body).toBeNull();
+  for (const body of ['Оплата прошла', 'Деньги пришли', 'Ақша келді', 'оплату получили', 'Спасибо, получили!', 'Получили, спасибо'])
+    expect(paidState('phone', body), body).toBe('paid');
+});
+
+it('accepts client payment verbs only as statements and «скинула» only with money', () => {
+  for (const body of ['скинула адрес', 'скинул фото', 'Оплатила?', 'Вы перевели мне сдачу?']) expect(paidState('client', body), body).toBeNull();
+  for (const body of ['Төлеп жібердім', 'Аударып жібердім', 'оплату отправила', 'Скинула деньги на Kaspi'])
+    expect(paidState('client', body), body).toBe('paid');
+});
+
+it('takes the paid amount only from a number followed by a currency', () => {
+  const offer = { id: 'o1', author: 'phone', kind: 'text', body: 'Стандартный размер 40 мм — 6.990 тенге' };
+  const amount = (value: string) => parseCrmAnalysis(output({ paidAmount: { value, messageId: 'o1', quote: '40 мм — 6.990 тенге' } }), [offer], []).paidAmount;
+  expect(amount('40')).toBeNull();
+  expect(amount('6990')).toBe('6990');
+});
+
+it('checks a seller confirmation in the comma fragment of the quote and never in a payment instrument', () => {
+  for (const body of ['Kaspi перевод по номеру, получили заказ', 'Заказ получили, оплата через Kaspi', 'Заказ получили, ссылку на оплату отправим',
+    'Заказ получили, можете оплатить', 'Товар поступил, сумма 6990 ₸', 'Вам пришла ссылка на оплату']) expect(paidState('phone', body), body).toBeNull();
+  for (const body of ['Оплату получили', 'Оплата прошла', 'Деньги пришли', 'Ақша келді', 'Спасибо, получили', 'Получили, спасибо', 'Оплату получили, спасибо'])
+    expect(paidState('phone', body), body).toBe('paid');
+  expect(paidState('client', 'Перевела бы, но карты нет')).toBeNull();
 });

@@ -23,8 +23,8 @@ export interface DefaultStage {
 /**
  * The funnel a new agent starts with.
  *
- * Nine stages because that is the shape of a sale someone actually runs: a lead arrives,
- * is talked to, is qualified, is quoted, is invoiced, and then either buys or does not.
+ * Eight stages because that is the shape of a sale someone actually runs: a lead arrives,
+ * is talked to, is qualified, is quoted, and then either pays or does not.
  * The owner reshapes it afterwards; this exists so the board is never blank on day one.
  *
  * Exactly one stage has kind `success`. Everything downstream — the statistics of stage 7
@@ -64,17 +64,12 @@ export const DEFAULT_STAGES: DefaultStage[] = [
   },
   {
     name: 'Готов к покупке', color: '#e0a13a', kind: 'active',
-    description: 'Клиент сказал, что берёт, и согласовал, что именно заказывает.',
-    agentGoal: 'Подтверди состав заказа, назови итоговую сумму и уточни данные для доставки. Затем предложи способ оплаты.',
-  },
-  {
-    name: 'Заказано', color: '#e0a13a', kind: 'awaiting_payment',
-    description: 'Заказ согласован, клиенту дали способ оплаты, ждём оплату.',
-    agentGoal: 'Помоги клиенту оплатить по инструкциям владельца. Никогда не говори, что оплата получена.',
+    description: 'Клиент сказал, что берёт, и согласовал, что именно заказывает. Сюда же — заказ согласован и ждём оплату.',
+    agentGoal: 'Подтверди состав заказа, назови итоговую сумму и уточни данные для доставки. Затем предложи способ оплаты и помоги оплатить по инструкциям владельца. Никогда не говори, что оплата получена.',
   },
   {
     name: 'Оплачено', color: '#0d9668', kind: 'success',
-    description: 'Оплата подтверждена.',
+    description: 'Оплата прошла: её подтвердил Kaspi, клиент написал, что оплатил, или продавец подтвердил поступление денег.',
     agentGoal: 'Поблагодари клиента и расскажи, что будет дальше: сроки и получение заказа.',
   },
   {

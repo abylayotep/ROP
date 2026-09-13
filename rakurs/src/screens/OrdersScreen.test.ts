@@ -22,10 +22,16 @@ describe('verified orders', () => {
     expect(html).toContain('+7 701 234 56 78');
     expect(html).not.toContain('Анна');
   });
+  it('marks a purchase paid in the chat without a Kaspi operation', () => {
+    fixture.orders = [{ id: 'order-2', conversationId: 'lead-2', amount: '6990.00', currency: 'KZT', paidAt: '2026-09-12T10:00:00Z', contactName: null, contactPhone: '+77012345678', comment: 'Оплата по переписке', operationId: null }];
+    const html = render();
+    expect(html).toContain('По переписке');
+    expect(html).not.toContain('Kaspi · оплачено');
+  });
   it('explains why an empty paid-orders list has no manual payment button', () => {
     fixture.orders = [];
     const html = render();
-    expect(html).toContain('Подтверждённых оплат пока нет');
+    expect(html).toContain('Оплаченных заказов пока нет');
     expect(html).not.toContain('<table');
     expect(html).not.toContain('Добавить заказ');
   });

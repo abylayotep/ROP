@@ -17,7 +17,6 @@ import {
   stages,
   users,
 } from '../db/schema.js';
-import { hasConfirmedKaspiPayment } from '../lib/kaspi/service.js';
 import { queueLead } from '../lib/capi/enqueue.js';
 import { ApiError } from '../lib/errors.js';
 import { recordStageMove } from '../lib/funnel-history.js';
@@ -128,9 +127,9 @@ export async function loadLead(
   return {
     crm: {status:crm?.status ?? (agent.openrouterKey ? 'pending' : 'needs_key'), summary:crm?.summary??null,
       profile:crm?.profile??{},error:crm?.error??null,analyzedAt:crm?.analyzedAt?.toISOString()??null,
-      paymentEvidence:confirmed.length ? 'confirmed' : (crm?.profile.paymentEvidence === 'awaiting_payment' || crm?.profile.paymentEvidence === 'needs_verification' ? crm.profile.paymentEvidence : 'unknown'),
+      paymentEvidence:confirmed.length ? 'confirmed' : (['awaiting_payment','needs_verification','paid'].includes(crm?.profile.paymentEvidence ?? '') ? crm!.profile.paymentEvidence as 'awaiting_payment'|'needs_verification'|'paid' : 'unknown'),
       paymentEvidenceReason:confirmed.length ? 'Оплата подтверждена Kaspi POS.'
-        : (crm?.profile.paymentEvidence === 'awaiting_payment' || crm?.profile.paymentEvidence === 'needs_verification') ? crm.profile.paymentEvidenceReason??null : null},
+        : ['awaiting_payment','needs_verification','paid'].includes(crm?.profile.paymentEvidence ?? '') ? crm!.profile.paymentEvidenceReason??null : null},
     sourceId:row.conversation.adSourceId,sourceType:row.conversation.adSourceType,
     conversationId,
     contactName: row.contact.name,
@@ -236,9 +235,6 @@ export function registerLeadRoutes(
             );
           const stage = rows.find((row) => row.id === targetId);
           if (!stage) throw new ApiError(404, 'Стадия не найдена');
-          if (stage.kind === 'success' && !(await hasConfirmedKaspiPayment(db, req.agent!.id, conversationId))) {
-            throw new ApiError(409, 'Сначала дождитесь подтверждения оплаты Kaspi. Заказ без оплаты остаётся в стадии «Заказано».');
-          }
           to = stage;
           from = rows.find((row) => row.id === current.stageId) ?? null;
         }

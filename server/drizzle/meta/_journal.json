@@ -351,6 +351,13 @@
       "when": 1789340684172,
       "tag": "0049_promotions",
       "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1789341284172,
+      "tag": "0050_merge_awaiting_payment",
+      "breakpoints": true
     }
   ]
 }

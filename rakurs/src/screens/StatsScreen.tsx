@@ -97,13 +97,11 @@ function transitions(value: number): string {
   return 'переходов';
 }
 
-/** Цвет полосы по смыслу стадии: продажа зелёная, ожидание оплаты жёлтое, прочее ровное. */
+/** Bar colour by stage meaning: the sale is green, everything else is even. */
 const stepFill = (kind: StageKind) =>
   kind === 'success'
     ? 'var(--accent)'
-    : kind === 'awaiting_payment'
-      ? 'var(--warn)'
-      : 'var(--accent-4)';
+    : 'var(--accent-4)';
 
 export function StatsScreen() {
   const { agent } = useAgent();

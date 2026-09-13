@@ -1,9 +1,9 @@
 import type { Lead } from '@rakurs/contract';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, isNull, or } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
-import { contacts, conversations, kaspiPayments, orders } from '../db/schema.js';
+import { contacts, conversations, kaspiPayments, orders, stages } from '../db/schema.js';
 import { ApiError } from '../lib/errors.js';
 import { isUuid } from '../lib/uuid.js';
 import { loadLead } from './leads.js';
@@ -61,7 +61,7 @@ export function registerOrderRoutes(
   db: Db,
   guard: preHandlerHookHandler,
 ): void {
-  // Account members may edit notes; only the provider confirms money received.
+  // Account members may edit notes; money is confirmed by Kaspi or shown in the chat.
   const anyMember = requireAgent(db);
 
   /** The agent's order, or a 404 that tells a stranger nothing. */
@@ -77,10 +77,11 @@ export function registerOrderRoutes(
 
   app.get('/api/agents/:agentId/orders', { preHandler: [guard, anyMember] }, async (req) => {
     const rows = await db.select({ order: orders, contactName: contacts.name, contactPhone: contacts.phone, operationId: kaspiPayments.operationId })
-      .from(orders).innerJoin(kaspiPayments, eq(kaspiPayments.orderId, orders.id))
+      .from(orders).leftJoin(kaspiPayments, eq(kaspiPayments.orderId, orders.id))
       .innerJoin(conversations, eq(conversations.id, orders.conversationId))
       .innerJoin(contacts, eq(contacts.id, conversations.contactId))
-      .where(and(eq(orders.agentId, req.agent!.id), eq(orders.status, 'paid'), eq(kaspiPayments.status, 'paid')))
+      .where(and(eq(orders.agentId, req.agent!.id), eq(orders.status, 'paid'),
+        or(isNull(kaspiPayments.id), eq(kaspiPayments.status, 'paid'))))
       .orderBy(desc(orders.paidAt)).limit(500);
     return { orders: rows.map(({ order, ...rest }) => ({ ...order, ...rest, paidAt: order.paidAt?.toISOString() ?? null, createdAt: order.createdAt.toISOString() })) };
   });
@@ -93,7 +94,7 @@ export function registerOrderRoutes(
       const parsed = createOrder.safeParse(req.body);
       if (!parsed.success) throw orderError(parsed.error.issues[0]);
 
-      if (parsed.data.status === 'paid') throw new ApiError(409, 'Оплата подтверждается только Kaspi');
+      if (parsed.data.status === 'paid') throw new ApiError(409, 'Оплату нельзя отметить вручную: её подтверждает Kaspi или переписка с клиентом');
 
       // Proves the conversation belongs to this agent before anything is written.
       await loadLead(db, req.agent!, conversationId);
@@ -127,7 +128,7 @@ export function registerOrderRoutes(
       const parsed = patchOrder.safeParse(req.body);
       if (!parsed.success) throw orderError(parsed.error.issues[0]);
 
-      if (parsed.data.status === 'paid') throw new ApiError(409, 'Оплата подтверждается только Kaspi');
+      if (parsed.data.status === 'paid') throw new ApiError(409, 'Оплату нельзя отметить вручную: её подтверждает Kaspi или переписка с клиентом');
       const [payment] = await db.select().from(kaspiPayments).where(eq(kaspiPayments.orderId, orderId));
       if ((payment || current.status === 'paid') && (parsed.data.amount !== undefined || parsed.data.status !== undefined)) throw new ApiError(409, 'Сумма и статус платёжного заказа неизменяемы');
 
@@ -152,8 +153,18 @@ export function registerOrderRoutes(
       const { orderId } = req.params as { orderId: string };
       const current = await loadOrder(req.agent!.id, orderId);
 
+      // Kaspi's money is a fact. An order paid in the chat has no Kaspi row: an operator deletes
+      // it to undo a sale the analysis saw by mistake; a Purchase not yet sent is then skipped.
       const [payment] = await db.select().from(kaspiPayments).where(eq(kaspiPayments.orderId, orderId));
-      if (payment || current.status === 'paid') throw new ApiError(409, 'Платёжный заказ нельзя удалить');
+      if (payment) throw new ApiError(409, 'Платёжный заказ нельзя удалить');
+      if (current.status === 'paid') {
+        // While the lead stands in the sale stage the next analysis would record the sale again,
+        // with a new order and a second Purchase: the undo starts with the stage.
+        const [stage] = await db.select({ kind: stages.kind }).from(conversations)
+          .innerJoin(stages, eq(stages.id, conversations.stageId))
+          .where(eq(conversations.id, current.conversationId));
+        if (stage?.kind === 'success') throw new ApiError(409, 'Сначала выведите сделку из стадии «Оплачено», затем удалите заказ');
+      }
       await db
         .delete(orders)
         .where(and(eq(orders.id, current.id), eq(orders.agentId, req.agent!.id)));

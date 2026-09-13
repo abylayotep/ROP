@@ -64,7 +64,7 @@ export function OrderDialog({ agentId, conversationId, currency, order, onClose,
           <label>Сумма, {currency}<input style={field} value={amount} onChange={(e) => setAmount(e.target.value)} inputMode="decimal" required /></label>
           <label>Способ оплаты<select style={field} value={method} onChange={(e) => setMethod(e.target.value as 'invoice' | 'qr')}><option value="invoice">Счёт на телефон</option><option value="qr">QR — клиент попросил</option></select></label>
           {method === 'invoice' && <label>Телефон клиента<input style={field} value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="+7 701 123 45 67" type="tel" required /></label>}
-          <small>Заказ станет оплаченным только после подтверждения Kaspi.</small>
+          <small>Заказ по этому счёту станет оплаченным после подтверждения Kaspi.</small>
         </>}
         <label>Комментарий<input style={field} value={comment} maxLength={500} onChange={(e) => setComment(e.target.value)} /></label>
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}><button type="button" className="btn-quiet" onClick={onClose}>Не сейчас</button><button className="btn" disabled={busy || loading}>{busy ? 'Отправляем…' : order ? 'Сохранить комментарий' : 'Выставить счёт'}</button></div>

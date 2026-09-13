@@ -361,7 +361,7 @@ async function skipOne(db: Db, id: string, reason: string): Promise<void> {
  * Re-reads what the claimed batch actually reports, and returns what is still worth sending.
  *
  * Only purchases are rebuilt. A lead is a milestone that cannot be undone: a conversation
- * legitimately walks on from the qualifying stage into `awaiting_payment` or `success`, so
+ * legitimately walks on from the qualifying stage into `success`, so
  * asking «is it still qualified?» would drop exactly the leads that converted, and by then
  * `stage_set_at` names a later stage — a rebuilt `event_time` would be the wrong moment, not
  * a corrected one. Everything else a lead carries is write-once (`ctwa_clid`) or not editable

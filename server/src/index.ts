@@ -1,6 +1,7 @@
 import { drainCrmAnalyses } from './lib/crm/worker.js';
 import { createLiveCrmHandler, createCrmDeps } from './lib/crm/live.js';
 import { reconcileKaspiPayments } from './lib/kaspi/service.js';
+import { queueMissingPurchases } from './lib/capi/enqueue.js';
 import { reconcileOrphanedRuns } from './api/drafts.js';
 import { buildServer } from './api/server.js';
 import { createDb } from './db/client.js';
@@ -184,3 +185,19 @@ const reconcilePayments = async () => {
 void reconcilePayments();
 const kaspiTimer = setInterval(() => void reconcilePayments(),5_000);
 kaspiTimer.unref();
+// Chat-paid orders have no Kaspi row, so their lost purchases are recovered on their own,
+// slower clock: a lost report is rare, and the sweep reads every tenant's recent orders.
+let purchaseRecoveryRunning = false;
+const recoverPurchases = async () => {
+  if (purchaseRecoveryRunning) return;
+  purchaseRecoveryRunning = true;
+  try {
+    const missing = await queueMissingPurchases(db);
+    if (missing.length > 0) app.log.warn({ count: missing.length, orderIds: missing }, 'capi: paid orders still without a purchase after recovery');
+  }
+  catch { app.log.error('capi: purchase recovery failed'); }
+  finally { purchaseRecoveryRunning = false; }
+};
+void recoverPurchases();
+const purchaseRecoveryTimer = setInterval(() => void recoverPurchases(),60_000);
+purchaseRecoveryTimer.unref();

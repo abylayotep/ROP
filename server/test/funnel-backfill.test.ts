@@ -5,12 +5,16 @@ import { accounts, agents, stages } from '../src/db/schema.js';
 import { DEFAULT_STAGES } from '../src/lib/funnel.js';
 import { withDb } from './helpers/db.js';
 
-const MIGRATIONS = ['drizzle/0005_seed_default_funnel.sql', 'drizzle/0026_paid_funnel_labels.sql'];
+const MIGRATIONS = [
+  'drizzle/0005_seed_default_funnel.sql',
+  'drizzle/0026_paid_funnel_labels.sql',
+  'drizzle/0050_merge_awaiting_payment.sql',
+];
 
 let db: Awaited<ReturnType<typeof withDb>>;
 
 /**
- * Runs the backfill and subsequent default-label migration SQL, exactly as shipped.
+ * Runs the backfill and the later migrations that reshape the default funnel, exactly as shipped.
  *
  * The harness migrates once and truncates per test, so an agent inserted afterwards can
  * never be caught by `migrate()` itself — by then the migration is recorded as applied.

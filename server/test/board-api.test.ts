@@ -150,7 +150,6 @@ describe('the board', () => {
       'Квалифицирован',
       'Предложение отправлено',
       'Готов к покупке',
-      'Заказано',
       'Оплачено',
       'Отказ',
     ]);
@@ -160,7 +159,7 @@ describe('the board', () => {
   });
 
   it('puts a card in its stage with its last line and its paid total', async () => {
-    const stage = await stageNamed('Заказано');
+    const stage = await stageNamed('Готов к покупке');
     const conversationId = await seedConversation('77000000002', 'Аян', {
       stageId: stage.id,
       adHeadline: 'Ремонт под ключ',

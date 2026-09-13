@@ -1,4 +1,4 @@
-import { and, eq } from 'drizzle-orm';
+import { and, desc, eq, gt, inArray, sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import {
   capiEvents,
@@ -192,6 +192,45 @@ export async function queuePurchase(
     // to write why the report was not queued, and raising here would turn a recorded sale
     // into a 500 in the face of the person who recorded it.
   }
+}
+
+/**
+ * Re-queues purchases for recently paid orders that have none, and returns the ids of those
+ * still without one afterwards.
+ *
+ * `queuePurchase` runs after the payment commits and swallows its own errors, so a crash or a
+ * transient failure in between would lose the report for good. Orders paid more than seven
+ * days ago are left alone: Meta refuses events that old.
+ */
+export async function queueMissingPurchases(
+  db: Db,
+  queue: typeof queuePurchase = queuePurchase,
+): Promise<string[]> {
+  const rows = await db
+    .select({ id: orders.id, agentId: orders.agentId })
+    .from(orders)
+    .where(
+      and(
+        eq(orders.status, 'paid'),
+        gt(orders.paidAt, sql`now() - interval '7 days'`),
+        sql`not exists (select 1 from ${capiEvents} where ${capiEvents.orderId} = ${orders.id} and ${capiEvents.kind} = 'purchase')`,
+      ),
+    )
+    .orderBy(desc(orders.paidAt))
+    .limit(50);
+  for (const row of rows) await queue(db, { agentId: row.agentId, orderId: row.id });
+  if (rows.length === 0) return [];
+  // What is still missing after the sweep failed again, which only a log can tell anyone.
+  const missing = await db
+    .select({ id: orders.id })
+    .from(orders)
+    .where(
+      and(
+        inArray(orders.id, rows.map((row) => row.id)),
+        sql`not exists (select 1 from ${capiEvents} where ${capiEvents.orderId} = ${orders.id} and ${capiEvents.kind} = 'purchase')`,
+      ),
+    );
+  return missing.map((row) => row.id);
 }
 
 /**

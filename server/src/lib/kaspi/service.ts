@@ -20,6 +20,22 @@ export async function activeSession(db: Db, env: Env, agentId: string): Promise<
 export function paymentDto(row: typeof kaspiPayments.$inferSelect) {
   return { id: row.id, orderId: row.orderId, conversationId: row.conversationId, method: row.method, phone: row.phone, amount: row.amount, status: row.status, operationId: row.operationId, qrToken: row.qrToken, paymentUrl: row.paymentUrl, error: row.error ?? (row.notificationStatus === 'unknown' ? 'Доставка сообщения об оплате не подтверждена. Проверьте переписку перед повторной отправкой.' : null), confirmedAt: row.confirmedAt?.toISOString() ?? null };
 }
+/**
+ * True when the lead stands in the sale stage and an order was paid since it last entered it:
+ * the current sale episode is already paid. The one definition shared by the invoice guard here
+ * and the CRM worker, so a repeat customer moved out and back into the sale stage can buy again.
+ */
+export async function hasPaidOrderInSaleEpisode(db: Pick<Db, 'select'>, conversationId: string): Promise<boolean> {
+  const [paid] = await db.select({ id: orders.id }).from(orders)
+    .innerJoin(conversations, eq(conversations.id, orders.conversationId))
+    .innerJoin(stages, and(eq(stages.id, conversations.stageId), eq(stages.kind, 'success')))
+    .where(and(eq(orders.conversationId, conversationId), eq(orders.status, 'paid'),
+      sql`(${conversations.stageSetAt} is null or ${orders.paidAt} >= date_trunc('milliseconds', ${conversations.stageSetAt}))`)).limit(1);
+  return !!paid;
+}
+async function refuseAfterPaidOrder(db: Pick<Db, 'select'>, conversationId: string) {
+  if (await hasPaidOrderInSaleEpisode(db, conversationId)) throw new ApiError(409, 'У сделки уже есть оплаченный заказ');
+}
 export async function createKaspiCheckout(db: Db, env: Env, input: { agentId: string; conversationId: string; amount: string; phone: string; method?: 'invoice' | 'qr'; requestKey: string; comment?: string }) {
   const amount = validateAmount(input.amount);
   const method = input.method ?? 'invoice';
@@ -31,6 +47,7 @@ export async function createKaspiCheckout(db: Db, env: Env, input: { agentId: st
     if (existingRequest.conversationId !== input.conversationId || Number(existingRequest.amount) !== Number(amount) || existingRequest.method !== method || existingRequest.phone !== phone) throw new ApiError(409, 'Этот запрос уже использован для другого счёта');
     return paymentDto(existingRequest);
   }
+  await refuseAfterPaidOrder(db, input.conversationId);
   if (method === 'qr') {
     const [open] = await db.select().from(kaspiPayments).where(and(eq(kaspiPayments.agentId, input.agentId), eq(kaspiPayments.conversationId, input.conversationId), eq(kaspiPayments.status, 'pending')));
     if (open?.method === 'invoice' && open.operationId && Number(open.amount) === Number(amount)) {
@@ -49,6 +66,7 @@ export async function createKaspiCheckout(db: Db, env: Env, input: { agentId: st
       if (prior.conversationId !== input.conversationId || Number(prior.amount) !== Number(amount) || prior.method !== method || prior.phone !== phone) throw new ApiError(409, 'Этот запрос уже использован для другого счёта');
       return { row: prior, fresh: false };
     }
+    await refuseAfterPaidOrder(tx, input.conversationId);
     const [open] = await tx.select().from(kaspiPayments).where(and(eq(kaspiPayments.conversationId, input.conversationId), inArray(kaspiPayments.status, ['creating', 'unknown', 'pending'])));
     if (open) throw new ApiError(409, 'В этом диалоге уже есть незавершённый счёт. Проверьте его статус');
     const [agent] = await tx.select().from(agents).where(eq(agents.id, input.agentId));
@@ -92,7 +110,8 @@ export async function reconcileKaspiPayment(db: Db, env: Env, agentId: string, i
       const stageRows = await tx.select().from(stages).where(eq(stages.agentId, agentId)).orderBy(asc(stages.position));
       const target = stageRows.find((stage) => stage.kind === 'success');
       if (conversation && target && conversation.stageId !== target.id) {
-        await tx.update(conversations).set({ stageId: target.id, stageSetAt: new Date(), stageSetBy: 'system' }).where(eq(conversations.id, conversation.id));
+        // Entered at the payment's own time, so the order is paid within this sale episode (see the CRM worker).
+        await tx.update(conversations).set({ stageId: target.id, stageSetAt: updated.confirmedAt!, stageSetBy: 'system' }).where(eq(conversations.id, conversation.id));
         await recordStageMove(tx, { agentId, conversationId: conversation.id, from: stageRows.find((stage) => stage.id === conversation.stageId) ?? null, to: target, movedBy: 'system' });
       }
     } else if (updated && (status === 'failed' || status === 'expired')) {
@@ -120,9 +139,17 @@ export async function reconcileKaspiPayments(db: Db, env: Env): Promise<void> {
   }
 }
 
+/**
+ * A confirmed Kaspi payment for where the lead stands now: it stands in the sale stage, or it was
+ * paid no earlier than its current stage was set. A payment from an earlier sale does not follow
+ * a repeat customer moved back into work.
+ */
 export async function hasConfirmedKaspiPayment(db: Db, agentId: string, conversationId: string): Promise<boolean> {
   const [row] = await db.select({ id: kaspiPayments.id }).from(kaspiPayments)
     .innerJoin(orders, eq(orders.id, kaspiPayments.orderId))
-    .where(and(eq(kaspiPayments.agentId, agentId), eq(kaspiPayments.conversationId, conversationId), eq(kaspiPayments.status, 'paid'), eq(orders.status, 'paid'), sql`${kaspiPayments.operationId} is not null`, sql`${kaspiPayments.confirmedAt} is not null`)).limit(1);
+    .innerJoin(conversations, eq(conversations.id, kaspiPayments.conversationId))
+    .leftJoin(stages, eq(stages.id, conversations.stageId))
+    .where(and(eq(kaspiPayments.agentId, agentId), eq(kaspiPayments.conversationId, conversationId), eq(kaspiPayments.status, 'paid'), eq(orders.status, 'paid'), sql`${kaspiPayments.operationId} is not null`, sql`${kaspiPayments.confirmedAt} is not null`,
+      sql`(${stages.kind} = 'success' or ${conversations.stageSetAt} is null or ${orders.paidAt} >= date_trunc('milliseconds', ${conversations.stageSetAt}))`)).limit(1);
   return !!row;
 }

@@ -2,7 +2,7 @@ import { eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildServer } from '../src/api/server.js';
-import { agents, contacts, conversations, orders, whatsappNumbers } from '../src/db/schema.js';
+import { agents, contacts, conversations, kaspiPayments, orders, stages, whatsappNumbers } from '../src/db/schema.js';
 import { addMember, createAccountWithOwner } from '../src/lib/provision.js';
 import { withDb } from './helpers/db.js';
 import { testEnv } from './helpers/env.js';
@@ -253,9 +253,58 @@ describe('changing an order', () => {
     expect(res.statusCode).toBe(400);
   });
 
-  it('does not delete a paid order', async () => {
+  it('deletes an order paid in the chat, so an operator can undo a false sale', async () => {
+    const [chat] = await db
+      .insert(orders)
+      .values({ agentId, conversationId, amount: '6990', currency: 'KZT', status: 'paid', comment: 'Оплата по переписке', paidAt: new Date() })
+      .returning();
+
+    const res = await app.inject({
+      method: 'DELETE',
+      url: `/api/agents/${agentId}/orders/${chat!.id}`,
+      cookies: jar,
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(await db.select().from(orders)).toHaveLength(0);
+  });
+
+  it('refuses to delete a chat-paid order while the lead is still in the sale stage, and allows it once moved out', async () => {
+    const funnel = await db.select().from(stages).where(eq(stages.agentId, agentId));
+    const sale = funnel.find((s) => s.kind === 'success')!;
+    const work = funnel.find((s) => s.kind === 'active')!;
+    await db.update(conversations).set({ stageId: sale.id, stageSetAt: new Date() }).where(eq(conversations.id, conversationId));
+    const [chat] = await db
+      .insert(orders)
+      .values({ agentId, conversationId, amount: '6990', currency: 'KZT', status: 'paid', comment: 'Оплата по переписке', paidAt: new Date() })
+      .returning();
+    const remove = () => app.inject({ method: 'DELETE', url: `/api/agents/${agentId}/orders/${chat!.id}`, cookies: jar });
+
+    const refused = await remove();
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json().message).toBe('Сначала выведите сделку из стадии «Оплачено», затем удалите заказ');
+    expect(await db.select().from(orders)).toHaveLength(1);
+
+    await db.update(conversations).set({ stageId: work.id, stageSetAt: new Date() }).where(eq(conversations.id, conversationId));
+    expect((await remove()).statusCode).toBe(200);
+    expect(await db.select().from(orders)).toHaveLength(0);
+  });
+
+  it('does not delete an order paid through Kaspi', async () => {
     const { id } = await record({ amount: '450000' });
     await db.update(orders).set({ status: 'paid', paidAt: new Date() }).where(eq(orders.id, id));
+    await db.insert(kaspiPayments).values({
+      agentId,
+      conversationId,
+      orderId: id,
+      requestKey: 'orders-delete',
+      method: 'invoice',
+      phone: '77085807932',
+      amount: '450000',
+      operationId: 'op-delete',
+      status: 'paid',
+      confirmedAt: new Date(),
+    });
 
     const res = await app.inject({
       method: 'DELETE',
@@ -264,6 +313,7 @@ describe('changing an order', () => {
     });
 
     expect(res.statusCode).toBe(409);
+    expect(res.json().message).toBe('Платёжный заказ нельзя удалить');
     expect(await db.select().from(orders)).toHaveLength(1);
   });
 });
@@ -304,5 +354,38 @@ describe('access', () => {
     });
 
     expect(res.statusCode).toBe(404);
+  });
+});
+
+describe('listing paid orders', () => {
+  it('lists orders paid through Kaspi and in the chat, and nothing unpaid', async () => {
+    const [kaspi, chat] = await db
+      .insert(orders)
+      .values([
+        { agentId, conversationId, amount: '5000', currency: 'KZT', status: 'paid', paidAt: new Date('2026-01-01T00:00:00Z') },
+        { agentId, conversationId, amount: '6990', currency: 'KZT', status: 'paid', comment: 'Оплата по переписке', paidAt: new Date('2026-01-02T00:00:00Z') },
+        { agentId, conversationId, amount: '100', currency: 'KZT' },
+      ])
+      .returning();
+    await db.insert(kaspiPayments).values({
+      agentId,
+      conversationId,
+      orderId: kaspi!.id,
+      requestKey: 'orders-list',
+      method: 'invoice',
+      phone: '77085807932',
+      amount: '5000',
+      operationId: 'op-1',
+      status: 'paid',
+      confirmedAt: new Date('2026-01-01T00:00:00Z'),
+    });
+
+    const res = await app.inject({ method: 'GET', url: `/api/agents/${agentId}/orders`, cookies: jar });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().orders).toEqual([
+      expect.objectContaining({ id: chat!.id, operationId: null, comment: 'Оплата по переписке' }),
+      expect.objectContaining({ id: kaspi!.id, operationId: 'op-1' }),
+    ]);
   });
 });

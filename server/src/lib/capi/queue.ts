@@ -1,10 +1,17 @@
 import { and, eq, gte, inArray, sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
-import { capiEvents, capiSettings, contacts, conversations, orders } from '../../db/schema.js';
+import {
+  capiEvents,
+  capiSettings,
+  contacts,
+  conversations,
+  orders,
+  whatsappNumbers,
+} from '../../db/schema.js';
 import { decryptSecret } from '../secret-box.js';
 import { withoutSecret } from '../whatsapp/graph.js';
 import { CapiError, type CapiClient } from './client.js';
-import { DISABLED, NON_WHATSAPP, NO_CLID, NO_SETTINGS } from './enqueue.js';
+import { DISABLED, NON_WHATSAPP, NO_CLID, NO_SETTINGS, NO_WABA } from './enqueue.js';
 import { buildPurchase, serialiseEvent, type CapiEventBody } from './events.js';
 
 /**
@@ -290,15 +297,23 @@ async function rebuildPurchase(
   if (orderId === null) return { reason: ORDER_GONE };
 
   const [row] = await db
-    .select({ order: orders, conversation: conversations, contact: contacts })
+    .select({
+      order: orders,
+      conversation: conversations,
+      contact: contacts,
+      wabaId: whatsappNumbers.wabaId,
+    })
     .from(orders)
     .innerJoin(conversations, eq(conversations.id, orders.conversationId))
     .innerJoin(contacts, eq(contacts.id, conversations.contactId))
+    .leftJoin(whatsappNumbers, eq(whatsappNumbers.id, conversations.whatsappNumberId))
     .where(and(eq(orders.id, orderId), eq(orders.agentId, agentId)));
 
   if (!row) return { reason: ORDER_GONE };
   if (row.order.status !== 'paid' || row.order.paidAt === null) return { reason: NOT_PAID };
   if (row.conversation.whatsappNumberId === null) return { reason: NON_WHATSAPP };
+  const wabaId = row.wabaId;
+  if (wabaId === null) return { reason: NO_WABA };
 
   const ctwaClid = row.conversation.ctwaClid;
   if (ctwaClid === null || row.contact.phone === null) return { reason: NO_CLID };
@@ -308,6 +323,7 @@ async function rebuildPurchase(
       body: serialiseEvent(
         buildPurchase({
           orderId: row.order.id,
+          wabaId,
           ctwaClid,
           phone: row.contact.phone,
           amount: row.order.amount,

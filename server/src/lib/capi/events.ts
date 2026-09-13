@@ -54,11 +54,16 @@ function exactDecimal(amount: string): ExactDecimal {
 
 /**
  * The customer, reduced to the two things Meta is allowed to have: the click that started
- * the chat, and a phone nobody can read back.
+ * the chat, and a phone nobody can read back — plus the WhatsApp Business Account the chat
+ * happened on.
+ *
+ * Meta requires both `whatsapp_business_account_id` and `ctwa_clid` for business messaging:
+ * a click id alone is refused, because Meta matches the click within the account's own ads.
  *
  * `ph` is an array because that is the shape Meta's `user_data` takes for an identifier.
  */
 export interface CapiUserData {
+  whatsapp_business_account_id: string;
   ctwa_clid: string;
   ph: readonly [string];
 }
@@ -150,13 +155,16 @@ export function hashPhone(phone: string): string {
 /** Whole seconds since the epoch. Meta's `event_time` is a Unix timestamp, not milliseconds. */
 const unixSeconds = (at: Date): number => Math.floor(at.getTime() / 1000);
 
-const userData = (ctwaClid: string, phone: string): CapiUserData => ({
+const userData = (wabaId: string, ctwaClid: string, phone: string): CapiUserData => ({
+  whatsapp_business_account_id: wabaId,
   ctwa_clid: ctwaClid,
   ph: [hashPhone(phone)],
 });
 
 export interface PurchaseInput {
   orderId: string;
+  /** `whatsapp_numbers.waba_id` of the number the conversation happened on. */
+  wabaId: string;
   ctwaClid: string;
   /** In any form; it is normalised and hashed, never sent. */
   phone: string;
@@ -179,13 +187,14 @@ export function buildPurchase(input: PurchaseInput): CapiPurchaseEvent {
     event_id: purchaseEventId(input.orderId),
     action_source: ACTION_SOURCE,
     messaging_channel: MESSAGING_CHANNEL,
-    user_data: userData(input.ctwaClid, input.phone),
+    user_data: userData(input.wabaId, input.ctwaClid, input.phone),
     custom_data: { value: exactDecimal(input.amount), currency: input.currency },
   };
 }
 
 export interface LeadInput {
   conversationId: string;
+  wabaId: string;
   ctwaClid: string;
   phone: string;
   /** When the lead reached the qualifying stage. */
@@ -203,6 +212,6 @@ export function buildLead(input: LeadInput): CapiLeadEvent {
     event_id: leadEventId(input.conversationId),
     action_source: ACTION_SOURCE,
     messaging_channel: MESSAGING_CHANNEL,
-    user_data: userData(input.ctwaClid, input.phone),
+    user_data: userData(input.wabaId, input.ctwaClid, input.phone),
   };
 }

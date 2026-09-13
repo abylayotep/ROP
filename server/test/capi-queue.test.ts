@@ -44,6 +44,7 @@ function body(orderId: string, amount = '15000.00', phone = '77085807932'): Capi
   return serialiseEvent(
     buildPurchase({
       orderId,
+      wabaId: 'waba',
       ctwaClid: CLID,
       phone,
       amount,
@@ -605,6 +606,7 @@ describe('the order as it stands at claim time', () => {
         payload: serialiseEvent(
           buildLead({
             conversationId,
+            wabaId: 'waba',
             ctwaClid: CLID,
             phone: '77085807932',
             occurredAt: PAID_AT,

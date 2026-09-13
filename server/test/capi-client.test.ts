@@ -18,6 +18,7 @@ const DATASET = '1234567890';
 const purchase = serialiseEvent(
   buildPurchase({
     orderId: 'order-1',
+    wabaId: 'waba',
     ctwaClid: 'clid-1',
     phone: '77015550000',
     // Deliberately a figure a double cannot hold exactly: this is what must survive the body.
@@ -30,6 +31,7 @@ const purchase = serialiseEvent(
 const lead = serialiseEvent(
   buildLead({
     conversationId: 'conversation-1',
+    wabaId: 'waba',
     ctwaClid: 'clid-2',
     phone: '77015550001',
     occurredAt: new Date('2026-09-01T11:00:00Z'),

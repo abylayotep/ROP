@@ -933,9 +933,9 @@ function CapiIntro() {
         не с чем сопоставить покупку.
       </div>
       <div style={{ ...hint, marginTop: 6 }}>
-        Нужны ID набора данных и токен системного пользователя из{' '}
-        <a href={EVENTS_MANAGER_URL} target="_blank" rel="noreferrer">Events Manager</a>.
-        При первом подключении или замене этих данных кабинет отправляет отдельное тестовое
+        Работает только для номера на WhatsApp Cloud API: у номера, подключённого по QR, нет
+        аккаунта WhatsApp Business, и Meta его покупки не примет. Нужны ID набора данных этого
+        аккаунта и токен системного пользователя. При первом подключении или замене этих данных кабинет отправляет отдельное тестовое
         событие. Сохранённые настройки ещё не означают, что реальные покупки видны в отчётах:
         проверьте ответ ниже и вкладку Test Events в Meta.
       </div>
@@ -1098,11 +1098,12 @@ function CapiForm({
             onChange={(e) => setDatasetId(e.target.value)}
           />
           <div style={hint}>
-            Берётся в{' '}
+            Набор, привязанный к аккаунту WhatsApp Business, а не пиксель сайта. Проверить
+            события можно в{' '}
             <a href={EVENTS_MANAGER_URL} target="_blank" rel="noreferrer">
               Meta Events Manager
             </a>
-            : Data sources → набор данных → Settings. Как это сделать по шагам — в разделе{' '}
+            . Как получить набор по шагам — в разделе{' '}
             <Link to="../setup">«Запуск»</Link>.
           </div>
         </div>
@@ -1118,7 +1119,8 @@ function CapiForm({
             onChange={(e) => setAccessToken(e.target.value)}
           />
           <div style={hint}>
-            Постоянный токен системного пользователя с правом на этот набор данных.
+            Постоянный токен системного пользователя с правами whatsapp_business_management и
+            whatsapp_business_manage_events.
             Хранится в зашифрованном виде и обратно не показывается.
           </div>
         </div>

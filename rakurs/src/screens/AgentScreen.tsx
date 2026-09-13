@@ -1,6 +1,7 @@
 import { useState, type CSSProperties, type FormEvent, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import * as api from '@/api';
+import { money } from '@/components/drafts/cost';
 import { Card, CardHead, Segmented } from '@/components/ui/primitives';
 import { Async, EmptyState, Skeleton } from '@/components/ui/states';
 import { useToast } from '@/components/ui/Toast';
@@ -563,19 +564,6 @@ function ModelCard({
 
 /* ── Расход ──────────────────────────────────────────────────────────────── */
 
-/**
- * Доллары OpenRouter, а не валюта компании: платит владелец им и в них.
- *
- * Число доходит сюда строкой и складывается в Postgres — здесь оно только печатается.
- * Знаков после запятой четыре, пока сумма меньше доллара: на дешёвой модели сутки стоят
- * доли цента, и два знака показали бы «0,00 $» там, где расход есть.
- */
-function money(cost: string): string {
-  const value = Number(cost);
-  if (!Number.isFinite(value)) return `${cost} $`;
-  const digits = value !== 0 && value < 1 ? 4 : 2;
-  return `${value.toFixed(digits).replace('.', ',')} $`;
-}
 
 const count = (value: number) => value.toLocaleString('ru-RU');
 

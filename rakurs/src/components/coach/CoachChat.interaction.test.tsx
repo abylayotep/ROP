@@ -22,7 +22,7 @@ vi.mock('@/api', async (original) => ({
   ...(await original() as object), sendCoachMessage: fixture.send,
   getCoachFeedbackRequest: fixture.status, listCoachMessages: fixture.list,
   updateCoachProposal: fixture.update, draftCoachMessage: fixture.draft,
-  runDraft: fixture.run, applyDraft: fixture.apply,
+  runDraft: fixture.run, applyDraft: fixture.apply, getAutopilot: async () => null,
 }));
 vi.mock('@/hooks/useApi', () => ({ useApi: (fetcher: Function, deps: unknown[]) => {
   const call = fetcher.toString();

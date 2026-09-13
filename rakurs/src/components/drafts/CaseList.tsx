@@ -58,6 +58,7 @@ export function CaseList({
   onChanged,
   selected,
   onSelectedChange,
+  selectionDisabled = false,
 }: {
   agentId: string;
   draftId: string;
@@ -70,6 +71,8 @@ export function CaseList({
    * run button read the same set this list's checkboxes write. */
   selected: Set<string>;
   onSelectedChange: (next: Set<string>) => void;
+  /** Locks the checkboxes while the autopilot owns the case set. */
+  selectionDisabled?: boolean;
 }) {
   const toast = useToast();
 
@@ -310,6 +313,7 @@ export function CaseList({
                   type="button"
                   className="btn-quiet"
                   aria-pressed={selected.has(kase.id)}
+                  disabled={selectionDisabled}
                   style={{ marginTop: 1 }}
                   onClick={() => toggleSelected(kase.id)}
                 >

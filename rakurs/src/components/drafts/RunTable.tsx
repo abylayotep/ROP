@@ -87,12 +87,10 @@ export function RunTable({
 }) {
   const [expanded, setExpanded] = useState<string | null>(null);
 
-  // Every knowledge chunk this run's replies cite is a note id — the same ids `AgentScreen`'s
-  // own sandbox resolves server-side into a title. Nothing here resolves them for a run
-  // (`TestCaseSide.usedChunkIds` carries bare ids — see `server/src/api/drafts.ts`'s
-  // `CaseSide`), so this fetches the vault once and matches locally; an id from a note a
-  // draft's own `note_create` would have made cannot resolve here, because that note never
-  // outlives the rolled-back transaction it was created in — `usedOpIndexes` names those
+  // `TestCaseSide.usedChunkIds` carries knowledge chunk ids, not note ids (see
+  // `server/src/api/drafts.ts`'s `CaseSide`), while this map is keyed by note id — so a cited
+  // chunk only gets a title here if the two ids happen to coincide. Chunks of a draft's own
+  // `note_create` never outlive the rolled-back replay either; `usedOpIndexes` names those
   // instead (see `sectionLabels`).
   const notes = useApi<Map<string, string>>(
     async (signal) => new Map((await api.listKbNotes(agentId, {}, signal)).map((n) => [n.id, n.title])),

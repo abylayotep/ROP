@@ -30,7 +30,16 @@ export function ruPlural(n: number, one: string, few: string, many: string): str
   return many;
 }
 
-const casesWord = (n: number) => ruPlural(n, 'проверка', 'проверки', 'проверок');
+/** OpenRouter dollars, printed from the string Postgres summed. Four decimals below one dollar:
+ * a cheap model spends fractions of a cent, and two would print «0,00 $» where there was spend. */
+export function money(cost: string): string {
+  const value = Number(cost);
+  if (!Number.isFinite(value)) return `${cost} $`;
+  const digits = value !== 0 && value < 1 ? 4 : 2;
+  return `${value.toFixed(digits).replace('.', ',')} $`;
+}
+
+const casesWord =(n: number) => ruPlural(n, 'проверка', 'проверки', 'проверок');
 const callsWord = (n: number) => ruPlural(n, 'вызов', 'вызова', 'вызовов');
 const comparisonsWord = (n: number) => ruPlural(n, 'сравнение', 'сравнения', 'сравнений');
 

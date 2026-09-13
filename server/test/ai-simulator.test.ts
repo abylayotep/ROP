@@ -111,18 +111,31 @@ describe('persistent browser simulator', () => {
   });
 
   it('writes no production CRM, transport, messaging, or analytics rows', async () => {
-    model = fakeModel(answer('I will ask a teammate.', {
-      stageId, fields: { [fieldId]: 'Almaty' }, handoff: { reason: 'Needs a person' },
-    }));
+    model = fakeModel(
+      answer('Which city?', { stageId, fields: { [fieldId]: 'Almaty' } }),
+      answer('I will ask a teammate.', { handoff: { reason: 'Needs a person' } }),
+    );
     await run('Please help.', 0);
-    const production = await Promise.all([
+    await run('I live in Almaty.', 1);
+    expect(await db.select().from(aiSandboxTurns)).toHaveLength(2);
+
+    const [contactRows, conversationRows, messageRows, leadRows, orderRows,
+      replyRows, noteRows, transitionRows, capiRows] = await Promise.all([
       db.select().from(contacts), db.select().from(conversations), db.select().from(messages),
       db.select().from(leadValues), db.select().from(orders), db.select().from(aiReplies),
       db.select().from(notes), db.select().from(stageTransitions), db.select().from(capiEvents),
     ]);
-    for (const rows of production) expect(rows).toEqual([]);
-    expect(graph.calls).toEqual([]);
-    expect(linked.calls).toEqual([]);
+    expect(contactRows).toHaveLength(0);
+    expect(conversationRows).toHaveLength(0);
+    expect(messageRows).toHaveLength(0);
+    expect(leadRows).toHaveLength(0);
+    expect(orderRows).toHaveLength(0);
+    expect(replyRows).toHaveLength(0);
+    expect(noteRows).toHaveLength(0);
+    expect(transitionRows).toHaveLength(0);
+    expect(capiRows).toHaveLength(0);
+    expect(graph.calls).toHaveLength(0);
+    expect(linked.calls).toHaveLength(0);
   });
 
   it('rejects stale revisions and foreign agent ownership without spending another model call', async () => {

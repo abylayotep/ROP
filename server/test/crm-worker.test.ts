@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { withDb } from './helpers/db.js';
 import { createAccountWithOwner } from '../src/lib/provision.js';
-import { agents, aiReplies, capiEvents, contacts, conversations, crmAnalyses, leadFields, leadValues, messages, stages, whatsappNumbers } from '../src/db/schema.js';
+import { agents, aiReplies, capiEvents, contacts, conversations, crmAnalyses, leadFields, leadValues, messages, notes, stages, whatsappNumbers } from '../src/db/schema.js';
 import { seedFunnel } from '../src/lib/funnel.js';
 import { encryptSecret } from '../src/lib/secret-box.js';
 import { analyzeConversation, drainCrmAnalyses } from '../src/lib/crm/worker.js';
@@ -97,6 +97,28 @@ describe('independent CRM analysis', () => {
     expect((await db.select().from(conversations))[0]?.stageId).toBeNull();
     expect((await db.select().from(contacts))[0]?.name).toBeNull();
     expect(await db.select().from(leadValues)).toHaveLength(0);
+  });
+  // An Instagram customer has no phone, so no Kaspi invoice can be issued; the owner is told,
+  // and the customer still gets the normal reply instead of silence.
+  it('notes a phoneless checkout intent and still replies to the customer', async () => {
+    await db.update(agents).set({aiEnabled:true}).where(eq(agents.id,agentId));
+    await db.update(contacts).set({phone:null});
+    const [offer] = await db.insert(messages).values({conversationId,direction:'out',author:'operator',kind:'text',
+      body:'Итого 5000 ₸',sentAt:new Date(Date.now()-60_000)}).returning();
+    await db.update(messages).set({body:'Отправьте счёт, пожалуйста',sentAt:new Date()}).where(eq(messages.id,messageId));
+    await db.insert(crmAnalyses).values({conversationId,pendingLiveMessageId:messageId});
+    model.complete.mockResolvedValueOnce({text:JSON.stringify({stageId:targetId,summary:'Хочет оплатить',confidence:95,
+      profile:{},fields:{},
+      checkout:{method:'invoice',messageId,quote:'Отправьте счёт',amount:'5000',amountMessageId:offer!.id}}),
+      promptTokens:1,completionTokens:1,cost:'0'});
+    const checkout = vi.fn();
+    const reply = vi.fn();
+
+    await analyzeConversation(db,{model,key,checkout,reply},{agentId,conversationId,live:true});
+
+    expect(checkout).not.toHaveBeenCalled();
+    expect(reply).toHaveBeenCalledWith(agentId,conversationId);
+    expect((await db.select().from(notes)).map((row)=>row.body).join(' ')).toContain('у клиента нет номера телефона');
   });
   it('applies no CRM or checkout effects when response mode changes during analysis', async () => {
     const [field] = await db.insert(leadFields).values({agentId,name:'City',kind:'text',position:99}).returning();

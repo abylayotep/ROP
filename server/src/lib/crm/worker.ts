@@ -202,18 +202,18 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
       const [latest] = await db.select({id:messages.id}).from(messages).where(eq(messages.conversationId,conversation.id))
         .orderBy(desc(messages.sentAt),desc(messages.id)).limit(1);
       if (agent.crmAnalysisMode === 'follow_ai' && current?.crmAnalysisMode === 'follow_ai' && current.agentEnabled && current.conversationEnabled && latest?.id === liveId) {
-        if (deps.checkout && analysis.checkout?.messageId === liveId && analysis.confidence >= 85
+        const wantsCheckout = Boolean(deps.checkout && analysis.checkout?.messageId === liveId && analysis.confidence >= 85
           && !await hasConfirmedKaspiPayment(db,agent.id,conversation.id)
-          && await automationAllowed(db,input,'checkout')) {
-          if (!contact.phone) {
-            await db.insert(notes).values({ conversationId: conversation.id,
-              body: 'Счёт Kaspi не создан: у клиента нет номера телефона. Добавьте номер в карточку клиента и повторите действие.' });
-          } else {
-            await deps.checkout({agentId:agent.id,conversationId:conversation.id,phone:contact.phone,
-              intent:analysis.checkout,summary:analysis.summary});
-            checkedOut = true;
-          }
+          && await automationAllowed(db,input,'checkout'));
+        if (wantsCheckout && contact.phone) {
+          await deps.checkout!({agentId:agent.id,conversationId:conversation.id,phone:contact.phone,
+            intent:analysis.checkout!,summary:analysis.summary});
+          checkedOut = true;
         } else if (deps.reply && await automationAllowed(db,input,'reply')) {
+          // No phone means no Kaspi invoice (an Instagram customer); the owner is told, and the
+          // customer still gets the ordinary reply rather than silence.
+          if (wantsCheckout) await db.insert(notes).values({ conversationId: conversation.id,
+            body: 'Счёт Kaspi не создан: у клиента нет номера телефона. Добавьте номер в карточку клиента и повторите действие.' });
           await deps.reply(agent.id,conversation.id);
         }
       }

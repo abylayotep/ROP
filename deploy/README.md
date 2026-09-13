@@ -83,8 +83,11 @@ recorded, so renumbering or retiming an applied entry silently skips schema. Reh
 migration on a copy of production's schema before releasing it. A local database migrated
 with a journal that was since rewritten must be recreated.
 
-Rollback of the application: `docker tag rakurs-api:rollback rakurs-api:latest`, then
-`up -d --no-deps api`, and republish the previous frontend. Additive migration tables stay.
+If the API fails its health check, the script restarts the previous image by itself and stops
+before the frontend. A manual rollback is `docker tag rakurs-api:rollback rakurs-api:latest`,
+`up -d --no-deps --force-recreate api`, and `mv /var/www/rakurs/index.html.previous
+/var/www/rakurs/index.html`. Additive migration tables stay. The host keeps the last five
+releases and ten database dumps.
 Restoring the database dump is a separate recovery decision, not a rollback step.
 
 The `media` volume survives `down` and `up` — WhatsApp attachments are not lost on an

@@ -31,6 +31,10 @@ echo "release $SHA ($(git log -1 --format=%s "$SHA"))"
 
 DEPLOYED="$(ssh_host "cat $REMOTE_DIR/.release.sha 2>/dev/null || true")"
 if [[ -n "$DEPLOYED" ]]; then
+  if ! git cat-file -e "$DEPLOYED^{commit}" 2>/dev/null; then
+    echo "Production runs $DEPLOYED, a commit this clone does not have. Fetch it, or merge it into main." >&2
+    exit 1
+  fi
   # A deployed commit that main does not contain means production runs something main lost.
   if ! git merge-base --is-ancestor "$DEPLOYED" "$SHA" 2>/dev/null; then
     echo "Production runs $DEPLOYED, which is not part of origin/main. Merge it into main first." >&2
@@ -58,35 +62,13 @@ step "Uploading source to $RELEASES_DIR/$SHA"
 git archive --format=tar.gz "$SHA" | ssh_host "rm -rf $RELEASES_DIR/$SHA && mkdir -p $RELEASES_DIR/$SHA && tar -xz -C $RELEASES_DIR/$SHA"
 
 step "Backing up the database, installing the source, migrating, restarting the API"
-ssh_host bash -s -- "$SHA" "$STAMP" <<'REMOTE'
-set -euo pipefail
-SHA="$1"; STAMP="$2"
-REMOTE_DIR=/opt/rakurs; RELEASES_DIR=/opt/rakurs-releases; BACKUP_DIR=/opt/rakurs-backups
-compose() { docker compose -f deploy/compose.yml --env-file deploy/.env "$@"; }
-
-mkdir -p "$BACKUP_DIR"
-cd "$REMOTE_DIR"
-compose exec -T postgres pg_dump -U rakurs -Fc rakurs > "$BACKUP_DIR/rakurs-$STAMP-${SHA:0:12}.dump"
-echo "database backup: $BACKUP_DIR/rakurs-$STAMP-${SHA:0:12}.dump"
-docker image inspect rakurs-api:latest >/dev/null 2>&1 && docker tag rakurs-api:latest rakurs-api:rollback
-
-# Files main does not track are moved aside rather than deleted, as are the ones replaced.
-rsync -a --delete --backup --backup-dir="$RELEASES_DIR/replaced-$STAMP" \
-  --exclude=/deploy/.env --exclude=/.release.sha "$RELEASES_DIR/$SHA/" "$REMOTE_DIR/"
-
-compose build api
-compose run --rm --no-deps api npm run migrate
-compose up -d --no-deps api
-curl --silent --fail --retry 30 --retry-all-errors --retry-delay 1 --max-time 3 \
-  http://127.0.0.1:3000/api/health >/dev/null
-echo "$SHA" > "$REMOTE_DIR/.release.sha"
-echo "api healthy on $SHA"
-REMOTE
+ssh_host "bash $RELEASES_DIR/$SHA/deploy/release-remote.sh $SHA $STAMP" </dev/null
 
 step "Publishing the frontend"
 # Old hashed assets stay for browsers that still have the previous index.html open.
 rsync -a -e "ssh -i $KEY -o BatchMode=yes" --exclude=index.html "$WORK/rakurs/dist/" "$HOST:$WEB_ROOT/"
 rsync -a -e "ssh -i $KEY -o BatchMode=yes" "$WORK/rakurs/dist/index.html" "$HOST:$WEB_ROOT/index.html.next"
-ssh_host "mv $WEB_ROOT/index.html.next $WEB_ROOT/index.html"
+# The previous page is kept so a rollback can put it back without rebuilding.
+ssh_host "cp -p $WEB_ROOT/index.html $WEB_ROOT/index.html.previous 2>/dev/null || true; mv $WEB_ROOT/index.html.next $WEB_ROOT/index.html"
 
 step "Released $SHA"

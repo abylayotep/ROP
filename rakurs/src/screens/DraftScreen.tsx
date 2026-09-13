@@ -203,6 +203,8 @@ function Draft({ agentId, draftId, initial }: { agentId: string; draftId: string
     () => (cases.data ?? []).filter((c) => selected.has(c.id) && c.enabled),
     [cases.data, selected],
   );
+  const requiredCase = draft.requiredCaseId
+    ? cases.data?.find((item) => item.id === draft.requiredCaseId) : null;
 
   const isOpen = draft.status === 'open';
   const running = run?.status === 'running';
@@ -293,6 +295,9 @@ function Draft({ agentId, draftId, initial }: { agentId: string; draftId: string
 
           <Card>
             <CardHead title="Случаи для прогона" />
+            {draft.requiredCaseId && <p role="status">Для этого исправления обязателен исходный случай.
+              {requiredCase ? ` ${requiredCase.title}` : ' Если случай не найден, обновите список или создайте предложение заново.'}
+            </p>}
             <Async state={cases} skeleton={<Skeleton height={140} />}>
               {(loadedCases) => (
                 <CaseList
@@ -334,7 +339,11 @@ function Draft({ agentId, draftId, initial }: { agentId: string; draftId: string
               </button>
               {isOpen && !draft.applicable && (
                 <span style={{ fontSize: 11.5, color: 'var(--text-dim)' }}>
-                  {draft.runs.length === 0
+                  {draft.requiredCaseId && !requiredCase
+                    ? 'Обязательный случай исправления не найден. Обновите список; если он удалён, создайте предложение заново.'
+                    : draft.requiredCaseId && run?.status === 'done' && run.results.find((result) => result.caseId === draft.requiredCaseId)?.verdict !== 'better'
+                      ? 'Исходный случай должен стать лучше. Исправьте предложение и повторите прогон.'
+                    : draft.runs.length === 0
                     ? 'Прогоните черновик хотя бы раз — иначе применить будет нечего проверить.'
                     : 'База изменилась после последнего прогона — прогоните черновик заново.'}
                 </span>

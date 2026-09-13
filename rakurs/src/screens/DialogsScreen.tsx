@@ -69,9 +69,10 @@ export function canCoachFrom(message: Message, role: Role): boolean {
  * `server/src/lib/ai/coach.ts` builds around a transcript is not something a link built here
  * may hand a way around.
  */
-export function coachLink(conversationId: string, aiReplyId?: string | null): string {
+export function coachLink(conversationId: string, aiReplyId?: string | null, messageId?: string): string {
   const reply = aiReplyId ? `&reply=${aiReplyId}` : '';
-  return `../coach?conversation=${conversationId}${reply}`;
+  const message = messageId ? `&message=${messageId}` : '';
+  return `../coach?conversation=${conversationId}${reply}${message}`;
 }
 
 export function DialogsScreen() {
@@ -566,6 +567,11 @@ const Bubble = memo(function Bubble({
         </div>
         {canCoachFrom(message, role) && (
           <>
+            {message.aiReplyId && <button type="button"
+              onClick={() => navigate(coachLink(conversationId, message.aiReplyId, message.id))}
+              style={{ marginLeft: 'auto', fontSize: 10.5, color: 'var(--danger)', background: 'none', border: 0, padding: 0, cursor: 'pointer', textDecoration: 'underline' }}>
+              Исправить ответ
+            </button>}
             <button
               type="button"
               onClick={() => navigate(coachLink(conversationId, message.aiReplyId))}

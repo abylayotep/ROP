@@ -10,6 +10,8 @@ import {
   reconcileConflict, selectTurn, selectedTurn, startNewSession, terminalSessionReason,
   turnCountLabel, visibleSessions, type TestChatState,
 } from './test-chat';
+import { recoveredTurn } from './response-feedback';
+import { useNavigate } from 'react-router-dom';
 import './test-screen.css';
 
 const outcomeLabels: Record<string, string> = {
@@ -45,6 +47,7 @@ export function TestScreen() {
 }
 
 function TestWorkspace({ agentId }: { agentId: string }) {
+  const navigate = useNavigate();
   const sessions = useApi((signal) => api.listAiSandboxSessions(agentId, signal), [agentId]);
   const [chat, setChat] = useState(initialChatState);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -120,10 +123,42 @@ function TestWorkspace({ agentId }: { agentId: string }) {
           setChat((current) => failSend(current, api.humanError(reloadError)));
         }
       } else {
-        setChat((current) => failSend(current, api.humanError(error)));
+        try {
+          const fresh = await api.getAiSandboxSession(agentId, pending.sessionId);
+          const persisted = recoveredTurn(fresh, pending);
+          if (persisted) {
+            setChat((current) => acceptTurn(current, persisted));
+            sessions.reload();
+          } else if (fresh.revision > pending.revision) {
+            setChat((current) => reconcileConflict(current, fresh, 'Сессия изменилась. Проверьте историю перед повторной отправкой.'));
+          } else {
+            setChat((current) => ({ ...current, error: 'Ответ ещё обрабатывается или его статус неизвестен. Проверьте историю теста перед повторной отправкой.' }));
+          }
+        } catch {
+          setChat((current) => ({ ...current, error: 'Статус отправки неизвестен. Проверьте соединение; повторная отправка пока заблокирована, чтобы не создать дубль.' }));
+        }
       }
     } finally {
       sending.current = false;
+    }
+  }
+
+  async function checkPendingStatus() {
+    const pending = chat.pending;
+    if (!pending) return;
+    try {
+      const fresh = await api.getAiSandboxSession(agentId, pending.sessionId);
+      const persisted = recoveredTurn(fresh, pending);
+      if (persisted) {
+        setChat((current) => acceptTurn(current, persisted));
+        sessions.reload();
+      } else if (fresh.revision > pending.revision) {
+        setChat((current) => reconcileConflict(current, fresh, 'Сессия изменилась. Проверьте историю перед повторной отправкой.'));
+      } else {
+        setChat((current) => ({ ...current, error: 'Ответ пока не появился. Повторите проверку статуса позднее; сообщение повторно не отправлялось.' }));
+      }
+    } catch (error) {
+      setChat((current) => ({ ...current, error: `Не удалось проверить статус: ${api.humanError(error)} Повторная отправка пока заблокирована.` }));
     }
   }
 
@@ -210,14 +245,28 @@ function TestWorkspace({ agentId }: { agentId: string }) {
                 </div>
               )}
             </div>
-            {chat.error && <div className="test-send-error" role="alert">{chat.error}</div>}
+            {chat.error && <div className="test-send-error" role="alert">{chat.error}
+              {chat.pending && <button type="button" className="btn btn-sm" onClick={() => void checkPendingStatus()}>Проверить статус</button>}
+            </div>}
             <TestComposer chat={chat} onSend={send}
               onChangeText={(text) => setChat((state) => ({ ...state, composer: text }))} />
           </>
         )}
       </Card>
 
-      <TestTurnInspector turn={activeTurn} />
+      <TestTurnInspector turn={activeTurn} session={currentSession}
+        onCorrect={() => activeTurn && currentSession && navigate(`../coach?session=${encodeURIComponent(currentSession.id)}&turn=${encodeURIComponent(activeTurn.id)}`)}
+        onSaveCase={async () => {
+          if (!activeTurn || !currentSession) return;
+          try {
+            await api.createTestCase(agentId, {
+              title: `Тест: ${activeTurn.userText.slice(0, 80)}`,
+              messages: currentSession.turns.filter((item) => item.revision <= activeTurn.revision).map((item) => item.userText),
+              expectation: activeTurn.reply,
+            });
+            setChat((current) => ({ ...current, error: 'Тест-кейс сохранён в разделе проверок.' }));
+          } catch (error) { setChat((current) => ({ ...current, error: api.humanError(error) })); }
+        }} />
     </div>
   );
 }
@@ -248,7 +297,12 @@ export function TestComposer({
   );
 }
 
-export function TestTurnInspector({ turn }: { turn: AiSandboxTurn | null }) {
+export function TestTurnInspector({ turn, onCorrect, onSaveCase }: {
+  turn: AiSandboxTurn | null;
+  session?: AiSandboxSessionSummary | null;
+  onCorrect?: () => void;
+  onSaveCase?: () => void;
+}) {
   return (
     <Card pad={false} className="test-inspector">
       <div className="test-panel-head">
@@ -289,9 +343,8 @@ export function TestTurnInspector({ turn }: { turn: AiSandboxTurn | null }) {
             <p>Настройки: {turn.configVersion} · модель: {turn.model}</p>
           </div>
           <div className="test-inspector-actions">
-            <button type="button" className="btn" disabled>Исправить ответ</button>
-            <button type="button" className="btn" disabled>Сохранить как тест-кейс</button>
-            <p>Исправление ответа и сохранение тест-кейса пока недоступны в тестировании.</p>
+            <button type="button" className="btn" disabled={!turn.reply || !onCorrect} onClick={onCorrect}>Исправить ответ</button>
+            <button type="button" className="btn" disabled={!onSaveCase} onClick={onSaveCase}>Сохранить как тест-кейс</button>
           </div>
         </div>
       )}

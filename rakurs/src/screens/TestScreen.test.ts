@@ -1,5 +1,6 @@
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it, vi } from 'vitest';
 import type { AiSandboxSessionDetail, AiSandboxSessionSummary, AiSandboxTurn } from '@rakurs/contract';
 
@@ -38,20 +39,20 @@ const session: AiSandboxSessionDetail = {
 
 describe('testing screen', () => {
   it('keeps the isolation warning visible before any session exists', () => {
-    const html = renderToStaticMarkup(createElement(TestScreen));
+    const html = renderToStaticMarkup(createElement(MemoryRouter, null, createElement(TestScreen)));
     expect(html).toContain('Тест — сообщения не отправляются в WhatsApp');
     expect(html).toContain('Новый тест');
     expect(html).toContain('Выберите тест или создайте новый');
   });
 
-  it('shows sources and proposed effects without presenting future actions as live', () => {
-    const html = renderToStaticMarkup(createElement(TestTurnInspector, { turn }));
+  it('shows sources and enables correction and case saving for a selected answer', () => {
+    const html = renderToStaticMarkup(createElement(TestTurnInspector, { turn, onCorrect: () => {}, onSaveCase: () => {} }));
     expect(html).toContain('Доставка');
     expect(html).toContain('Готов к покупке');
     expect(html).toContain('Алматы');
-    expect(html).toMatch(/disabled=""[^>]*>Исправить ответ/);
-    expect(html).toMatch(/disabled=""[^>]*>Сохранить как тест-кейс/);
-    expect(html).toContain('пока недоступны');
+    expect(html).toMatch(/>Исправить ответ<\/button>/);
+    expect(html).toMatch(/>Сохранить как тест-кейс<\/button>/);
+    expect(html).not.toContain('пока недоступны');
   });
 
   it('labels separate CRM effects and a checkout as simulated without claiming payment creation', () => {
@@ -73,7 +74,7 @@ describe('testing screen', () => {
 
   it('shows a retryable warning when a list reload fails with stale data', () => {
     fixture.error = new Error('Network unavailable');
-    const html = renderToStaticMarkup(createElement(TestScreen));
+    const html = renderToStaticMarkup(createElement(MemoryRouter, null, createElement(TestScreen)));
     fixture.error = undefined;
     expect(html).toContain('Не удалось обновить список тестов');
     expect(html).toContain('Повторить');

@@ -9,6 +9,7 @@ import { useToast } from '@/components/ui/Toast';
 import { useApi } from '@/hooks/useApi';
 import { useAgent } from '@/store/agent';
 import type { AgentRule, CoachMessage, ConversationThread, KbDraft } from '@/types';
+import { correctionSource, correctionText, type CorrectionTarget } from './response-feedback';
 
 /**
  * Обучение: a chat where the owner teaches the agent, and the rules that chat has already
@@ -82,6 +83,7 @@ function Coach({ agentId, loaded }: { agentId: string; loaded: Loaded }) {
   const [messages, setMessages] = useState<CoachMessage[]>(loaded.messages);
   const [rules, setRules] = useState<AgentRule[]>(loaded.rules);
   const [text, setText] = useState('');
+  const [correctionType, setCorrectionType] = useState<'fact' | 'behavior'>('fact');
   const [sending, setSending] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const textRef = useRef<HTMLTextAreaElement>(null);
@@ -96,6 +98,13 @@ function Coach({ agentId, loaded }: { agentId: string; loaded: Loaded }) {
   // The particular reply «Так нельзя» sat on, when the button carried one — read the same
   // way and for the same reason as `conversationId` itself, right above.
   const aiReplyId = params.get('reply');
+  const sandboxSessionId = params.get('session');
+  const sandboxTurnId = params.get('turn');
+  const correctionTarget: CorrectionTarget | null = sandboxSessionId && sandboxTurnId
+    ? { kind: 'sandbox', sessionId: sandboxSessionId, turnId: sandboxTurnId }
+    : conversationId && aiReplyId
+      ? { kind: 'live', conversationId, replyId: aiReplyId }
+      : null;
   const detach = () => setParams({}, { replace: true });
 
   useEffect(() => {
@@ -135,10 +144,20 @@ function Coach({ agentId, loaded }: { agentId: string; loaded: Loaded }) {
         text: value,
         conversationId: conversationId ?? undefined,
         aiReplyId: aiReplyId ?? undefined,
+        feedback: correctionTarget ? {
+          source: correctionSource(correctionTarget), correctionType, note: correctionText(value)!,
+        } : undefined,
       });
+      let savedReply: CoachMessage | undefined;
+      try {
+        savedReply = (await api.listCoachMessages(agentId)).find((item) => item.id === reply.id);
+      } catch {
+        // The proposal was already persisted. A failed refresh must not turn the submitted
+        // feedback into a retryable send, which would create a duplicate coaching turn.
+      }
       setMessages((prev) => [
         ...prev,
-        {
+        savedReply ?? {
           id: reply.id,
           role: 'model',
           text: reply.message,
@@ -150,6 +169,7 @@ function Coach({ agentId, loaded }: { agentId: string; loaded: Loaded }) {
           createdAt: new Date().toISOString(),
         },
       ]);
+      if (correctionTarget) setParams({}, { replace: true });
     } catch (error) {
       // The turn never happened — its line does not stay, and the text goes back into the
       // box so retyping a paragraph is not the price of a failed send.
@@ -171,6 +191,7 @@ function Coach({ agentId, loaded }: { agentId: string; loaded: Loaded }) {
         {conversationId !== null && (
           <AttachedDialog agentId={agentId} conversationId={conversationId} onDetach={detach} />
         )}
+        {correctionTarget && <CorrectionContext agentId={agentId} target={correctionTarget} messageId={params.get('message')} />}
         <Card pad={false}>
           <div
             style={{
@@ -215,7 +236,17 @@ function Coach({ agentId, loaded }: { agentId: string; loaded: Loaded }) {
                     {message.text}
                   </div>
                   {message.role === 'model' && message.proposal && (
-                    <ProposalCard agentId={agentId} message={message} rules={rules} onRejected={onRejected} />
+                    <>
+                      {message.sourceSnapshot && <div className="sunken-box" style={{ maxWidth: '85%', fontSize: 12 }}>
+                        <strong>Исходный ответ</strong><p>{message.sourceSnapshot.responseText}</p>
+                        <strong>Проверенные источники</strong>
+                        {message.sourceSnapshot.sourceRecords.length
+                          ? <ul>{message.sourceSnapshot.sourceRecords.map((source) =>
+                            <li key={source.id}>{source.title}: {source.content}</li>)}</ul>
+                          : <p>Источники не использовались.</p>}
+                      </div>}
+                      <ProposalCard agentId={agentId} message={message} rules={rules} onRejected={onRejected} />
+                    </>
                   )}
                 </div>
               ))
@@ -225,7 +256,16 @@ function Coach({ agentId, loaded }: { agentId: string; loaded: Loaded }) {
         </Card>
 
         <form onSubmit={send} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {correctionTarget && <>
+            <label htmlFor="correction-type">Тип исправления</label>
+            <select id="correction-type" value={correctionType} onChange={(event) => setCorrectionType(event.target.value as 'fact' | 'behavior')}>
+              <option value="fact">Неверная информация</option>
+              <option value="behavior">Неверное поведение</option>
+            </select>
+            <label htmlFor="correction-note">Как нужно исправить ответ</label>
+          </>}
           <textarea
+            id={correctionTarget ? 'correction-note' : undefined}
             ref={textRef}
             style={{ ...control, minHeight: 72 }}
             value={text}
@@ -234,8 +274,8 @@ function Coach({ agentId, loaded }: { agentId: string; loaded: Loaded }) {
             onChange={(e) => setText(e.target.value)}
           />
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <button type="submit" className="btn" disabled={sending || text.trim() === ''}>
-              {sending ? 'Коуч отвечает…' : 'Отправить'}
+            <button type="submit" className="btn" disabled={sending || correctionText(text) === null}>
+              {sending ? 'Коуч отвечает…' : correctionTarget ? 'Создать предложение' : 'Отправить'}
             </button>
             {/* Every turn is a real OpenRouter call, the same money a sandbox run spends —
                 said next to the button that spends it, not buried in a tooltip. */}
@@ -309,6 +349,41 @@ function OpenDrafts({ agentId }: { agentId: string }) {
       </div>
     </Card>
   );
+}
+
+function CorrectionContext({ agentId, target, messageId }: { agentId: string; target: CorrectionTarget; messageId: string | null }) {
+  const context = useApi(async (signal) => target.kind === 'sandbox'
+    ? api.getAiSandboxSession(agentId, target.sessionId, signal)
+    : api.getConversation(agentId, target.conversationId, signal,
+      messageId ? { limit: 30, around: messageId } : undefined),
+  [agentId, target.kind, target.kind === 'sandbox' ? target.sessionId : target.conversationId, messageId]);
+  if (context.error) return <Card>Не удалось загрузить ответ. Проверьте доступ и обновите страницу.</Card>;
+  if (!context.data) return <Card>Загружаем выбранный ответ…</Card>;
+  if (target.kind === 'sandbox') {
+    const session = context.data as Awaited<ReturnType<typeof api.getAiSandboxSession>>;
+    const index = session.turns.findIndex((turn) => turn.id === target.turnId);
+    const turn = session.turns[index];
+    if (!turn?.reply) return <Card>Выбранный ответ не найден. Вернитесь в тест и выберите другой ответ.</Card>;
+    return <Card>
+      <h3>Исправление тестового ответа</h3>
+      {session.turns.slice(Math.max(0, index - 2), index + 1).map((item) =>
+        <p key={item.id}>Клиент: {item.userText}<br />Агент: {item.reply ?? 'Без ответа'}</p>)}
+      <strong>Проверенные источники ответа</strong>
+      {turn.sourceIds.length ? <ul>{turn.sourceIds.map((id) =>
+        <li key={id}>{turn.usedItems.find((item) => item.id === id)?.title ?? `Источник ${id}`}</li>)}</ul>
+        : <p>Источники не использовались.</p>}
+      <p>Сервер повторно проверит принадлежность ответа и источников перед созданием предложения.</p>
+    </Card>;
+  }
+  const thread = context.data as ConversationThread;
+  const index = thread.messages.findIndex((message) => message.aiReplyId === target.replyId);
+  if (index < 0) return <Card>Выбранный ответ не найден в загруженной переписке. Проверьте его в диалоге.</Card>;
+  return <Card>
+    <h3>Исправление ответа в диалоге</h3>
+    {thread.messages.slice(Math.max(0, index - 5), index + 1).map((message) =>
+      <p key={message.id}>{message.author === 'ai' ? 'Агент' : message.author === 'client' ? 'Клиент' : 'Оператор'}: {message.body}</p>)}
+    <p>Проверенные источники выбранного ответа будут зафиксированы сервером вместе с исправлением.</p>
+  </Card>;
 }
 
 /**

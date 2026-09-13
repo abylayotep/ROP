@@ -541,7 +541,7 @@ export const getAiSandboxSession = (agentId: string, sessionId: string, signal?:
 export const sendAiSandboxTurn = (
   agentId: string, sessionId: string, body: AiSandboxTurnRequest,
 ) => request<AiSandboxTurn>(`${sandboxSessions(agentId)}/${sessionId}/turns`, {
-  method: 'POST', body, timeoutMs: LONG_TIMEOUT_MS,
+  method: 'POST', body, timeoutMs: 150_000,
 });
 
 /** Any member: the operator watching the agent go wrong is the one who has to stop it. */
@@ -691,7 +691,11 @@ export interface CoachReply {
  */
 export const sendCoachMessage = (
   agentId: string,
-  body: { text: string; conversationId?: string; aiReplyId?: string },
+  body: { text: string; conversationId?: string; aiReplyId?: string; feedback?: {
+    source: { kind: 'conversation_reply'; conversationId: string; aiReplyId: string }
+      | { kind: 'sandbox_turn'; sessionId: string; turnId: string };
+    correctionType: 'fact' | 'behavior'; note: string;
+  } },
 ) =>
   request<CoachReply>(`/agents/${agentId}/coach/messages`, {
     method: 'POST',

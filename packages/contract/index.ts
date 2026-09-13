@@ -1437,7 +1437,7 @@ export interface TestCase {
   /** The customer's side only. The agent's replies are what is being tested. */
   messages: string[];
   expectation: string | null;
-  origin: 'manual' | 'dialog' | 'generated' | 'correction';
+  origin: 'manual' | 'dialog' | 'generated' | 'correction' | 'suggested';
   conversationId: string | null;
   requiredDraftId: string | null;
   enabled: boolean;

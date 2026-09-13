@@ -47,10 +47,11 @@ export const TOPIC_FIX_INPUT_MAX = 8_000;
 
 const OUTPUT_SCHEMA = z.object({ body: z.string(), reason: z.string() });
 
-/** Digit runs in `after` that do not occur in `before`. Spaces inside a number are dropped
- * first so "9 990" and "9990" count as the same price. */
+/** Digit runs in `after` that do not occur in `before`. Spaces inside a number (a plain, a
+ * no-break or a narrow no-break space, never a line break) are dropped first so "9 990" and
+ * "9990" count as the same price while numbers on adjacent lines stay apart. */
 export function inventedNumbers(before: string, after: string): string[] {
-  const runs = (text: string): string[] => text.replace(/(\d)[\s ](?=\d)/g, '$1').match(/\d+/g) ?? [];
+  const runs = (text: string): string[] => text.replace(/(\d)[ \u00a0\u202f](?=\d)/g, '$1').match(/\d+/g) ?? [];
   const known = new Set(runs(before));
   const invented: string[] = [];
   for (const run of runs(after)) {

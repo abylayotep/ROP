@@ -18,6 +18,16 @@ describe('inventedNumbers', () => {
   it('accepts reformatted but identical numbers', () => {
     expect(inventedNumbers('цена 9 990 тг', 'цена 9990 тг')).toEqual([]);
   });
+  it('accepts no-break and narrow no-break spaces inside a number', () => {
+    expect(inventedNumbers('цена 9\u00a0990 и 12\u202f500 тг', 'цена 9990 и 12500 тг')).toEqual([]);
+  });
+  it('never merges numbers across a line break', () => {
+    expect(inventedNumbers('## Факты\nРаботаем до 18:00\n1500 ₸ доставка', '## Факты\n- Работаем до 18:00\n- 1500 ₸ доставка'))
+      .toEqual([]);
+  });
+  it('flags a shortened number as new', () => {
+    expect(inventedNumbers('цена 9990 тг', 'цена 99 тг')).toEqual(['99']);
+  });
 });
 
 describe('cleanTopic', () => {

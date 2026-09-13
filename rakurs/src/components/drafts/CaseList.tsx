@@ -33,11 +33,12 @@ const control: CSSProperties = {
   resize: 'vertical',
 };
 
-const ORIGIN_LABEL: Record<TestCase['origin'], string> = {
+export const ORIGIN_LABEL: Record<TestCase['origin'], string> = {
   manual: 'руками',
   dialog: 'из диалога',
   generated: 'предложен моделью',
   correction: 'обязательный случай исправления',
+  suggested: 'придумано',
 };
 
 /** Not a real case id — every id is a uuid the server minted. Marks the inline slot as "a

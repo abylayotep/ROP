@@ -82,7 +82,7 @@ const toCase = (row: typeof testCases.$inferSelect) => ({
   title: row.title,
   messages: row.messages,
   expectation: row.expectation,
-  origin: row.origin as 'manual' | 'dialog' | 'generated' | 'correction',
+  origin: row.origin as 'manual' | 'dialog' | 'generated' | 'correction' | 'suggested',
   conversationId: row.conversationId,
   requiredDraftId: row.requiredDraftId,
   enabled: row.enabled,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { draftOrigin, nextStep, pluralRu, tabAfterKey, wizardStep } from './training-state';
+import { draftOrigin, nextStep, pluralRu, runErrorSummary, tabAfterKey, wizardStep } from './training-state';
 
 const run = (status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled', proposalCount = 3, drafts = 0) =>
   ({ run: { status, proposalCount }, drafts: Array.from({ length: drafts }, (_, i) => ({ id: `d${i}` })) });
@@ -65,5 +65,30 @@ describe('pluralRu', () => {
     expect(drafts(12)).toBe('12 черновиков');
     expect(drafts(21)).toBe('21 черновик');
     expect(drafts(22)).toBe('22 черновика');
+  });
+});
+
+describe('runErrorSummary', () => {
+  const batch = (ordinal: number, code = 'unsafe_output') => ({ batchId: `b${ordinal}`, ordinal, code });
+
+  it('reports nothing for a clean run', () => {
+    expect(runErrorSummary({ status: 'completed', batchCount: 83, errors: [] })).toBeNull();
+  });
+
+  it('folds batch errors of a finished run into one calm line', () => {
+    const summary = runErrorSummary({ status: 'completed', batchCount: 83, errors: [batch(8), batch(11), batch(11, 'batch_failed')] });
+    expect(summary).toEqual({ severity: 'partial', text: 'Не обработано частей: 2 из 83. Остальное разобрано — факты ниже можно отбирать.', runLevel: [] });
+  });
+
+  it('keeps run-level errors separate and marks a failed run as an error', () => {
+    const summary = runErrorSummary({ status: 'failed', batchCount: 4, errors: [{ batchId: null, ordinal: null, code: 'missing_ai_configuration' }, batch(1)] });
+    expect(summary?.severity).toBe('error');
+    expect(summary?.runLevel).toHaveLength(1);
+    expect(summary?.text).toBe('Не обработано частей: 1 из 4.');
+  });
+
+  it('has no batch line when only the run itself failed', () => {
+    const summary = runErrorSummary({ status: 'failed', batchCount: 4, errors: [{ batchId: null, ordinal: null, code: 'consolidation_failed' }] });
+    expect(summary).toEqual({ severity: 'error', text: null, runLevel: [{ batchId: null, ordinal: null, code: 'consolidation_failed' }] });
   });
 });

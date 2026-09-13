@@ -2,7 +2,7 @@
  * State the «Обучение агента» section derives rather than stores: the generation wizard's
  * step, the one next action the strip suggests, and a draft's origin label.
  */
-import type { KbDraft, KbGenerationRunDetail } from '@/types';
+import type { KbDraft, KbGenerationRunDetail, KbGenerationRunError } from '@/types';
 
 export type WizardStep = 'period' | 'processing' | 'selection' | 'draft';
 
@@ -79,4 +79,35 @@ export function tabAfterKey<T extends string>(ids: readonly T[], current: T, key
   if (key === 'ArrowRight') return ids[(index + 1) % ids.length]!;
   if (key === 'ArrowLeft') return ids[(index - 1 + ids.length) % ids.length]!;
   return null;
+}
+
+export interface RunErrorSummary {
+  /** `partial`: some batches failed but the run finished; `error`: the run itself failed. */
+  severity: 'partial' | 'error';
+  /** One line counting failed batches, or `null` when no batch failed. */
+  text: string | null;
+  /** Errors not tied to a batch (missing key, consolidation) — actionable, shown one by one. */
+  runLevel: KbGenerationRunError[];
+}
+
+/**
+ * A run that finished with a few unusable batches still produced reviewable facts. Listing
+ * every batch error in red made such a run read as a crash, so batch errors collapse into one
+ * count and the per-batch list moves under details. Run-level errors stay visible: each one
+ * names a fix the owner has to make.
+ */
+export function runErrorSummary(run: {
+  status: KbGenerationRunDetail['run']['status'];
+  batchCount: number;
+  errors: KbGenerationRunError[];
+}): RunErrorSummary | null {
+  if (run.errors.length === 0) return null;
+  const runLevel = run.errors.filter((error) => error.ordinal === null);
+  const failedBatches = new Set(run.errors.flatMap((error) => (error.ordinal === null ? [] : [error.ordinal]))).size;
+  const finished = run.status === 'completed' || run.status === 'cancelled';
+  const severity = finished && runLevel.length === 0 ? 'partial' : 'error';
+  const count = `Не обработано частей: ${failedBatches} из ${run.batchCount}.`;
+  const text = failedBatches === 0 ? null
+    : severity === 'partial' ? `${count} Остальное разобрано — факты ниже можно отбирать.` : count;
+  return { severity, text, runLevel };
 }

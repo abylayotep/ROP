@@ -14,7 +14,7 @@ import { GenerationRunRail } from '@/components/knowledge/GenerationRunRail';
 import { ProposalWorkspace } from '@/components/knowledge/ProposalWorkspace';
 import { RecentHistoryPreparation } from '@/components/knowledge/RecentHistoryPreparation';
 import { useApi } from '@/hooks/useApi';
-import { wizardStep } from '@/lib/training-state';
+import { runErrorSummary, wizardStep } from '@/lib/training-state';
 import type { KbGenerationRunDetail } from '@/types';
 import { WizardSteps } from './WizardSteps';
 
@@ -149,14 +149,7 @@ function RunBar({ generation, detail }: { generation: GenerationRunController; d
         <span className="mono">{new Date(run.createdAt).toLocaleString('ru-RU')}</span>{' '}
         <small>{generationStatusLabel(run.status)}</small>
       </div>
-      {run.errors.length > 0 && (
-        <div className="generation-review__notice generation-review__notice--error" role="alert">
-          {run.errors.map((error, index) => {
-            const presentation = generationRunErrorPresentation(error);
-            return <p key={`${error.batchId ?? 'run'}:${error.code}:${index}`}><strong>{presentation.reason}</strong> {presentation.recovery}</p>;
-          })}
-        </div>
-      )}
+      <RunErrors run={run} />
       {!active && (
         <div className="generation-review__actions">
           {run.status === 'failed' && (
@@ -166,6 +159,31 @@ function RunBar({ generation, detail }: { generation: GenerationRunController; d
         </div>
       )}
     </header>
+  );
+}
+
+/** Run-level errors one by one; batch errors as a single count with the list under details. */
+function RunErrors({ run }: { run: KbGenerationRunDetail['run'] }) {
+  const summary = runErrorSummary(run);
+  if (!summary) return null;
+  const batchErrors = run.errors.filter((error) => error.ordinal !== null);
+  const tone = summary.severity === 'error' ? ' generation-review__notice--error' : '';
+  return (
+    <div className={`generation-review__notice${tone}`} role={summary.severity === 'error' ? 'alert' : 'status'}>
+      {summary.runLevel.map((error, index) => {
+        const presentation = generationRunErrorPresentation(error);
+        return <p key={`run:${error.code}:${index}`}><strong>{presentation.reason}</strong> {presentation.recovery}</p>;
+      })}
+      {summary.text && (
+        <details className="generation-run-errors">
+          <summary>{summary.text}</summary>
+          {batchErrors.map((error, index) => {
+            const presentation = generationRunErrorPresentation(error);
+            return <p key={`${error.batchId ?? 'run'}:${error.code}:${index}`}><strong>{presentation.reason}</strong> {presentation.recovery}</p>;
+          })}
+        </details>
+      )}
+    </div>
   );
 }
 

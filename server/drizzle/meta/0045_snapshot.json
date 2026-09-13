@@ -1,6 +1,6 @@
 {
-  "id": "3266db9d-3696-40b7-8e68-ee3832618063",
-  "prevId": "34843d61-496b-483a-b0a3-e1caae8b4fbc",
+  "id": "0d20ea20-e920-4c35-8029-a341add6d764",
+  "prevId": "4e1bd350-7d9c-482c-83f0-63a2a7ec7288",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -413,6 +413,13 @@
           "notNull": true,
           "default": "'off'"
         },
+        "crm_analysis_mode": {
+          "name": "crm_analysis_mode",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'follow_ai'"
+        },
         "test_contact_id": {
           "name": "test_contact_id",
           "type": "uuid",
@@ -439,6 +446,13 @@
           "primaryKey": false,
           "notNull": true,
           "default": "'auto'"
+        },
+        "communication_style": {
+          "name": "communication_style",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'warm'"
         },
         "openrouter_key": {
           "name": "openrouter_key",
@@ -529,6 +543,10 @@
         "agents_response_mode_check": {
           "name": "agents_response_mode_check",
           "value": "\"agents\".\"response_mode\" in ('off', 'test', 'live')"
+        },
+        "agents_crm_analysis_mode_check": {
+          "name": "agents_crm_analysis_mode_check",
+          "value": "\"agents\".\"crm_analysis_mode\" in ('follow_ai', 'independent')"
         }
       },
       "isRLSEnabled": false
@@ -607,6 +625,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": "'[]'::jsonb"
+        },
+        "config_version": {
+          "name": "config_version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
         },
         "created_at": {
           "name": "created_at",
@@ -3007,6 +3031,18 @@
           "primaryKey": false,
           "notNull": true
         },
+        "classification": {
+          "name": "classification",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "classification_reason": {
+          "name": "classification_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "status": {
           "name": "status",
           "type": "text",
@@ -3087,6 +3123,96 @@
           "columns": [
             "run_id",
             "ordinal"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.kb_generation_drafts": {
+      "name": "kb_generation_drafts",
+      "schema": "",
+      "columns": {
+        "run_id": {
+          "name": "run_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "draft_id": {
+          "name": "draft_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "request_key": {
+          "name": "request_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "kb_generation_drafts_draft_idx": {
+          "name": "kb_generation_drafts_draft_idx",
+          "columns": [
+            {
+              "expression": "draft_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "kb_generation_drafts_run_id_kb_generation_runs_id_fk": {
+          "name": "kb_generation_drafts_run_id_kb_generation_runs_id_fk",
+          "tableFrom": "kb_generation_drafts",
+          "tableTo": "kb_generation_runs",
+          "columnsFrom": [
+            "run_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "kb_generation_drafts_draft_id_kb_drafts_id_fk": {
+          "name": "kb_generation_drafts_draft_id_kb_drafts_id_fk",
+          "tableFrom": "kb_generation_drafts",
+          "tableTo": "kb_drafts",
+          "columnsFrom": [
+            "draft_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "kb_generation_drafts_run_draft": {
+          "name": "kb_generation_drafts_run_draft",
+          "nullsNotDistinct": false,
+          "columns": [
+            "run_id",
+            "draft_id"
           ]
         }
       },
@@ -3248,6 +3374,13 @@
           "notNull": true,
           "default": 1
         },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'knowledge'"
+        },
         "path": {
           "name": "path",
           "type": "text",
@@ -3259,6 +3392,20 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
+        },
+        "confidence": {
+          "name": "confidence",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'review'"
+        },
+        "selected": {
+          "name": "selected",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
         },
         "warnings": {
           "name": "warnings",
@@ -3437,6 +3584,182 @@
           ]
         }
       },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.kb_generation_raw_findings": {
+      "name": "kb_generation_raw_findings",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "run_id": {
+          "name": "run_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "batch_id": {
+          "name": "batch_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "fingerprint": {
+          "name": "fingerprint",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "legacy_kind": {
+          "name": "legacy_kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "legacy_revision": {
+          "name": "legacy_revision",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "legacy_status": {
+          "name": "legacy_status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "legacy_draft_id": {
+          "name": "legacy_draft_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "legacy_draft_op_index": {
+          "name": "legacy_draft_op_index",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "legacy_note_id": {
+          "name": "legacy_note_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "path": {
+          "name": "path",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "body": {
+          "name": "body",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "warnings": {
+          "name": "warnings",
+          "type": "text[]",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::text[]"
+        },
+        "sources": {
+          "name": "sources",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "kb_generation_raw_findings_run_created_idx": {
+          "name": "kb_generation_raw_findings_run_created_idx",
+          "columns": [
+            {
+              "expression": "run_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "kb_generation_raw_findings_run_fingerprint_idx": {
+          "name": "kb_generation_raw_findings_run_fingerprint_idx",
+          "columns": [
+            {
+              "expression": "run_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "fingerprint",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "kb_generation_raw_findings_run_id_kb_generation_runs_id_fk": {
+          "name": "kb_generation_raw_findings_run_id_kb_generation_runs_id_fk",
+          "tableFrom": "kb_generation_raw_findings",
+          "tableTo": "kb_generation_runs",
+          "columnsFrom": [
+            "run_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "kb_generation_raw_findings_batch_id_kb_generation_batches_id_fk": {
+          "name": "kb_generation_raw_findings_batch_id_kb_generation_batches_id_fk",
+          "tableFrom": "kb_generation_raw_findings",
+          "tableTo": "kb_generation_batches",
+          "columnsFrom": [
+            "batch_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false
@@ -4872,6 +5195,30 @@
           "primaryKey": false,
           "notNull": true
         },
+        "request_key": {
+          "name": "request_key",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "requested_by_user_id": {
+          "name": "requested_by_user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "request_hash": {
+          "name": "request_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "failure_reason": {
+          "name": "failure_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "snapshot": {
           "name": "snapshot",
           "type": "jsonb",
@@ -4977,7 +5324,17 @@
         }
       },
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
+      "uniqueConstraints": {
+        "response_feedback_request_key": {
+          "name": "response_feedback_request_key",
+          "nullsNotDistinct": false,
+          "columns": [
+            "agent_id",
+            "requested_by_user_id",
+            "request_key"
+          ]
+        }
+      },
       "policies": {},
       "checkConstraints": {
         "response_feedback_one_source_check": {
@@ -4994,7 +5351,7 @@
         },
         "response_feedback_snapshot_bounds_check": {
           "name": "response_feedback_snapshot_bounds_check",
-          "value": "jsonb_typeof(\"response_feedback\".\"snapshot\") = 'object' and (\"response_feedback\".\"snapshot\" - 'transcript' - 'responseText' - 'configVersion' - 'sourceIds' - 'sourceRecords') = '{}'::jsonb and jsonb_typeof(\"response_feedback\".\"snapshot\"->'transcript') = 'string' and length(\"response_feedback\".\"snapshot\"->>'transcript') <= 12000 and jsonb_typeof(\"response_feedback\".\"snapshot\"->'responseText') = 'string' and length(\"response_feedback\".\"snapshot\"->>'responseText') <= 4000 and jsonb_typeof(\"response_feedback\".\"snapshot\"->'configVersion') = 'number' and jsonb_typeof(\"response_feedback\".\"snapshot\"->'sourceIds') = 'array' and jsonb_array_length(\"response_feedback\".\"snapshot\"->'sourceIds') <= 30 and jsonb_typeof(\"response_feedback\".\"snapshot\"->'sourceRecords') = 'array' and jsonb_array_length(\"response_feedback\".\"snapshot\"->'sourceRecords') <= 30 and pg_column_size(\"response_feedback\".\"snapshot\") <= 32768"
+          "value": "jsonb_typeof(\"response_feedback\".\"snapshot\") = 'object' and (\"response_feedback\".\"snapshot\" - 'transcript' - 'responseText' - 'configVersion' - 'sourceIds' - 'sourceRecords') = '{}'::jsonb and jsonb_typeof(\"response_feedback\".\"snapshot\"->'transcript') = 'string' and length(\"response_feedback\".\"snapshot\"->>'transcript') <= 12000 and jsonb_typeof(\"response_feedback\".\"snapshot\"->'responseText') = 'string' and length(\"response_feedback\".\"snapshot\"->>'responseText') <= 4000 and jsonb_typeof(\"response_feedback\".\"snapshot\"->'configVersion') in ('number', 'null') and jsonb_typeof(\"response_feedback\".\"snapshot\"->'sourceIds') = 'array' and jsonb_array_length(\"response_feedback\".\"snapshot\"->'sourceIds') <= 30 and jsonb_typeof(\"response_feedback\".\"snapshot\"->'sourceRecords') = 'array' and jsonb_array_length(\"response_feedback\".\"snapshot\"->'sourceRecords') <= 30 and pg_column_size(\"response_feedback\".\"snapshot\") <= 32768"
         }
       },
       "isRLSEnabled": false
@@ -5431,6 +5788,12 @@
           "notNull": true,
           "default": true
         },
+        "required_draft_id": {
+          "name": "required_draft_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -5495,10 +5858,31 @@
           ],
           "onDelete": "set null",
           "onUpdate": "no action"
+        },
+        "test_cases_required_draft_id_kb_drafts_id_fk": {
+          "name": "test_cases_required_draft_id_kb_drafts_id_fk",
+          "tableFrom": "test_cases",
+          "tableTo": "kb_drafts",
+          "columnsFrom": [
+            "required_draft_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
+      "uniqueConstraints": {
+        "test_cases_required_draft_key": {
+          "name": "test_cases_required_draft_key",
+          "nullsNotDistinct": false,
+          "columns": [
+            "required_draft_id"
+          ]
+        }
+      },
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false

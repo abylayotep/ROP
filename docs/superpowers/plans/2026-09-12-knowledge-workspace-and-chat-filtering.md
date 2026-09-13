@@ -19,7 +19,7 @@
 - Use additive migrations and keep rollback compatible with the previous application image.
 
 ## File Map
-- `server/src/db/schema.ts`, `server/drizzle/0028_knowledge_review_workspace.sql`: additive persistence for classification, selection, proposal kind/confidence, run-draft links, and agent style.
+- `server/src/db/schema.ts`, `server/drizzle/0029_knowledge_review_workspace.sql`: additive persistence for classification, selection, proposal kind/confidence, run-draft links, and agent style.
 - `packages/contract/index.ts`: shared API types for style, classified batches, proposal review state, exclusions, and draft links.
 - `server/src/lib/knowledge/generation-extract.ts`: customer relevance classification and grounded raw extraction.
 - `server/src/lib/knowledge/generation-consolidate.ts`: bounded deduplication and source-preserving consolidation.
@@ -41,7 +41,7 @@
 
 **Files:**
 - Modify: `server/src/db/schema.ts`
-- Create: `server/drizzle/0028_knowledge_review_workspace.sql`
+- Create: `server/drizzle/0029_knowledge_review_workspace.sql`
 - Modify: `server/drizzle/meta/_journal.json`
 - Modify: `packages/contract/index.ts`
 - Test: `server/test/knowledge-generation-workspace-schema.test.ts`
@@ -87,7 +87,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit only Task 1 files**
 
 ```bash
-git add packages/contract/index.ts server/src/db/schema.ts server/drizzle/0028_knowledge_review_workspace.sql server/drizzle/meta/_journal.json server/test/knowledge-generation-workspace-schema.test.ts
+git add packages/contract/index.ts server/src/db/schema.ts server/drizzle/0029_knowledge_review_workspace.sql server/drizzle/meta/_journal.json server/test/knowledge-generation-workspace-schema.test.ts
 git commit -m "feat: persist knowledge generation review state"
 ```
 
@@ -477,7 +477,7 @@ Expected: server and frontend builds succeed. If unrelated dirty-tree work preve
 
 - [ ] **Step 3: Deploy the additive migration and application images**
 
-Create rollback image tags before updating services. Apply migration `0028_knowledge_review_workspace.sql`, deploy API and frontend, and wait for health checks before proceeding.
+Create rollback image tags before updating services. Apply migration `0029_knowledge_review_workspace.sql`, deploy API and frontend, and wait for health checks before proceeding.
 
 - [ ] **Step 4: Perform human-style production browser QA**
 

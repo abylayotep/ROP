@@ -40,7 +40,12 @@ export function jidToPhone(jid: string | null | undefined): string | null {
   return digits.length > 0 ? digits : null;
 }
 
-/** Reads the opaque account id from `<lid>[:device]@lid`, never treating it as a phone. */
+/**
+ * `4304144453830:3@lid` → `4304144453830`. Anything that is not a LID answers null.
+ *
+ * A LID is WhatsApp's account id, not a phone number, and is never stored as one: it is
+ * only ever the question this file asks [[lid-directory]].
+ */
 export function jidToLid(jid: string | null | undefined): string | null {
   if (!jid) return null;
   const [user, domain] = jid.split('@');

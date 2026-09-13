@@ -1,8 +1,9 @@
 import { Link } from 'react-router-dom';
 
 export function GenerationDraftLinks({ drafts }: { drafts: { id: string; title: string }[] }) {
-  const knowledge = drafts.find(draft => draft.title === 'База знаний из WhatsApp');
-  const script = drafts.find(draft => draft.title === 'Скрипт продаж из WhatsApp');
+  const categoryDraft = (title: string) => drafts.find(draft => draft.title === title || draft.title.startsWith(`${title} · `));
+  const knowledge = categoryDraft('База знаний из WhatsApp');
+  const script = categoryDraft('Скрипт продаж из WhatsApp');
   return <section aria-label="Результат подготовки" style={{ margin: '14px 0' }}>
     <div style={{ fontWeight: 700 }}>Результат подготовки</div>
     <p style={{ fontSize: 13 }}>Ничего не опубликовано. Откройте черновики, проверьте текст и источники.</p>

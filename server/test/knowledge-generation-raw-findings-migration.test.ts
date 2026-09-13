@@ -1,0 +1,285 @@
+import { randomUUID } from 'node:crypto';
+import { drizzle } from 'drizzle-orm/postgres-js';
+import type { FastifyInstance } from 'fastify';
+import postgres from 'postgres';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { buildServer } from '../src/api/server.js';
+import * as schema from '../src/db/schema.js';
+import { hashPassword } from '../src/lib/password.js';
+import { testEnv } from './helpers/env.js';
+import { fakeGraph } from './helpers/fake-graph.js';
+import { fakeModel } from './helpers/fake-model.js';
+import { ADMIN_URL, runMigration, tagsAfter, tagsBefore, withDatabase } from './helpers/migration-db.js';
+
+const REVIEW_WORKSPACE_TAG = '0029_knowledge_review_workspace';
+const ORIGINAL_TABLE_TAG = '0030_knowledge_generation_raw_findings';
+const DRAFT_LINK_TAG = '0031_backfill_generation_draft_links';
+const TARGET_TAG = '0032_migrate_remaining_legacy_raw_proposals';
+const PASSWORD = 'correct-horse-battery';
+
+describe('migration 0032: remaining legacy raw proposals become immutable findings', () => {
+  const dbName = `rakurs_migrate_${randomUUID().replace(/-/g, '')}`;
+  let adminSql: postgres.Sql;
+  let scratchSql: postgres.Sql;
+  let app: FastifyInstance;
+  const rawId = randomUUID();
+  const appliedRawId = randomUUID();
+  const discardedRawId = randomUUID();
+  const proposalId = randomUUID();
+  const openDraftId = randomUUID();
+  const appliedDraftId = randomUUID();
+  const discardedDraftId = randomUUID();
+  const appliedNoteId = randomUUID();
+  const sourceMessageId = randomUUID();
+  const sourceConversationId = randomUUID();
+  const createdAt = new Date('2026-09-12T03:04:05.000Z');
+  let runId: string;
+  let batchId: string;
+  let agentId: string;
+  let cookieJar: Record<string, string>;
+
+  beforeAll(async () => {
+    adminSql = postgres(ADMIN_URL, { max: 1 });
+    await adminSql.unsafe(`CREATE DATABASE "${dbName}"`);
+    scratchSql = postgres(withDatabase(ADMIN_URL, dbName), { max: 1 });
+    for (const tag of tagsBefore(REVIEW_WORKSPACE_TAG)) await runMigration(scratchSql, tag);
+
+    const [account] = await scratchSql`INSERT INTO accounts (name) VALUES ('Migration') RETURNING id`;
+    const [user] = await scratchSql`
+      INSERT INTO users (email, password_hash, name, initials)
+      VALUES ('raw-migration@example.test', ${await hashPassword(PASSWORD)}, 'Owner', 'OW') RETURNING id
+    `;
+    await scratchSql`
+      INSERT INTO account_members (account_id, user_id, role)
+      VALUES (${account!.id}, ${user!.id}, 'owner')
+    `;
+    const [agent] = await scratchSql`
+      INSERT INTO agents (account_id, name) VALUES (${account!.id}, 'Agent') RETURNING id
+    `;
+    agentId = agent!.id as string;
+    const [number] = await scratchSql`
+      INSERT INTO whatsapp_numbers (agent_id, phone_number_id, waba_id, display_phone, access_token)
+      VALUES (${agent!.id}, 'migration-number', 'migration-waba', '+77000000000', 'token') RETURNING id
+    `;
+    const [contact] = await scratchSql`
+      INSERT INTO contacts (agent_id, phone) VALUES (${agent!.id}, '77000000001') RETURNING id
+    `;
+    await scratchSql`
+      INSERT INTO conversations (id, agent_id, contact_id, whatsapp_number_id)
+      VALUES (${sourceConversationId}, ${agent!.id}, ${contact!.id}, ${number!.id})
+    `;
+    await scratchSql`
+      INSERT INTO messages (id, conversation_id, wa_message_id, direction, author, kind, body, sent_at)
+      VALUES (
+        ${sourceMessageId}, ${sourceConversationId}, 'migration-message', 'out', 'operator', 'text',
+        'Доставка занимает два дня.', ${createdAt}
+      )
+    `;
+    const [run] = await scratchSql`
+      INSERT INTO kb_generation_runs (
+        agent_id, user_id, requested_preview_id, request_key, selection, manifest, counts,
+        model_id, temperature, status
+      ) VALUES (
+        ${agent!.id}, ${user!.id}, ${randomUUID()}, 'migration', '{}', '{}', '{}',
+        'model', '0.30', 'completed'
+      ) RETURNING id
+    `;
+    runId = run!.id as string;
+    const [batch] = await scratchSql`
+      INSERT INTO kb_generation_batches (run_id, ordinal, manifest, status)
+      VALUES (${run!.id}, 0, '{}', 'done') RETURNING id
+    `;
+    batchId = batch!.id as string;
+    await scratchSql`
+      INSERT INTO kb_drafts (id, agent_id, title, origin, status, ops, base, created_by)
+      VALUES
+        (${openDraftId}, ${agent!.id}, 'Raw open', 'manual', 'open',
+          ${scratchSql.json([{ op: 'note_create', path: 'Unsafe raw', body: 'Unreviewed raw text.' }])}, '{}', ${user!.id}),
+        (${appliedDraftId}, ${agent!.id}, 'Raw applied', 'manual', 'applied', '[]', '{}', ${user!.id}),
+        (${discardedDraftId}, ${agent!.id}, 'Raw discarded', 'manual', 'discarded', '[]', '{}', ${user!.id})
+    `;
+    await scratchSql`
+      INSERT INTO kb_notes (id, agent_id, path, title, body)
+      VALUES (${appliedNoteId}, ${agent!.id}, 'База знаний/Опубликовано', 'Опубликовано', 'Уже опубликовано.')
+    `;
+    await scratchSql`
+      INSERT INTO kb_generation_proposals (
+        id, run_id, batch_id, fingerprint, revision, path, body, warnings, sources, status,
+        draft_id, draft_op_index, note_id, created_at
+      ) VALUES (
+        ${rawId}, ${run!.id}, ${batch!.id}, 'raw:batch:0:hash', 4, 'База знаний/Доставка',
+        'Доставка занимает два дня.', ARRAY['context_limited']::text[],
+        ${scratchSql.json([{ conversationId: sourceConversationId, messageId: sourceMessageId, sentAt: createdAt.toISOString() }])},
+        'drafted', ${openDraftId}, 0, NULL, ${createdAt}
+      ), (
+        ${appliedRawId}, ${run!.id}, ${batch!.id}, 'raw:batch:1:hash', 7, 'База знаний/Опубликовано',
+        'Уже опубликовано.', ARRAY[]::text[],
+        ${scratchSql.json([{ conversationId: sourceConversationId, messageId: sourceMessageId, sentAt: createdAt.toISOString() }])},
+        'applied', ${appliedDraftId}, 2, ${appliedNoteId}, ${createdAt}
+      ), (
+        ${discardedRawId}, ${run!.id}, ${batch!.id}, 'raw:batch:2:hash', 9, 'Скрипт/Отклонено',
+        'Уже отклонено.', ARRAY[]::text[], ${scratchSql.json([])},
+        'rejected', ${discardedDraftId}, 1, NULL, ${createdAt}
+      ), (
+        ${proposalId}, ${run!.id}, ${batch!.id}, 'normal-hash', 1, 'База знаний/Оплата',
+        'Оплата при получении.', ARRAY[]::text[], ${scratchSql.json([])},
+        'pending', NULL, NULL, NULL, ${createdAt}
+      )
+    `;
+
+    await runMigration(scratchSql, REVIEW_WORKSPACE_TAG);
+    await runMigration(scratchSql, ORIGINAL_TABLE_TAG);
+    await scratchSql`
+      INSERT INTO kb_generation_raw_findings (
+        id, run_id, batch_id, fingerprint, path, body, warnings, sources, created_at
+      ) VALUES (
+        ${appliedRawId}, ${run!.id}, ${batch!.id}, 'raw:batch:1:hash', 'База знаний/Опубликовано',
+        'Уже опубликовано.', ARRAY[]::text[],
+        ${scratchSql.json([{ conversationId: sourceConversationId, messageId: sourceMessageId, sentAt: createdAt.toISOString() }])},
+        ${createdAt}
+      )
+    `;
+    await runMigration(scratchSql, DRAFT_LINK_TAG);
+    await runMigration(scratchSql, TARGET_TAG);
+    await runMigration(scratchSql, TARGET_TAG);
+    // The API below runs the current code, which reads tables later migrations add.
+    for (const tag of tagsAfter(TARGET_TAG)) await runMigration(scratchSql, tag);
+
+    const db = drizzle(scratchSql, { schema });
+    app = buildServer(testEnv({ DATABASE_URL: withDatabase(ADMIN_URL, dbName) }), db, {
+      graph: fakeGraph(),
+      model: fakeModel('{}'),
+    });
+    await app.ready();
+    const login = await app.inject({
+      method: 'POST',
+      url: '/api/auth/login',
+      payload: { email: 'raw-migration@example.test', password: PASSWORD },
+    });
+    const cookie = login.cookies[0]!;
+    cookieJar = { [cookie.name]: cookie.value };
+  });
+
+  afterAll(async () => {
+    await app?.close();
+    await scratchSql?.end();
+    await adminSql.unsafe(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`);
+    await adminSql.end();
+  });
+
+  it('moves legacy raw rows with their audit fields and leaves normal proposals untouched', async () => {
+    const proposals = await scratchSql`SELECT * FROM kb_generation_proposals ORDER BY id`;
+    const findings = await scratchSql`SELECT * FROM kb_generation_raw_findings ORDER BY id`;
+
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0]).toMatchObject({ id: proposalId, fingerprint: 'normal-hash', status: 'pending' });
+    expect(findings).toHaveLength(3);
+    const migrated = findings.find((row) => row.id === rawId);
+    expect(migrated).toMatchObject({
+      id: rawId,
+      run_id: runId,
+      batch_id: batchId,
+      fingerprint: 'raw:batch:0:hash',
+      path: 'База знаний/Доставка',
+      body: 'Доставка занимает два дня.',
+      warnings: ['context_limited'],
+      sources: [{ conversationId: sourceConversationId, messageId: sourceMessageId, sentAt: createdAt.toISOString() }],
+      legacy_kind: 'knowledge',
+      legacy_revision: 4,
+      legacy_status: 'drafted',
+      legacy_draft_id: openDraftId,
+      legacy_draft_op_index: 0,
+      legacy_note_id: null,
+    });
+    expect(findings.find((row) => row.id === appliedRawId)).toMatchObject({
+      legacy_kind: 'knowledge',
+      legacy_revision: 7,
+      legacy_status: 'applied',
+      legacy_draft_id: appliedDraftId,
+      legacy_draft_op_index: 2,
+      legacy_note_id: appliedNoteId,
+    });
+    expect(findings.find((row) => row.id === discardedRawId)).toMatchObject({
+      path: 'Скрипт/Отклонено',
+      legacy_kind: 'script',
+      legacy_revision: 9,
+      legacy_status: 'rejected',
+      legacy_draft_id: discardedDraftId,
+      legacy_draft_op_index: 1,
+      legacy_note_id: null,
+    });
+    expect(new Date(migrated!.created_at as string | Date).toISOString()).toBe(createdAt.toISOString());
+    const links = await scratchSql`
+      SELECT run_id, draft_id FROM kb_generation_drafts
+      WHERE run_id = ${runId}
+      ORDER BY draft_id
+    `;
+    expect(links).toEqual(expect.arrayContaining([
+      expect.objectContaining({ run_id: runId, draft_id: openDraftId }),
+      expect.objectContaining({ run_id: runId, draft_id: appliedDraftId }),
+      expect.objectContaining({ run_id: runId, draft_id: discardedDraftId }),
+    ]));
+    expect(links).toHaveLength(3);
+  });
+
+  it('exposes immutable legacy provenance through the raw findings API', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/agents/${agentId}/knowledge/generation/runs/${runId}?includeRawFindings=true`,
+      cookies: cookieJar,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().rawFindings).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: appliedRawId,
+        legacyProvenance: {
+          kind: 'knowledge',
+          revision: 7,
+          status: 'applied',
+          draftId: appliedDraftId,
+          draftOpIndex: 2,
+          noteId: appliedNoteId,
+        },
+      }),
+    ]));
+  });
+
+  it('shows a migrated applied finding as the published note source', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/agents/${agentId}/knowledge/notes/${appliedNoteId}`,
+      cookies: cookieJar,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().generationSources).toEqual([{
+      conversationId: sourceConversationId,
+      messageId: sourceMessageId,
+      sentAt: createdAt.toISOString(),
+      excerpt: 'Доставка занимает два дня.',
+      available: true,
+    }]);
+  });
+
+  it('discards only linked open drafts and prevents their raw ops from being applied', async () => {
+    const drafts = await scratchSql`
+      SELECT id, status FROM kb_drafts
+      WHERE id IN (${openDraftId}, ${appliedDraftId}, ${discardedDraftId})
+      ORDER BY id
+    `;
+    expect(drafts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: openDraftId, status: 'discarded' }),
+      expect.objectContaining({ id: appliedDraftId, status: 'applied' }),
+      expect.objectContaining({ id: discardedDraftId, status: 'discarded' }),
+    ]));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/agents/${agentId}/drafts/${openDraftId}/apply`,
+      cookies: cookieJar,
+    });
+    expect(response.statusCode).toBe(409);
+    expect(await scratchSql`SELECT id FROM kb_notes WHERE path = 'Unsafe raw'`).toEqual([]);
+  });
+});

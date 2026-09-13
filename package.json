@@ -1,6 +1,9 @@
 {
   "name": "rakurs-monorepo",
   "private": true,
+  "scripts": {
+    "postinstall": "node scripts/patch-libsignal-logging.mjs"
+  },
   "workspaces": [
     "packages/*",
     "rakurs",

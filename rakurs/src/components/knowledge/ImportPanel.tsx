@@ -53,6 +53,8 @@ export const KIND_LABELS: { id: KbNoteKind; label: string }[] = [
 export const kindLabel = (kind: KbNoteKind): string =>
   KIND_LABELS.find((entry) => entry.id === kind)?.label ?? kind;
 
+export type ImportSourceKind = KbSource['kind'];
+
 /** «заметка» / «заметки» / «заметок». Russian counts three ways and this panel shows numbers. */
 function notesWord(count: number): string {
   const hundreds = count % 100;
@@ -95,10 +97,16 @@ function reimportFailure(error: unknown): string | undefined {
 export function ImportPanel({
   agentId,
   onChanged,
+  sourceKind = 'all',
+  embedded = false,
 }: {
   agentId: string;
   /** A note was created, replaced or renamed — the tree pane must reread its list. */
   onChanged: () => void;
+  /** Compact source cards render one existing form at a time. */
+  sourceKind?: ImportSourceKind | 'all';
+  /** The source card already owns the border and padding. */
+  embedded?: boolean;
 }) {
   const [imported, setImported] = useState<KbImport | null>(null);
   const sources = useApi<KbSource[]>((signal) => api.listKbSources(agentId, signal), [agentId]);
@@ -109,13 +117,12 @@ export function ImportPanel({
     sources.reload();
   }
 
-  return (
-    <Card>
-      <CardHead title="Загрузить" gap={12} />
+  const content = <>
+      {sourceKind === 'all' && <CardHead title="Загрузить" gap={12} />}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 18, alignItems: 'flex-start' }}>
-        <PasteForm agentId={agentId} onImported={handleImported} />
-        <PageForm agentId={agentId} onImported={handleImported} />
-        <InstagramForm agentId={agentId} onImported={handleImported} />
+        {(sourceKind === 'all' || sourceKind === 'text') && <PasteForm agentId={agentId} onImported={handleImported} />}
+        {(sourceKind === 'all' || sourceKind === 'page') && <PageForm agentId={agentId} onImported={handleImported} />}
+        {(sourceKind === 'all' || sourceKind === 'instagram') && <InstagramForm agentId={agentId} onImported={handleImported} />}
       </div>
 
       {imported && <ImportResult result={imported} onHide={() => setImported(null)} />}
@@ -123,27 +130,29 @@ export function ImportPanel({
       <div style={{ marginTop: 16 }}>
         <div style={{ fontSize: 11.5, fontWeight: 650, marginBottom: 8 }}>Источники</div>
         <Async state={sources} skeleton={<Skeleton height={70} />} compactError>
-          {(loaded) =>
-            loaded.length === 0 ? (
+          {(loaded) => {
+            const visible = sourceKind === 'all' ? loaded : loaded.filter((source) => source.kind === sourceKind);
+            return visible.length === 0 ? (
               <div style={{ fontSize: 11.5, color: 'var(--text-dim)' }}>
                 Пока ничего не загружали. Заметки, добавленные руками, источника не имеют.
               </div>
             ) : (
               <SourceList
                 agentId={agentId}
-                sources={loaded}
+                sources={visible}
                 onChanged={() => {
                   sources.reload();
                   onChanged();
                 }}
                 onReimported={handleImported}
               />
-            )
-          }
+            );
+          }}
         </Async>
       </div>
-    </Card>
-  );
+    </>;
+
+  return embedded ? <div className="knowledge-import-panel">{content}</div> : <Card>{content}</Card>;
 }
 
 function PasteForm({
@@ -182,6 +191,7 @@ function PasteForm({
 
   return (
     <form
+      aria-label="Вставить текст"
       onSubmit={submit}
       style={{ flex: '1 1 320px', minWidth: 0, width: '100%', display: 'flex', flexDirection: 'column', gap: 10 }}
     >
@@ -256,6 +266,7 @@ function InstagramForm({
   const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [waiting, setWaiting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const login = useRef<AbortController | null>(null);
   useEffect(() => () => login.current?.abort(), []);
 
@@ -263,6 +274,7 @@ function InstagramForm({
     if (busy) return;
     setBusy(true);
     setWaiting(true);
+    setError(null);
     const controller = new AbortController();
     login.current = controller;
     let authorizing = true;
@@ -274,7 +286,11 @@ function InstagramForm({
       onImported(await api.importKbInstagram(agentId, code));
     } catch (error) {
       if (!controller.signal.aborted) {
-        toast.fail(error, authorizing && error instanceof Error && !(error instanceof ApiError) ? error.message : undefined);
+        const message = authorizing && error instanceof Error && !(error instanceof ApiError)
+          ? error.message
+          : api.humanError(error);
+        setError(message);
+        toast.fail(error, message);
       }
     } finally {
       login.current = null;
@@ -284,7 +300,8 @@ function InstagramForm({
   }
 
   return (
-    <div
+    <section
+      aria-label="Подключить Instagram"
       style={{ flex: '1 1 260px', minWidth: 240, display: 'flex', flexDirection: 'column', gap: 10 }}
     >
       <div style={{ fontSize: 12, fontWeight: 650 }}>Забрать из Instagram</div>
@@ -309,7 +326,11 @@ function InstagramForm({
         pages_show_list и pages_read_engagement в{' '}
         <a href="https://developers.facebook.com/apps/" target="_blank" rel="noreferrer">настройках Meta</a>.
       </div>
-    </div>
+      {error && <div role="alert" style={{ ...hint, color: 'var(--danger)' }}>
+        Не удалось подключить Instagram: {error}. Проверьте тип профиля и доступ приложения в{' '}
+        <a href="https://developers.facebook.com/apps/" target="_blank" rel="noreferrer">настройках Meta</a>, затем попробуйте снова.
+      </div>}
+    </section>
   );
 }
 
@@ -342,6 +363,7 @@ function PageForm({
 
   return (
     <form
+      aria-label="Загрузить веб-страницу"
       onSubmit={submit}
       style={{ flex: '1 1 260px', minWidth: 240, display: 'flex', flexDirection: 'column', gap: 10 }}
     >

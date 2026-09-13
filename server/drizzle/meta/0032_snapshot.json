@@ -1,6 +1,6 @@
 {
-  "id": "b8ecb70f-a115-45ac-aefd-702f206fa8fb",
-  "prevId": "b7040bf2-58ab-454d-bf41-0eaf1b69036f",
+  "id": "0d8196b2-7e8a-4dd2-a833-9abb5426a232",
+  "prevId": "19edc240-aaa3-4151-9c23-92ebc802109f",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -124,114 +124,6 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.agent_response_mode_changes": {
-      "name": "agent_response_mode_changes",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "agent_id": {
-          "name": "agent_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "actor_user_id": {
-          "name": "actor_user_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "old_response_mode": {
-          "name": "old_response_mode",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "old_test_contact_id": {
-          "name": "old_test_contact_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "new_response_mode": {
-          "name": "new_response_mode",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "new_test_contact_id": {
-          "name": "new_test_contact_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "agent_response_mode_changes_agent_created_idx": {
-          "name": "agent_response_mode_changes_agent_created_idx",
-          "columns": [
-            {
-              "expression": "agent_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "created_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "agent_response_mode_changes_agent_id_agents_id_fk": {
-          "name": "agent_response_mode_changes_agent_id_agents_id_fk",
-          "tableFrom": "agent_response_mode_changes",
-          "tableTo": "agents",
-          "columnsFrom": [
-            "agent_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "agent_response_mode_changes_old_mode_check": {
-          "name": "agent_response_mode_changes_old_mode_check",
-          "value": "\"agent_response_mode_changes\".\"old_response_mode\" in ('off', 'test', 'live')"
-        },
-        "agent_response_mode_changes_new_mode_check": {
-          "name": "agent_response_mode_changes_new_mode_check",
-          "value": "\"agent_response_mode_changes\".\"new_response_mode\" in ('off', 'test', 'live')"
-        }
-      },
       "isRLSEnabled": false
     },
     "public.agent_rules": {
@@ -466,6 +358,13 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
+        },
+        "communication_style": {
+          "name": "communication_style",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'warm'"
         }
       },
       "indexes": {
@@ -1131,7 +1030,7 @@
           "name": "phone",
           "type": "text",
           "primaryKey": false,
-          "notNull": false
+          "notNull": true
         },
         "name": {
           "name": "name",
@@ -1147,29 +1046,7 @@
           "default": "now()"
         }
       },
-      "indexes": {
-        "contacts_agent_phone_key": {
-          "name": "contacts_agent_phone_key",
-          "columns": [
-            {
-              "expression": "agent_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "phone",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
+      "indexes": {},
       "foreignKeys": {
         "contacts_agent_id_agents_id_fk": {
           "name": "contacts_agent_id_agents_id_fk",
@@ -1187,12 +1064,12 @@
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
-        "contacts_id_agent_key": {
-          "name": "contacts_id_agent_key",
+        "contacts_agent_phone_key": {
+          "name": "contacts_agent_phone_key",
           "nullsNotDistinct": false,
           "columns": [
-            "id",
-            "agent_id"
+            "agent_id",
+            "phone"
           ]
         }
       },
@@ -1227,13 +1104,7 @@
           "name": "whatsapp_number_id",
           "type": "uuid",
           "primaryKey": false,
-          "notNull": false
-        },
-        "instagram_account_id": {
-          "name": "instagram_account_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
+          "notNull": true
         },
         "last_inbound_at": {
           "name": "last_inbound_at",
@@ -1323,49 +1194,6 @@
         }
       },
       "indexes": {
-        "conversations_number_contact_key": {
-          "name": "conversations_number_contact_key",
-          "columns": [
-            {
-              "expression": "whatsapp_number_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "contact_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "conversations_instagram_contact_key": {
-          "name": "conversations_instagram_contact_key",
-          "columns": [
-            {
-              "expression": "instagram_account_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "contact_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "where": "\"conversations\".\"instagram_account_id\" is not null",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
         "conversations_agent_last_message_idx": {
           "name": "conversations_agent_last_message_idx",
           "columns": [
@@ -1428,19 +1256,6 @@
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "conversations_instagram_account_id_instagram_accounts_id_fk": {
-          "name": "conversations_instagram_account_id_instagram_accounts_id_fk",
-          "tableFrom": "conversations",
-          "tableTo": "instagram_accounts",
-          "columnsFrom": [
-            "instagram_account_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
         "conversations_stage_id_stages_id_fk": {
           "name": "conversations_stage_id_stages_id_fk",
           "tableFrom": "conversations",
@@ -1466,47 +1281,21 @@
           ],
           "onDelete": "set null",
           "onUpdate": "no action"
-        },
-        "conversations_contact_agent_fk": {
-          "name": "conversations_contact_agent_fk",
-          "tableFrom": "conversations",
-          "tableTo": "contacts",
-          "columnsFrom": [
-            "contact_id",
-            "agent_id"
-          ],
-          "columnsTo": [
-            "id",
-            "agent_id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "conversations_instagram_account_agent_fk": {
-          "name": "conversations_instagram_account_agent_fk",
-          "tableFrom": "conversations",
-          "tableTo": "instagram_accounts",
-          "columnsFrom": [
-            "instagram_account_id",
-            "agent_id"
-          ],
-          "columnsTo": [
-            "id",
-            "agent_id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "conversations_one_provider_check": {
-          "name": "conversations_one_provider_check",
-          "value": "num_nonnulls(\"conversations\".\"whatsapp_number_id\", \"conversations\".\"instagram_account_id\") = 1"
+      "uniqueConstraints": {
+        "conversations_number_contact_key": {
+          "name": "conversations_number_contact_key",
+          "nullsNotDistinct": false,
+          "columns": [
+            "whatsapp_number_id",
+            "contact_id"
+          ]
         }
       },
+      "policies": {},
+      "checkConstraints": {},
       "isRLSEnabled": false
     },
     "public.crm_analyses": {
@@ -1624,324 +1413,6 @@
           "onUpdate": "no action"
         }
       },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.instagram_accounts": {
-      "name": "instagram_accounts",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "agent_id": {
-          "name": "agent_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "instagram_user_id": {
-          "name": "instagram_user_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "page_id": {
-          "name": "page_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "username": {
-          "name": "username",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "access_token": {
-          "name": "access_token",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "token_expires_at": {
-          "name": "token_expires_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "enabled": {
-          "name": "enabled",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": true
-        },
-        "subscribed_at": {
-          "name": "subscribed_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "instagram_accounts_agent_id_idx": {
-          "name": "instagram_accounts_agent_id_idx",
-          "columns": [
-            {
-              "expression": "agent_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "instagram_accounts_agent_id_agents_id_fk": {
-          "name": "instagram_accounts_agent_id_agents_id_fk",
-          "tableFrom": "instagram_accounts",
-          "tableTo": "agents",
-          "columnsFrom": [
-            "agent_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {
-        "instagram_accounts_instagram_user_id_key": {
-          "name": "instagram_accounts_instagram_user_id_key",
-          "nullsNotDistinct": false,
-          "columns": [
-            "instagram_user_id"
-          ]
-        },
-        "instagram_accounts_id_agent_key": {
-          "name": "instagram_accounts_id_agent_key",
-          "nullsNotDistinct": false,
-          "columns": [
-            "id",
-            "agent_id"
-          ]
-        }
-      },
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.instagram_contacts": {
-      "name": "instagram_contacts",
-      "schema": "",
-      "columns": {
-        "contact_id": {
-          "name": "contact_id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "agent_id": {
-          "name": "agent_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "instagram_account_id": {
-          "name": "instagram_account_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "instagram_user_id": {
-          "name": "instagram_user_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "username": {
-          "name": "username",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "instagram_contacts_contact_id_contacts_id_fk": {
-          "name": "instagram_contacts_contact_id_contacts_id_fk",
-          "tableFrom": "instagram_contacts",
-          "tableTo": "contacts",
-          "columnsFrom": [
-            "contact_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "instagram_contacts_agent_id_agents_id_fk": {
-          "name": "instagram_contacts_agent_id_agents_id_fk",
-          "tableFrom": "instagram_contacts",
-          "tableTo": "agents",
-          "columnsFrom": [
-            "agent_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "instagram_contacts_contact_agent_fk": {
-          "name": "instagram_contacts_contact_agent_fk",
-          "tableFrom": "instagram_contacts",
-          "tableTo": "contacts",
-          "columnsFrom": [
-            "contact_id",
-            "agent_id"
-          ],
-          "columnsTo": [
-            "id",
-            "agent_id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "instagram_contacts_account_agent_fk": {
-          "name": "instagram_contacts_account_agent_fk",
-          "tableFrom": "instagram_contacts",
-          "tableTo": "instagram_accounts",
-          "columnsFrom": [
-            "instagram_account_id",
-            "agent_id"
-          ],
-          "columnsTo": [
-            "id",
-            "agent_id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {
-        "instagram_contacts_account_user_key": {
-          "name": "instagram_contacts_account_user_key",
-          "nullsNotDistinct": false,
-          "columns": [
-            "instagram_account_id",
-            "instagram_user_id"
-          ]
-        }
-      },
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.instagram_events": {
-      "name": "instagram_events",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "payload": {
-          "name": "payload",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "received_at": {
-          "name": "received_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "processed_at": {
-          "name": "processed_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "error": {
-          "name": "error",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "attempts": {
-          "name": "attempts",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "processing_at": {
-          "name": "processing_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "conversation_ids": {
-          "name": "conversation_ids",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
-        }
-      },
-      "indexes": {
-        "instagram_events_processed_at_idx": {
-          "name": "instagram_events_processed_at_idx",
-          "columns": [
-            {
-              "expression": "processed_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
@@ -2645,6 +2116,18 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
+        },
+        "classification": {
+          "name": "classification",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "classification_reason": {
+          "name": "classification_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {},
@@ -2895,6 +2378,27 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'knowledge'"
+        },
+        "confidence": {
+          "name": "confidence",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'review'"
+        },
+        "selected": {
+          "name": "selected",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
         }
       },
       "indexes": {
@@ -4014,12 +3518,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "instagram_message_id": {
-          "name": "instagram_message_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
         "direction": {
           "name": "direction",
           "type": "text",
@@ -4154,13 +3652,6 @@
           "nullsNotDistinct": false,
           "columns": [
             "wa_message_id"
-          ]
-        },
-        "messages_instagram_message_id_unique": {
-          "name": "messages_instagram_message_id_unique",
-          "nullsNotDistinct": false,
-          "columns": [
-            "instagram_message_id"
           ]
         }
       },
@@ -5477,6 +4968,266 @@
           ],
           "onDelete": "cascade",
           "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.kb_generation_drafts": {
+      "name": "kb_generation_drafts",
+      "schema": "",
+      "columns": {
+        "run_id": {
+          "name": "run_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "draft_id": {
+          "name": "draft_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "kb_generation_drafts_draft_idx": {
+          "name": "kb_generation_drafts_draft_idx",
+          "columns": [
+            {
+              "expression": "draft_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "with": {},
+          "method": "btree",
+          "concurrently": false
+        }
+      },
+      "foreignKeys": {
+        "kb_generation_drafts_run_id_kb_generation_runs_id_fk": {
+          "name": "kb_generation_drafts_run_id_kb_generation_runs_id_fk",
+          "tableFrom": "kb_generation_drafts",
+          "columnsFrom": [
+            "run_id"
+          ],
+          "tableTo": "kb_generation_runs",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "cascade"
+        },
+        "kb_generation_drafts_draft_id_kb_drafts_id_fk": {
+          "name": "kb_generation_drafts_draft_id_kb_drafts_id_fk",
+          "tableFrom": "kb_generation_drafts",
+          "columnsFrom": [
+            "draft_id"
+          ],
+          "tableTo": "kb_drafts",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "cascade"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "kb_generation_drafts_run_draft": {
+          "name": "kb_generation_drafts_run_draft",
+          "columns": [
+            "run_id",
+            "draft_id"
+          ],
+          "nullsNotDistinct": false
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.kb_generation_raw_findings": {
+      "name": "kb_generation_raw_findings",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "run_id": {
+          "name": "run_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "batch_id": {
+          "name": "batch_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "fingerprint": {
+          "name": "fingerprint",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "legacy_kind": {
+          "name": "legacy_kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "legacy_revision": {
+          "name": "legacy_revision",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "legacy_status": {
+          "name": "legacy_status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "legacy_draft_id": {
+          "name": "legacy_draft_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "legacy_draft_op_index": {
+          "name": "legacy_draft_op_index",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "legacy_note_id": {
+          "name": "legacy_note_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "path": {
+          "name": "path",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "body": {
+          "name": "body",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "warnings": {
+          "name": "warnings",
+          "type": "text[]",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::text[]"
+        },
+        "sources": {
+          "name": "sources",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "kb_generation_raw_findings_run_created_idx": {
+          "name": "kb_generation_raw_findings_run_created_idx",
+          "columns": [
+            {
+              "expression": "run_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "with": {},
+          "method": "btree",
+          "concurrently": false
+        },
+        "kb_generation_raw_findings_run_fingerprint_idx": {
+          "name": "kb_generation_raw_findings_run_fingerprint_idx",
+          "columns": [
+            {
+              "expression": "run_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "fingerprint",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "with": {},
+          "method": "btree",
+          "concurrently": false
+        }
+      },
+      "foreignKeys": {
+        "kb_generation_raw_findings_run_id_kb_generation_runs_id_fk": {
+          "name": "kb_generation_raw_findings_run_id_kb_generation_runs_id_fk",
+          "tableFrom": "kb_generation_raw_findings",
+          "columnsFrom": [
+            "run_id"
+          ],
+          "tableTo": "kb_generation_runs",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "cascade"
+        },
+        "kb_generation_raw_findings_batch_id_kb_generation_batches_id_fk": {
+          "name": "kb_generation_raw_findings_batch_id_kb_generation_batches_id_fk",
+          "tableFrom": "kb_generation_raw_findings",
+          "columnsFrom": [
+            "batch_id"
+          ],
+          "tableTo": "kb_generation_batches",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},

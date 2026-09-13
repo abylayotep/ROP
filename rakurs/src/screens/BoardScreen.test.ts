@@ -34,6 +34,15 @@ describe('funnel cards', () => {
     expect(html).not.toContain('@@shop_handle');
     expect(html).toContain('Instagram');
   });
+  it('shows and searches an Instagram username with one @ prefix', () => {
+    const instagramCard = { ...card, channel: 'instagram' as const, contactAddress: 'anna_shop', contactPhone: null };
+    expect(matchesBoardSearch(instagramCard, '@anna_shop')).toBe(true);
+    fixture.data = { currency: 'KZT', unsorted: [instagramCard], columns: [] };
+    const html = render();
+    expect(html).toContain('@anna_shop');
+    expect(html).not.toContain('@@anna_shop');
+    expect(html).toContain('aria-label="Этап сделки @anna_shop"');
+  });
   it('keeps a keyboard-accessible conversation button and stage selector', () => {
     fixture.data = { currency: 'KZT', unsorted: [card], columns: [] };
     const html = render();

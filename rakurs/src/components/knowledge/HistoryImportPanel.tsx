@@ -1,16 +1,39 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import * as api from '@/api';
+import type { WhatsappHistoryArchivePacket } from '@/api';
 import { Card } from '@/components/ui/primitives';
-import { usePollingApi } from '@/hooks/usePollingApi';
+import { usePollingApi, type PollingApiState } from '@/hooks/usePollingApi';
+import type { WhatsappHistoryOverview } from '@rakurs/contract';
 import { historyRunLabel } from './history-selection';
+
+export interface WhatsappHistoryState {
+  status: PollingApiState<WhatsappHistoryOverview>;
+  archive: PollingApiState<WhatsappHistoryArchivePacket[]>;
+}
+
+/** One polling owner serves both the collapsed card summary and the expanded controls. */
+export function useWhatsappHistoryState(agentId: string): WhatsappHistoryState {
+  return {
+    status: usePollingApi((signal) => api.getWhatsappHistory(agentId, signal), [agentId]),
+    archive: usePollingApi((signal) => api.getWhatsappHistoryArchive(agentId, signal), [agentId]),
+  };
+}
 
 /** Requests available history; an acknowledgement never means the messages arrived. */
 export function HistoryImportPanel({ agentId, readOnly = false }: {
   agentId: string; readOnly?: boolean;
 }) {
-  const status = usePollingApi((signal) => api.getWhatsappHistory(agentId, signal), [agentId]);
-  const archive = usePollingApi((signal) => api.getWhatsappHistoryArchive(agentId, signal), [agentId]);
+  const history = useWhatsappHistoryState(agentId);
+  return <Card><HistoryImportPanelContent agentId={agentId} readOnly={readOnly} history={history} /></Card>;
+}
+
+export function HistoryImportPanelContent({ agentId, history, readOnly = false }: {
+  agentId: string;
+  history: WhatsappHistoryState;
+  readOnly?: boolean;
+}) {
+  const { status, archive } = history;
   const [limit, setLimit] = useState<100 | 200>(100);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -56,7 +79,6 @@ export function HistoryImportPanel({ agentId, readOnly = false }: {
   }
 
   return (
-    <Card>
       <section id="whatsapp-history" aria-label="Загрузка истории WhatsApp">
         <div style={{ display: 'flex', gap: 12, justifyContent: 'space-between', flexWrap: 'wrap' }}>
           <div>
@@ -135,15 +157,40 @@ export function HistoryImportPanel({ agentId, readOnly = false }: {
           Статус текущего запроса сбрасывается при перезапуске сервера. Сохранённые сообщения остаются.
         </div>
       </section>
-    </Card>
   );
 }
 
-function archiveStatus(status: string): string {
+export function archiveStatus(status: string): string {
   if (status === 'queued') return 'Ожидает обработки';
   if (status === 'processing') return 'Обрабатывается';
   if (status === 'partial') return 'Сохранено частично';
   if (status === 'failed') return 'Ошибка обработки';
   if (status === 'done') return 'Обработано';
   return 'Состояние неизвестно';
+}
+
+function chatsWord(count: number): string {
+  const tens = count % 10;
+  const hundreds = count % 100;
+  if (tens === 1 && hundreds !== 11) return 'чат';
+  if (tens >= 2 && tens <= 4 && (hundreds < 12 || hundreds > 14)) return 'чата';
+  return 'чатов';
+}
+
+export function whatsappHistorySummary({ status, archive }: WhatsappHistoryState): string {
+  if (status.loading && !status.data) return 'Проверяем подключение…';
+  if (status.error !== undefined && !status.data) return 'Не удалось проверить подключение';
+
+  const overview = status.data;
+  const connection = (overview?.connectedNumbers ?? 0) > 0
+    ? `Подключений: ${overview!.connectedNumbers}`
+    : 'Нет подключения';
+  const chats = overview ? `${overview.availableChats} ${chatsWord(overview.availableChats)}` : 'чаты неизвестны';
+
+  if (archive.loading && !archive.data) return `${connection} · ${chats} · проверяем архив…`;
+  if (archive.error !== undefined && !archive.data) return `${connection} · ${chats} · архив недоступен`;
+  const latest = archive.data?.[0];
+  const archiveLabel = latest ? archiveStatus(latest.status) : 'архив пуст';
+  const stale = status.error !== undefined || archive.error !== undefined ? ' · данные не обновились' : '';
+  return `${connection} · ${chats} · ${archiveLabel}${stale}`;
 }

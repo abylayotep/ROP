@@ -1,10 +1,25 @@
 import { createHash } from 'node:crypto';
-import { eq } from 'drizzle-orm';
+import { drizzle } from 'drizzle-orm/postgres-js';
+import { eq, sql } from 'drizzle-orm';
+import postgres from 'postgres';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { accounts, agents, kbDrafts, kbGenerationBatches, kbGenerationProposals, kbGenerationRuns, users } from '../src/db/schema.js';
-import { cancelGenerationRun } from '../src/lib/knowledge/generation-run.js';
-import { createGenerationCategoryDrafts, createGenerationDraft, updateGenerationProposal } from '../src/lib/knowledge/generation-review.js';
+import * as schema from '../src/db/schema.js';
+import {
+  accounts,
+  agentRules,
+  agents,
+  kbDrafts,
+  kbGenerationBatches,
+  kbGenerationDrafts,
+  kbGenerationProposals,
+  kbGenerationRuns,
+  kbNotes,
+  users,
+} from '../src/db/schema.js';
+import { createGenerationDraft, updateGenerationProposal } from '../src/lib/knowledge/generation-review.js';
 import { withDb } from './helpers/db.js';
+
+const DATABASE_URL = process.env.TEST_DATABASE_URL ?? 'postgres://rakurs:rakurs@localhost:55432/rakurs_test';
 
 let db: Awaited<ReturnType<typeof withDb>>;
 let agentId: string;
@@ -34,6 +49,111 @@ describe('generation review', () => {
     await expect(updateGenerationProposal(db, agentId, proposalId, { revision: 1, body: 'Four days' })).rejects.toMatchObject({ statusCode: 409 });
   });
 
+  it('persists selection with an optimistic revision and rejects a stale selection write', async () => {
+    await updateGenerationProposal(db, agentId, proposalId, { revision: 1, selected: true });
+    await expect(updateGenerationProposal(db, agentId, proposalId, { revision: 1, selected: false }))
+      .rejects.toMatchObject({ statusCode: 409 });
+
+    const [proposal] = await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.id, proposalId));
+    expect(proposal).toMatchObject({ selected: true, revision: 2 });
+  });
+
+  it('serializes a selection update on another proposal behind the draft run lock', async () => {
+    const [batch] = await db.select().from(kbGenerationBatches).where(eq(kbGenerationBatches.runId, runId));
+    const [other] = await db.insert(kbGenerationProposals).values({
+      runId,
+      batchId: batch!.id,
+      fingerprint: 'concurrent-selection',
+      path: 'База знаний/Other',
+      body: 'Other body',
+      sources: [],
+    }).returning();
+    await db.update(kbGenerationProposals).set({ selected: true }).where(eq(kbGenerationProposals.id, proposalId));
+
+    let releaseBlocker!: () => void;
+    let blockerLocked!: () => void;
+    const release = new Promise<void>((resolve) => { releaseBlocker = resolve; });
+    const locked = new Promise<void>((resolve) => { blockerLocked = resolve; });
+    const blocker = db.transaction(async (tx) => {
+      await tx.select({ id: kbGenerationProposals.id }).from(kbGenerationProposals)
+        .where(eq(kbGenerationProposals.id, proposalId)).for('update');
+      blockerLocked();
+      await release;
+    });
+    await locked;
+
+    const blockedQueries = async (table: string): Promise<number> => {
+      const rows = await db.execute(sql<{ count: number }>`
+        select count(*)::int as count
+        from pg_stat_activity
+        where datname = current_database()
+          and wait_event_type = 'Lock'
+          and query ilike ${`%${table}%`}
+      `);
+      return Number(rows[0]?.count ?? 0);
+    };
+    const waitUntilBlocked = async (table: string): Promise<boolean> => {
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        if (await blockedQueries(table) > 0) return true;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      return false;
+    };
+
+    const draftOutcome = createGenerationDraft(db, agentId, userId, runId, {
+      proposalIds: [proposalId],
+      revisions: { [proposalId]: 1 },
+    }).then((value) => ({ value }), (error: unknown) => ({ error }));
+    expect(await waitUntilBlocked('kb_generation_proposals')).toBe(true);
+
+    const patchApplication = `generation-proposal-patch-${crypto.randomUUID()}`;
+    const patchSql = postgres(DATABASE_URL, { max: 1, connection: { application_name: patchApplication } });
+    const patchDb = drizzle(patchSql, { schema });
+    const patchIsBlocked = async (): Promise<boolean> => {
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const rows = await db.execute(sql<{ blocked: boolean }>`
+          select exists (
+            select 1
+            from pg_stat_activity
+            where datname = current_database()
+              and application_name = ${patchApplication}
+              and cardinality(pg_blocking_pids(pid)) > 0
+          ) as blocked
+        `);
+        if (rows[0]?.blocked === true) return true;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      return false;
+    };
+    let updateSettled = false;
+    const updatePromise = updateGenerationProposal(patchDb, agentId, other!.id, { revision: 1, selected: true })
+      .finally(() => { updateSettled = true; });
+    const updateWaitsForRun = await Promise.race([
+      updatePromise.then(() => false),
+      patchIsBlocked(),
+    ]);
+
+    let outcome: Awaited<typeof draftOutcome> | undefined;
+    try {
+      expect(updateWaitsForRun).toBe(true);
+      expect(updateSettled).toBe(false);
+    } finally {
+      releaseBlocker();
+      await blocker;
+      outcome = await draftOutcome;
+      await updatePromise;
+      await patchSql.end();
+    }
+
+    expect(outcome).toHaveProperty('value');
+    if (!outcome || !('value' in outcome)) throw outcome?.error;
+    const draft = outcome.value;
+    expect((await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.id, proposalId)))[0])
+      .toMatchObject({ status: 'drafted', draftId: draft.draftId, selected: false });
+    expect((await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.id, other!.id)))[0])
+      .toMatchObject({ status: 'pending', selected: true, revision: 2 });
+  });
+
   it('restores a rejected proposal to pending with its current revision', async () => {
     await updateGenerationProposal(db, agentId, proposalId, { revision: 1, status: 'rejected' });
 
@@ -41,6 +161,27 @@ describe('generation review', () => {
 
     const [proposal] = await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.id, proposalId));
     expect(proposal).toMatchObject({ status: 'pending', revision: 3 });
+  });
+
+  it('never mutates, restores, or drafts a legacy raw proposal', async () => {
+    const [batch] = await db.select().from(kbGenerationBatches).where(eq(kbGenerationBatches.runId, runId));
+    const [legacyRaw] = await db.insert(kbGenerationProposals).values({
+      runId,
+      batchId: batch!.id,
+      fingerprint: 'raw:legacy:0:hash',
+      path: 'База знаний/Legacy raw',
+      body: 'Immutable evidence.',
+      sources: [],
+      status: 'rejected',
+    }).returning();
+
+    await expect(updateGenerationProposal(db, agentId, legacyRaw!.id, { revision: 1, status: 'pending' }))
+      .rejects.toMatchObject({ statusCode: 409 });
+    await expect(createGenerationDraft(db, agentId, userId, runId, {
+      proposalIds: [legacyRaw!.id], revisions: { [legacyRaw!.id]: 1 },
+    })).rejects.toMatchObject({ statusCode: 404 });
+    expect((await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.id, legacyRaw!.id)))[0])
+      .toMatchObject({ status: 'rejected', revision: 1, draftId: null });
   });
 
   it('recomputes the fingerprint and atomically refuses a duplicate after an edit', async () => {
@@ -66,94 +207,194 @@ describe('generation review', () => {
     expect(proposal).toMatchObject({ fingerprint: 'one', path: 'База знаний/Delivery', body: 'Two days', revision: 1 });
   });
 
-  it('converts an explicit selection once and returns the same draft on replay', async () => {
-    const input = { proposalIds: [proposalId], revisions: { [proposalId]: 1 } };
+  it('keeps proposal kind consistent when an owner changes the path prefix', async () => {
+    await updateGenerationProposal(db, agentId, proposalId, {
+      revision: 1,
+      path: 'Скрипт/Доставка',
+    });
+    expect((await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.id, proposalId)))[0])
+      .toMatchObject({ kind: 'script', path: 'Скрипт/Доставка', revision: 2 });
+
+    await updateGenerationProposal(db, agentId, proposalId, {
+      revision: 2,
+      path: 'База знаний/Доставка',
+    });
+    expect((await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.id, proposalId)))[0])
+      .toMatchObject({ kind: 'knowledge', path: 'База знаний/Доставка', revision: 3 });
+  });
+
+  it('converts the complete persisted checked set once and records the run relation without publishing', async () => {
+    await updateGenerationProposal(db, agentId, proposalId, { revision: 1, selected: true });
+    const input = { proposalIds: [proposalId], revisions: { [proposalId]: 2 } };
     const first = await createGenerationDraft(db, agentId, userId, runId, input);
     const second = await createGenerationDraft(db, agentId, userId, runId, input);
     expect(second).toEqual(first);
-    expect((await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.id, proposalId)))[0]).toMatchObject({ status: 'drafted', draftId: first.draftId, draftOpIndex: 0 });
-    expect((await db.select().from(kbDrafts).where(eq(kbDrafts.id, first.draftId)))[0]?.title).toBe('Знания из WhatsApp · 1');
+    expect(first.draftIds).toEqual([first.draftId]);
+    expect((await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.id, proposalId)))[0]).toMatchObject({ status: 'drafted', draftId: first.draftId, draftOpIndex: 0, revision: 3 });
+    expect((await db.select().from(kbDrafts).where(eq(kbDrafts.id, first.draftId)))[0]?.title).toBe('База знаний из WhatsApp · 1');
+    expect(await db.select().from(kbGenerationDrafts)).toEqual([
+      expect.objectContaining({ runId, draftId: first.draftId }),
+    ]);
+    expect(await db.select().from(kbNotes)).toHaveLength(0);
+    expect(await db.select().from(agentRules)).toHaveLength(0);
   });
 
-  it('creates one review draft per non-empty category and is idempotent', async () => {
+  it('atomically creates one idempotent draft per selected proposal kind', async () => {
     const [batch] = await db.select().from(kbGenerationBatches).where(eq(kbGenerationBatches.runId, runId));
-    const [script, rejected, secondKnowledge] = await db.insert(kbGenerationProposals).values([
-      { runId, batchId: batch!.id, fingerprint: 'script', path: 'Скрипт/Первичный контакт', body: 'Уточните задачу клиента.', sources: [] },
-      { runId, batchId: batch!.id, fingerprint: 'rejected', path: 'Скрипт/Возражения', body: 'Не использовать.', sources: [], status: 'rejected' },
-      { runId, batchId: batch!.id, fingerprint: 'knowledge-2', path: 'База знаний/Delivery', body: 'Стоимость зависит от адреса.', sources: [] },
-    ]).returning();
+    const [script] = await db.insert(kbGenerationProposals).values({
+      runId,
+      batchId: batch!.id,
+      fingerprint: 'script-selected',
+      kind: 'script',
+      path: 'Скрипт/Доставка',
+      body: 'Подскажите адрес, и я рассчитаю доставку.',
+      sources: [],
+      selected: true,
+    }).returning();
+    await updateGenerationProposal(db, agentId, proposalId, { revision: 1, selected: true });
+    const input = {
+      proposalIds: [proposalId, script!.id],
+      revisions: { [proposalId]: 2, [script!.id]: 1 },
+    };
 
-    const first = await createGenerationCategoryDrafts(db, agentId, userId, runId);
-    const second = await createGenerationCategoryDrafts(db, agentId, userId, runId);
+    const first = await createGenerationDraft(db, agentId, userId, runId, input);
+    const second = await createGenerationDraft(db, agentId, userId, runId, input);
 
-    expect(first).toHaveLength(2);
-    expect(second).toEqual([]);
+    expect(second).toEqual(first);
+    expect(first.draftIds).toHaveLength(2);
     const drafts = await db.select().from(kbDrafts);
-    expect(drafts).toHaveLength(2);
-    expect(drafts.map((draft) => ({ title: draft.title, ops: draft.ops }))).toEqual(expect.arrayContaining([
-      { title: 'База знаний из WhatsApp', ops: [{ op: 'note_create', path: 'База знаний/Delivery', body: 'Two days\n\nСтоимость зависит от адреса.' }] },
-      { title: 'Скрипт продаж из WhatsApp', ops: [{ op: 'note_create', path: 'Скрипт/Первичный контакт', body: 'Уточните задачу клиента.' }] },
-    ]));
-    expect((await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.id, script!.id)))[0])
-      .toMatchObject({ status: 'drafted', draftOpIndex: 0 });
-    const [firstKnowledge] = await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.id, proposalId));
-    const [otherKnowledge] = await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.id, secondKnowledge!.id));
-    expect(otherKnowledge).toMatchObject({ status: 'drafted', draftId: firstKnowledge!.draftId, draftOpIndex: firstKnowledge!.draftOpIndex });
-    expect((await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.id, rejected!.id)))[0])
-      .toMatchObject({ status: 'rejected', draftId: null, draftOpIndex: null });
-  });
-
-  it('does not create an empty or uncategorized draft', async () => {
-    await db.update(kbGenerationProposals).set({ status: 'rejected' }).where(eq(kbGenerationProposals.id, proposalId));
-    const [batch] = await db.select().from(kbGenerationBatches).where(eq(kbGenerationBatches.runId, runId));
-    await db.insert(kbGenerationProposals).values({
-      runId,
-      batchId: batch!.id,
-      fingerprint: 'legacy',
-      path: 'Legacy/Note',
-      body: 'Old uncategorized proposal.',
-      sources: [],
+    const knowledgeDraft = drafts.find((draft) => draft.title === 'База знаний из WhatsApp · 1');
+    const scriptDraft = drafts.find((draft) => draft.title === 'Скрипт продаж из WhatsApp · 1');
+    expect(knowledgeDraft?.ops).toEqual([
+      { op: 'note_create', path: 'База знаний/Delivery', body: 'Two days' },
+    ]);
+    expect(scriptDraft?.ops).toEqual([
+      { op: 'note_create', path: 'Скрипт/Доставка', body: 'Подскажите адрес, и я рассчитаю доставку.' },
+    ]);
+    expect(first).toEqual({
+      draftId: knowledgeDraft!.id,
+      draftIds: [knowledgeDraft!.id, scriptDraft!.id],
     });
-
-    expect(await createGenerationCategoryDrafts(db, agentId, userId, runId)).toEqual([]);
-    expect(await db.select().from(kbDrafts)).toHaveLength(0);
-  });
-
-  it('does not create drafts after cancellation was requested', async () => {
-    await db.update(kbGenerationRuns).set({ status: 'running', cancelRequestedAt: new Date() }).where(eq(kbGenerationRuns.id, runId));
-
-    expect(await createGenerationCategoryDrafts(db, agentId, userId, runId)).toEqual([]);
-    expect(await db.select().from(kbDrafts)).toHaveLength(0);
     expect((await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.id, proposalId)))[0])
-      .toMatchObject({ status: 'pending', draftId: null, draftOpIndex: null });
+      .toMatchObject({ status: 'drafted', selected: false, draftId: knowledgeDraft!.id, draftOpIndex: 0, revision: 3 });
+    expect((await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.id, script!.id)))[0])
+      .toMatchObject({ status: 'drafted', selected: false, draftId: scriptDraft!.id, draftOpIndex: 0, revision: 2 });
+    expect((await db.select().from(kbGenerationDrafts)).map((link) => link.draftId).sort())
+      .toEqual([knowledgeDraft!.id, scriptDraft!.id].sort());
+    expect(await db.select().from(kbNotes)).toHaveLength(0);
+    expect(await db.select().from(agentRules)).toHaveLength(0);
   });
 
-  it('atomically completes a finalized run before a later cancellation', async () => {
-    await db.update(kbGenerationRuns).set({ status: 'running' }).where(eq(kbGenerationRuns.id, runId));
-
-    expect(await createGenerationCategoryDrafts(db, agentId, userId, runId, true)).toHaveLength(1);
-    expect((await db.select().from(kbGenerationRuns).where(eq(kbGenerationRuns.id, runId)))[0])
-      .toMatchObject({ status: 'completed', cancelRequestedAt: null });
-
-    await cancelGenerationRun(db, agentId, runId);
-    expect((await db.select().from(kbGenerationRuns).where(eq(kbGenerationRuns.id, runId)))[0])
-      .toMatchObject({ status: 'completed', cancelRequestedAt: null });
-  });
-
-  it('rolls back when proposals sharing a path exceed the note body limit', async () => {
+  it('rejects replaying only one draft from a mixed-kind request', async () => {
     const [batch] = await db.select().from(kbGenerationBatches).where(eq(kbGenerationBatches.runId, runId));
-    await db.insert(kbGenerationProposals).values({
+    const [script] = await db.insert(kbGenerationProposals).values({
       runId,
       batchId: batch!.id,
-      fingerprint: 'oversize-combined',
-      path: 'База знаний/Delivery',
-      body: 'x'.repeat(199_995),
+      fingerprint: 'mixed-subset-script',
+      kind: 'script',
+      path: 'Скрипт/Доставка',
+      body: 'Подскажите адрес доставки.',
       sources: [],
+      selected: true,
+    }).returning();
+    await updateGenerationProposal(db, agentId, proposalId, { revision: 1, selected: true });
+    await createGenerationDraft(db, agentId, userId, runId, {
+      proposalIds: [proposalId, script!.id],
+      revisions: { [proposalId]: 2, [script!.id]: 1 },
     });
 
-    await expect(createGenerationCategoryDrafts(db, agentId, userId, runId))
-      .rejects.toMatchObject({ statusCode: 400 });
-    expect(await db.select().from(kbDrafts)).toHaveLength(0);
-    expect(await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.status, 'drafted'))).toHaveLength(0);
+    await expect(createGenerationDraft(db, agentId, userId, runId, {
+      proposalIds: [proposalId],
+      revisions: { [proposalId]: 2 },
+    })).rejects.toMatchObject({ statusCode: 409 });
   });
+
+  it('rejects combining drafts created by two independent requests', async () => {
+    await updateGenerationProposal(db, agentId, proposalId, { revision: 1, selected: true });
+    await createGenerationDraft(db, agentId, userId, runId, {
+      proposalIds: [proposalId],
+      revisions: { [proposalId]: 2 },
+    });
+    const [batch] = await db.select().from(kbGenerationBatches).where(eq(kbGenerationBatches.runId, runId));
+    const [script] = await db.insert(kbGenerationProposals).values({
+      runId,
+      batchId: batch!.id,
+      fingerprint: 'independent-script',
+      kind: 'script',
+      path: 'Скрипт/Оплата',
+      body: 'Оплатить можно удобным для вас способом.',
+      sources: [],
+      selected: true,
+    }).returning();
+    await createGenerationDraft(db, agentId, userId, runId, {
+      proposalIds: [script!.id],
+      revisions: { [script!.id]: 1 },
+    });
+
+    await expect(createGenerationDraft(db, agentId, userId, runId, {
+      proposalIds: [proposalId, script!.id],
+      revisions: { [proposalId]: 2, [script!.id]: 1 },
+    })).rejects.toMatchObject({ statusCode: 409 });
+  });
+
+  it('replays an exact historical mixed-kind request stored in one legacy draft', async () => {
+    const [batch] = await db.select().from(kbGenerationBatches).where(eq(kbGenerationBatches.runId, runId));
+    const [script] = await db.insert(kbGenerationProposals).values({
+      runId,
+      batchId: batch!.id,
+      fingerprint: 'legacy-mixed-script',
+      kind: 'script',
+      path: 'Скрипт/Оплата',
+      body: 'Оплатить можно удобным для вас способом.',
+      sources: [],
+    }).returning();
+    const ops = [
+      { op: 'note_create' as const, path: 'База знаний/Delivery', body: 'Two days' },
+      { op: 'note_create' as const, path: 'Скрипт/Оплата', body: 'Оплатить можно удобным для вас способом.' },
+    ];
+    const [draft] = await db.insert(kbDrafts).values({
+      agentId,
+      title: 'Знания из WhatsApp · 2',
+      origin: 'manual',
+      ops,
+      base: {},
+      createdBy: userId,
+    }).returning();
+    await db.insert(kbGenerationDrafts).values({ runId, draftId: draft!.id });
+    await db.update(kbGenerationProposals).set({
+      status: 'drafted', draftId: draft!.id, draftOpIndex: 0, revision: 2,
+    }).where(eq(kbGenerationProposals.id, proposalId));
+    await db.update(kbGenerationProposals).set({
+      status: 'drafted', draftId: draft!.id, draftOpIndex: 1, revision: 2,
+    }).where(eq(kbGenerationProposals.id, script!.id));
+
+    await expect(createGenerationDraft(db, agentId, userId, runId, {
+      proposalIds: [proposalId, script!.id],
+      revisions: { [proposalId]: 1, [script!.id]: 1 },
+    })).resolves.toEqual({ draftId: draft!.id, draftIds: [draft!.id] });
+  });
+
+  it('refuses a draft request that omits a proposal from the persisted checked set', async () => {
+    const [batch] = await db.select().from(kbGenerationBatches).where(eq(kbGenerationBatches.runId, runId));
+    const [second] = await db.insert(kbGenerationProposals).values({
+      runId,
+      batchId: batch!.id,
+      fingerprint: 'second-selected',
+      path: 'Скрипт/Delivery',
+      body: 'It takes two days.',
+      sources: [],
+      selected: true,
+    }).returning();
+    await updateGenerationProposal(db, agentId, proposalId, { revision: 1, selected: true });
+
+    await expect(createGenerationDraft(db, agentId, userId, runId, {
+      proposalIds: [proposalId],
+      revisions: { [proposalId]: 2 },
+    })).rejects.toMatchObject({ statusCode: 409 });
+
+    expect(await db.select().from(kbDrafts)).toHaveLength(0);
+    expect((await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.id, second!.id)))[0])
+      .toMatchObject({ status: 'pending', selected: true, draftId: null });
+  });
+
 });

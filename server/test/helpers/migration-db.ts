@@ -34,6 +34,16 @@ export function tagsBefore(targetTag: string): string[] {
   return journal.entries.filter((e) => e.idx < target.idx).map((e) => e.tag);
 }
 
+/** Every migration tag that runs strictly after `targetTag`, in application order. */
+export function tagsAfter(targetTag: string): string[] {
+  const journal = JSON.parse(
+    readFileSync(path.join(DRIZZLE_DIR, 'meta/_journal.json'), 'utf8'),
+  ) as { entries: JournalEntry[] };
+  const target = journal.entries.find((e) => e.tag === targetTag);
+  if (!target) throw new Error(`No journal entry tagged ${targetTag}`);
+  return journal.entries.filter((e) => e.idx > target.idx).map((e) => e.tag);
+}
+
 /** Applies one migration's `.sql` file, statement by statement, against `sql`. */
 export async function runMigration(sql: postgres.Sql, tag: string): Promise<void> {
   const text = readFileSync(path.join(DRIZZLE_DIR, `${tag}.sql`), 'utf8');

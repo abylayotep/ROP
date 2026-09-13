@@ -225,7 +225,7 @@
  * after that instant, before the draft is ever written.
  */
 import type { TestRun } from '@rakurs/contract';
-import { and, asc, desc, eq, gte, inArray, isNull, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, isNull, notLike, sql } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
@@ -233,8 +233,10 @@ import {
   agents,
   coachMessages,
   kbDrafts,
+  kbGenerationDrafts,
   kbGenerationProposals,
   responseFeedback,
+  kbGenerationRuns,
   testCases,
   testResults,
   testRuns,
@@ -251,6 +253,7 @@ import { applyOps, baseOf, MissingDraftRowError, staleOps, type DraftBase, type 
 import { replayCase, type AiDeps, type ReplayResult } from '../lib/drafts/replay.js';
 import { bumpConfigVersion } from '../lib/drafts/version.js';
 import { ApiError, isDuplicate } from '../lib/errors.js';
+import { LEGACY_RAW_FINGERPRINT_PATTERN } from '../lib/knowledge/generation-types.js';
 import { clampTitle } from '../lib/knowledge/split.js';
 import { credentialsKey, decryptSecret } from '../lib/secret-box.js';
 import { isUuid } from '../lib/uuid.js';
@@ -1147,6 +1150,21 @@ export function registerDraftRoutes(
           throw new ApiError(409, 'База изменилась после проверки — прогоните черновик заново');
         }
 
+        const linkedRuns = await tx.selectDistinct({ runId: kbGenerationProposals.runId })
+          .from(kbGenerationProposals)
+          .innerJoin(kbGenerationRuns, and(
+            eq(kbGenerationRuns.id, kbGenerationProposals.runId),
+            eq(kbGenerationRuns.agentId, agentId),
+          ))
+          .where(and(
+            eq(kbGenerationProposals.draftId, draft.id),
+            notLike(kbGenerationProposals.fingerprint, LEGACY_RAW_FINGERPRINT_PATTERN),
+          ));
+        if (linkedRuns.length > 0) {
+          await tx.insert(kbGenerationDrafts).values(linkedRuns.map(({ runId }) => ({ runId, draftId: draft.id })))
+            .onConflictDoNothing();
+        }
+
         // `staleOps` and `isDraftApplicable` above only see a row this draft's own `note_update`
         // or `rule_update` names moving out from under it — neither has anything to check a
         // `note_create` op against, because it names no existing row at all. So a `note_create`
@@ -1157,10 +1175,14 @@ export function registerDraftRoutes(
         try {
           await applyOps(tx as unknown as Db, agentId, draft.ops, async (opIndex, noteId) => {
             await tx.update(kbGenerationProposals).set({
-              status: 'applied', noteId, updatedAt: new Date(),
+              status: 'applied',
+              noteId,
+              revision: sql`${kbGenerationProposals.revision} + 1`,
+              updatedAt: new Date(),
             }).where(and(
               eq(kbGenerationProposals.draftId, draft.id),
               eq(kbGenerationProposals.draftOpIndex, opIndex),
+              notLike(kbGenerationProposals.fingerprint, LEGACY_RAW_FINGERPRINT_PATTERN),
             ));
           });
         } catch (error) {
@@ -1196,13 +1218,31 @@ export function registerDraftRoutes(
         )).for('update');
         if (!draft) throw new ApiError(404, 'Черновик не найден');
         if (draft.status !== 'open') throw new ApiError(409, 'Черновик уже применён или отклонён');
+        const linkedRuns = await tx.selectDistinct({ runId: kbGenerationProposals.runId })
+          .from(kbGenerationProposals)
+          .innerJoin(kbGenerationRuns, and(
+            eq(kbGenerationRuns.id, kbGenerationProposals.runId),
+            eq(kbGenerationRuns.agentId, agentId),
+          ))
+          .where(and(
+            eq(kbGenerationProposals.draftId, draft.id),
+            notLike(kbGenerationProposals.fingerprint, LEGACY_RAW_FINGERPRINT_PATTERN),
+          ));
+        if (linkedRuns.length > 0) {
+          await tx.insert(kbGenerationDrafts).values(linkedRuns.map(({ runId }) => ({ runId, draftId: draft.id })))
+            .onConflictDoNothing();
+        }
         await tx.update(kbGenerationProposals).set({
           status: 'pending',
           draftId: null,
           draftOpIndex: null,
           revision: sql`${kbGenerationProposals.revision} + 1`,
           updatedAt: new Date(),
-        }).where(and(eq(kbGenerationProposals.draftId, draft.id), eq(kbGenerationProposals.status, 'drafted')));
+        }).where(and(
+          eq(kbGenerationProposals.draftId, draft.id),
+          eq(kbGenerationProposals.status, 'drafted'),
+          notLike(kbGenerationProposals.fingerprint, LEGACY_RAW_FINGERPRINT_PATTERN),
+        ));
         const [discarded] = await tx.update(kbDrafts).set({ status: 'discarded' }).where(eq(kbDrafts.id, draft.id)).returning();
         return discarded!;
       });

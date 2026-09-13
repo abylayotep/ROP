@@ -1,6 +1,6 @@
 {
-  "id": "34843d61-496b-483a-b0a3-e1caae8b4fbc",
-  "prevId": "1695f1f7-e8aa-4c18-b9d0-9b1fa5b46884",
+  "id": "4e1bd350-7d9c-482c-83f0-63a2a7ec7288",
+  "prevId": "2f8c1ff3-8197-4e7f-9e25-23c4d85b7696",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -124,114 +124,6 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.agent_response_mode_changes": {
-      "name": "agent_response_mode_changes",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "agent_id": {
-          "name": "agent_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "actor_user_id": {
-          "name": "actor_user_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "old_response_mode": {
-          "name": "old_response_mode",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "old_test_contact_id": {
-          "name": "old_test_contact_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "new_response_mode": {
-          "name": "new_response_mode",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "new_test_contact_id": {
-          "name": "new_test_contact_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "agent_response_mode_changes_agent_created_idx": {
-          "name": "agent_response_mode_changes_agent_created_idx",
-          "columns": [
-            {
-              "expression": "agent_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "created_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "agent_response_mode_changes_agent_id_agents_id_fk": {
-          "name": "agent_response_mode_changes_agent_id_agents_id_fk",
-          "tableFrom": "agent_response_mode_changes",
-          "tableTo": "agents",
-          "columnsFrom": [
-            "agent_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "agent_response_mode_changes_old_mode_check": {
-          "name": "agent_response_mode_changes_old_mode_check",
-          "value": "\"agent_response_mode_changes\".\"old_response_mode\" in ('off', 'test', 'live')"
-        },
-        "agent_response_mode_changes_new_mode_check": {
-          "name": "agent_response_mode_changes_new_mode_check",
-          "value": "\"agent_response_mode_changes\".\"new_response_mode\" in ('off', 'test', 'live')"
-        }
-      },
       "isRLSEnabled": false
     },
     "public.agent_rules": {
@@ -440,6 +332,13 @@
           "notNull": true,
           "default": "'auto'"
         },
+        "communication_style": {
+          "name": "communication_style",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'warm'"
+        },
         "openrouter_key": {
           "name": "openrouter_key",
           "type": "text",
@@ -466,6 +365,13 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
+        },
+        "crm_analysis_mode": {
+          "name": "crm_analysis_mode",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'follow_ai'"
         }
       },
       "indexes": {
@@ -514,21 +420,16 @@
         }
       },
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {
-        "agents_account_id_id_key": {
-          "name": "agents_account_id_id_key",
-          "nullsNotDistinct": false,
-          "columns": [
-            "account_id",
-            "id"
-          ]
-        }
-      },
+      "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {
         "agents_response_mode_check": {
           "name": "agents_response_mode_check",
           "value": "\"agents\".\"response_mode\" in ('off', 'test', 'live')"
+        },
+        "agents_crm_analysis_mode_check": {
+          "name": "agents_crm_analysis_mode_check",
+          "value": "\"crm_analysis_mode\" IN ('follow_ai', 'independent')"
         }
       },
       "isRLSEnabled": false
@@ -696,384 +597,9 @@
         }
       },
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {
-        "ai_replies_agent_conversation_id_key": {
-          "name": "ai_replies_agent_conversation_id_key",
-          "nullsNotDistinct": false,
-          "columns": [
-            "agent_id",
-            "conversation_id",
-            "id"
-          ]
-        }
-      },
+      "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.ai_sandbox_sessions": {
-      "name": "ai_sandbox_sessions",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "account_id": {
-          "name": "account_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "agent_id": {
-          "name": "agent_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "title": {
-          "name": "title",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "''"
-        },
-        "phone": {
-          "name": "phone",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "revision": {
-          "name": "revision",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "stage_id": {
-          "name": "stage_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "stage_name": {
-          "name": "stage_name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "fields": {
-          "name": "fields",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'[]'::jsonb"
-        },
-        "crm_summary": {
-          "name": "crm_summary",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "crm_profile": {
-          "name": "crm_profile",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'{}'::jsonb"
-        },
-        "outcome": {
-          "name": "outcome",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "handoff": {
-          "name": "handoff",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "archived_at": {
-          "name": "archived_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "ai_sandbox_sessions_agent_updated_idx": {
-          "name": "ai_sandbox_sessions_agent_updated_idx",
-          "columns": [
-            {
-              "expression": "agent_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "updated_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "ai_sandbox_sessions_account_agent_fk": {
-          "name": "ai_sandbox_sessions_account_agent_fk",
-          "tableFrom": "ai_sandbox_sessions",
-          "tableTo": "agents",
-          "columnsFrom": [
-            "account_id",
-            "agent_id"
-          ],
-          "columnsTo": [
-            "account_id",
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {
-        "ai_sandbox_sessions_scope_id_key": {
-          "name": "ai_sandbox_sessions_scope_id_key",
-          "nullsNotDistinct": false,
-          "columns": [
-            "account_id",
-            "agent_id",
-            "id"
-          ]
-        }
-      },
-      "policies": {},
-      "checkConstraints": {
-        "ai_sandbox_sessions_revision_check": {
-          "name": "ai_sandbox_sessions_revision_check",
-          "value": "\"ai_sandbox_sessions\".\"revision\" >= 0"
-        }
-      },
-      "isRLSEnabled": false
-    },
-    "public.ai_sandbox_turns": {
-      "name": "ai_sandbox_turns",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "account_id": {
-          "name": "account_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "agent_id": {
-          "name": "agent_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "session_id": {
-          "name": "session_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "revision": {
-          "name": "revision",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "user_text": {
-          "name": "user_text",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "reply": {
-          "name": "reply",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "config_version": {
-          "name": "config_version",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "model": {
-          "name": "model",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "source_ids": {
-          "name": "source_ids",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'[]'::jsonb"
-        },
-        "stage_id": {
-          "name": "stage_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "stage_name": {
-          "name": "stage_name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "fields": {
-          "name": "fields",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'[]'::jsonb"
-        },
-        "effect_source": {
-          "name": "effect_source",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'ai'"
-        },
-        "checkout": {
-          "name": "checkout",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "handoff": {
-          "name": "handoff",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "outcome": {
-          "name": "outcome",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "detail": {
-          "name": "detail",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "ai_sandbox_turns_session_revision_idx": {
-          "name": "ai_sandbox_turns_session_revision_idx",
-          "columns": [
-            {
-              "expression": "session_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "revision",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "ai_sandbox_turns_session_scope_fk": {
-          "name": "ai_sandbox_turns_session_scope_fk",
-          "tableFrom": "ai_sandbox_turns",
-          "tableTo": "ai_sandbox_sessions",
-          "columnsFrom": [
-            "account_id",
-            "agent_id",
-            "session_id"
-          ],
-          "columnsTo": [
-            "account_id",
-            "agent_id",
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {
-        "ai_sandbox_turns_session_revision_key": {
-          "name": "ai_sandbox_turns_session_revision_key",
-          "nullsNotDistinct": false,
-          "columns": [
-            "session_id",
-            "revision"
-          ]
-        },
-        "ai_sandbox_turns_scope_id_key": {
-          "name": "ai_sandbox_turns_scope_id_key",
-          "nullsNotDistinct": false,
-          "columns": [
-            "account_id",
-            "agent_id",
-            "session_id",
-            "id"
-          ]
-        }
-      },
-      "policies": {},
-      "checkConstraints": {
-        "ai_sandbox_turns_revision_check": {
-          "name": "ai_sandbox_turns_revision_check",
-          "value": "\"ai_sandbox_turns\".\"revision\" > 0"
-        }
-      },
       "isRLSEnabled": false
     },
     "public.capi_events": {
@@ -1391,25 +917,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "feedback_id": {
-          "name": "feedback_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "revision": {
-          "name": "revision",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 1
-        },
-        "source_snapshot": {
-          "name": "source_snapshot",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
-        },
         "draft_id": {
           "name": "draft_id",
           "type": "uuid",
@@ -1486,19 +993,6 @@
           "tableTo": "ai_replies",
           "columnsFrom": [
             "ai_reply_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
-        "coach_messages_feedback_id_response_feedback_id_fk": {
-          "name": "coach_messages_feedback_id_response_feedback_id_fk",
-          "tableFrom": "coach_messages",
-          "tableTo": "response_feedback",
-          "columnsFrom": [
-            "feedback_id"
           ],
           "columnsTo": [
             "id"
@@ -3007,6 +2501,18 @@
           "primaryKey": false,
           "notNull": true
         },
+        "classification": {
+          "name": "classification",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "classification_reason": {
+          "name": "classification_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "status": {
           "name": "status",
           "type": "text",
@@ -3087,6 +2593,96 @@
           "columns": [
             "run_id",
             "ordinal"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.kb_generation_drafts": {
+      "name": "kb_generation_drafts",
+      "schema": "",
+      "columns": {
+        "run_id": {
+          "name": "run_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "draft_id": {
+          "name": "draft_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "request_key": {
+          "name": "request_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "kb_generation_drafts_draft_idx": {
+          "name": "kb_generation_drafts_draft_idx",
+          "columns": [
+            {
+              "expression": "draft_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "kb_generation_drafts_run_id_kb_generation_runs_id_fk": {
+          "name": "kb_generation_drafts_run_id_kb_generation_runs_id_fk",
+          "tableFrom": "kb_generation_drafts",
+          "tableTo": "kb_generation_runs",
+          "columnsFrom": [
+            "run_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "kb_generation_drafts_draft_id_kb_drafts_id_fk": {
+          "name": "kb_generation_drafts_draft_id_kb_drafts_id_fk",
+          "tableFrom": "kb_generation_drafts",
+          "tableTo": "kb_drafts",
+          "columnsFrom": [
+            "draft_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "kb_generation_drafts_run_draft": {
+          "name": "kb_generation_drafts_run_draft",
+          "nullsNotDistinct": false,
+          "columns": [
+            "run_id",
+            "draft_id"
           ]
         }
       },
@@ -3248,6 +2844,13 @@
           "notNull": true,
           "default": 1
         },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'knowledge'"
+        },
         "path": {
           "name": "path",
           "type": "text",
@@ -3259,6 +2862,20 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
+        },
+        "confidence": {
+          "name": "confidence",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'review'"
+        },
+        "selected": {
+          "name": "selected",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
         },
         "warnings": {
           "name": "warnings",
@@ -3437,6 +3054,182 @@
           ]
         }
       },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.kb_generation_raw_findings": {
+      "name": "kb_generation_raw_findings",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "run_id": {
+          "name": "run_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "batch_id": {
+          "name": "batch_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "fingerprint": {
+          "name": "fingerprint",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "legacy_kind": {
+          "name": "legacy_kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "legacy_revision": {
+          "name": "legacy_revision",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "legacy_status": {
+          "name": "legacy_status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "legacy_draft_id": {
+          "name": "legacy_draft_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "legacy_draft_op_index": {
+          "name": "legacy_draft_op_index",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "legacy_note_id": {
+          "name": "legacy_note_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "path": {
+          "name": "path",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "body": {
+          "name": "body",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "warnings": {
+          "name": "warnings",
+          "type": "text[]",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::text[]"
+        },
+        "sources": {
+          "name": "sources",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "kb_generation_raw_findings_run_created_idx": {
+          "name": "kb_generation_raw_findings_run_created_idx",
+          "columns": [
+            {
+              "expression": "run_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "kb_generation_raw_findings_run_fingerprint_idx": {
+          "name": "kb_generation_raw_findings_run_fingerprint_idx",
+          "columns": [
+            {
+              "expression": "run_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "fingerprint",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "kb_generation_raw_findings_run_id_kb_generation_runs_id_fk": {
+          "name": "kb_generation_raw_findings_run_id_kb_generation_runs_id_fk",
+          "tableFrom": "kb_generation_raw_findings",
+          "tableTo": "kb_generation_runs",
+          "columnsFrom": [
+            "run_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "kb_generation_raw_findings_batch_id_kb_generation_batches_id_fk": {
+          "name": "kb_generation_raw_findings_batch_id_kb_generation_batches_id_fk",
+          "tableFrom": "kb_generation_raw_findings",
+          "tableTo": "kb_generation_batches",
+          "columnsFrom": [
+            "batch_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false
@@ -4811,188 +4604,6 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.response_feedback": {
-      "name": "response_feedback",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "account_id": {
-          "name": "account_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "agent_id": {
-          "name": "agent_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "conversation_id": {
-          "name": "conversation_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "ai_reply_id": {
-          "name": "ai_reply_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "session_id": {
-          "name": "session_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "sandbox_turn_id": {
-          "name": "sandbox_turn_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "correction_type": {
-          "name": "correction_type",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "note": {
-          "name": "note",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "snapshot": {
-          "name": "snapshot",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "revision": {
-          "name": "revision",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 1
-        },
-        "status": {
-          "name": "status",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'pending'"
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "response_feedback_agent_created_idx": {
-          "name": "response_feedback_agent_created_idx",
-          "columns": [
-            {
-              "expression": "agent_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "created_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "response_feedback_agent_scope_fk": {
-          "name": "response_feedback_agent_scope_fk",
-          "tableFrom": "response_feedback",
-          "tableTo": "agents",
-          "columnsFrom": [
-            "account_id",
-            "agent_id"
-          ],
-          "columnsTo": [
-            "account_id",
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "response_feedback_live_scope_fk": {
-          "name": "response_feedback_live_scope_fk",
-          "tableFrom": "response_feedback",
-          "tableTo": "ai_replies",
-          "columnsFrom": [
-            "agent_id",
-            "conversation_id",
-            "ai_reply_id"
-          ],
-          "columnsTo": [
-            "agent_id",
-            "conversation_id",
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        },
-        "response_feedback_sandbox_scope_fk": {
-          "name": "response_feedback_sandbox_scope_fk",
-          "tableFrom": "response_feedback",
-          "tableTo": "ai_sandbox_turns",
-          "columnsFrom": [
-            "account_id",
-            "agent_id",
-            "session_id",
-            "sandbox_turn_id"
-          ],
-          "columnsTo": [
-            "account_id",
-            "agent_id",
-            "session_id",
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "response_feedback_one_source_check": {
-          "name": "response_feedback_one_source_check",
-          "value": "(\"response_feedback\".\"conversation_id\" is not null and \"response_feedback\".\"ai_reply_id\" is not null and \"response_feedback\".\"session_id\" is null and \"response_feedback\".\"sandbox_turn_id\" is null) or (\"response_feedback\".\"conversation_id\" is null and \"response_feedback\".\"ai_reply_id\" is null and \"response_feedback\".\"session_id\" is not null and \"response_feedback\".\"sandbox_turn_id\" is not null)"
-        },
-        "response_feedback_type_check": {
-          "name": "response_feedback_type_check",
-          "value": "\"response_feedback\".\"correction_type\" in ('fact', 'behavior')"
-        },
-        "response_feedback_revision_check": {
-          "name": "response_feedback_revision_check",
-          "value": "\"response_feedback\".\"revision\" > 0"
-        }
-      },
       "isRLSEnabled": false
     },
     "public.sessions": {

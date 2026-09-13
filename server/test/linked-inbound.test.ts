@@ -42,6 +42,7 @@ let deps: LinkedInboundDeps;
 let errors: string[];
 
 const JID = '77085807932@s.whatsapp.net';
+/** The same customer, as WhatsApp addresses them once their chat has moved to a LID. */
 const LID = '47536731594988@lid';
 
 function raw(over: Partial<RawLinkedMessage> = {}): RawLinkedMessage {
@@ -108,7 +109,9 @@ describe('jidToPhone', () => {
 
   it('reads a LID without treating it as a phone number', () => {
     expect(jidToPhone(LID)).toBeNull();
+    expect(jidToLid(LID)).toBe('47536731594988');
     expect(jidToLid('47536731594988:3@lid')).toBe('47536731594988');
+    expect(jidToLid(JID)).toBeNull();
   });
 });
 
@@ -150,6 +153,28 @@ describe('normalize', () => {
   it('drops protocol and reaction traffic', () => {
     expect(normalize(raw({ message: { protocolMessage: {} } }))).toBeNull();
     expect(normalize(raw({ message: { reactionMessage: {} } }))).toBeNull();
+  });
+
+  it('files a LID chat under the number its sender carries', () => {
+    // WhatsApp addresses more and more one-to-one chats by LID. Reading `remoteJid` alone
+    // dropped every one of them, with nothing in the log to say so.
+    const line = normalize(raw({
+      key: { id: 'wa.1', remoteJid: LID, fromMe: false, senderPn: JID },
+    }), 'number-a');
+    expect(line).toMatchObject({ from: '77085807932', fromMe: false });
+  });
+
+  it('drops the owner’s own LID line until a customer has named the number', () => {
+    const own = raw({
+      key: { id: 'wa.2', remoteJid: LID, fromMe: true, senderPn: '77015550000@s.whatsapp.net' },
+      message: { conversation: 'уже отвечаю' },
+    });
+    // `senderPn` on an outgoing line is the owner's own number; filing the thread under it
+    // would put the shop in its own contact list.
+    expect(normalize(own, 'number-a')).toBeNull();
+
+    normalize(raw({ key: { id: 'wa.1', remoteJid: LID, fromMe: false, senderPn: JID } }), 'number-a');
+    expect(normalize(own, 'number-a')).toMatchObject({ from: '77085807932', fromMe: true });
   });
 
   it('reads a timestamp handed over as a Long', () => {
@@ -301,6 +326,49 @@ describe('linked inbound', () => {
 
     const [conversation] = await db.select().from(conversations);
     expect(conversation!.aiEnabled).toBe(false);
+  });
+
+  it('stores a message from a LID-addressed chat', async () => {
+    // The bug this covers: in production the socket decrypted message after message and
+    // «Диалоги» stayed empty, because every one of those chats arrived as `<lid>@lid`.
+    const client = fakeLinked();
+
+    await applyMessage(db, deps, client, numberId, raw({
+      key: { id: 'wa.7', remoteJid: LID, fromMe: false, senderPn: JID },
+    }));
+
+    const [stored] = await db.select().from(messages);
+    expect(stored).toMatchObject({ direction: 'in', author: 'client' });
+    const [contact] = await db.select().from(contacts);
+    expect(contact).toMatchObject({ phone: '77085807932', name: 'Айгерим' });
+    expect(errors).toEqual([]);
+  });
+
+  it('keeps one thread whether the chat arrives by number or by LID', async () => {
+    const client = fakeLinked();
+
+    await applyMessage(db, deps, client, numberId, raw());
+    await applyMessage(db, deps, client, numberId, raw({
+      key: { id: 'wa.8', remoteJid: LID, fromMe: false, senderPn: JID },
+      message: { conversation: 'и ещё вопрос' },
+    }));
+
+    expect(await db.select().from(conversations)).toHaveLength(1);
+    expect(await db.select().from(messages)).toHaveLength(2);
+  });
+
+  it('says in the log when a LID chat names nobody', async () => {
+    // Silence is what hid this class of bug for a day: a customer wrote, the socket
+    // decrypted it, and nothing anywhere said the line had been thrown away.
+    const client = fakeLinked();
+
+    await applyMessage(db, deps, client, numberId, raw({
+      key: { id: 'wa.9', remoteJid: LID, fromMe: true },
+      message: { conversation: 'уже отвечаю' },
+    }));
+
+    expect(await db.select().from(messages)).toHaveLength(0);
+    expect(errors.join(' ')).toContain('the contact phone number is unknown');
   });
 
   it('ignores a group message entirely', async () => {

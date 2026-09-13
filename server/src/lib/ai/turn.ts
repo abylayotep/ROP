@@ -580,7 +580,7 @@ export async function executeAiCore(db: Db, deps: TurnDeps, input: AiCoreInput):
   const instructions = assembleRules(await loadRules(db, agent.id));
   const context: TurnContext = {
     agent: { name: agent.name, timezone: agent.timezone, instructions,
-      replyLanguage: agent.replyLanguage },
+      replyLanguage: agent.replyLanguage, communicationStyle: agent.communicationStyle },
     stages: stageRows.map(({ id, name, description }) => ({ id, name, description })),
     fields: fieldRows.map(({ id, name, kind, hint }) => ({ id, name, kind, hint })),
     knowledge: hits.map(({ chunk }) => ({ id: chunk.id, kind: chunk.kind,

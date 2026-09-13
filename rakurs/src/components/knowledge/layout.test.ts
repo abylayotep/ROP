@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { layout } from './layout.js';
+import { recentHistorySearch, sourceAfterKey } from './KnowledgeSourceCards.js';
 
 const graph = {
   notes: [
@@ -36,5 +37,28 @@ describe('layout', () => {
 
   it('renders an empty graph as an empty map', () => {
     expect(layout({ notes: [], links: [], truncated: false }, 50).size).toBe(0);
+  });
+});
+
+describe('source card keyboard layout', () => {
+  const ids = ['whatsapp', 'instagram', 'text', 'page'] as const;
+
+  it('moves across the source cards with arrows and wraps at the edges', () => {
+    expect(sourceAfterKey(ids, 'text', 'ArrowRight')).toBe('page');
+    expect(sourceAfterKey(ids, 'page', 'ArrowRight')).toBe('whatsapp');
+    expect(sourceAfterKey(ids, 'whatsapp', 'ArrowLeft')).toBe('page');
+  });
+
+  it('jumps to the first and last source card', () => {
+    expect(sourceAfterKey(ids, 'instagram', 'Home')).toBe('whatsapp');
+    expect(sourceAfterKey(ids, 'instagram', 'End')).toBe('page');
+    expect(sourceAfterKey(ids, 'instagram', 'Enter')).toBeNull();
+  });
+
+  it('opens a fresh two-week preparation instead of a stale selected run', () => {
+    const next = recentHistorySearch(new URLSearchParams('tab=sources&generation=old-run&note=note-1'));
+    expect(next.get('tab')).toBe('drafts');
+    expect(next.has('generation')).toBe(false);
+    expect(next.get('note')).toBe('note-1');
   });
 });

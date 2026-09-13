@@ -16,6 +16,7 @@ import {
   aiSandboxTurns,
   kbDrafts,
   kbGenerationBatches,
+  kbGenerationDrafts,
   kbGenerationProposals,
   kbGenerationRuns,
   kbNotes,
@@ -416,16 +417,48 @@ describe('applying a draft', () => {
     const counts = { selectedConversations: 0, selectedMessages: 0, eligibleMessages: 0, eligibleCharacters: 0, skippedAiOrSystem: 0, skippedUnsupported: 0, skippedEmpty: 0, skippedSensitive: 0, skippedOversize: 0, skippedNoSeller: 0 };
     const [run] = await db.insert(kbGenerationRuns).values({ agentId, userId: owner!.id, requestedPreviewId: randomUUID(), requestKey: 'discard-stale', selection, manifest: { messages: [], batches: [] }, counts, modelId: 'model', temperature: '0.30', status: 'completed' }).returning();
     const [batch] = await db.insert(kbGenerationBatches).values({ runId: run!.id, ordinal: 0, manifest: { ordinal: 0, conversationId: randomUUID(), messages: [], characterCount: 0 }, status: 'done' }).returning();
-    const [proposal] = await db.insert(kbGenerationProposals).values({ runId: run!.id, batchId: batch!.id, fingerprint: 'discard-stale', path: 'Delivery', body: 'Two days', sources: [] }).returning();
+    const [proposal] = await db.insert(kbGenerationProposals).values({ runId: run!.id, batchId: batch!.id, fingerprint: 'discard-stale', path: 'Delivery', body: 'Two days', sources: [], selected: true }).returning();
     const input = { proposalIds: [proposal!.id], revisions: { [proposal!.id]: 1 } };
     const draft = await createGenerationDraft(db, agentId, owner!.id, run!.id, input);
+    await db.delete(kbGenerationDrafts).where(eq(kbGenerationDrafts.draftId, draft.draftId));
 
     const discarded = await app.inject({ method: 'POST', url: `${drafts()}/${draft.draftId}/discard`, cookies: jar });
 
     expect(discarded.statusCode).toBe(200);
     await expect(createGenerationDraft(db, agentId, owner!.id, run!.id, input)).rejects.toMatchObject({ statusCode: 409 });
     const [released] = await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.id, proposal!.id));
-    expect(released).toMatchObject({ status: 'pending', revision: 2, draftId: null, draftOpIndex: null });
+    expect(released).toMatchObject({ status: 'pending', revision: 3, draftId: null, draftOpIndex: null });
+    const history = await app.inject({
+      method: 'GET',
+      url: `/api/agents/${agentId}/knowledge/generation/runs/${run!.id}`,
+      cookies: jar,
+    });
+    expect(history.statusCode).toBe(200);
+    expect(history.json().drafts).toContainEqual(expect.objectContaining({
+      id: draft.draftId,
+      status: 'discarded',
+    }));
+  });
+
+  it('restores a missing generation draft relation before applying a legacy linked draft', async () => {
+    const [owner] = await db.select().from(users).where(eq(users.email, 'owner@example.com'));
+    const selection = { conversationIds: [], from: '2026-09-01T00:00:00Z', to: '2026-09-02T00:00:00Z' };
+    const counts = { selectedConversations: 0, selectedMessages: 0, eligibleMessages: 0, eligibleCharacters: 0, skippedAiOrSystem: 0, skippedUnsupported: 0, skippedEmpty: 0, skippedSensitive: 0, skippedOversize: 0, skippedNoSeller: 0 };
+    const [run] = await db.insert(kbGenerationRuns).values({ agentId, userId: owner!.id, requestedPreviewId: randomUUID(), requestKey: 'apply-legacy-link', selection, manifest: { messages: [], batches: [] }, counts, modelId: 'model', temperature: '0.30', status: 'completed' }).returning();
+    const [batch] = await db.insert(kbGenerationBatches).values({ runId: run!.id, ordinal: 0, manifest: { ordinal: 0, conversationId: randomUUID(), messages: [], characterCount: 0 }, status: 'done' }).returning();
+    const [proposal] = await db.insert(kbGenerationProposals).values({ runId: run!.id, batchId: batch!.id, fingerprint: 'apply-legacy-link', path: 'Legacy apply', body: 'Two days', sources: [], selected: true }).returning();
+    const draft = await createGenerationDraft(db, agentId, owner!.id, run!.id, {
+      proposalIds: [proposal!.id],
+      revisions: { [proposal!.id]: 1 },
+    });
+    await db.delete(kbGenerationDrafts).where(eq(kbGenerationDrafts.draftId, draft.draftId));
+    await runOver({ id: draft.draftId }, [await addCase('доставка')]);
+
+    expect((await apply(draft.draftId)).statusCode).toBe(200);
+    expect(await db.select().from(kbGenerationDrafts).where(eq(kbGenerationDrafts.draftId, draft.draftId)))
+      .toEqual([expect.objectContaining({ runId: run!.id, draftId: draft.draftId })]);
+    expect((await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.id, proposal!.id)))[0])
+      .toMatchObject({ status: 'applied', revision: 3 });
   });
 
   it('applies over a red verdict, because the owner decides', async () => {

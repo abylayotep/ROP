@@ -1,5 +1,5 @@
-import type { Agent } from '@rakurs/contract';
-import { eq } from 'drizzle-orm';
+import type { Agent, CommunicationStyle, CommunicationStyleSettings } from '@rakurs/contract';
+import { and, eq } from 'drizzle-orm';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
@@ -21,6 +21,21 @@ const patch = z.object({
   name: z.string().trim().min(1).optional(),
   description: z.string().trim().optional(),
   timezone: z.string().trim().min(1).optional(),
+});
+
+const communicationStylePatch = z.object({
+  preset: z.enum(['warm', 'calm', 'friendly']),
+});
+
+const communicationStylePreview: Record<CommunicationStyle, string> = {
+  warm: 'Здравствуйте! С радостью помогу 😊 Подскажите, что вас интересует?',
+  calm: 'Здравствуйте. Подскажите, пожалуйста, что вас интересует?',
+  friendly: 'Привет! Давайте разберёмся 🙂 Что именно вы ищете?',
+};
+
+const styleToApi = (preset: CommunicationStyle): CommunicationStyleSettings => ({
+  preset,
+  preview: communicationStylePreview[preset],
 });
 
 const toApi = (row: typeof agents.$inferSelect): Agent => ({
@@ -112,6 +127,32 @@ export function registerAgentRoutes(
       });
       if (row.name.trim().toLocaleLowerCase() === 'sealhouse') await ensureSealhousePaymentPolicy(db, row.id);
       return toApi(row);
+    },
+  );
+
+  app.get(
+    '/api/agents/:agentId/communication-style',
+    { preHandler: [guard, requireAgent(db)] },
+    async (req): Promise<CommunicationStyleSettings> => styleToApi(req.agent!.communicationStyle),
+  );
+
+  app.patch(
+    '/api/agents/:agentId/communication-style',
+    { preHandler: [guard, requireAgent(db, { role: 'owner' })] },
+    async (req): Promise<CommunicationStyleSettings> => {
+      const parsed = communicationStylePatch.safeParse(req.body);
+      if (!parsed.success) throw new ApiError(400, 'Выберите доступный стиль общения');
+      if (parsed.data.preset === req.agent!.communicationStyle) return styleToApi(parsed.data.preset);
+
+      await db.transaction(async (tx) => {
+        const [updated] = await tx.update(agents).set({ communicationStyle: parsed.data.preset }).where(and(
+          eq(agents.id, req.agent!.id),
+          eq(agents.communicationStyle, req.agent!.communicationStyle),
+        )).returning({ id: agents.id });
+        if (!updated) throw new ApiError(409, 'Стиль общения уже изменился');
+        await bumpConfigVersion(tx as unknown as Db, req.agent!.id);
+      });
+      return styleToApi(parsed.data.preset);
     },
   );
 }

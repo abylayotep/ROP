@@ -308,7 +308,7 @@ export function registerTestCaseRoutes(
 
       try {
         const key = decryptSecret(req.agent!.openrouterKey, credentialsKey(env), keyAad(agentId));
-        const cases = await suggestCases(
+        const { cases } = await suggestCases(
           { model: deps.model, key, modelId: req.agent!.model, temperature: req.agent!.temperature },
           draft.ops,
         );

@@ -55,11 +55,11 @@ export function createCrmDeps(db: Db, env: Env, deps: TurnDeps): CrmDeps {
       db,
       { agentId: input.agentId, conversationId: input.conversationId },
       'checkout',
-      async () => createKaspiCheckout(db,env,{agentId:input.agentId,conversationId:input.conversationId,
+      async (tx,snapshot) => snapshot.crmAnalysisMode === 'follow_ai' ? createKaspiCheckout(tx as unknown as Db,env,{agentId:input.agentId,conversationId:input.conversationId,
         amount:input.intent.amount,phone,method:input.intent.method,requestKey:`crm:${input.intent.messageId}`,
-        comment:input.summary}),
+        comment:input.summary}) : null,
     );
-    if (!created.allowed) return;
+    if (!created.allowed || !created.value) return;
     const payment = created.value;
     if (payment.status !== 'pending') throw new ApiError(409,'Счёт Kaspi требует проверки в карточке клиента');
     let media: {path:string;mime:string}|null = null;
@@ -86,7 +86,8 @@ export function createCrmDeps(db: Db, env: Env, deps: TurnDeps): CrmDeps {
         db,
         { agentId: input.agentId, conversationId: input.conversationId },
         'reply',
-        async (tx) => {
+        async (tx,snapshot) => {
+          if (snapshot.crmAnalysisMode !== 'follow_ai') return false;
           const sent = media
             ? await transport.sendMedia(delivery.address,{path:join(env.MEDIA_DIR,media.path),mime:media.mime,caption:body})
             : await transport.sendText(delivery.address,body);
@@ -97,9 +98,10 @@ export function createCrmDeps(db: Db, env: Env, deps: TurnDeps): CrmDeps {
             kind:media?'image':'text',body,mediaPath:media?.path??null,mediaMime:media?.mime??null,status:'sent',sentAt:new Date()}).onConflictDoNothing();
           await tx.update(conversations).set({lastMessageAt:new Date()}).where(eq(conversations.id,input.conversationId));
           await tx.update(kaspiPayments).set({ notificationStatus: 'sent', notificationMessageId: sent.messageId }).where(eq(kaspiPayments.id, payment.id));
+          return true;
         },
       );
-      if (!notified.allowed) {
+      if (!notified.allowed || !notified.value) {
         await db.update(kaspiPayments).set({notificationStatus:'pending',notificationClaimedAt:null})
           .where(and(eq(kaspiPayments.id,payment.id),eq(kaspiPayments.notificationStatus,'unknown')));
       }
@@ -111,7 +113,7 @@ export function createCrmDeps(db: Db, env: Env, deps: TurnDeps): CrmDeps {
     }
   };
   return { model:deps.model,key:deps.key,checkout,
-    reply: async (agentId,conversationId) => { await runTurn(db,{...deps,crm:async()=>true},{agentId,conversationId}); },
+    reply: async (agentId,conversationId) => { await runTurn(db,{...deps,crm:async()=>true},{agentId,conversationId,crmOrigin:true}); },
   };
 }
 

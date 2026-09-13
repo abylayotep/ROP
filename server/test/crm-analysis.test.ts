@@ -85,6 +85,47 @@ it('grounds unverified payment evidence without treating it as confirmation', ()
   expect(resolveCrmStage(stages, 'paid', false)?.id).toBe('ordered');
 });
 
+it('rejects payment evidence quoted from seller instructions or an unknown message', () => {
+  const seller = { id: 'seller', author: 'operator', body: 'Kaspi перевод +77066241022, Құралай А.' };
+  const claimed = { state: 'needs_verification', messageId: seller.id, quote: 'Kaspi перевод', reason: 'Клиент оплатил' };
+  expect(parseCrmAnalysis(output({ payment: claimed }), [seller], []).payment).toBeNull();
+  expect(parseCrmAnalysis(output({ payment: { ...claimed, messageId: 'missing' } }), [seller], []).payment).toBeNull();
+});
+
+it('grounds a Kazakh customer payment claim while leaving confirmation to POS', () => {
+  const client = { id: 'client-kz', author: 'client', body: 'Halyk арқылы аудардым, чекті кейін жіберемін.' };
+  const result = parseCrmAnalysis(output({ payment: {
+    state: 'needs_verification', messageId: client.id, quote: 'Halyk арқылы аудардым', reason: 'Клиент сообщил о переводе',
+  } }), [client], []);
+  expect(result.payment).toEqual({ state: 'needs_verification', messageId: client.id, reason: 'Клиент сообщил о переводе' });
+  expect(resolveCrmStage(stages, 'paid', false)?.id).toBe('ordered');
+});
+
+it('does not present attachment metadata as a read receipt', () => {
+  const image = { id: 'image', author: 'client', kind: 'image', mediaMime: 'image/jpeg', body: null };
+  const captioned = { ...image, id: 'captioned', body: 'Фото заказа, чек пришлю позже' };
+  const evidence = (messageId: string) => ({ state: 'needs_verification', messageId,
+    quote: 'На фото чек', reason: 'На фото чек с подтверждением оплаты' });
+  expect(parseCrmAnalysis(output({ payment: evidence(image.id) }), [image], []).payment).toEqual({
+    state: 'needs_verification', messageId: image.id, reason: 'Вложение требует проверки',
+  });
+  expect(parseCrmAnalysis(output({ payment: evidence(captioned.id) }), [captioned], []).payment).toEqual({
+    state: 'needs_verification', messageId: captioned.id, reason: 'Вложение требует проверки',
+  });
+  expect(parseCrmAnalysis(output({ payment: evidence(image.id) }), [{ ...image, author: 'operator' }], []).payment).toBeNull();
+});
+
+it('treats an Instagram unsupported-attachment placeholder as metadata, not customer text', () => {
+  const attachment = { id: 'instagram-image', author: 'client', kind: 'unsupported', mediaMime: null,
+    body: 'Вложение Instagram пока не поддерживается.' };
+  const claimed = { state: 'needs_verification', messageId: attachment.id,
+    quote: attachment.body, reason: 'На фото оплаченный чек' };
+  expect(parseCrmAnalysis(output({ payment: claimed }), [attachment], []).payment).toEqual({
+    state: 'needs_verification', messageId: attachment.id, reason: 'Вложение требует проверки',
+  });
+  expect(parseCrmAnalysis(output({ payment: { ...claimed, state: 'awaiting_payment' } }), [attachment], []).payment).toBeNull();
+});
+
 it('describes prior analysis as revisable context and distinguishes attachment metadata', () => {
   const prompt = crmPrompt(stages, []);
   expect(prompt).toContain('previous analysis');

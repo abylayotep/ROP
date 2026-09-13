@@ -11,6 +11,7 @@ import { withDb } from './helpers/db.js';
 
 const base: AutomationSnapshot = {
   responseMode: 'live',
+  crmAnalysisMode: 'follow_ai',
   testContactId: null,
   contactId: 'contact-a',
   conversationAiEnabled: true,
@@ -61,6 +62,18 @@ describe('automation policy', () => {
       expected: { allowed: false, reason: 'conversation_disabled' },
     },
     {
+      name: 'allows independent CRM with replies off and conversation AI disabled',
+      snapshot: { ...base, crmAnalysisMode: 'independent', responseMode: 'off', conversationAiEnabled: false },
+      purpose: 'crm',
+      expected: { allowed: true, reason: 'independent_crm' },
+    },
+    {
+      name: 'keeps checkout disabled when CRM is independent',
+      snapshot: { ...base, crmAnalysisMode: 'independent', responseMode: 'off' },
+      purpose: 'checkout',
+      expected: { allowed: false, reason: 'agent_off' },
+    },
+    {
       name: 'rejects a reply through a disabled WhatsApp number',
       snapshot: { ...base, numberEnabled: false },
       purpose: 'reply',
@@ -102,6 +115,7 @@ describe('automation snapshot loader', () => {
 
     expect(snapshot).toEqual({
       responseMode: 'live',
+      crmAnalysisMode: 'follow_ai',
       testContactId: own.contactId,
       contactId: own.contactId,
       conversationAiEnabled: true,

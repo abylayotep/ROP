@@ -187,15 +187,19 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
     // Only a persisted live delivery authorizes customer side effects, never a backfill flag.
     if (liveId && last?.id === liveId && last.author === 'client' && Date.now()-last.sentAt.getTime() >= 0
       && Date.now()-last.sentAt.getTime() < 5*60_000) {
-      if (moved && await automationAllowed(db,input,'crm')) {
-        await queueLead(db,{agentId:agent.id,conversationId:conversation.id,
-          canQueue:()=>automationAllowed(db,input,'crm')});
-      }
-      const [current] = await db.select({agentEnabled:agents.aiEnabled,conversationEnabled:conversations.aiEnabled})
+      const [current] = await db.select({agentEnabled:agents.aiEnabled,conversationEnabled:conversations.aiEnabled,
+        crmAnalysisMode:agents.crmAnalysisMode})
         .from(conversations).innerJoin(agents,eq(agents.id,conversations.agentId)).where(eq(conversations.id,conversation.id));
+      if (agent.crmAnalysisMode === 'follow_ai' && current?.crmAnalysisMode === 'follow_ai' && moved && await automationAllowed(db,input,'crm')) {
+        await queueLead(db,{agentId:agent.id,conversationId:conversation.id,
+          canQueue:async (effectDb) => {
+            const snapshot=await loadAutomationSnapshot(effectDb,input);
+            return snapshot?.crmAnalysisMode === 'follow_ai' && decideAutomation(snapshot,'crm').allowed;
+          }});
+      }
       const [latest] = await db.select({id:messages.id}).from(messages).where(eq(messages.conversationId,conversation.id))
         .orderBy(desc(messages.sentAt),desc(messages.id)).limit(1);
-      if (current?.agentEnabled && current.conversationEnabled && latest?.id === liveId) {
+      if (agent.crmAnalysisMode === 'follow_ai' && current?.crmAnalysisMode === 'follow_ai' && current.agentEnabled && current.conversationEnabled && latest?.id === liveId) {
         if (deps.checkout && contact.phone && analysis.checkout?.messageId === liveId && analysis.confidence >= 85
           && !await hasConfirmedKaspiPayment(db,agent.id,conversation.id)
           && await automationAllowed(db,input,'checkout')) {
@@ -234,8 +238,9 @@ export async function drainCrmAnalyses(db: Db, deps: CrmDeps): Promise<void> {
     .innerJoin(agents,eq(agents.id,conversations.agentId))
     .innerJoin(contacts,and(eq(contacts.id,conversations.contactId),eq(contacts.agentId,agents.id)))
     .leftJoin(crmAnalyses,eq(crmAnalyses.conversationId,conversations.id))
-    .where(and(isNotNull(agents.openrouterKey),eq(conversations.aiEnabled,true),
-      or(eq(agents.responseMode,'live'),and(eq(agents.responseMode,'test'),eq(agents.testContactId,contacts.id))),
+    .where(and(isNotNull(agents.openrouterKey),
+      or(eq(agents.crmAnalysisMode,'independent'),and(eq(agents.crmAnalysisMode,'follow_ai'),eq(conversations.aiEnabled,true),
+        or(eq(agents.responseMode,'live'),and(eq(agents.responseMode,'test'),eq(agents.testContactId,contacts.id))))),
       sql`exists (select 1 from messages m where m.conversation_id = ${conversations.id} and m.author <> 'system')`,
       or(sql`${crmAnalyses.analyzedMessageId} is distinct from (select m.id from messages m where m.conversation_id = ${conversations.id} order by m.created_at desc, m.id desc limit 1)`,
         sql`${crmAnalyses.pendingLiveMessageId} is not null and ${crmAnalyses.pendingLiveMessageId} is distinct from ${crmAnalyses.handledLiveMessageId}`),

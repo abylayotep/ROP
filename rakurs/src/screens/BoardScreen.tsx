@@ -88,7 +88,7 @@ export function BoardScreen() {
         <div className="funnel-controls">
           <label className="funnel-search"><span aria-hidden="true">⌕</span><input aria-label="Поиск по воронке" placeholder="Имя, телефон, сообщение…" value={search} onChange={(event) => setSearch(event.target.value)} />{search && <button type="button" aria-label="Очистить поиск" onClick={() => setSearch('')}>×</button>}</label>
           <span className="funnel-total">Сделки: {search ? `${visibleCount} из ${all.length}` : all.length}</span>
-          <span className="funnel-sync" role="status">{data.analysisConfigured === false ? 'Добавьте ключ ИИ в настройках агента' : moving ? 'Сохраняем этап…' : pending ? `ИИ разбирает: ${pending}` : failed ? `Не удалось разобрать: ${failed}` : board.loading ? 'Обновляем…' : 'Автообновление включено'}</span>
+          <span className="funnel-sync" role="status">{data.analysisConfigured === false ? 'Добавьте ключ ИИ в настройках агента' : moving ? 'Сохраняем этап…' : data.crmAnalysisMode !== 'independent' ? 'Анализ следует режиму AI' : pending ? `ИИ разбирает: ${pending}` : failed ? `Не удалось разобрать: ${failed}` : board.loading ? 'Обновляем…' : 'Автообновление включено'}</span>
         </div>
         {board.error !== undefined && <div className="funnel-error" role="alert">Не удалось обновить воронку. Показаны последние данные. <button className="btn" onClick={board.reload}>Повторить</button></div>}
         {all.length === 0 && <p className="funnel-empty-note">Здесь появятся сделки из диалогов с клиентами.</p>}

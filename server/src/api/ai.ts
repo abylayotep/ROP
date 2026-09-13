@@ -58,6 +58,7 @@ const settings = z
   .object({
     aiEnabled: z.boolean().optional(),
     responseMode: z.enum(['off', 'test', 'live']).optional(),
+    crmAnalysisMode: z.enum(['follow_ai', 'independent']).optional(),
     testContactId: z.uuid().nullable().optional(),
     model: z.string().trim().optional(),
     temperature: z.number().min(0).max(2).optional(),
@@ -130,6 +131,7 @@ const toApi = (
 ): AiSettings => ({
   aiEnabled: row.aiEnabled,
   responseMode: row.responseMode,
+  crmAnalysisMode: row.crmAnalysisMode,
   testContact: testContact ? toContact(testContact) : null,
   model: row.model,
   temperature: Number(row.temperature),
@@ -191,6 +193,7 @@ export function registerAiRoutes(
       const {
         aiEnabled,
         responseMode,
+        crmAnalysisMode,
         testContactId,
         model,
         temperature,
@@ -215,6 +218,7 @@ export function registerAiRoutes(
         changes.aiEnabled = requestedMode !== 'off';
       }
       if (testContactId !== undefined) changes.testContactId = testContactId;
+      if (crmAnalysisMode !== undefined) changes.crmAnalysisMode = crmAnalysisMode;
       if (model !== undefined) changes.model = model;
       // The column is numeric(3,2) and hands back a string; two decimals is all it keeps.
       if (temperature !== undefined) changes.temperature = temperature.toFixed(2);

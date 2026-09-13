@@ -68,6 +68,20 @@ afterEach(async () => {
 });
 
 describe('AI response mode settings', () => {
+  it('lets only the owner enable independent CRM without changing reply scope', async () => {
+    expect((await patchSettings({crmAnalysisMode:'independent'},memberJar)).statusCode).toBe(403);
+    const response=await patchSettings({crmAnalysisMode:'independent'});
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({crmAnalysisMode:'independent',responseMode:'off',aiEnabled:false});
+    const [stored]=await db.select().from(agents).where(eq(agents.id,agentId));
+    expect(stored).toMatchObject({crmAnalysisMode:'independent',responseMode:'off',aiEnabled:false});
+  });
+  it('rejects an unknown CRM mode without a partial update', async () => {
+    const response=await patchSettings({crmAnalysisMode:'send_anyway',replyLanguage:'ru'});
+    expect(response.statusCode).toBe(400);
+    const [stored]=await db.select().from(agents).where(eq(agents.id,agentId));
+    expect(stored).toMatchObject({crmAnalysisMode:'follow_ai',replyLanguage:'auto'});
+  });
   it('allows only the owner to change the response mode', async () => {
     const response = await patchSettings({ responseMode: 'live' }, memberJar);
 

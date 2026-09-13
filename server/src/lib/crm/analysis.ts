@@ -79,12 +79,17 @@ export function parseCrmAnalysis(raw: string, history: EvidenceMessage[], fields
   let payment: CrmAnalysis['payment'] = null;
   if (result.payment) {
     const source = messages.get(result.payment.messageId);
-    const groundedText = !!result.payment.quote && source?.body?.includes(result.payment.quote);
+    const groundedText = source?.author === 'client' && source.kind !== 'unsupported' && !!result.payment.quote
+      && source.body?.includes(result.payment.quote);
     const unreadAttachment = result.payment.state === 'needs_verification' && source?.author === 'client'
-      && !!source.kind && source.kind !== 'text' && (!!source.mediaMime || source.kind === 'image' || source.kind === 'document');
-    if (groundedText || unreadAttachment) payment = {
-      state: result.payment.state, reason: result.payment.reason, messageId: result.payment.messageId,
-    };
+      && !!source.kind && source.kind !== 'text' && (!!source.mediaMime || ['image', 'document', 'unsupported'].includes(source.kind));
+    if (groundedText || unreadAttachment) {
+      payment = {
+        state: result.payment.state,
+        reason: unreadAttachment ? 'Вложение требует проверки' : result.payment.reason,
+        messageId: result.payment.messageId,
+      };
+    }
   }
   const acceptedEvidence = Object.fromEntries([
     ...Object.keys(profile).map((key) => [`profile:${key}`, {messageId: result.profile[key]!.messageId}]),

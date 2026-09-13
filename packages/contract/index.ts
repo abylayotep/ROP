@@ -314,6 +314,7 @@ export interface BoardColumn {
 
 export interface Board {
   analysisConfigured?: boolean;
+  crmAnalysisMode?: CrmAnalysisMode;
   columns: BoardColumn[];
   /** Conversations nobody has put in a stage yet. Shown first, never hidden. */
   unsorted: BoardCard[];
@@ -685,6 +686,7 @@ export interface CommunicationStyleSettings {
  * sandbox turn answers back. The key is not here: it goes in and never out. */
 
 export type AgentResponseMode = 'off' | 'test' | 'live';
+export type CrmAnalysisMode = 'follow_ai' | 'independent';
 
 export interface AiTestContact {
   id: string;
@@ -697,6 +699,8 @@ export interface AiSettings {
   aiEnabled: boolean;
   /** Explicit automation scope. */
   responseMode: AgentResponseMode;
+  /** Whether CRM analysis follows reply scope or runs independently without customer effects. */
+  crmAnalysisMode: CrmAnalysisMode;
   /** Contact selected for test mode, or null when no contact is selected. */
   testContact: AiTestContact | null;
   /** An OpenRouter model id, one of `AiModel.id`. */

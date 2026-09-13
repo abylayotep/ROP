@@ -162,6 +162,7 @@ export function registerBoardRoutes(
 
       return {
         analysisConfigured: req.agent!.openrouterKey !== null,
+        crmAnalysisMode: req.agent!.crmAnalysisMode,
         columns: funnel.map((stage) => ({ stage: toStage(stage), cards: byStage.get(stage.id)! })),
         unsorted,
         currency: req.agent!.currency,

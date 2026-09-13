@@ -34,6 +34,46 @@ beforeEach(async () => {
 });
 
 describe('independent CRM analysis', () => {
+  it('analyzes disabled-reply conversations while keeping all customer effects off', async () => {
+    await db.update(agents).set({responseMode:'off',aiEnabled:false,crmAnalysisMode:'independent'}).where(eq(agents.id,agentId));
+    await db.update(conversations).set({aiEnabled:false}).where(eq(conversations.id,conversationId));
+    const checkout=vi.fn(); const reply=vi.fn();
+    await drainCrmAnalyses(db,{model,key,checkout,reply});
+    const [conversation]=await db.select().from(conversations).where(eq(conversations.id,conversationId));
+    const [analysis]=await db.select().from(crmAnalyses).where(eq(crmAnalyses.conversationId,conversationId));
+    expect(conversation?.stageId).toBe(targetId);
+    expect(analysis?.status).toBe('ready');
+    expect(checkout).not.toHaveBeenCalled();
+    expect(reply).not.toHaveBeenCalled();
+    expect(await db.select().from(capiEvents)).toHaveLength(0);
+  });
+  it('does not use stale live markers for effects in independent mode', async () => {
+    await db.update(agents).set({responseMode:'live',aiEnabled:true,crmAnalysisMode:'independent'}).where(eq(agents.id,agentId));
+    await db.update(messages).set({sentAt:new Date()}).where(eq(messages.id,messageId));
+    await db.insert(crmAnalyses).values({conversationId,pendingLiveMessageId:messageId});
+    const checkout=vi.fn(); const reply=vi.fn();
+    await analyzeConversation(db,{model,key,checkout,reply},{agentId,conversationId,live:true});
+    expect((await db.select().from(conversations))[0]?.stageId).toBe(targetId);
+    expect(checkout).not.toHaveBeenCalled();
+    expect(reply).not.toHaveBeenCalled();
+    expect(await db.select().from(capiEvents)).toHaveLength(0);
+  });
+  it('keeps an analysis started independently free of effects if mode changes during the model call', async () => {
+    await db.update(agents).set({responseMode:'live',aiEnabled:true,crmAnalysisMode:'independent'}).where(eq(agents.id,agentId));
+    await db.update(messages).set({sentAt:new Date()}).where(eq(messages.id,messageId));
+    await db.insert(crmAnalyses).values({conversationId,pendingLiveMessageId:messageId});
+    const original=model.complete.getMockImplementation()!;
+    model.complete.mockImplementationOnce(async (...args:unknown[])=>{
+      await db.update(agents).set({crmAnalysisMode:'follow_ai'}).where(eq(agents.id,agentId));
+      return original(...args);
+    });
+    const checkout=vi.fn(); const reply=vi.fn();
+    await analyzeConversation(db,{model,key,checkout,reply},{agentId,conversationId,live:true});
+    expect((await db.select().from(conversations))[0]?.stageId).toBe(targetId);
+    expect(checkout).not.toHaveBeenCalled();
+    expect(reply).not.toHaveBeenCalled();
+    expect(await db.select().from(capiEvents)).toHaveLength(0);
+  });
   it('classifies old conversations without customer side effects', async () => {
     const checkout = vi.fn();
     await analyzeConversation(db, { model, key, checkout }, { agentId, conversationId });
@@ -41,7 +81,8 @@ describe('independent CRM analysis', () => {
     const [analysis] = await db.select().from(crmAnalyses).where(eq(crmAnalyses.conversationId, conversationId));
     expect(conversation?.stageId).toBe(targetId);
     expect(conversation?.aiEnabled).toBe(true);
-    expect(analysis?.profile).toEqual({ name:'Айгуль',city:'Алматы' });
+    expect(analysis?.profile).toMatchObject({ name:'Айгуль',city:'Алматы',paymentEvidence:'unknown' });
+    expect(analysis?.profile.paymentEvidenceReason).toBeUndefined();
     expect(analysis?.status).toBe('ready');
     expect(checkout).not.toHaveBeenCalled();
     expect(await db.select().from(messages)).toHaveLength(1);

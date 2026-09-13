@@ -314,3 +314,62 @@ describe('inbound processing', () => {
     expect(await db.select().from(messages)).toHaveLength(1);
   });
 });
+
+describe('a message from the operator alert number', () => {
+  // Now, not the fixture's 2025: a closed reply window would skip the turn for its own reason.
+  const fresh = (id = 'wamid.ONE') => delivery({ message: { id, timestamp: String(Math.floor(Date.now() / 1000)) } });
+
+  it('is recorded on a conversation that starts with the agent off, and never answered', async () => {
+    await db.update(agents).set({
+      aiEnabled: true,
+      responseMode: 'live',
+      operatorNotifyPhone: '77771234567',
+      openrouterKey: encryptSecret('sk-or-test', key, agentId),
+    }).where(eq(agents.id, agentId));
+    const graph = fakeGraph();
+    const model = fakeModel(JSON.stringify({ reply: 'Здравствуйте!' }));
+    let crmCalls = 0;
+    await store(fresh());
+
+    expect(await processPendingEvents(db, {
+      ...deps(), graph, model, crm: async () => { crmCalls += 1; return false; },
+    })).toEqual({ processed: 1, failed: 0 });
+
+    expect(await db.select().from(messages)).toHaveLength(1);
+    const [conversation] = await db.select().from(conversations);
+    expect(conversation!.aiEnabled).toBe(false);
+    expect(model.calls).toHaveLength(0);
+    expect(crmCalls).toBe(0);
+    expect(graph.calls.filter((call) => call.method === 'sendText')).toHaveLength(0);
+  });
+
+  it('is not answered even after the thread is switched back on', async () => {
+    await db.update(agents).set({
+      aiEnabled: true,
+      responseMode: 'live',
+      operatorNotifyPhone: '77771234567',
+      openrouterKey: encryptSecret('sk-or-test', key, agentId),
+    }).where(eq(agents.id, agentId));
+    await store(fresh());
+    await processPendingEvents(db, deps());
+    await db.update(conversations).set({ aiEnabled: true });
+    const graph = fakeGraph();
+    const model = fakeModel(JSON.stringify({ reply: 'Здравствуйте!' }));
+    await store(fresh('wamid.TWO'));
+
+    await processPendingEvents(db, { ...deps(), graph, model });
+
+    expect(await db.select().from(messages)).toHaveLength(2);
+    expect(model.calls).toHaveLength(0);
+    expect(graph.calls.filter((call) => call.method === 'sendText')).toHaveLength(0);
+  });
+
+  it('leaves an ordinary client conversation on', async () => {
+    await db.update(agents).set({ operatorNotifyPhone: '77710000000' }).where(eq(agents.id, agentId));
+    await store(fresh());
+
+    await processPendingEvents(db, deps());
+
+    expect((await db.select().from(conversations))[0]!.aiEnabled).toBe(true);
+  });
+});

@@ -16,6 +16,7 @@ const base: AutomationSnapshot = {
   contactId: 'contact-a',
   conversationAiEnabled: true,
   numberEnabled: true,
+  operatorContact: false,
 };
 
 describe('automation policy', () => {
@@ -30,6 +31,18 @@ describe('automation policy', () => {
       snapshot: { ...base, responseMode: 'off' },
       purpose: 'reply',
       expected: { allowed: false, reason: 'agent_off' },
+    },
+    {
+      name: 'refuses every purpose for the operator alert number, independent CRM included',
+      snapshot: { ...base, crmAnalysisMode: 'independent', operatorContact: true },
+      purpose: 'crm',
+      expected: { allowed: false, reason: 'operator_contact' },
+    },
+    {
+      name: 'refuses a reply to the operator alert number',
+      snapshot: { ...base, operatorContact: true },
+      purpose: 'reply',
+      expected: { allowed: false, reason: 'operator_contact' },
     },
     {
       name: 'allows a live reply',
@@ -120,7 +133,18 @@ describe('automation snapshot loader', () => {
       contactId: own.contactId,
       conversationAiEnabled: true,
       numberEnabled: true,
+      operatorContact: false,
     });
+  });
+
+  it('marks the agent operator alert number, whenever it is set', async () => {
+    const [contact] = await db.select().from(contacts).where(eq(contacts.id, own.contactId));
+    await db.update(agents).set({ operatorNotifyPhone: contact!.phone }).where(eq(agents.id, own.agentId));
+
+    const snapshot = await loadAutomationSnapshot(db, own);
+
+    expect(snapshot?.operatorContact).toBe(true);
+    expect(decideAutomation(snapshot!, 'reply')).toEqual({ allowed: false, reason: 'operator_contact' });
   });
 
   it('does not load a conversation through another agent scope', async () => {

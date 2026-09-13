@@ -1655,12 +1655,17 @@ describe('the operator alert on a handoff', () => {
     expect(alerts()).toHaveLength(0);
   });
 
-  it('does not tell the operator about themselves', async () => {
+  it('never runs a turn for the operator alert number, even on a thread that predates the setting', async () => {
+    // The fixture's conversation was created with the agent on; the setting arrives later.
     await db.update(agents).set({ operatorNotifyPhone: '77085807932' }).where(eq(agents.id, agentId));
+    const model = fakeModel(answer({ handoff: { reason: 'нужен человек' } }));
 
-    await turn(fakeModel(answer({ handoff: { reason: 'нужен человек' } })));
+    const result = await turn(model);
 
-    expect(graph.calls.filter((call) => call.method === 'sendText')).toHaveLength(1);
+    expect(result.outcome).toBe('skipped');
+    expect(model.calls).toHaveLength(0);
+    expect(graph.calls.filter((call) => call.method === 'sendText')).toHaveLength(0);
+    expect(await replyLog()).toHaveLength(0);
   });
 
   it('writes down a failed alert and keeps the handoff outcome', async () => {

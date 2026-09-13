@@ -119,7 +119,12 @@ export async function upsertConversation(
 ): Promise<string> {
   const [created] = await db
     .insert(conversations)
-    .values({ agentId, contactId, whatsappNumberId })
+    // A thread with the agent's own operator number starts with the agent off, so the cabinet
+    // shows it as a person's conversation from its first line. Only on insert: an existing
+    // thread keeps its switch, and the automation policy refuses it regardless.
+    .values({ agentId, contactId, whatsappNumberId, aiEnabled: sql`not exists (
+      select 1 from agents a join contacts c on c.id = ${contactId}
+      where a.id = ${agentId} and a.operator_notify_phone = c.phone)` })
     .onConflictDoUpdate({
       target: [conversations.whatsappNumberId, conversations.contactId],
       set: { contactId },

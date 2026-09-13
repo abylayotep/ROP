@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { describeProposal } from './ProposalCard.js';
-import { needsProposalReconciliation, proposalWithText } from './proposal';
+import { hasUnresolvedProposalConflict, needsProposalReconciliation, proposalWithText } from './proposal';
 
 const rules = [{ id: 'r1', category: 'tone' as const, text: 'На «вы».', enabled: true,
   origin: 'manual' as const, position: 0, warning: null, updatedAt: '' }];
@@ -59,5 +59,15 @@ describe('needsProposalReconciliation', () => {
 
   it('keeps the conflict when the saved proposal differs from the preserved text', () => {
     expect(needsProposalReconciliation('Edited wording.', 'Another edit.')).toBe(true);
+  });
+});
+
+describe('hasUnresolvedProposalConflict', () => {
+  it('unblocks a draft when the operator manually reconciles text after a 409', () => {
+    expect(hasUnresolvedProposalConflict(true, 'Current server text.', 'Current server text.')).toBe(false);
+  });
+
+  it('keeps a different unsaved edit blocked after a 409', () => {
+    expect(hasUnresolvedProposalConflict(true, 'My unsaved edit.', 'Current server text.')).toBe(true);
   });
 });

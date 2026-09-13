@@ -14,3 +14,8 @@ export function proposalWithText(proposal: CoachProposal, text: string): CoachPr
 export function needsProposalReconciliation(localText: string, savedText: string): boolean {
   return localText !== savedText;
 }
+
+/** Recompute on each edit: matching the reloaded server text resolves an earlier conflict. */
+export function hasUnresolvedProposalConflict(conflict: boolean, localText: string, savedText: string): boolean {
+  return conflict && needsProposalReconciliation(localText, savedText);
+}

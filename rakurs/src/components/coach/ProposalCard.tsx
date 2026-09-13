@@ -1,11 +1,11 @@
-import { useMemo, useState, type CSSProperties } from 'react';
+import { useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { useNavigate } from 'react-router-dom';
 import * as api from '@/api';
 import { useToast } from '@/components/ui/Toast';
 import { ruleCategoryPhrase } from '@/lib/rule-categories';
 import type { AgentRule, CoachMessage, CoachProposal } from '@/types';
 import { ApiError } from '@/api/client';
-import { needsProposalReconciliation, proposalWithText } from './proposal';
+import { hasUnresolvedProposalConflict, needsProposalReconciliation, proposalWithText } from './proposal';
 
 /**
  * What a coaching turn proposed, and the two answers an owner may give it today.
@@ -92,8 +92,14 @@ export function ProposalCard({
   const [drafting, setDrafting] = useState(false);
 
   const decided = savedMessage.status !== 'pending';
-  const dirty = text !== describeProposal(savedMessage.proposal ?? proposal, rules).body;
-  const draftAllowed = !decided && !dirty && !saving && !drafting && !conflict;
+  const savedText = describeProposal(savedMessage.proposal ?? proposal, rules).body;
+  const dirty = text !== savedText;
+  const unresolvedConflict = hasUnresolvedProposalConflict(conflict, text, savedText);
+  const draftAllowed = !decided && !dirty && !saving && !drafting && !unresolvedConflict;
+
+  useEffect(() => {
+    if (conflict && !unresolvedConflict) setConflict(false);
+  }, [conflict, unresolvedConflict]);
 
   async function save() {
     if (saving || decided || !dirty) return;
@@ -164,7 +170,7 @@ export function ProposalCard({
         onChange={(e) => setText(e.target.value)}
       />
 
-      {conflict && dirty && <div role="alert" style={{ fontSize: 11.5, color: 'var(--warn)' }}>Предложение изменилось. Ваш текст сохранён в поле; проверьте его и сохраните снова.</div>}
+      {unresolvedConflict && <div role="alert" style={{ fontSize: 11.5, color: 'var(--warn)' }}>Предложение изменилось. Ваш текст сохранён в поле; проверьте его и сохраните снова.</div>}
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <button type="button" className="btn-sm" disabled={saving || !dirty || decided} onClick={() => void save()}>

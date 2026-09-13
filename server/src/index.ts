@@ -25,7 +25,6 @@ import { createGraphClient } from './lib/whatsapp/graph.js';
 import { createInstagramMessagingClient } from './lib/instagram/messaging-graph.js';
 import { processPendingInstagramEvents } from './lib/instagram/inbound.js';
 import { reconcileGenerationRuns } from './lib/knowledge/generation-run.js';
-import { ensureSealhousePaymentPolicy } from './lib/payment-policy.js';
 
 // Local convenience only. In production Compose supplies the environment and there is
 // no .env in the image, so the absence of the file is the normal case, not an error.
@@ -103,7 +102,6 @@ await reconcileOrphanedRuns(db);
 await reconcileGenerationRuns(db);
 void processPendingInstagramEvents(db, liveDeps)
   .catch((error) => app.log.error({ error }, 'instagram: startup event recovery failed'));
-await ensureSealhousePaymentPolicy(db, env.PAYMENT_POLICY_AGENT_ID);
 
 // A pairing is a QR code on somebody's screen, and that screen did not survive the
 // restart either. Left in place, one of them refuses every later attempt by that account.

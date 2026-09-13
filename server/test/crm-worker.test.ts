@@ -7,7 +7,8 @@ import { agents, aiReplies, capiEvents, contacts, conversations, crmAnalyses, ka
 import { seedFunnel } from '../src/lib/funnel.js';
 import { encryptSecret } from '../src/lib/secret-box.js';
 import { analyzeConversation, drainCrmAnalyses } from '../src/lib/crm/worker.js';
-import { hasVisiblePayment } from '../src/lib/crm/payment.js';
+import { hasVisiblePayment, operatorLeftSale } from '../src/lib/crm/payment.js';
+import { recordStageMove } from '../src/lib/funnel-history.js';
 import * as automationPolicy from '../src/lib/automation/policy.js';
 
 let db: Awaited<ReturnType<typeof withDb>>;
@@ -495,6 +496,75 @@ describe('chat payment', () => {
     await analyzeConversation(db, { model, key, checkout, reply }, { agentId, conversationId, live: true });
     expect(checkout).not.toHaveBeenCalled();
     expect(reply).toHaveBeenCalledWith(agentId, conversationId);
+  });
+
+  /** What the leads API does when an operator drags a lead: move it and record the move. */
+  const operatorMoves = async (toId: string, movedBy: 'operator' | 'ai' = 'operator') => {
+    const funnel = await db.select().from(stages).where(eq(stages.agentId, agentId));
+    const [current] = await db.select().from(conversations).where(eq(conversations.id, conversationId));
+    const to = funnel.find((s) => s.id === toId)!;
+    await db.update(conversations).set({ stageId: to.id, stageSetAt: new Date(), stageSetBy: movedBy }).where(eq(conversations.id, conversationId));
+    await recordStageMove(db, { agentId, conversationId, from: funnel.find((s) => s.id === current!.stageId) ?? null, to, movedBy });
+  };
+
+  it('leaves a lead an operator took out of the sale stage there, with no second chat order', async () => {
+    await paidChat();
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+    expect((await db.select().from(conversations))[0]?.stageId).toBe((await sale()).id);
+    await operatorMoves(targetId);
+    await db.delete(orders).where(eq(orders.conversationId, conversationId));
+    expect(await operatorLeftSale(db, conversationId)).toBe(true);
+    await db.insert(messages).values({ conversationId, direction: 'in', author: 'client', kind: 'text', body: 'Спасибо!', sentAt: new Date('2026-01-01T00:03:00Z') });
+
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+
+    expect((await db.select().from(conversations))[0]?.stageId).toBe(targetId);
+    expect(await db.select().from(orders)).toHaveLength(0);
+    expect((await db.select().from(capiEvents)).filter((e) => e.kind === 'purchase')).toHaveLength(1);
+    expect(await hasVisiblePayment(db, agentId, conversationId)).toBe(false);
+  });
+
+  it('still lets the lead move among the other stages after the operator undid the sale', async () => {
+    await paidChat();
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+    await operatorMoves(targetId);
+    const other = (await db.select().from(stages).where(eq(stages.agentId, agentId))).find((s) => s.kind === 'active' && s.id !== targetId)!;
+    const text = JSON.parse((await model.complete.getMockImplementation()!()).text);
+    model.complete.mockResolvedValue({ text: JSON.stringify({ ...text, stageId: other.id }), promptTokens: 1, completionTokens: 1, cost: '0' });
+    await db.insert(messages).values({ conversationId, direction: 'in', author: 'client', kind: 'text', body: 'Спасибо!', sentAt: new Date('2026-01-01T00:03:00Z') });
+
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+    expect((await db.select().from(conversations))[0]?.stageId).toBe(other.id);
+    // The AI's own move does not wipe out the operator's undo.
+    expect(await operatorLeftSale(db, conversationId)).toBe(true);
+    await db.insert(messages).values({ conversationId, direction: 'in', author: 'client', kind: 'text', body: 'Жду', sentAt: new Date('2026-01-01T00:04:00Z') });
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+    expect((await db.select().from(conversations))[0]?.stageId).toBe(other.id);
+  });
+
+  it('moves a lead the operator took out of the sale stage back once Kaspi confirms the money', async () => {
+    await paidChat();
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+    await operatorMoves(targetId);
+    await db.delete(orders).where(eq(orders.conversationId, conversationId));
+    const [order] = await db.insert(orders).values({ agentId, conversationId, amount: '6990', currency: 'KZT', status: 'paid', paidAt: new Date() }).returning();
+    await db.insert(kaspiPayments).values({ agentId, conversationId, orderId: order!.id, requestKey: 'undo-kaspi', method: 'invoice',
+      phone: '77011234567', amount: '6990', status: 'paid', operationId: 'undo-operation', confirmedAt: new Date() });
+    await db.insert(messages).values({ conversationId, direction: 'in', author: 'client', kind: 'text', body: 'Оплатила счёт', sentAt: new Date('2026-01-01T00:03:00Z') });
+
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+
+    expect((await db.select().from(conversations))[0]?.stageId).toBe((await sale()).id);
+    expect(await hasVisiblePayment(db, agentId, conversationId)).toBe(true);
+  });
+
+  it('forgets the undo once an operator puts the lead back into the sale stage', async () => {
+    await operatorMoves((await sale()).id);
+    expect(await operatorLeftSale(db, conversationId)).toBe(false);
+    await operatorMoves(targetId);
+    expect(await operatorLeftSale(db, conversationId)).toBe(true);
+    await operatorMoves((await sale()).id);
+    expect(await operatorLeftSale(db, conversationId)).toBe(false);
   });
 
   it.each(['paid', 'confirmed'])('treats stored %s payment evidence as visible payment', async (state) => {

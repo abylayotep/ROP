@@ -8,6 +8,7 @@ import {
   capiEvents,
   contacts,
   conversations,
+  crmAnalyses,
   kbChunks,
   leadFields,
   leadValues,
@@ -18,6 +19,7 @@ import {
 } from '../src/db/schema.js';
 import type { Db } from '../src/db/client.js';
 import { seedFunnel } from '../src/lib/funnel.js';
+import { recordStageMove } from '../src/lib/funnel-history.js';
 import * as automationPolicy from '../src/lib/automation/policy.js';
 import { deleteNote, saveNote } from '../src/lib/knowledge/notes.js';
 import { createAccountWithOwner } from '../src/lib/provision.js';
@@ -712,6 +714,31 @@ describe('applying what the model asked for', () => {
     expect(sent[1]?.args[3]).toBe('Уточняю детали.');
     const out = (await thread()).filter((message) => message.direction === 'out');
     expect(out.map((message) => message.author)).toEqual(['system', 'ai']);
+  });
+
+  it('never takes a lead out of the sale stage', async () => {
+    const sale = await stageNamed('Оплачено');
+    await db.update(conversations).set({ stageId: sale.id, stageSetBy: 'operator' }).where(eq(conversations.id, conversationId));
+    const model = fakeModel(answer({ stageId: (await stageNamed('В диалоге')).id }));
+
+    const result = await turn(model);
+
+    expect(result.outcome).toBe('sent');
+    expect((await conversationRow()).stageId).toBe(sale.id);
+    expect(result.detail).toContain('продажи');
+  });
+
+  it('does not put back into the sale stage a lead an operator took out of it', async () => {
+    const sale = await stageNamed('Оплачено');
+    const ready = await stageNamed('Готов к покупке');
+    await db.insert(crmAnalyses).values({ conversationId, profile: { paymentEvidence: 'paid' } });
+    await db.update(conversations).set({ stageId: ready.id, stageSetBy: 'operator' }).where(eq(conversations.id, conversationId));
+    await recordStageMove(db, { agentId, conversationId, from: sale, to: ready, movedBy: 'operator' });
+    const model = fakeModel(answer({ stageId: sale.id }));
+
+    await turn(model);
+
+    expect((await conversationRow()).stageId).toBe(ready.id);
   });
 
   it('sends no auto-message when the lead is given its first stage', async () => {

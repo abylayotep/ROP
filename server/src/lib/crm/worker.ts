@@ -10,6 +10,7 @@ import { queueLead, queuePurchase } from '../capi/enqueue.js';
 import { recordStageMove } from '../funnel-history.js';
 import { decryptSecret } from '../secret-box.js';
 import { hasConfirmedKaspiPayment } from '../kaspi/service.js';
+import { operatorLeftSale } from './payment.js';
 import { crmPrompt, parseCrmAnalysis, resolveCrmStage, resolvePaymentEvidence, type CheckoutIntent } from './analysis.js';
 
 export interface CrmDeps {
@@ -90,11 +91,12 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
     const last = history.at(-1);
     const scanned = page.at(-1) ?? cursor ?? version;
     const backlog = scanned.id !== version.id;
-    const [funnel, fields, values, paid] = await Promise.all([
+    const [funnel, fields, values, paid, undone] = await Promise.all([
       db.select().from(stages).where(eq(stages.agentId, agent.id)).orderBy(asc(stages.position)),
       db.select().from(leadFields).where(eq(leadFields.agentId, agent.id)).orderBy(asc(leadFields.position)),
       db.select({fieldId:leadValues.fieldId,value:leadValues.value,version:sql<string>`${leadValues.updatedAt}::text`}).from(leadValues).where(eq(leadValues.conversationId, conversation.id)),
       hasConfirmedKaspiPayment(db, agent.id, conversation.id),
+      operatorLeftSale(db, conversation.id),
     ]);
     const inputHistory = history.map((m) => ({ ...m, body: m.body?.slice(0, Math.min(4000, Math.floor(60_000 / Math.max(1, history.length)))) ?? null }));
     if (!await automationAllowed(db,input,'crm')) {
@@ -113,8 +115,9 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
     const analysis = parseCrmAnalysis(completion.text, inputHistory, fields);
     // A paid claim the model is unsure of is not stored, so it can neither move the lead nor stick.
     const payment = analysis.payment?.state === 'paid' && analysis.confidence < 65 ? null : analysis.payment;
+    // An operator who took the lead out of the sale stage has overruled the chat; only Kaspi money moves it back.
     const target = resolveCrmStage(funnel, analysis.confidence >= 65 ? analysis.stageId : null,
-      { paid: paid || payment?.state === 'paid', currentStageId: conversation.stageId });
+      { paid: paid || (!undone && payment?.state === 'paid'), currentStageId: conversation.stageId });
     if (!await automationAllowed(db,input,'crm')) {
       await db.update(crmAnalyses).set({status:'pending',leaseToken:null,leaseUntil:null,updatedAt:new Date()}).where(ownLease);
       return 'skipped';
@@ -183,7 +186,7 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
         if (changed.length) evidence[`field:${fieldId}`] = proof;
       }
       // One paid order per sale, whoever moved the lead there. A Kaspi invoice in flight owns the money.
-      if (stageNow?.kind === 'success' && analysis.paidAmount && analysis.confidence >= 65) {
+      if (stageNow?.kind === 'success' && analysis.paidAmount && analysis.confidence >= 65 && !undone) {
         const [paidOrder] = await tx.select({id:orders.id}).from(orders)
           .where(and(eq(orders.conversationId,conversation.id),eq(orders.status,'paid'))).limit(1);
         const [invoice] = await tx.select({id:kaspiPayments.id}).from(kaspiPayments)

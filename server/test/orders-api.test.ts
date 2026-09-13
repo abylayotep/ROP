@@ -253,9 +253,37 @@ describe('changing an order', () => {
     expect(res.statusCode).toBe(400);
   });
 
-  it('does not delete a paid order', async () => {
+  it('deletes an order paid in the chat, so an operator can undo a false sale', async () => {
+    const [chat] = await db
+      .insert(orders)
+      .values({ agentId, conversationId, amount: '6990', currency: 'KZT', status: 'paid', comment: 'Оплата по переписке', paidAt: new Date() })
+      .returning();
+
+    const res = await app.inject({
+      method: 'DELETE',
+      url: `/api/agents/${agentId}/orders/${chat!.id}`,
+      cookies: jar,
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(await db.select().from(orders)).toHaveLength(0);
+  });
+
+  it('does not delete an order paid through Kaspi', async () => {
     const { id } = await record({ amount: '450000' });
     await db.update(orders).set({ status: 'paid', paidAt: new Date() }).where(eq(orders.id, id));
+    await db.insert(kaspiPayments).values({
+      agentId,
+      conversationId,
+      orderId: id,
+      requestKey: 'orders-delete',
+      method: 'invoice',
+      phone: '77085807932',
+      amount: '450000',
+      operationId: 'op-delete',
+      status: 'paid',
+      confirmedAt: new Date(),
+    });
 
     const res = await app.inject({
       method: 'DELETE',
@@ -264,6 +292,7 @@ describe('changing an order', () => {
     });
 
     expect(res.statusCode).toBe(409);
+    expect(res.json().message).toBe('Платёжный заказ нельзя удалить');
     expect(await db.select().from(orders)).toHaveLength(1);
   });
 });

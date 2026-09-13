@@ -94,7 +94,7 @@ export function registerOrderRoutes(
       const parsed = createOrder.safeParse(req.body);
       if (!parsed.success) throw orderError(parsed.error.issues[0]);
 
-      if (parsed.data.status === 'paid') throw new ApiError(409, 'Оплата подтверждается только Kaspi');
+      if (parsed.data.status === 'paid') throw new ApiError(409, 'Оплату нельзя отметить вручную: её подтверждает Kaspi или переписка с клиентом');
 
       // Proves the conversation belongs to this agent before anything is written.
       await loadLead(db, req.agent!, conversationId);
@@ -128,7 +128,7 @@ export function registerOrderRoutes(
       const parsed = patchOrder.safeParse(req.body);
       if (!parsed.success) throw orderError(parsed.error.issues[0]);
 
-      if (parsed.data.status === 'paid') throw new ApiError(409, 'Оплата подтверждается только Kaspi');
+      if (parsed.data.status === 'paid') throw new ApiError(409, 'Оплату нельзя отметить вручную: её подтверждает Kaspi или переписка с клиентом');
       const [payment] = await db.select().from(kaspiPayments).where(eq(kaspiPayments.orderId, orderId));
       if ((payment || current.status === 'paid') && (parsed.data.amount !== undefined || parsed.data.status !== undefined)) throw new ApiError(409, 'Сумма и статус платёжного заказа неизменяемы');
 
@@ -153,8 +153,10 @@ export function registerOrderRoutes(
       const { orderId } = req.params as { orderId: string };
       const current = await loadOrder(req.agent!.id, orderId);
 
+      // Kaspi's money is a fact. An order paid in the chat has no Kaspi row: an operator deletes
+      // it to undo a sale the analysis saw by mistake; a Purchase not yet sent is then skipped.
       const [payment] = await db.select().from(kaspiPayments).where(eq(kaspiPayments.orderId, orderId));
-      if (payment || current.status === 'paid') throw new ApiError(409, 'Платёжный заказ нельзя удалить');
+      if (payment) throw new ApiError(409, 'Платёжный заказ нельзя удалить');
       await db
         .delete(orders)
         .where(and(eq(orders.id, current.id), eq(orders.agentId, req.agent!.id)));

@@ -747,8 +747,12 @@ export async function executeAiCore(db: Db, deps: TurnDeps, input: AiCoreInput):
   let targetStage: typeof stages.$inferSelect | null = null;
   if (input.allowProposedCrm && reply?.stageId) {
     const target = stageRows.find((stage) => stage.id === reply.stageId);
+    // Like `resolveCrmStage`: a sale is undone by an operator, never by the agent.
+    const current = stageRows.find((stage) => stage.id === input.stageId);
     if (!target) details.push(`Модель назвала этап, которого у агента нет: ${reply.stageId.slice(0, 80)}.`);
-    else if (target.kind === 'success' && !await input.canMoveToSuccess()) {
+    else if (current?.kind === 'success' && target.id !== current.id) {
+      details.push('Сделка уже на стадии продажи. Этап не изменён.');
+    } else if (target.kind === 'success' && !await input.canMoveToSuccess()) {
       details.push('Оплата в переписке не видна. Стадия продажи не изменена.');
     } else if (target.id !== input.stageId) targetStage = target;
   }

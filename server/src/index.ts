@@ -1,6 +1,7 @@
 import { drainCrmAnalyses } from './lib/crm/worker.js';
 import { createLiveCrmHandler, createCrmDeps } from './lib/crm/live.js';
 import { reconcileKaspiPayments } from './lib/kaspi/service.js';
+import { queueMissingPurchases } from './lib/capi/enqueue.js';
 import { reconcileOrphanedRuns } from './api/drafts.js';
 import { buildServer } from './api/server.js';
 import { createDb } from './db/client.js';
@@ -179,6 +180,9 @@ const reconcilePayments = async () => {
   kaspiRunning = true;
   try { await reconcileKaspiPayments(db,env); }
   catch { app.log.error('kaspi: reconciliation failed'); }
+  // Chat-paid orders have no Kaspi row, so their lost purchases are recovered separately.
+  try { await queueMissingPurchases(db); }
+  catch { app.log.error('capi: purchase recovery failed'); }
   finally { kaspiRunning = false; }
 };
 void reconcilePayments();

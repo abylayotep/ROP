@@ -7,6 +7,7 @@ import { agents, aiReplies, capiEvents, contacts, conversations, crmAnalyses, ka
 import { seedFunnel } from '../src/lib/funnel.js';
 import { encryptSecret } from '../src/lib/secret-box.js';
 import { analyzeConversation, drainCrmAnalyses } from '../src/lib/crm/worker.js';
+import { hasVisiblePayment } from '../src/lib/crm/payment.js';
 import * as automationPolicy from '../src/lib/automation/policy.js';
 
 let db: Awaited<ReturnType<typeof withDb>>;
@@ -455,6 +456,51 @@ describe('chat payment', () => {
       phone: '77011234567', amount: '6990', status: 'pending' });
     await analyzeConversation(db, { model, key }, { agentId, conversationId });
     expect((await db.select().from(orders)).filter((o) => o.status === 'paid')).toHaveLength(0);
+  });
+
+  it('records no order when an operator moves the lead out of the sale stage during the model call', async () => {
+    await db.update(conversations).set({ stageId: (await sale()).id, stageSetAt: new Date('2026-01-02T00:00:00Z') }).where(eq(conversations.id, conversationId));
+    await paidChat();
+    const original = model.complete.getMockImplementation()!;
+    model.complete.mockImplementationOnce(async (...args: unknown[]) => {
+      await db.update(conversations).set({ stageId: targetId, stageSetAt: new Date(), stageSetBy: 'operator' }).where(eq(conversations.id, conversationId));
+      return original(...args);
+    });
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+    expect((await db.select().from(conversations))[0]?.stageId).toBe(targetId);
+    expect(await db.select().from(orders)).toHaveLength(0);
+    expect((await db.select().from(capiEvents)).filter((e) => e.kind === 'purchase')).toHaveLength(0);
+  });
+
+  it('does not use the quoted amount when the analysis is unsure', async () => {
+    await db.update(conversations).set({ stageId: (await sale()).id, stageSetAt: new Date('2026-01-02T00:00:00Z') }).where(eq(conversations.id, conversationId));
+    await paidChat();
+    const text = JSON.parse((await model.complete.getMockImplementation()!()).text);
+    model.complete.mockResolvedValue({ text: JSON.stringify({ ...text, payment: null, confidence: 50 }), promptTokens: 1, completionTokens: 1, cost: '0' });
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+    expect(await db.select().from(orders)).toHaveLength(0);
+  });
+
+  it('does not start a Kaspi checkout for a sale already paid in the chat', async () => {
+    await db.update(agents).set({ aiEnabled: true }).where(eq(agents.id, agentId));
+    const [offer] = await db.insert(messages).values({ conversationId, direction: 'out', author: 'operator', kind: 'text',
+      body: 'Итого 5000 ₸', sentAt: new Date(Date.now() - 60_000) }).returning();
+    await db.update(messages).set({ body: 'Отправьте счёт, пожалуйста', sentAt: new Date() }).where(eq(messages.id, messageId));
+    await db.insert(orders).values({ agentId, conversationId, amount: '5000', currency: 'KZT', status: 'paid', comment: 'Оплата по переписке', paidAt: new Date() });
+    await db.insert(crmAnalyses).values({ conversationId, pendingLiveMessageId: messageId });
+    model.complete.mockResolvedValueOnce({ text: JSON.stringify({ stageId: targetId, summary: 'Хочет оплатить', confidence: 95, profile: {}, fields: {},
+      checkout: { method: 'invoice', messageId, quote: 'Отправьте счёт', amount: '5000', amountMessageId: offer!.id } }),
+      promptTokens: 1, completionTokens: 1, cost: '0' });
+    const checkout = vi.fn(); const reply = vi.fn();
+    await analyzeConversation(db, { model, key, checkout, reply }, { agentId, conversationId, live: true });
+    expect(checkout).not.toHaveBeenCalled();
+    expect(reply).toHaveBeenCalledWith(agentId, conversationId);
+  });
+
+  it.each(['paid', 'confirmed'])('treats stored %s payment evidence as visible payment', async (state) => {
+    expect(await hasVisiblePayment(db, agentId, conversationId)).toBe(false);
+    await db.insert(crmAnalyses).values({ conversationId, profile: { paymentEvidence: state } });
+    expect(await hasVisiblePayment(db, agentId, conversationId)).toBe(true);
   });
 
   it('does not move on a paid claim below the confidence threshold', async () => {

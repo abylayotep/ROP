@@ -34,11 +34,12 @@ async function lockAutomationPolicy(
   tx: Parameters<Parameters<Db['transaction']>[0]>[0],
   input: AnalyzeInput,
 ) {
-  const [locked] = await tx.select({id:conversations.id}).from(conversations)
+  const [locked] = await tx.select({stageId:conversations.stageId,stageSetAt:conversations.stageSetAt}).from(conversations)
     .innerJoin(agents,and(eq(agents.id,conversations.agentId),eq(agents.id,input.agentId)))
     .innerJoin(contacts,and(eq(contacts.id,conversations.contactId),eq(contacts.agentId,agents.id)))
     .where(eq(conversations.id,input.conversationId)).for('update');
-  return locked !== undefined && await automationAllowed(tx as unknown as Db,input,'crm');
+  // The stage as it is now, under the lock: an operator may have moved the lead during the model call.
+  return locked !== undefined && await automationAllowed(tx as unknown as Db,input,'crm') ? locked : null;
 }
 
 /** Page imported data by arrival order, but resolve evidence conflicts by message chronology. */
@@ -125,7 +126,8 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
     await withAgentAutomationLock(db, input.agentId, async (tx) => {
       const [lease] = await tx.select().from(crmAnalyses).where(ownLease).for('update');
       if (!lease) return;
-      if (!await lockAutomationPolicy(tx,input)) {
+      const locked = await lockAutomationPolicy(tx,input);
+      if (!locked) {
         policyDenied = true;
         await tx.update(crmAnalyses).set({status:'pending',leaseToken:null,leaseUntil:null,updatedAt:new Date()}).where(ownLease);
         return;
@@ -148,7 +150,7 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
           from:funnel.find((s)=>s.id===conversation.stageId)??null,to:target,movedBy:'ai'});
       }
       const stageNow = moved ? target : target && target.id !== conversation.stageId ? null
-        : funnel.find((s) => s.id === conversation.stageId) ?? null;
+        : funnel.find((s) => s.id === locked.stageId) ?? null;
       const evidence = {...lease.fieldEvidence};
       const profile = {...lease.profile};
       const accept = (key: string, value: string) => {
@@ -181,7 +183,7 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
         if (changed.length) evidence[`field:${fieldId}`] = proof;
       }
       // One paid order per sale, whoever moved the lead there. A Kaspi invoice in flight owns the money.
-      if (stageNow?.kind === 'success' && analysis.paidAmount) {
+      if (stageNow?.kind === 'success' && analysis.paidAmount && analysis.confidence >= 65) {
         const [paidOrder] = await tx.select({id:orders.id}).from(orders)
           .where(and(eq(orders.conversationId,conversation.id),eq(orders.status,'paid'))).limit(1);
         const [invoice] = await tx.select({id:kaspiPayments.id}).from(kaspiPayments)
@@ -189,7 +191,7 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
         if (!paidOrder && !invoice) {
           const [order] = await tx.insert(orders).values({agentId:agent.id,conversationId:conversation.id,amount:analysis.paidAmount,
             currency:agent.currency,status:'paid',comment:'Оплата по переписке',
-            paidAt:moved ? movedAt : conversation.stageSetAt ?? movedAt}).returning({id:orders.id});
+            paidAt:moved ? movedAt : locked.stageSetAt ?? movedAt}).returning({id:orders.id});
           chatOrderId = order!.id;
         }
       }
@@ -226,6 +228,7 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
       if (agent.crmAnalysisMode === 'follow_ai' && current?.crmAnalysisMode === 'follow_ai' && current.agentEnabled && current.conversationEnabled && latest?.id === liveId) {
         const wantsCheckout = Boolean(deps.checkout && analysis.checkout?.messageId === liveId && analysis.confidence >= 85
           && !await hasConfirmedKaspiPayment(db,agent.id,conversation.id)
+          && !(await db.select({id:orders.id}).from(orders).where(and(eq(orders.conversationId,conversation.id),eq(orders.status,'paid'))).limit(1)).length
           && await automationAllowed(db,input,'checkout'));
         if (wantsCheckout && contact.phone) {
           await deps.checkout!({agentId:agent.id,conversationId:conversation.id,phone:contact.phone,

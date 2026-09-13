@@ -374,6 +374,87 @@ describe('advanceAutopilot', () => {
     expect(await rowNow()).toMatchObject({ status: 'cancelled', step: 'start_run', runsStarted: 0, runId: null });
   });
 
+  it('starts no run when the cancel lands after the row was loaded', async () => {
+    id = await createRow({ step: 'start_run' });
+    // Cancels the moment the engine has read the agent — after its own status check on load,
+    // before the step's side effect.
+    const cancel = () => db.update(draftAutopilots).set({ status: 'cancelled' }).where(eq(draftAutopilots.id, id));
+    deps.db = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop !== 'select') return Reflect.get(target, prop, receiver);
+        return (...args: unknown[]) => {
+          const builder = (target.select as (...a: unknown[]) => { from: (t: unknown) => unknown })(...args);
+          return new Proxy(builder, {
+            get(b, bprop, breceiver) {
+              if (bprop !== 'from') return Reflect.get(b, bprop, breceiver);
+              return (table: unknown) => {
+                const query = b.from(table) as { where: (...w: unknown[]) => Promise<unknown> };
+                if (table !== agents) return query;
+                return { where: (...w: unknown[]) => query.where(...w).then(async (rows) => { await cancel(); return rows; }) };
+              };
+            },
+          });
+        };
+      },
+    });
+    await tick();
+    expect(startRunCalls).toBe(0);
+    expect(await runCount()).toBe(0);
+    expect(await rowNow()).toMatchObject({ status: 'cancelled', step: 'start_run' });
+  });
+
+  it('makes no further topic edit once cancelled between two edits', async () => {
+    id = await createRow({ step: 'clean_topics' });
+    deps.ops.cleanTopic = async (_d, input) => ({ body: `${input.body}\nЧище.`, reason: 'убран диалог', cost: '0' });
+    let edits = 0;
+    deps.ops.editOp = async (database, input) => {
+      edits += 1;
+      const updated = await editDraftOp(database, input);
+      await db.update(draftAutopilots).set({ status: 'cancelled' }).where(eq(draftAutopilots.id, id));
+      return updated;
+    };
+    await tick();
+    expect(edits).toBe(1);
+    const draft = await draftNow();
+    expect((draft.ops[0] as { body: string }).body).toBe(`${OPS[0]!.body}\nЧище.`);
+    expect((draft.ops[1] as { body: string }).body).toBe(OPS[1]!.body);
+    expect(await rowNow()).toMatchObject({ status: 'cancelled', step: 'clean_topics' });
+  });
+
+  it('waits on a done run until its paired baseline run is done too', async () => {
+    id = await createRow({ step: 'start_run' });
+    await tick();
+    const { runId } = await rowNow();
+    const [baseline] = await db
+      .insert(testRuns)
+      .values({ agentId, draftId: null, configVersion: 1, model: 'openai/gpt-4o-mini', status: 'running' })
+      .returning();
+    await finishRun(runId!, caseIds.map((caseId) => ({ caseId, verdict: 'better', usedOpIndexes: [0] })));
+    await tick();
+    expect((await rowNow()).step).toBe('await_run');
+
+    await db.update(testRuns).set({ status: 'done', cost: '0.00500000' }).where(eq(testRuns.id, baseline!.id));
+    await tick();
+    const row = await rowNow();
+    expect(row.step).toBe('apply');
+    expect(Number(row.cost)).toBeCloseTo(0.015, 8);
+  });
+
+  it('keeps the required correction case when the owner picked twenty cases', async () => {
+    const [required] = await db
+      .insert(testCases)
+      .values({ agentId, title: 'Исправление', messages: ['Сколько?'], origin: 'correction', requiredDraftId: draftId })
+      .returning();
+    const many: string[] = [];
+    for (let i = 0; i < 20; i += 1) many.push(await addCase(`Вопрос ${i}`));
+    id = await createRow({ caseIds: many });
+    await tick();
+    const row = await rowNow();
+    expect(row.step).toBe('clean_topics');
+    expect(row.caseIds).toHaveLength(20);
+    expect(row.caseIds[0]).toBe(required!.id);
+  });
+
   it('resumes a row left at await_run on the next drain', async () => {
     const [run] = await db
       .insert(testRuns)
@@ -425,7 +506,7 @@ describe('advanceAutopilot', () => {
       .returning();
     id = await createRow({ caseIds: [caseIds[0]!] });
     await tick();
-    expect((await rowNow()).caseIds).toEqual([caseIds[0], required!.id]);
+    expect((await rowNow()).caseIds).toEqual([required!.id, caseIds[0]]);
     await tick();
     await tick();
     await finishRun((await rowNow()).runId!, [

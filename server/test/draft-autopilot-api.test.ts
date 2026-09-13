@@ -146,6 +146,7 @@ describe('POST …/autopilot', () => {
     await db.update(kbDrafts).set({ status: 'applied' }).where(eq(kbDrafts.id, draft.id));
     const closed = await start(draft.id);
     expect(closed.statusCode).toBe(409);
+    expect(closed.json().message).toBe('Черновик уже применён или отклонён');
     expect(await db.select().from(draftAutopilots)).toHaveLength(0);
   });
 

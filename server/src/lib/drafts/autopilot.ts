@@ -26,7 +26,7 @@ import type { AutopilotLogEntry, AutopilotLogKind, FailingCase, PendingFix } fro
 import { editDraftOp, opTitle, topicKey } from './edit-op.js';
 import type { DraftOp } from './ops.js';
 import { isDraftRunning, MAX_CASES, startDraftRun, type RunAgent, type RunContext } from './run.js';
-import { readRun } from './run-read.js';
+import { pairedBaselineRun, readRun } from './run-read.js';
 import { suggestCases } from './suggest.js';
 import { cleanTopic, rewriteTopic, TopicFixError, type TopicFixDeps } from './topic-fix.js';
 
@@ -84,6 +84,23 @@ const entry = (kind: AutopilotLogKind, text: string): AutopilotLogEntry => ({
   text,
 });
 
+/**
+ * Whether the row is still `running`, read fresh. The final save is guarded too, but a side
+ * effect (an op edit that deletes the draft's runs, a run, an apply) cannot be undone by a
+ * dropped save, so each one checks right before it happens: an owner who cancelled and took
+ * the draft back by hand must not have it changed underneath them.
+ */
+async function stillRunning(db: Db, id: string): Promise<boolean> {
+  const [row] = await db.select({ status: draftAutopilots.status }).from(draftAutopilots)
+    .where(eq(draftAutopilots.id, id));
+  return row?.status === 'running';
+}
+
+/** Before an op edit: also refuses while a run is in flight, since the edit would delete it. */
+async function mayEdit(db: Db, row: Row, draftId: string): Promise<boolean> {
+  return !isDraftRunning(draftId) && (await stillRunning(db, row.id));
+}
+
 const bodyOf = (op: DraftOp): string => (op.op === 'note_create' || op.op === 'note_update' ? op.body : '');
 
 function llmDeps(deps: AutopilotDeps, agent: RunAgent): TopicFixDeps {
@@ -109,11 +126,14 @@ const prepareCases: StepFn = async (deps, row, draft, agent) => {
         eq(testCases.agentId, agent.id), eq(testCases.enabled, true), inArray(testCases.id, row.caseIds),
       ));
   const enabledIds = new Set(enabled.map((c) => c.id));
-  const caseIds = row.caseIds.filter((caseId) => enabledIds.has(caseId));
-  // The run adds the required correction case on its own; naming it here keeps the count honest.
+  // The run adds the required correction case on its own; naming it here, first, keeps the
+  // count honest and keeps it from being the one the 20-case cap cuts off.
   const [required] = await db.select({ id: testCases.id }).from(testCases)
     .where(eq(testCases.requiredDraftId, draft.id)).limit(1);
-  if (required && !caseIds.includes(required.id)) caseIds.push(required.id);
+  const caseIds = [
+    ...(required ? [required.id] : []),
+    ...row.caseIds.filter((caseId) => enabledIds.has(caseId) && caseId !== required?.id),
+  ];
 
   const noteOps = draft.ops.filter((op) => topicKey(op) !== null).length;
   const need = Math.min(noteOps, MAX_CASES) - caseIds.length;
@@ -122,6 +142,7 @@ const prepareCases: StepFn = async (deps, row, draft, agent) => {
       const suggestion = await deps.ops.suggestCases(llmDeps(deps, agent), draft.ops);
       cost = addCost(cost, suggestion.cost);
       const picked = suggestion.cases.slice(0, need);
+      if (picked.length > 0 && !(await stillRunning(db, row.id))) return null;
       if (picked.length > 0) {
         const inserted = await db.insert(testCases).values(picked.map((c) => ({
           agentId: agent.id,
@@ -168,6 +189,7 @@ const cleanTopics: StepFn = async (deps, row, draft, agent) => {
     cost = addCost(cost, cleaned.cost);
     if (cleaned.body === body) continue;
 
+    if (!(await mayEdit(deps.db, row, draft.id))) return null;
     try {
       current = await deps.ops.editOp(deps.db, {
         agentId: agent.id, draftId: draft.id, edit: { action: 'update', index, current: op, body: cleaned.body },
@@ -189,6 +211,7 @@ const startRun: StepFn = async (deps, row, draft, agent) => {
   // A manual run started just before the autopilot: wait for it rather than fail.
   if (isDraftRunning(draft.id)) return null;
 
+  if (!(await stillRunning(deps.db, row.id))) return null;
   let run;
   try {
     run = await deps.ops.startRun(deps, { agent, draft, caseIds: row.caseIds });
@@ -214,6 +237,13 @@ const awaitRun: StepFn = async (deps, row, draft, agent) => {
   // `run_id` goes null when an op edit deleted the run; that proves nothing, like a failed run.
   const [run] = row.runId === null ? [] : await db.select().from(testRuns).where(eq(testRuns.id, row.runId));
   if (run?.status === 'running') return null;
+
+  if (run?.status === 'done') {
+    // `runReplay` marks the draft run done a moment before its paired baseline run; reading in
+    // between would miss the baseline's cost and its «было» replies.
+    const baseline = await pairedBaselineRun(db, run);
+    if (baseline?.status === 'running') return null;
+  }
 
   if (!run || run.status !== 'done') {
     const runFailures = row.runFailures + 1;
@@ -309,6 +339,7 @@ const fixTopics: StepFn = async (deps, row, draft, agent) => {
     try {
       if (fix.action === 'remove') {
         if (current.ops.length === 1) return done({ stop: 'Все темы убраны — применять нечего' });
+        if (!(await mayEdit(deps.db, row, draft.id))) return null;
         current = await deps.ops.editOp(deps.db, {
           agentId: agent.id, draftId: draft.id, edit: { action: 'remove', index, current: op },
         });
@@ -333,6 +364,7 @@ const fixTopics: StepFn = async (deps, row, draft, agent) => {
         logs.push(entry('warn', `Не удалось переписать тему „${title}“ — оставлена как есть`));
         continue;
       }
+      if (!(await mayEdit(deps.db, row, draft.id))) return null;
       current = await deps.ops.editOp(deps.db, {
         agentId: agent.id, draftId: draft.id, edit: { action: 'update', index, current: op, body: rewritten.body },
       });
@@ -346,7 +378,8 @@ const fixTopics: StepFn = async (deps, row, draft, agent) => {
   return done({ step: 'start_run' });
 };
 
-const applyStep: StepFn = async (deps, _row, draft, agent) => {
+const applyStep: StepFn = async (deps, row, draft, agent) => {
+  if (!(await stillRunning(deps.db, row.id))) return null;
   try {
     await deps.ops.apply(deps.db, { agentId: agent.id, draftId: draft.id });
   } catch (error) {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import * as api from '@/api';
 import { tabAfterKey } from '@/lib/training-state';
@@ -162,6 +162,7 @@ export function ProposalWorkspace({
   onLoadMoreRawFindings,
   collectionState = {},
   readOnly = false,
+  details,
 }: {
   agentId: string;
   detail: KbGenerationRunDetail;
@@ -173,6 +174,8 @@ export function ProposalWorkspace({
   onLoadMoreRawFindings?: () => void;
   collectionState?: Partial<Record<'proposals' | 'exclusions' | 'rawFindings', ProposalCollectionState>>;
   readOnly?: boolean;
+  /** Extra run facts shown first inside the one «Подробности разбора» block. */
+  details?: ReactNode;
 }) {
   const toast = useToast();
   const navigate = useNavigate();
@@ -418,6 +421,7 @@ export function ProposalWorkspace({
       {/* Excluded batches and raw findings are an audit trail, not the owner's main decision. */}
       <details className="generation-details">
         <summary>Подробности разбора</summary>
+        {details}
         <AuditSection
           detail={detail}
           onLoadMoreExclusions={onLoadMoreExclusions}

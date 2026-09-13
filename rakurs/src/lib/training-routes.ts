@@ -58,6 +58,16 @@ export function withoutCorrectionParams(current: URLSearchParams): URLSearchPara
 }
 
 /**
+ * The query string for choosing a way inside «Научить» (or `null` for the chooser). Each way
+ * starts fresh: the previous way's generation run and correction context are dropped.
+ */
+export function teachModeSearch(current: URLSearchParams, mode: TeachMode | null): URLSearchParams {
+  const next = withoutCorrectionParams(trainingSearch(current, 'teach', mode));
+  next.delete('generation');
+  return next;
+}
+
+/**
  * The query string for a tab change. State owned by the tab being left is dropped: a
  * selected note belongs to «Знания», a generation run and a correction to «Научить».
  */

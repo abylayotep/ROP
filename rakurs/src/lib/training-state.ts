@@ -60,6 +60,16 @@ export function draftOrigin(draft: Pick<KbDraft, 'origin' | 'title'>): DraftOrig
   return 'Вручную';
 }
 
+/** Russian plural form for a count: 1 черновик, 3 черновика, 5 черновиков, 21 черновик. */
+export function pluralRu(n: number, one: string, few: string, many: string): string {
+  const mod10 = Math.abs(n) % 10;
+  const mod100 = Math.abs(n) % 100;
+  if (mod100 >= 11 && mod100 <= 14) return many;
+  if (mod10 === 1) return one;
+  if (mod10 >= 2 && mod10 <= 4) return few;
+  return many;
+}
+
 /** Roving tab focus for a WAI-ARIA tablist: arrows wrap, Home and End jump. */
 export function tabAfterKey<T extends string>(ids: readonly T[], current: T, key: string): T | null {
   const index = ids.indexOf(current);

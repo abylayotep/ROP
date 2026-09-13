@@ -35,15 +35,6 @@ export function sourceAfterKey<T extends string>(
   return ids[(currentIndex + direction + ids.length) % ids.length] ?? null;
 }
 
-/** The shortcut starts a fresh preparation even when the URL still names an older run. */
-export function recentHistorySearch(current: URLSearchParams): URLSearchParams {
-  const next = new URLSearchParams(current);
-  next.set('tab', 'teach');
-  next.set('teach', 'chats');
-  next.delete('generation');
-  return next;
-}
-
 export function KnowledgeSourceCards({
   agentId,
   onChanged,

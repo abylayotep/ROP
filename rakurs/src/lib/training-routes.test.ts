@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { legacyCoachSearch, legacyKnowledgeSearch, teachModeFromSearch, trainingSearch,
-  trainingTabFromSearch, visibleTabs, withoutCorrectionParams } from './training-routes';
+  teachModeSearch, trainingTabFromSearch, visibleTabs, withoutCorrectionParams } from './training-routes';
 
 const p = (s: string) => new URLSearchParams(s);
 const owner = { owner: true, noteCount: 5 };
@@ -47,5 +47,10 @@ describe('training routes', () => {
   it('maps legacy coach URLs and keeps correction params', () => {
     expect(legacyCoachSearch(p('conversation=c1&reply=a1')).toString())
       .toBe('conversation=c1&reply=a1&tab=teach&teach=coach');
+  });
+  it('switches the teach way with a fresh start', () => {
+    expect(teachModeSearch(p('tab=teach&teach=import&generation=old&conversation=c'), 'chats').toString())
+      .toBe('tab=teach&teach=chats');
+    expect(teachModeSearch(p('tab=teach&teach=coach&reply=r'), null).toString()).toBe('tab=teach');
   });
 });

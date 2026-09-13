@@ -40,10 +40,15 @@ export function GenerationWizard({
   const [pickMoreRunId, setPickMoreRunId] = useState<string | null>(null);
   const pickMore = detail !== null && pickMoreRunId === detail.run.id;
   const step = wizardStep(detail, pickMore);
+  // A linked run has no step until its detail arrives; «Период» would be a false start.
+  const shownStep = detail === null && initialRunId !== null ? null : step;
+  // The selection step's workspace owns the one «Подробности разбора» block; the metrics go inside it.
+  const workspaceShown = detail !== null && step === 'selection'
+    && !(detail.run.status === 'completed' && detail.run.proposalCount === 0);
 
   return (
     <div className="training-wizard">
-      <WizardSteps current={step} />
+      <WizardSteps current={shownStep} />
 
       {detailLoading && !detail && (
         <div className="generation-review__skeleton" role="status" aria-label="Загружаем разбор"><span /><span /><span /></div>
@@ -113,7 +118,7 @@ export function GenerationWizard({
         />
       </details>
 
-      {detail && (
+      {detail && !workspaceShown && (
         <details className="generation-details">
           <summary>Подробности разбора</summary>
           <RunMetrics detail={detail} />
@@ -225,6 +230,7 @@ function SelectionStep({
           onLoadMoreExclusions={() => void loadCollection('exclusions')}
           onLoadRawFindings={() => void loadCollection('rawFindings')}
           onLoadMoreRawFindings={() => void loadCollection('rawFindings')}
+          details={<RunMetrics detail={detail} />}
           collectionState={{
             proposals: { loading: collectionLoading.includes('proposals'), error: collectionErrors.proposals, onRetry: () => void loadCollection('proposals') },
             exclusions: { loading: collectionLoading.includes('exclusions'), error: collectionErrors.exclusions, onRetry: () => void loadCollection('exclusions') },

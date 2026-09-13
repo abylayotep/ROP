@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { draftOrigin, nextStep, tabAfterKey, wizardStep } from './training-state';
+import { draftOrigin, nextStep, pluralRu, tabAfterKey, wizardStep } from './training-state';
 
 const run = (status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled', proposalCount = 3, drafts = 0) =>
   ({ run: { status, proposalCount }, drafts: Array.from({ length: drafts }, (_, i) => ({ id: `d${i}` })) });
@@ -52,5 +52,18 @@ describe('tabAfterKey', () => {
     expect(tabAfterKey(ids, 'runs', 'Home')).toBe('knowledge');
     expect(tabAfterKey(ids, 'drafts', 'End')).toBe('sources');
     expect(tabAfterKey(ids, 'drafts', 'Enter')).toBeNull();
+  });
+});
+
+describe('pluralRu', () => {
+  it('picks the Russian plural form', () => {
+    const drafts = (n: number) => `${n} ${pluralRu(n, 'черновик', 'черновика', 'черновиков')}`;
+    expect(drafts(1)).toBe('1 черновик');
+    expect(drafts(3)).toBe('3 черновика');
+    expect(drafts(5)).toBe('5 черновиков');
+    expect(drafts(11)).toBe('11 черновиков');
+    expect(drafts(12)).toBe('12 черновиков');
+    expect(drafts(21)).toBe('21 черновик');
+    expect(drafts(22)).toBe('22 черновика');
   });
 });

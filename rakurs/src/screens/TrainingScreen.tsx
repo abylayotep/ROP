@@ -1,26 +1,25 @@
 import { useState, type KeyboardEvent, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import * as api from '@/api';
-import { CoachChat } from '@/components/coach/CoachChat';
-import { KnowledgeSourceCards, recentHistorySearch } from '@/components/knowledge/KnowledgeSourceCards';
-import { GenerationWizard } from '@/components/training/GenerationWizard';
 import { KnowledgeTab } from '@/components/training/KnowledgeTab';
+import { NextStepStrip } from '@/components/training/NextStepStrip';
 import { RepliesTab } from '@/components/training/RepliesTab';
-import { Card } from '@/components/ui/primitives';
-import { EmptyState } from '@/components/ui/states';
+import { ReviewList } from '@/components/training/ReviewList';
+import { TeachTab } from '@/components/training/TeachTab';
 import { useApi } from '@/hooks/useApi';
 import {
   TRAINING_TABS,
   teachModeFromSearch,
+  teachModeSearch,
   trainingSearch,
   trainingTabFromSearch,
   visibleTabs,
   type TeachMode,
   type TrainingTab,
 } from '@/lib/training-routes';
-import { tabAfterKey } from '@/lib/training-state';
+import { nextStep, tabAfterKey } from '@/lib/training-state';
 import { useAgent } from '@/store/agent';
-import type { KbDraft, KbNote } from '@/types';
+import type { KbDraft, KbGenerationRunPage, KbNote } from '@/types';
 import './training-workspace.css';
 
 /**
@@ -28,12 +27,6 @@ import './training-workspace.css';
  * and what waits for the owner's decision. The tab lives in the URL (`lib/training-routes.ts`),
  * so deep links from dialogs, the sandbox and old bookmarks land on the right tab.
  */
-
-const TEACH_MODE_LABELS: ReadonlyArray<{ id: TeachMode; label: string }> = [
-  { id: 'chats', label: 'Из переписки WhatsApp' },
-  { id: 'coach', label: 'Спросить тренера' },
-  { id: 'import', label: 'Загрузить материалы' },
-];
 
 export function TrainingWorkspace({
   tabs,
@@ -105,11 +98,16 @@ export function TrainingScreen() {
   const notes = useApi<KbNote[]>((signal) => api.listKbNotes(agent.id, {}, signal), [agent.id]);
   const noteCount = notes.data ? notes.data.length : null;
 
-  // Owner-only route: a non-owner never asks for it.
+  // Owner-only routes: a non-owner never asks for them.
   const drafts = useApi<KbDraft[] | null>(
     (signal) => (owner ? api.listOpenDrafts(agent.id, signal) : Promise.resolve(null)),
     [agent.id, owner],
   );
+  const runs = useApi<KbGenerationRunPage | null>(
+    (signal) => (owner ? api.listKnowledgeGenerationRuns(agent.id, undefined, signal) : Promise.resolve(null)),
+    [agent.id, owner],
+  );
+  const activeRun = runs.data?.items.find((run) => run.status === 'queued' || run.status === 'running') ?? null;
 
   const activeTab = trainingTabFromSearch(params, { owner, noteCount });
   const teachMode = teachModeFromSearch(params);
@@ -117,19 +115,41 @@ export function TrainingScreen() {
   // Mirrors the knowledge tab's unsaved editor, so leaving the tab asks before discarding it.
   const [knowledgeDirty, setKnowledgeDirty] = useState(false);
 
-  const go = (tab: TrainingTab, teach?: TeachMode | null) => {
+  const go = (tab: TrainingTab, teach?: TeachMode | null, generation?: string) => {
     if (activeTab === 'knowledge' && tab !== 'knowledge' && knowledgeDirty
       && !window.confirm('Уйти без сохранения? Несохранённые правки будут потеряны.')) return;
     if (tab !== 'knowledge') setKnowledgeDirty(false);
-    setParams(trainingSearch(params, tab, teach), { replace: true });
+    const next = trainingSearch(params, tab, teach);
+    if (generation !== undefined) next.set('generation', generation);
+    setParams(next, { replace: true });
+    // The strip and the review count go stale while the owner works in another tab.
+    if (owner && tab !== activeTab) {
+      drafts.reload();
+      runs.reload();
+    }
   };
+
+  const step = nextStep({ owner, activeRun, openDrafts: drafts.data?.length ?? 0, noteCount });
+  // A strip pointing at the view already on screen says nothing new.
+  const stripShown = step !== null
+    && !(step.kind === 'review' && activeTab === 'review')
+    && !(step.kind !== 'review' && activeTab === 'teach' && teachMode === 'chats');
 
   return (
     <TrainingWorkspace
       tabs={visibleTabs(owner)}
       activeTab={activeTab}
       reviewCount={drafts.data ? drafts.data.length : null}
-      strip={null}
+      strip={stripShown ? (
+        <NextStepStrip
+          step={step}
+          onOpen={(target) => {
+            if (target.kind === 'review') go('review');
+            else if (target.kind === 'running') go('teach', 'chats', target.runId);
+            else go('teach', 'chats');
+          }}
+        />
+      ) : null}
       onTabChange={(tab) => go(tab)}
     >
       {activeTab === 'knowledge' && (
@@ -141,90 +161,33 @@ export function TrainingScreen() {
       )}
 
       {activeTab === 'teach' && (
-        <TeachPlaceholder
+        <TeachTab
+          key={agent.id}
           agentId={agent.id}
           mode={teachMode}
-          params={params}
-          onMode={(mode) => go('teach', mode)}
+          onMode={(mode) => setParams(teachModeSearch(params, mode), { replace: true })}
+          generationRunId={params.get('generation')}
           onRunId={(runId) => {
             const next = trainingSearch(params, 'teach', 'chats');
             if (runId === null) next.delete('generation');
             else next.set('generation', runId);
             setParams(next, { replace: true });
+            runs.reload();
           }}
-          onOpenRecentHistory={() => setParams(recentHistorySearch(params), { replace: true })}
-          onKnowledgeChanged={notes.reload}
-          onOpenRules={() => go('replies')}
           onOpenReplies={() => go('replies')}
+          onOpenRules={() => go('replies')}
+          onKnowledgeChanged={notes.reload}
         />
       )}
 
       {activeTab === 'review' && (
-        <Card><EmptyState>Черновики на проверке скоро появятся здесь.</EmptyState></Card>
+        <ReviewList
+          drafts={drafts.data ?? undefined}
+          error={drafts.error}
+          onRetry={drafts.reload}
+          onTeach={() => go('teach', null)}
+        />
       )}
     </TrainingWorkspace>
-  );
-}
-
-/**
- * Temporary «Научить» body: the generation wizard, coach chat and source cards
- * behind a plain mode switch. The chooser replaces it.
- */
-function TeachPlaceholder({
-  agentId,
-  mode,
-  params,
-  onMode,
-  onRunId,
-  onOpenRecentHistory,
-  onKnowledgeChanged,
-  onOpenRules,
-  onOpenReplies,
-}: {
-  agentId: string;
-  mode: TeachMode | null;
-  params: URLSearchParams;
-  onMode: (mode: TeachMode | null) => void;
-  onRunId: (runId: string | null) => void;
-  onOpenRecentHistory: () => void;
-  onKnowledgeChanged: () => void;
-  onOpenRules: () => void;
-  onOpenReplies: () => void;
-}) {
-  return (
-    <>
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
-        {TEACH_MODE_LABELS.map((item) => (
-          <button
-            key={item.id}
-            type="button"
-            className={mode === item.id ? 'btn btn-sm' : 'btn-sm'}
-            aria-pressed={mode === item.id}
-            onClick={() => onMode(item.id)}
-          >
-            {item.label}
-          </button>
-        ))}
-      </div>
-      {mode === null && <Card><EmptyState>Выберите способ обучения агента.</EmptyState></Card>}
-      {mode === 'chats' && (
-        <GenerationWizard
-          key={`${agentId}:chats`}
-          agentId={agentId}
-          initialRunId={params.get('generation')}
-          onRunId={onRunId}
-          onOpenReplies={onOpenReplies}
-        />
-      )}
-      {mode === 'coach' && <CoachChat key={`${agentId}:coach`} agentId={agentId} onOpenRules={onOpenRules} />}
-      {mode === 'import' && (
-        <KnowledgeSourceCards
-          key={`sources-${agentId}`}
-          agentId={agentId}
-          onChanged={onKnowledgeChanged}
-          onOpenRecentHistory={onOpenRecentHistory}
-        />
-      )}
-    </>
   );
 }

@@ -40,6 +40,7 @@ describe('draftOrigin', () => {
   it('labels drafts by where they came from', () => {
     expect(draftOrigin({ origin: 'coach', title: 'Правило' })).toBe('Тренер');
     expect(draftOrigin({ origin: 'manual', title: 'Скрипт продаж из WhatsApp' })).toBe('Из переписки');
+    expect(draftOrigin({ origin: 'manual', title: 'База знаний из WhatsApp · 4' })).toBe('Из переписки');
     expect(draftOrigin({ origin: 'manual', title: 'Правка цен' })).toBe('Вручную');
   });
 });

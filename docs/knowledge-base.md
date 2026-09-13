@@ -400,6 +400,14 @@ analysis, nothing is stored separately.
    newest open one, and «Отобрать ещё» back to step 3. The same drafts also appear in
    «На проверке».
 
+**One draft per kind.** An agent has at most one open «База знаний из WhatsApp» and one open
+«Скрипт продаж из WhatsApp». A new selection does not add a second draft: the open one is
+discarded and rebuilt from its changes plus the new ones, and when both write the same note
+(same path, or same note id for an update) the newer text wins and the older fact returns to
+«pending» in its analysis. The rebuilt draft has to be checked again. Rules live in
+`server/src/lib/knowledge/whatsapp-drafts.ts`; duplicates made before this rule are merged by
+`node dist/scripts/merge-whatsapp-drafts.js`.
+
 Below the wizard, **«История разборов (N)»** lists earlier analyses with date, status and
 «найдено фактов: N»; choosing one opens it in the wizard. **«Подробности разбора»** is one
 collapsed block with the technical numbers (batches, skipped messages, tokens and cost),

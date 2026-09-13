@@ -13,6 +13,6 @@ export function GenerationDraftLinks({ drafts }: { drafts: { id: string; title: 
       {script ? <Link className="btn" to={`../drafts/${script.id}`}>Открыть скрипт</Link>
         : <span>Новый черновик скрипта не создан.</span>}
     </div>
-    {(!knowledge || !script) && <p style={{ fontSize: 12, color: 'var(--text-dim)' }}>Подтверждённые новые предложения для этой части не получены. Ранее созданные черновики не перезаписываются.</p>}
+    {(!knowledge || !script) && <p style={{ fontSize: 12, color: 'var(--text-dim)' }}>В эту часть не попало ни одного отобранного предложения. У агента всегда один черновик базы знаний и один черновик скрипта: новые предложения добавляются в них, более новый текст заменяет старый.</p>}
   </section>;
 }

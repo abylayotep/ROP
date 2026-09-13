@@ -35,6 +35,9 @@ export async function runSimulatorTurn(
   if (!session) throw new ApiError(404, 'Сессия не найдена.');
   if (session.revision !== input.revision || session.archivedAt !== null
     || session.handoff !== null) throw conflict();
+  if (agent.openrouterKey === null) {
+    throw new ApiError(409, 'Ключ OpenRouter не задан. Добавьте его в настройках агента.');
+  }
 
   if (!tryTakeTurnSlot()) {
     throw new ApiError(429, 'Песочница занята. Попробуйте через несколько секунд.');
@@ -49,9 +52,7 @@ export async function runSimulatorTurn(
       ...(turn.reply === null ? [] : [{ author: 'ai', body: turn.reply, kind: 'text' }]),
     ]).concat({ author: 'client', body: text, kind: 'text' }).slice(-HISTORY_LIMIT);
 
-    const core = agent.openrouterKey === null ? {
-      kind: 'skipped' as const, detail: 'Ключ OpenRouter не задан.',
-    } : await executeAiCore(db, deps, {
+    const core = await executeAiCore(db, deps, {
       agent, history, stageId: session.stageId, stageName: session.stageName,
       values: session.fields.map(({ id, name, value }) => ({ fieldId: id, name, value })),
       allowProposedCrm: true,

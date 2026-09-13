@@ -171,4 +171,35 @@ describe('persistent browser simulator', () => {
     expect(turn.detail).toContain('дважды');
     expect(model.calls).toHaveLength(2);
   });
+
+  it('rejects a missing model key without consuming a session revision', async () => {
+    await db.update(agents).set({ openrouterKey: null }).where(eq(agents.id, agentId));
+
+    await expect(run('Can you help?', 0)).rejects.toMatchObject({ statusCode: 409 });
+    expect(await db.select().from(aiSandboxTurns)).toEqual([]);
+    expect((await db.select().from(aiSandboxSessions))[0])
+      .toMatchObject({ revision: 0, outcome: null, handoff: null, fields: [] });
+    expect(model.calls).toEqual([]);
+  });
+
+  it('records a model-call failure only in sandbox state', async () => {
+    model = fakeModel(new Error('Model endpoint unavailable'));
+
+    const result = await run('Can you help?', 0);
+    expect(result).toMatchObject({ revision: 1, outcome: 'failed', reply: null,
+      detail: 'Model endpoint unavailable' });
+    expect(await db.select().from(aiSandboxTurns))
+      .toMatchObject([{ revision: 1, userText: 'Can you help?', outcome: 'failed',
+        detail: 'Model endpoint unavailable' }]);
+    expect((await db.select().from(aiSandboxSessions))[0])
+      .toMatchObject({ revision: 1, outcome: 'failed' });
+    const production = await Promise.all([
+      db.select().from(contacts), db.select().from(conversations), db.select().from(messages),
+      db.select().from(leadValues), db.select().from(orders), db.select().from(aiReplies),
+      db.select().from(notes), db.select().from(stageTransitions), db.select().from(capiEvents),
+    ]);
+    for (const rows of production) expect(rows).toEqual([]);
+    expect(graph.calls).toEqual([]);
+    expect(linked.calls).toEqual([]);
+  });
 });

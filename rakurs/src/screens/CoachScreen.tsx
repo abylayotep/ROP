@@ -7,6 +7,7 @@ import { Card, CardHead } from '@/components/ui/primitives';
 import { Async, EmptyState, Skeleton } from '@/components/ui/states';
 import { useToast } from '@/components/ui/Toast';
 import { useApi } from '@/hooks/useApi';
+import { withoutCorrectionParams } from '@/lib/training-routes';
 import { useAgent } from '@/store/agent';
 import type { AgentRule, CoachMessage, ConversationThread, KbDraft } from '@/types';
 import { clearPendingCorrection, correctionSource, correctionText, readPendingCorrection,
@@ -118,7 +119,7 @@ function Coach({ agentId, loaded }: { agentId: string; loaded: Loaded }) {
     ? { key: previewKey, snapshot: await api.previewResponseFeedback(agentId, correctionSource(correctionTarget), signal) }
     : null, [agentId, previewKey]);
   const previewReady = !correctionTarget || (preview.data?.key === previewKey && !preview.error);
-  const detach = () => setParams({}, { replace: true });
+  const detach = () => setParams((prev) => withoutCorrectionParams(prev), { replace: true });
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ block: 'nearest' });
@@ -141,7 +142,7 @@ function Coach({ agentId, loaded }: { agentId: string; loaded: Loaded }) {
         clearPendingCorrection(window.localStorage, agentId);
         pendingRef.current = null;
         setPendingCorrection(null);
-        setParams({}, { replace: true });
+        setParams((prev) => withoutCorrectionParams(prev), { replace: true });
       } else setPendingStatus(status.status === 'failed' ? 'failed' : 'pending');
     } catch {
       setPendingStatus('unknown');
@@ -228,7 +229,7 @@ function Coach({ agentId, loaded }: { agentId: string; loaded: Loaded }) {
         clearPendingCorrection(window.localStorage, agentId);
         pendingRef.current = null;
         setPendingCorrection(null);
-        setParams({}, { replace: true });
+        setParams((prev) => withoutCorrectionParams(prev), { replace: true });
       }
     } catch (error) {
       if (correctionTarget) {

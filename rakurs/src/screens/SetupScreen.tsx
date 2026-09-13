@@ -122,7 +122,7 @@ const STEPS: StepDef[] = [
     id: 'knowledge',
     title: 'Наполнить базу знаний',
     why: 'То, чем агент отвечает клиентам. Пустая база — это агент, который зовёт человека на каждый вопрос.',
-    section: { to: '../knowledge', label: 'База знаний' },
+    section: { to: '../training?tab=knowledge', label: 'Обучение агента' },
   },
   {
     id: 'agent',

@@ -241,7 +241,7 @@ function Draft({ agentId, draftId, initial }: { agentId: string; draftId: string
       // screen that is about to navigate away regardless.
       setDraft((prev) => ({ ...prev, ...applied }));
       toast.ok('Черновик применён — правки уже в базе');
-      navigate('../coach');
+      navigate('../training?tab=review');
     } catch (error) {
       // The server's own words: a stale draft names what moved, a missing run says to run
       // it first — see `server/src/api/drafts.ts`'s own comment on the apply route. Shown
@@ -261,7 +261,7 @@ function Draft({ agentId, draftId, initial }: { agentId: string; draftId: string
       const discarded = await api.discardDraft(agentId, draftId);
       setDraft((prev) => ({ ...prev, ...discarded }));
       toast.ok('Черновик отброшен');
-      navigate('../coach');
+      navigate('../training?tab=review');
     } catch (error) {
       toast.fail(error);
     } finally {

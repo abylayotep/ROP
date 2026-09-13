@@ -1,10 +1,10 @@
-.knowledge-page {
+.training-page {
   width: min(100%, 1540px);
   margin: 0 auto;
   color: var(--text);
 }
 
-.knowledge-page__header {
+.training-page__header {
   display: flex;
   align-items: end;
   justify-content: space-between;
@@ -12,7 +12,7 @@
   padding: 2px 2px 18px;
 }
 
-.knowledge-page__header h1,
+.training-page__header h1,
 .knowledge-panel-head h2,
 .generation-rail h2,
 .proposal-workspace h2,
@@ -22,12 +22,12 @@
   line-height: 1.1;
 }
 
-.knowledge-page__header h1 { font-size: clamp(24px, 2vw, 32px); }
-.knowledge-page__header > p { max-width: 48ch; margin: 0; color: var(--text-muted); font-size: 12.5px; line-height: 1.5; text-align: right; }
-.knowledge-page__eyebrow,
+.training-page__header h1 { font-size: clamp(24px, 2vw, 32px); }
+.training-page__header > p { max-width: 48ch; margin: 0; color: var(--text-muted); font-size: 12.5px; line-height: 1.5; text-align: right; }
+.training-page__eyebrow,
 .knowledge-kicker { margin: 0 0 5px; color: var(--text-dim); font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
 
-.knowledge-tabs {
+.training-tabs {
   display: flex;
   gap: 3px;
   overflow-x: auto;
@@ -37,7 +37,7 @@
   background: var(--seg);
 }
 
-.knowledge-tabs button,
+.training-tabs button,
 .proposal-kind-tabs button {
   border: 0;
   border-radius: 8px;
@@ -48,16 +48,16 @@
   transition: background 160ms ease, color 160ms ease, transform 120ms ease;
 }
 
-.knowledge-tabs button { flex: 0 0 auto; padding: 9px 14px; }
-.knowledge-tabs button:hover,
+.training-tabs button { flex: 0 0 auto; padding: 9px 14px; }
+.training-tabs button:hover,
 .proposal-kind-tabs button:hover { color: var(--text); background: var(--raise); }
-.knowledge-tabs button[aria-selected='true'],
+.training-tabs button[aria-selected='true'],
 .proposal-kind-tabs button[aria-selected='true'] { background: var(--seg-on); color: var(--text); }
-.knowledge-tabs button:active,
+.training-tabs button:active,
 .proposal-kind-tabs button:active,
 .generation-run:active,
 .knowledge-load-more:active { transform: translateY(1px); }
-.knowledge-tabs button:focus-visible,
+.training-tabs button:focus-visible,
 .proposal-kind-tabs button:focus-visible,
 .generation-run:focus-visible,
 .generation-rail__more:focus-visible,
@@ -70,8 +70,8 @@
   outline-offset: 2px;
 }
 
-.knowledge-page__main { padding-top: 16px; outline: none; }
-.knowledge-page__main:focus-visible { outline: 2px solid var(--accent-a45); outline-offset: 4px; border-radius: 12px; }
+.training-page__main { padding-top: 16px; outline: none; }
+.training-page__main:focus-visible { outline: 2px solid var(--accent-a45); outline-offset: 4px; border-radius: 12px; }
 
 .knowledge-review-grid {
   display: grid;
@@ -323,9 +323,9 @@
 }
 
 @media (max-width: 720px) {
-  .knowledge-page__header { display: block; }
-  .knowledge-page__header > p { margin-top: 8px; text-align: left; }
-  .knowledge-tabs { margin-inline: -2px; }
+  .training-page__header { display: block; }
+  .training-page__header > p { margin-top: 8px; text-align: left; }
+  .training-tabs { margin-inline: -2px; }
   .knowledge-review-grid { display: block; }
   .generation-rail,
   .knowledge-review-aside { position: static; }
@@ -339,9 +339,9 @@
   .proposal-workspace { padding: 15px; }
   .proposal-workspace__footer { align-items: stretch; flex-direction: column; }
   .proposal-workspace__footer .btn-accent { width: 100%; }
-  .knowledge-page button,
-  .knowledge-page input:not([type='checkbox']):not([type='radio']),
-  .knowledge-page select,
+  .training-page button,
+  .training-page input:not([type='checkbox']):not([type='radio']),
+  .training-page select,
   .proposal-card__check { min-height: 44px; }
   .knowledge-source-seam { padding: 13px; }
   .knowledge-source-card__header { min-height: 64px; padding: 10px; }
@@ -359,7 +359,7 @@
   .proposal-card__state a,
   .generation-drafts__list a { display: flex; align-items: center; min-height: 44px; }
   .proposal-card__check input { width: 20px; height: 20px; }
-  .knowledge-page__eyebrow,
+  .training-page__eyebrow,
   .knowledge-kicker,
   .generation-run__time,
   .generation-run__metrics,
@@ -392,7 +392,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .knowledge-tabs button,
+  .training-tabs button,
   .proposal-kind-tabs button,
   .generation-run,
   .generation-rail__more,

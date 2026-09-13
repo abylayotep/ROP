@@ -82,7 +82,7 @@ function renderInline(node: InlineNode, key: number, onOpenNote: ((noteId: strin
     case 'link': {
       const target = targets.get(node.target);
       // `!target` alone, never `node.broken`: `node.broken` comes from the client's own
-      // title set, which is capped at `LIST_LIMIT` (see `KnowledgeScreen`'s `vault` fetch),
+      // title set, which is capped at `LIST_LIMIT` (see `KnowledgeTab`'s `vault` fetch),
       // while `target` comes from `detail.links`, which the server resolved over the whole
       // vault with no cap. A link past the hundredth note is broken by the client's count and
       // resolved by the server's — the server's resolution is authoritative, so the capped
@@ -227,7 +227,7 @@ export function NoteEditor({
   onOpenNote: (noteId: string) => void;
   /**
    * Told every time `dirty` changes, so the one place that can actually change which note is
-   * open — `KnowledgeScreen`'s `select` — can ask before it does, instead of this pane's own
+   * open — `KnowledgeTab`'s `select` — can ask before it does, instead of this pane's own
    * unsaved textarea silently vanishing under a remount. This component is keyed by the
    * selected note id, so switching notes does not update it — it replaces it, and whatever
    * was typed here goes with the old instance.

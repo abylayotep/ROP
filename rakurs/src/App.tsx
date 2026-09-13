@@ -1,21 +1,21 @@
 import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { Layout } from '@/components/layout/Layout';
 import { SECTIONS } from '@/lib/sections';
+import { legacyCoachSearch, legacyKnowledgeSearch } from '@/lib/training-routes';
 import { AgentScreen } from '@/screens/AgentScreen';
 import { AgentSettingsScreen } from '@/screens/AgentSettingsScreen';
 import { AgentsScreen } from '@/screens/AgentsScreen';
 import { OrdersScreen } from '@/screens/OrdersScreen';
 import { BoardScreen } from '@/screens/BoardScreen';
-import { CoachScreen } from '@/screens/CoachScreen';
 import { CustomersScreen } from '@/screens/CustomersScreen';
 import { DraftScreen } from '@/screens/DraftScreen';
 import { IntegrationsScreen } from '@/screens/IntegrationsScreen';
-import { KnowledgeScreen } from '@/screens/KnowledgeScreen';
 import { LoginScreen } from '@/screens/LoginScreen';
 import { SectionScreen } from '@/screens/SectionScreen';
 import { SetupScreen } from '@/screens/SetupScreen';
 import { StatsScreen } from '@/screens/StatsScreen';
 import { TestScreen } from '@/screens/TestScreen';
+import { TrainingScreen } from '@/screens/TrainingScreen';
 import { AgentProvider } from '@/store/agent';
 import { AuthProvider, useAuth } from '@/store/auth';
 
@@ -69,10 +69,8 @@ function AuthGate() {
                 <OrdersScreen />
               ) : section.path === 'customers' ? (
                 <CustomersScreen />
-              ) : section.path === 'knowledge' ? (
-                <KnowledgeScreen />
-              ) : section.path === 'coach' ? (
-                <CoachScreen />
+              ) : section.path === 'training' ? (
+                <TrainingScreen />
               ) : section.path === 'testing' ? (
                 <TestScreen />
               ) : section.path === 'agent' ? (
@@ -86,6 +84,8 @@ function AuthGate() {
           />
         ))}
         <Route path="dialogs" element={<LegacyDialogsRedirect />} />
+        <Route path="knowledge" element={<LegacyTrainingRedirect map={legacyKnowledgeSearch} />} />
+        <Route path="coach" element={<LegacyTrainingRedirect map={legacyCoachSearch} />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
@@ -95,4 +95,11 @@ function AuthGate() {
 function LegacyDialogsRedirect() {
   const location = useLocation();
   return <Navigate to={`../funnel${location.search}`} replace />;
+}
+
+/** «База знаний» and «Обучение» merged into «Обучение агента»; old bookmarks and
+ * notification links land on the matching tab with every other parameter kept. */
+function LegacyTrainingRedirect({ map }: { map: (current: URLSearchParams) => URLSearchParams }) {
+  const location = useLocation();
+  return <Navigate to={`../training?${map(new URLSearchParams(location.search))}`} replace />;
 }

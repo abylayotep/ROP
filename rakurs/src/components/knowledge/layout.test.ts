@@ -57,7 +57,8 @@ describe('source card keyboard layout', () => {
 
   it('opens a fresh two-week preparation instead of a stale selected run', () => {
     const next = recentHistorySearch(new URLSearchParams('tab=sources&generation=old-run&note=note-1'));
-    expect(next.get('tab')).toBe('drafts');
+    expect(next.get('tab')).toBe('teach');
+    expect(next.get('teach')).toBe('chats');
     expect(next.has('generation')).toBe(false);
     expect(next.get('note')).toBe('note-1');
   });

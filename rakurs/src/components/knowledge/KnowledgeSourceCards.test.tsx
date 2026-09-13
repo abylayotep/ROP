@@ -38,7 +38,7 @@ import { KnowledgeSourceCards } from './KnowledgeSourceCards';
 const text = (node: { children?: unknown[] }): string =>
   (node.children ?? []).map((child) => typeof child === 'string' ? child : text(child as { children?: unknown[] })).join('');
 
-const workspaceCss = readFileSync(new URL('../../screens/knowledge-workspace.css', import.meta.url), 'utf8');
+const workspaceCss = readFileSync(new URL('../../screens/training-workspace.css', import.meta.url), 'utf8');
 
 function cssRule(source: string, selector: string): string {
   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

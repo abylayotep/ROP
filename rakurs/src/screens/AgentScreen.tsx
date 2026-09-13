@@ -419,8 +419,8 @@ function RulesPointerCard({ agentId }: { agentId: string }) {
     <Card>
       <div style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--text-3)' }}>
         Характер агента задаётся правилами в разделе «
-        <Link to={`/a/${agentId}/coach`} style={{ color: 'var(--accent)' }}>
-          Обучение
+        <Link to={`/a/${agentId}/training?tab=replies`} style={{ color: 'var(--accent)' }}>
+          Обучение агента
         </Link>
         ».
       </div>

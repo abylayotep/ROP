@@ -15,8 +15,8 @@ describe('dialog history navigation', () => {
     const html = renderToStaticMarkup(createElement(StaticRouter, { location: '/a/agent/dialogs' },
       createElement(DialogsScreen)));
     expect(html).not.toContain('Загрузить историю');
-    expect(html).toContain('href="/a/agent/knowledge"');
-    expect(html).toContain('База знаний');
+    expect(html).toContain('href="/a/agent/training?tab=teach"');
+    expect(html).toContain('Обучение агента');
   });
 
   it('identifies WhatsApp dialog rows by formatted phone instead of contact name', () => {

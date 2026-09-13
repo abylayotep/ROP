@@ -3,31 +3,8 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import type { KbGenerationRunSummary } from '@/types';
 import { GenerationRunRail, mergeDelayedRunFirstPage, mergeRunPages } from './GenerationRunRail';
-import { KnowledgeWorkspace, knowledgeTabFromSearch } from './KnowledgeWorkspace';
 
-describe('KnowledgeWorkspace', () => {
-  it('keeps four page-level tabs instead of stacking every knowledge tool', () => {
-    const html = renderToStaticMarkup(createElement(KnowledgeWorkspace, {
-      activeTab: 'drafts',
-      onTabChange: () => undefined,
-      children: createElement('p', null, 'Review content'),
-    }));
-
-    expect(html).toContain('role="tablist"');
-    expect(html).toContain('Знания');
-    expect(html).toContain('Черновики');
-    expect(html).toContain('Запуски');
-    expect(html).toContain('Источники и загрузка');
-    expect(html).toMatch(/role="tab"[^>]*aria-selected="true"[^>]*>Черновики/);
-    expect(html).toContain('<main');
-  });
-
-  it('opens generation-only deep links in the draft review workspace', () => {
-    expect(knowledgeTabFromSearch(new URLSearchParams('generation=run-7'))).toBe('drafts');
-    expect(knowledgeTabFromSearch(new URLSearchParams('tab=runs&generation=run-7'))).toBe('runs');
-    expect(knowledgeTabFromSearch(new URLSearchParams('note=note-3'))).toBe('knowledge');
-  });
-
+describe('GenerationRunRail', () => {
   it('marks the active run and keeps the pagination action visible', () => {
     const run = {
       id: 'run-7',

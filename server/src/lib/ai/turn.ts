@@ -52,7 +52,7 @@ import {
 import { queueLead } from '../capi/enqueue.js';
 import { recordStageMove } from '../funnel-history.js';
 import { sendStageMessage } from '../funnel-message.js';
-import { searchKnowledge } from '../knowledge/search.js';
+import { knowledgeForTurn } from '../knowledge/for-turn.js';
 import { decryptSecret } from '../secret-box.js';
 import { GraphError, withoutSecret, type GraphClient } from '../whatsapp/graph.js';
 import type { LinkedClient } from '../whatsapp/linked/client.js';
@@ -181,6 +181,13 @@ const UNSOURCED = (value: string): string =>
  */
 const SPACED = /(?<=\p{Nd})\s+(?=\p{Nd})/gu;
 const PUNCTUATED = /(?<=\p{Nd})[\s()\-\u2013\u2014]+(?=\p{Nd})/gu;
+/**
+ * Thousands written with a dot, comma or apostrophe — «9.990 тг», «1,500» — which is how
+ * Kazakhstani price lists are typed. Without this reading a record's `9.990` lent only `9` and
+ * `990`, and the agent quoting it as «9 990 ₸» was withheld as an invention. A separator counts
+ * only before exactly three digits, so «1.5 метра» stays two numbers.
+ */
+const GROUPED = /(?<=\p{Nd})(?:\s+|[.,'\u2019](?=\p{Nd}{3}(?!\p{Nd})))(?=\p{Nd})/gu;
 
 /** Every whole number in the text, under one of the two readings. */
 function digitRuns(text: string, joiner: RegExp): string[] {
@@ -233,20 +240,51 @@ export function unsourcedNumber(reply: string, sources: readonly string[]): stri
   const spaced = digitRuns(reply, SPACED);
   if (spaced.length === 0) return null;
   const punctuated = digitRuns(reply, PUNCTUATED);
+  const grouped = digitRuns(reply, GROUPED);
 
   const given = new Set<string>();
   for (const source of sources) {
     for (const run of digitRuns(source, SPACED)) given.add(run);
     for (const run of digitRuns(source, PUNCTUATED)) given.add(run);
+    for (const run of digitRuns(source, GROUPED)) given.add(run);
   }
 
-  const missing = (runs: string[]): string | undefined => runs.find((run) => !given.has(run));
+  const derived = arithmetic(given);
+  const missing = (runs: string[]): string | undefined =>
+    runs.find((run) => !given.has(run) && !derived.has(run));
   const bySpaces = missing(spaced);
   if (bySpaces === undefined) return null;
   if (missing(punctuated) === undefined) return null;
+  if (missing(grouped) === undefined) return null;
   // The spaced reading's miss, because it is the number as the reader will see it written:
   // the joined reading would report a phone and a price run together as one long digit soup.
   return bySpaces;
+}
+
+/**
+ * The totals a manager computes out of numbers the agent was given.
+ *
+ * A checkout has to say «Итого 10 990 ₸» for a 9 990 ₸ stamp and 1 000 ₸ delivery, and no
+ * record holds that sum — so a reply naming the total was withheld and the customer, ready to
+ * pay, was handed to a colleague. Sums and differences of two given amounts and small multiples
+ * of one are accepted. Only amounts of three digits and more take part: a price, not the «2»
+ * or «3» of a quantity, which would otherwise make almost every small number derivable.
+ */
+const MIN_AMOUNT = 100;
+const MAX_MULTIPLE = 10;
+
+function arithmetic(given: ReadonlySet<string>): Set<string> {
+  const amounts = [...given].map(Number)
+    .filter((value) => Number.isSafeInteger(value) && value >= MIN_AMOUNT && value < 1e9);
+  const derived = new Set<string>();
+  for (const a of amounts) {
+    for (let k = 2; k <= MAX_MULTIPLE; k += 1) derived.add(String(a * k));
+    for (const b of amounts) {
+      derived.add(String(a + b));
+      if (a > b) derived.add(String(a - b));
+    }
+  }
+  return derived;
 }
 
 const empty = (
@@ -576,15 +614,18 @@ export async function executeAiCore(db: Db, deps: TurnDeps, input: AiCoreInput):
   const fieldRows = await db.select().from(leadFields)
     .where(eq(leadFields.agentId, agent.id)).orderBy(asc(leadFields.position));
   const last = history.at(-1)!;
-  const hits = await searchKnowledge(db, agent.id, last.body ?? '', KNOWLEDGE_LIMIT);
+  const customerSaid = history.filter((message) => message.author === 'client')
+    .map((message) => message.body ?? '').filter((body) => body.trim() !== '');
+  const hits = await knowledgeForTurn(db, agent.id, customerSaid, KNOWLEDGE_LIMIT);
   const instructions = assembleRules(await loadRules(db, agent.id));
   const context: TurnContext = {
     agent: { name: agent.name, timezone: agent.timezone, instructions,
       replyLanguage: agent.replyLanguage, communicationStyle: agent.communicationStyle },
-    stages: stageRows.map(({ id, name, description }) => ({ id, name, description })),
+    stages: stageRows.map(({ id, name, description, agentGoal }) => ({ id, name, description, goal: agentGoal })),
     fields: fieldRows.map(({ id, name, kind, hint }) => ({ id, name, kind, hint })),
-    knowledge: hits.map(({ chunk }) => ({ id: chunk.id, kind: chunk.kind,
+    knowledge: hits.map((chunk) => ({ id: chunk.id, kind: chunk.kind,
       title: chunk.title, content: chunk.content })),
+    knowledgeLimit: Math.max(hits.length, KNOWLEDGE_LIMIT),
     history,
     lead: { stageId: input.stageId,
       stageName: input.stageName === undefined
@@ -630,10 +671,14 @@ export async function executeAiCore(db: Db, deps: TurnDeps, input: AiCoreInput):
   const given = new Set(context.knowledge.map((item) => item.id));
   const usedItemIds = reply?.usedItemIds.filter((id) => given.has(id)) ?? [];
   const cited = new Set(usedItemIds);
+  // Every record the agent read, not only the ones it cited: a small store now travels whole,
+  // and a model that quotes a price from the record in front of it but forgets to list the id
+  // has not invented anything. The whole conversation too, so a quantity or a total agreed two
+  // messages ago is still a number the agent was given.
   const sources = [
-    ...context.knowledge.filter((item) => cited.has(item.id))
+    ...context.knowledge.slice(0, context.knowledgeLimit)
       .flatMap((item) => [item.title, item.content]),
-    last.body ?? '', instructions,
+    ...history.map((message) => message.body ?? ''), instructions,
   ];
   const invented = reply === null ? null : unsourcedNumber(reply.reply, sources);
   const reasons: string[] = [];

@@ -582,6 +582,10 @@ export const stages = pgTable(
     kind: text('kind').notNull(),
     position: integer('position').notNull(),
     description: text('description').notNull().default(''),
+    // What the agent should achieve while a conversation sits on this stage — the step of
+    // the sale it is on. `description` says when a conversation belongs here (the CRM reads
+    // it); this says what to do about it (the reply prompt reads it).
+    agentGoal: text('agent_goal').notNull().default(''),
     // Sent when a lead enters this stage. Null means the stage sends nothing.
     autoMessage: text('auto_message'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),

@@ -197,6 +197,8 @@ export interface Stage {
   /** When a lead belongs here, in the owner's own words. Read by the agent in stage 5. */
   description: string;
   /** Sent on entering the stage. Null means the stage sends nothing. */
+  /** What the AI agent should achieve while a lead is on this stage. */
+  agentGoal: string;
   autoMessage: string | null;
 }
 

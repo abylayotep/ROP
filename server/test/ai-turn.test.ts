@@ -1310,6 +1310,23 @@ describe('unsourcedNumber', () => {
       expect(unsourcedNumber('От 1500 до 20000 ₸.', ['цена 1500', 'цена 20000'])).toBeNull();
     });
 
+    it('reads a price list that writes thousands with a dot', () => {
+      expect(unsourcedNumber('30 мм — 8 990 ₸.', ['30 мм 8.990.'])).toBeNull();
+      expect(unsourcedNumber('Стоит 8990 ₸.', ['Цена 8,990 тг'])).toBeNull();
+    });
+
+    it('does not read a decimal as a thousands group', () => {
+      expect(unsourcedNumber('Длина 15 метров.', ['Длина 1.5 метра'])).toBe('15');
+    });
+
+    it('lets a total add the price and the delivery it was given', () => {
+      expect(unsourcedNumber('Итого 10 990 ₸.', ['Печать 9.990 тг', 'Доставка 1000 тг'])).toBeNull();
+    });
+
+    it('still withholds a total no two given amounts make', () => {
+      expect(unsourcedNumber('Итого 11 490 ₸.', ['Печать 9.990 тг', 'Доставка 1000 тг'])).toBe('11490');
+    });
+
     it('does not let the dashes lend a number neither side wrote', () => {
       expect(unsourcedNumber('Доставка 999 ₸.', ['Телефон 8-777-123-45-67'])).toBe('999');
     });
@@ -1349,8 +1366,19 @@ describe('a number nothing the agent read contains', () => {
     expect(written[0]?.body).toContain('2200');
   });
 
-  it('withholds it when the only cited record belonged to another agent', async () => {
+  it('sends a price from a record the agent read even when it cites the wrong id', async () => {
+    // The agent reads a small store whole, so the record is in front of it either way; a
+    // forgotten or mistyped citation is not an invented number.
     const model = fakeModel(answer({ reply: 'Доставка 1500 ₸.', usedItemIds: [randomUUID()] }));
+
+    const result = await turn(model);
+
+    expect(result.outcome).toBe('sent');
+    expect(result.usedItemIds).toEqual([]);
+  });
+
+  it('withholds a price no record carries when the only cited record belonged to another agent', async () => {
+    const model = fakeModel(answer({ reply: 'Доставка 2200 ₸.', usedItemIds: [randomUUID()] }));
 
     const result = await turn(model);
 

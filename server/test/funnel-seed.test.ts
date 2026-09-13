@@ -66,7 +66,10 @@ describe('the default funnel', () => {
 
     expect(rows.map((row) => row.name)).toEqual(DEFAULT_STAGES.map((stage) => stage.name));
     expect(rows.map((row) => row.position)).toEqual(DEFAULT_STAGES.map((_, i) => i));
-    expect(rows.every((row) => row.description === '')).toBe(true);
+    // The funnel arrives with its sales script: what each stage means and what the agent does on it.
+    expect(rows.map((row) => row.description)).toEqual(DEFAULT_STAGES.map((stage) => stage.description));
+    expect(rows.map((row) => row.agentGoal)).toEqual(DEFAULT_STAGES.map((stage) => stage.agentGoal));
+    expect(rows.every((row) => row.agentGoal !== '')).toBe(true);
     expect(rows.every((row) => row.autoMessage === null)).toBe(true);
   });
 

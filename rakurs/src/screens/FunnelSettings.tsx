@@ -266,6 +266,7 @@ function StageForm({
   const [color, setColor] = useState(stage.color);
   const [kind, setKind] = useState(stage.kind);
   const [description, setDescription] = useState(stage.description);
+  const [agentGoal, setAgentGoal] = useState(stage.agentGoal);
   const [autoMessage, setAutoMessage] = useState(stage.autoMessage ?? '');
   const [saving, setSaving] = useState(false);
 
@@ -273,7 +274,7 @@ function StageForm({
     event.preventDefault();
     setSaving(true);
     try {
-      await api.updateStage(agentId, stage.id, { name, color, kind, description, autoMessage });
+      await api.updateStage(agentId, stage.id, { name, color, kind, description, agentGoal, autoMessage });
       toast.ok('Сохранено');
       onDone();
     } catch (error) {
@@ -314,6 +315,13 @@ function StageForm({
         value={description}
         placeholder="Когда лид попадает в эту стадию — для ИИ"
         onChange={(e) => setDescription(e.target.value)}
+      />
+
+      <textarea
+        style={{ ...control, minHeight: 54, resize: 'vertical' }}
+        value={agentGoal}
+        placeholder="Что ИИ-менеджер делает на этой стадии: например, узнать, что нужно клиенту, и не говорить об оплате"
+        onChange={(e) => setAgentGoal(e.target.value)}
       />
 
       <textarea

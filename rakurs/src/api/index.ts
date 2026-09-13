@@ -343,7 +343,7 @@ export const createStage = (
 export const updateStage = (
   agentId: string,
   stageId: string,
-  body: Partial<Pick<Stage, 'name' | 'color' | 'kind' | 'description' | 'autoMessage'>>,
+  body: Partial<Pick<Stage, 'name' | 'color' | 'kind' | 'description' | 'agentGoal' | 'autoMessage'>>,
 ) => request<Stage>(`/agents/${agentId}/stages/${stageId}`, { method: 'PATCH', body });
 
 export const deleteStage = (agentId: string, stageId: string) =>

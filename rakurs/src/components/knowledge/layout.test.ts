@@ -55,3 +55,29 @@ describe('source card keyboard layout', () => {
     expect(sourceAfterKey(ids, 'instagram', 'Enter')).toBeNull();
   });
 });
+
+describe('layout without links', () => {
+  const unlinked = (count: number) => ({
+    notes: Array.from({ length: count }, (_, i) => ({ id: `note-${i}`, title: `${i}`, path: `${i}` })),
+    links: [],
+    truncated: false,
+  });
+
+  // Eight unlinked notes once spread over ~27 000 units — past the camera's minimum zoom, so
+  // the graph tab drew an empty canvas.
+  it.each([2, 8, 60])('keeps %i unlinked notes inside the simulation plane', (count) => {
+    const at = [...layout(unlinked(count), 300).values()];
+    for (const p of at) expect(Math.hypot(p.x, p.y)).toBeLessThan(1000);
+  });
+
+  it('still spreads unlinked notes apart', () => {
+    const at = [...layout(unlinked(8), 300).values()];
+    let closest = Infinity;
+    for (let i = 0; i < at.length; i += 1) {
+      for (let j = i + 1; j < at.length; j += 1) {
+        closest = Math.min(closest, Math.hypot(at[i]!.x - at[j]!.x, at[i]!.y - at[j]!.y));
+      }
+    }
+    expect(closest).toBeGreaterThan(80);
+  });
+});

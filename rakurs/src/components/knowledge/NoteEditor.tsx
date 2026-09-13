@@ -348,42 +348,47 @@ export function NoteEditor({
   // regardless, so there is no path back to view mode without saving first.
   if (!editing && detail) {
     const empty = forReading(detail.body).trim() === '';
+    const folders = detail.path.split('/').slice(0, -1);
+    const updated = new Date(detail.updatedAt).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' });
     return (
-      <div className="card card-pad">
-        <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 14 }}>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div className="ellipsis" style={{ fontSize: 15, fontWeight: 650 }}>
-              {detail.title}
-            </div>
-            <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 3 }}>
-              {detail.path} · {kindLabel(detail.kind)}
-              {detail.edited && ' · изменено вручную'}
+      <article className="card card-pad knowledge-note">
+        <header className="knowledge-note__head">
+          <div className="knowledge-note__heading">
+            {folders.length > 0 && <div className="knowledge-note__crumbs">{folders.join(' / ')}</div>}
+            <h2 className="knowledge-note__title">{detail.title}</h2>
+            <div className="knowledge-note__meta">
+              <span className="knowledge-note__chip">{kindLabel(detail.kind)}</span>
+              {detail.tags.map((tag) => (
+                <span key={tag} className="knowledge-note__chip is-tag">#{tag}</span>
+              ))}
+              <span>Обновлено {updated}{detail.edited && ' · изменено вручную'}</span>
             </div>
           </div>
-          <div style={{ display: 'flex', gap: 8, flex: '0 0 auto' }}>
+          <div className="knowledge-note__actions">
             <button type="button" className="btn-sm" onClick={() => setEditing(true)}>
               Изменить
             </button>
             <button
               type="button"
-              className="btn-link"
-              style={{ fontSize: 11.5, color: 'var(--danger)' }}
+              className="btn-link knowledge-note__delete"
               disabled={deleting}
               onClick={remove}
             >
-              Удалить
+              {deleting ? 'Удаляем…' : 'Удалить'}
             </button>
           </div>
-        </div>
+        </header>
 
         {empty ? (
           <div style={{ fontSize: 12.5, color: 'var(--text-dim)' }}>
             Текст пуст. Нажмите «Изменить», чтобы что-то написать.
           </div>
         ) : (
-          <MarkdownView nodes={renderMarkdown(forReading(detail.body), titles)} onOpenNote={onOpenNote} targets={linkTargets(detail)} />
+          <div className="knowledge-note__body">
+            <MarkdownView nodes={renderMarkdown(forReading(detail.body), titles)} onOpenNote={onOpenNote} targets={linkTargets(detail)} />
+          </div>
         )}
-      </div>
+      </article>
     );
   }
 

@@ -26,6 +26,13 @@ export interface Point {
 // needs to know how large the screen is.
 const WIDTH = 1000;
 const HEIGHT = 1000;
+/**
+ * Pull toward the origin, per unit of distance. Balanced against the summed repulsion of
+ * the other notes (about `n · k² / r` with `k² = WIDTH · HEIGHT / n`), it settles notes in
+ * a disc of radius `sqrt(WIDTH · HEIGHT / GRAVITY)` ≈ 500 whatever the vault's size — the
+ * same plane the seeds start in.
+ */
+const GRAVITY = 4;
 
 /**
  * FNV-1a over the id's characters. Any string in, the same 32-bit unsigned integer out,
@@ -121,6 +128,18 @@ export function layout(graph: KbGraph, steps: number): Map<string, Point> {
       const db = displacement.get(edge.to)!;
       db.x += ux * force;
       db.y += uy * force;
+    }
+
+    // Gravity toward the centre. Without it, repulsion is the only force on a note with no
+    // links, and a vault of unlinked notes flies apart without bound — eight notes spread
+    // over ~27 000 units, far past what the camera can frame. Linear in distance, so it is
+    // negligible near the middle and wins over the (1/dist) repulsion further out, which
+    // settles every note, linked or not, inside a bounded disc.
+    for (const id of ids) {
+      const pos = positions.get(id)!;
+      const disp = displacement.get(id)!;
+      disp.x -= pos.x * GRAVITY;
+      disp.y -= pos.y * GRAVITY;
     }
 
     // Cooling: the cap on a single step's move shrinks linearly to zero across the run.

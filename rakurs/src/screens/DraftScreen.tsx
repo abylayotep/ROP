@@ -223,7 +223,11 @@ function Draft({ agentId, draftId, initial }: { agentId: string; draftId: string
     let timer: ReturnType<typeof setTimeout>;
     // `undefined` until the first poll, so a reopened screen syncs to the autopilot's run at once.
     let followedRunId: string | null | undefined;
-    let caseCount = autopilot.caseIds.length;
+    const caseKey = (ids: string[]) => [...ids].sort().join(',');
+    let casesSeen = caseKey(autopilot.caseIds);
+    // The server keeps going through a network blip or a deploy restart; so does the poll, and
+    // the owner hears about an outage once rather than every three seconds.
+    let failing = false;
 
     const poll = () => {
       timer = setTimeout(async () => {
@@ -231,10 +235,14 @@ function Draft({ agentId, draftId, initial }: { agentId: string; draftId: string
         try {
           fresh = await api.getAutopilot(agentId, draftId);
         } catch (error) {
-          if (alive) toast.fail(error);
+          if (!alive) return;
+          if (!failing) toast.fail(error);
+          failing = true;
+          poll();
           return;
         }
         if (!alive) return;
+        failing = false;
         if (!fresh) {
           setAutopilot(null);
           return;
@@ -242,15 +250,17 @@ function Draft({ agentId, draftId, initial }: { agentId: string; draftId: string
 
         let nextRun: TestRun | null | undefined;
         if (fresh.runId !== followedRunId) {
-          nextRun = null;
-          if (fresh.runId) {
-            try {
-              nextRun = await api.getDraftRun(agentId, draftId, fresh.runId);
-            } catch {
-              // Deleted by a topic edit between the two reads: show no run, the next poll catches up.
+          try {
+            nextRun = fresh.runId ? await api.getDraftRun(agentId, draftId, fresh.runId) : null;
+            followedRunId = fresh.runId;
+          } catch (error) {
+            // Deleted by a topic edit between the two reads: show no run. Any other failure leaves
+            // the run unfollowed so the next poll retries it.
+            if (error instanceof api.ApiError && error.status === 404) {
+              nextRun = null;
+              followedRunId = fresh.runId;
             }
           }
-          followedRunId = fresh.runId;
         }
         const freshDraft = await api.getDraft(agentId, draftId).catch(() => null);
         if (!alive) return;
@@ -260,8 +270,8 @@ function Draft({ agentId, draftId, initial }: { agentId: string; draftId: string
           setRequestedCount(nextRun?.status === 'running' ? fresh.caseIds.length : nextRun?.results.length ?? 0);
         }
         if (freshDraft) setDraft(freshDraft);
-        if (fresh.caseIds.length !== caseCount) {
-          caseCount = fresh.caseIds.length;
+        if (caseKey(fresh.caseIds) !== casesSeen) {
+          casesSeen = caseKey(fresh.caseIds);
           setSelected(new Set(fresh.caseIds));
           cases.reload();
         }

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import type { DraftAutopilot } from '@/types';
@@ -13,9 +13,10 @@ const fixture = vi.hoisted(() => ({
   getDraft: vi.fn(),
   getDraftRun: vi.fn(),
   ok: vi.fn(),
+  fail: vi.fn(),
 }));
 vi.mock('@/store/agent', () => ({ useAgent: () => ({ agent: { id: 'agent-1' }, role: 'owner' }) }));
-vi.mock('@/components/ui/Toast', () => ({ useToast: () => ({ ok: fixture.ok, fail: () => {} }) }));
+vi.mock('@/components/ui/Toast', () => ({ useToast: () => ({ ok: fixture.ok, fail: fixture.fail }) }));
 vi.mock('@/api', async (original) => ({
   ...(await original() as object),
   getAutopilot: fixture.getAutopilot,
@@ -33,6 +34,7 @@ vi.mock('@/hooks/useApi', () => ({ useApi: (fetcher: Function) => {
   return { data, error: undefined, loading: false, reload: () => {} };
 } }));
 
+import { ApiError } from '@/api/client';
 import { DraftScreen } from './DraftScreen';
 
 const autopilot = (patch: Partial<DraftAutopilot> = {}): DraftAutopilot => ({
@@ -54,8 +56,12 @@ function mount() {
 }
 
 const button = (name: string) => screen.getByRole('button', { name }) as HTMLButtonElement;
+const user = () => userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+/** One autopilot poll interval, with the awaited reads it starts. */
+const nextPoll = () => act(() => vi.advanceTimersByTimeAsync(3000));
 
 beforeEach(() => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
   fixture.cases = [{ id: 'case-1', title: 'Доставка', messages: ['Когда?'], expectation: null,
     origin: 'manual', conversationId: null, requiredDraftId: null, enabled: true, updatedAt: '' }];
   fixture.draftDetail = { id: 'draft-1', title: 'Темы', origin: 'coach', status: 'open',
@@ -67,6 +73,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.clearAllMocks();
 });
 
@@ -75,7 +82,7 @@ it('starts the autopilot with the ticked cases and locks the manual controls whi
   fixture.startAutopilot.mockResolvedValue(autopilot({ caseIds: ['case-1'] }));
   mount();
   await waitFor(() => expect(button('Запустить прогон').disabled).toBe(false));
-  await userEvent.setup().click(button('Проверить и применить'));
+  await user().click(button('Проверить и применить'));
 
   expect(fixture.startAutopilot).toHaveBeenCalledWith('agent-1', 'draft-1', ['case-1']);
   await waitFor(() => expect(screen.getByText('Идёт: подбираем проверки')).toBeTruthy());
@@ -92,7 +99,7 @@ it('sends no ids when nothing is ticked and names the autopilot in the hint', as
   fixture.startAutopilot.mockResolvedValue(autopilot());
   mount();
   expect(screen.getByText(/Нажмите «Проверить и применить» — проверки подберутся сами/)).toBeTruthy();
-  await userEvent.setup().click(button('Проверить и применить'));
+  await user().click(button('Проверить и применить'));
   expect(fixture.startAutopilot).toHaveBeenCalledWith('agent-1', 'draft-1', []);
 });
 
@@ -102,7 +109,48 @@ it('follows the autopilot run and leaves for review once it applies', async () =
     .mockResolvedValue(autopilot({ status: 'applied', step: 'apply', runsStarted: 1, runId: 'run-1', caseIds: ['case-1'] }));
   mount();
   await waitFor(() => expect(screen.getByText('Идёт: прогон 1 из 4')).toBeTruthy());
-  await waitFor(() => expect(screen.getByTestId('where').textContent).toMatch(/\/training$/), { timeout: 5000 });
+  await nextPoll();
+  await nextPoll();
+  await waitFor(() => expect(screen.getByTestId('where').textContent).toMatch(/\/training$/));
   expect(fixture.getDraftRun).toHaveBeenCalledWith('agent-1', 'draft-1', 'run-1');
   expect(fixture.ok).toHaveBeenCalledWith('Черновик проверен и применён');
-}, 10_000);
+});
+
+it('keeps polling through a failed read and toasts the outage once', async () => {
+  fixture.getAutopilot
+    .mockResolvedValueOnce(autopilot())
+    .mockRejectedValueOnce(new ApiError('down', 0))
+    .mockRejectedValueOnce(new ApiError('down', 0))
+    .mockResolvedValue(autopilot({ status: 'applied', step: 'apply' }));
+  mount();
+  await waitFor(() => expect(screen.getByText('Идёт: подбираем проверки')).toBeTruthy());
+  await nextPoll();
+  await nextPoll();
+  expect(fixture.fail).toHaveBeenCalledTimes(1);
+  await nextPoll();
+  await waitFor(() => expect(screen.getByTestId('where').textContent).toMatch(/\/training$/));
+  expect(fixture.fail).toHaveBeenCalledTimes(1);
+  expect(fixture.ok).toHaveBeenCalledWith('Черновик проверен и применён');
+});
+
+it('shows no run and no error when the followed run was deleted', async () => {
+  fixture.getAutopilot.mockResolvedValue(autopilot({ step: 'await_run', runsStarted: 1, runId: 'run-9' }));
+  fixture.getDraftRun.mockRejectedValue(new ApiError('gone', 404));
+  mount();
+  await waitFor(() => expect(screen.getByText('Идёт: прогон 1 из 4')).toBeTruthy());
+  await nextPoll();
+  await nextPoll();
+  expect(fixture.getDraftRun).toHaveBeenCalledTimes(1);
+  expect(fixture.fail).not.toHaveBeenCalled();
+  expect(screen.getByText('Черновик ещё не прогоняли.')).toBeTruthy();
+});
+
+it('retries a followed run whose read failed for another reason', async () => {
+  fixture.getAutopilot.mockResolvedValue(autopilot({ step: 'await_run', runsStarted: 1, runId: 'run-9' }));
+  fixture.getDraftRun.mockRejectedValueOnce(new ApiError('down', 0));
+  mount();
+  await waitFor(() => expect(screen.getByText('Идёт: прогон 1 из 4')).toBeTruthy());
+  await nextPoll();
+  await nextPoll();
+  expect(fixture.getDraftRun).toHaveBeenCalledTimes(2);
+});

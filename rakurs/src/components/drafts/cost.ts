@@ -39,7 +39,7 @@ export function money(cost: string): string {
   return `${value.toFixed(digits).replace('.', ',')} $`;
 }
 
-const casesWord =(n: number) => ruPlural(n, 'проверка', 'проверки', 'проверок');
+const casesWord = (n: number) => ruPlural(n, 'проверка', 'проверки', 'проверок');
 const callsWord = (n: number) => ruPlural(n, 'вызов', 'вызова', 'вызовов');
 const comparisonsWord = (n: number) => ruPlural(n, 'сравнение', 'сравнения', 'сравнений');
 

@@ -15,14 +15,17 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { SANDBOX_TURNS } from '../src/api/ai.js';
 import { buildServer } from '../src/api/server.js';
 import type { Db } from '../src/db/client.js';
-import { agents, whatsappNumbers } from '../src/db/schema.js';
+import { agents, aiSandboxSessions, whatsappNumbers } from '../src/db/schema.js';
 import type { Completion, CompletionInput, ModelClient } from '../src/lib/ai/openrouter.js';
+import { runSimulatorTurn } from '../src/lib/ai/simulator.js';
 import { keyAad } from '../src/lib/ai/turn.js';
 import { createAccountWithOwner } from '../src/lib/provision.js';
 import { encryptSecret } from '../src/lib/secret-box.js';
 import { withDb } from './helpers/db.js';
 import { testEnv } from './helpers/env.js';
 import { fakeGraph } from './helpers/fake-graph.js';
+import { fakeLinked } from './helpers/fake-linked.js';
+import { fakeModel } from './helpers/fake-model.js';
 
 const env = testEnv();
 const key = Buffer.from(env.CREDENTIALS_KEY, 'base64');
@@ -156,11 +159,22 @@ describe('the shared in-flight cap', () => {
     // Refused, not run: the coaching call never reached the model.
     expect(model.calls).toHaveLength(SANDBOX_TURNS);
 
+    const [session] = await db.insert(aiSandboxSessions)
+      .values({ accountId: (await db.select().from(agents))[0]!.accountId, agentId })
+      .returning();
+    const simulator = () => runSimulatorTurn(db, {
+      model: fakeModel(JSON.stringify({ reply: 'Ответ.', stageId: null,
+        fields: {}, handoff: null, usedItemIds: [] })),
+      graph: fakeGraph(), linked: fakeLinked(), key,
+    }, { agentId, sessionId: session!.id, text: 'Здравствуйте', revision: 0 });
+    await expect(simulator()).rejects.toMatchObject({ statusCode: 429 });
+
     model.release();
     for (const res of await Promise.all(running)) expect(res.statusCode).toBe(200);
 
     // The slot came back, so the coach runs once the sandbox lets go of it.
     expect((await coach('Так нельзя.')).statusCode).toBe(200);
+    expect(await simulator()).toMatchObject({ outcome: 'sent', revision: 1 });
   });
 
   it('a coach holding every slot leaves the sandbox refused, the other direction', async () => {

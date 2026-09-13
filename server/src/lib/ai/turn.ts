@@ -5,13 +5,14 @@
  * this from the inbound queue, after Meta has already had its 200, so a slow model cannot
  * make Meta retry the webhook; task 6 calls it with `dryRun` for the sandbox.
  *
- * ## Why `dryRun` is a flag and not a second function
+ * ## Shared model execution
  *
  * The sandbox has to answer «what would the agent do» — and an answer produced by different
- * code answers a different question. So there is one path, and the flag is checked at each
- * write. The gather, the prompt, the model call, the parse, the retry, every refusal and
- * every check that stands between a reply and the customer are literally the same lines in
- * both modes; the flag skips the writes and `graph.sendText`, and nothing else.
+ * code answers a different question. `executeAiCore` takes explicit history and lead state,
+ * then shares retrieval, prompt, model retry and validation with the browser simulator.
+ * `runTurn` retains live policy checks, effects and delivery. Its original `dryRun` path is
+ * still used by transactional draft replay; the browser simulator persists only its own
+ * state and never constructs a production conversation or checks an outbound transport.
  *
  * The one thing a dry run does not honour is the two `aiEnabled` switches. An agent starts
  * switched off by design — the owner writes instructions first and turns it on when the
@@ -64,6 +65,8 @@ import {
   KNOWLEDGE_LIMIT,
   REPLY_SCHEMA,
   type AgentReply,
+  type PromptMessage,
+  type PromptLeadValue,
   type TurnContext,
 } from './prompt.js';
 import { assembleRules, loadRules } from './rules.js';
@@ -511,6 +514,147 @@ async function movedOn(
   return null;
 }
 
+/** The model-facing part of a turn. Both callers supply their own history and lead state. */
+export interface AiCoreInput {
+  agent: typeof agents.$inferSelect;
+  history: readonly PromptMessage[];
+  stageId: string | null;
+  stageName?: string | null;
+  values: readonly PromptLeadValue[];
+  allowProposedCrm: boolean;
+  canContinue?: () => Promise<boolean>;
+  canMoveToSuccess: () => Promise<boolean>;
+}
+
+type AiCoreUsage = { promptTokens: number; completionTokens: number; cost: string };
+export type AiCoreExecution =
+  | { kind: 'skipped' | 'failed'; detail: string; usage: AiCoreUsage }
+  | {
+      kind: 'ready';
+      key: string;
+      usage: AiCoreUsage;
+      reply: AgentReply | null;
+      usedItemIds: string[];
+      usedItems: { id: string; title: string }[];
+      invented: string | null;
+      handoffReason: string | null;
+      unreadableDetail: string | null;
+      fields: Record<string, string>;
+      targetStage: typeof stages.$inferSelect | null;
+      stageRows: (typeof stages.$inferSelect)[];
+      fieldRows: (typeof leadFields.$inferSelect)[];
+      details: string[];
+    };
+
+/**
+ * The same retrieval, prompt, model retry and validation whether the history came from a
+ * live conversation or the browser-only sandbox. This function has no write or send path.
+ */
+export async function executeAiCore(db: Db, deps: TurnDeps, input: AiCoreInput): Promise<AiCoreExecution> {
+  const { agent, history } = input;
+  const usage: AiCoreUsage = { promptTokens: 0, completionTokens: 0, cost: '0' };
+  let key: string;
+  try {
+    key = decryptSecret(agent.openrouterKey!, deps.key, keyAad(agent.id));
+  } catch {
+    return {
+      kind: 'failed', usage,
+      detail: 'Не удалось прочитать ключ OpenRouter. Введите ключ заново в настройках агента.',
+    };
+  }
+
+  const stageRows = await db.select().from(stages)
+    .where(eq(stages.agentId, agent.id)).orderBy(asc(stages.position));
+  const fieldRows = await db.select().from(leadFields)
+    .where(eq(leadFields.agentId, agent.id)).orderBy(asc(leadFields.position));
+  const last = history.at(-1)!;
+  const hits = await searchKnowledge(db, agent.id, last.body ?? '', KNOWLEDGE_LIMIT);
+  const instructions = assembleRules(await loadRules(db, agent.id));
+  const context: TurnContext = {
+    agent: { name: agent.name, timezone: agent.timezone, instructions,
+      replyLanguage: agent.replyLanguage },
+    stages: stageRows.map(({ id, name, description }) => ({ id, name, description })),
+    fields: fieldRows.map(({ id, name, kind, hint }) => ({ id, name, kind, hint })),
+    knowledge: hits.map(({ chunk }) => ({ id: chunk.id, kind: chunk.kind,
+      title: chunk.title, content: chunk.content })),
+    history,
+    lead: { stageId: input.stageId,
+      stageName: input.stageName === undefined
+        ? stageRows.find((stage) => stage.id === input.stageId)?.name ?? null : input.stageName,
+      values: input.values },
+  };
+  const prompt = buildMessages(context);
+  let reply: AgentReply | null = null;
+  let broken: Read & { ok: false } = {
+    ok: false, kind: 'ответ не подошёл', detail: 'ответ не подошёл',
+  };
+
+  for (let attempt = 0; attempt < 2 && reply === null; attempt += 1) {
+    if (input.canContinue && !await input.canContinue()) {
+      return { kind: 'skipped', detail: AUTOMATION_DISABLED, usage };
+    }
+    const messagesToSend = attempt === 0 ? prompt : [...prompt, retryMessage(broken.kind)];
+    let completion;
+    try {
+      completion = await deps.model.complete({ key, model: agent.model,
+        temperature: agent.temperature, messages: messagesToSend });
+    } catch (error) {
+      const said = error instanceof ModelError
+        ? `${error.message}${error.detail === undefined ? '' : ` ${error.detail}`}`
+        : String((error as { message?: string } | null)?.message ?? error);
+      const detail = safe(said, key);
+      if (input.canContinue && !await input.canContinue()) {
+        return { kind: 'skipped', detail: AUTOMATION_DISABLED, usage };
+      }
+      return { kind: 'failed', detail, usage };
+    }
+
+    usage.promptTokens += completion.promptTokens;
+    usage.completionTokens += completion.completionTokens;
+    usage.cost = addCost(usage.cost, completion.cost);
+    const answer = read(completion.text);
+    if (answer.ok) reply = answer.value;
+    else broken = answer;
+  }
+
+  const unreadableDetail = reply === null
+    ? safe(`модель дважды вернула негодный ответ (${broken.detail})`, key) : null;
+  const given = new Set(context.knowledge.map((item) => item.id));
+  const usedItemIds = reply?.usedItemIds.filter((id) => given.has(id)) ?? [];
+  const cited = new Set(usedItemIds);
+  const sources = [
+    ...context.knowledge.filter((item) => cited.has(item.id))
+      .flatMap((item) => [item.title, item.content]),
+    last.body ?? '', instructions,
+  ];
+  const invented = reply === null ? null : unsourcedNumber(reply.reply, sources);
+  const reasons: string[] = [];
+  if (reply?.handoff !== null && reply?.handoff !== undefined) {
+    reasons.push(safe(reply.handoff.reason, key));
+  }
+  if (invented !== null) reasons.push(UNSOURCED(invented));
+  const handoffReason = unreadableDetail ?? (reasons.length === 0 ? null : reasons.join('; '));
+
+  const known = new Set(fieldRows.map((field) => field.id));
+  const fields = input.allowProposedCrm && reply !== null
+    ? Object.fromEntries(Object.entries(reply.fields).filter(([id]) => known.has(id))) : {};
+  const details: string[] = [];
+  let targetStage: typeof stages.$inferSelect | null = null;
+  if (input.allowProposedCrm && reply?.stageId) {
+    const target = stageRows.find((stage) => stage.id === reply.stageId);
+    if (!target) details.push(`Модель назвала этап, которого у агента нет: ${reply.stageId.slice(0, 80)}.`);
+    else if (target.kind === 'success' && !await input.canMoveToSuccess()) {
+      details.push('Оплата ещё не подтверждена Kaspi. Стадия оплаты не изменена.');
+    } else if (target.id !== input.stageId) targetStage = target;
+  }
+
+  return { kind: 'ready', key, usage, reply, usedItemIds,
+    usedItems: context.knowledge.filter((item) => cited.has(item.id))
+      .map(({ id, title }) => ({ id, title })),
+    invented, handoffReason, unreadableDetail, fields,
+    targetStage, stageRows, fieldRows, details };
+}
+
 export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise<TurnResult> {
   const dryRun = input.dryRun === true;
 
@@ -568,36 +712,6 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
     lastMessageId: last.id,
   };
 
-  let key: string;
-  try {
-    key = decryptSecret(agent.openrouterKey, deps.key, keyAad(agent.id));
-  } catch {
-    // A rotated credentials key, or a row restored from a dump taken under another one.
-    // Logged rather than skipped: nothing is wrong with the conversation, and the owner is
-    // the only person who can fix it.
-    const detail = 'Не удалось прочитать ключ OpenRouter. Введите ключ заново в настройках агента.';
-    if (!dryRun) {
-      await db.insert(aiReplies).values({
-        agentId: agent.id,
-        conversationId: conversation.id,
-        model: agent.model,
-        outcome: 'failed',
-        detail,
-      });
-    }
-    return empty('failed', detail);
-  }
-
-  const stageRows = await db
-    .select()
-    .from(stages)
-    .where(eq(stages.agentId, agent.id))
-    .orderBy(asc(stages.position));
-  const fieldRows = await db
-    .select()
-    .from(leadFields)
-    .where(eq(leadFields.agentId, agent.id))
-    .orderBy(asc(leadFields.position));
   const values = await db
     .select({ fieldId: leadValues.fieldId, name: leadFields.name, value: leadValues.value })
     .from(leadValues)
@@ -605,116 +719,22 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
     .where(eq(leadValues.conversationId, conversation.id))
     .orderBy(asc(leadFields.position));
 
-  // Retrieval runs on the message being answered, which is the only thing that says what
-  // the customer wants to know right now.
-  const hits = await searchKnowledge(db, agent.id, last.body ?? '', KNOWLEDGE_LIMIT);
-
-  // `agents.instructions` is gone; this is the same string, assembled from the owner's rules.
-  // Read once and used twice below — in the prompt, and again as one of the number guard's
-  // three sources — so the two can never see a different owner's text.
-  const instructions = assembleRules(await loadRules(db, agent.id));
-
-  const context: TurnContext = {
-    agent: {
-      name: agent.name,
-      timezone: agent.timezone,
-      instructions,
-      replyLanguage: agent.replyLanguage,
-    },
-    stages: stageRows.map((stage) => ({
-      id: stage.id,
-      name: stage.name,
-      description: stage.description,
-    })),
-    fields: fieldRows.map((field) => ({
-      id: field.id,
-      name: field.name,
-      kind: field.kind,
-      hint: field.hint,
-    })),
-    knowledge: hits.map((hit) => ({
-      id: hit.chunk.id,
-      kind: hit.chunk.kind,
-      title: hit.chunk.title,
-      content: hit.chunk.content,
-    })),
-    history: history.map((message) => ({
-      author: message.author,
-      body: message.body,
-      kind: message.kind,
-    })),
-    lead: {
-      stageId: conversation.stageId,
-      stageName: stageRows.find((stage) => stage.id === conversation.stageId)?.name ?? null,
-      values,
-    },
-  };
-
-  const prompt = buildMessages(context);
-
-  let promptTokens = 0;
-  let completionTokens = 0;
-  let cost = '0';
-  let reply: AgentReply | null = null;
-  let broken: Read & { ok: false } = {
-    ok: false,
-    kind: 'ответ не подошёл',
-    detail: 'ответ не подошёл',
-  };
-
-  /** Everything a turn has spent so far, whatever it ends up producing. */
-  const spend = () => ({
-    agentId: agent.id,
-    conversationId: conversation.id,
-    model: agent.model,
-    promptTokens,
-    completionTokens,
-    cost,
+  const core = await executeAiCore(db, deps, {
+    agent,
+    history: history.map(({ author, body, kind }) => ({ author, body, kind })),
+    stageId: conversation.stageId,
+    values,
+    allowProposedCrm: !deps.crm || dryRun,
+    canContinue: dryRun ? undefined : () => automationAllowed(db, input, 'reply'),
+    canMoveToSuccess: () => hasConfirmedKaspiPayment(db, agent.id, conversation.id),
   });
-
-  // Twice at most. An answer that will not parse is retried once with the kind of error
-  // named; a `ModelError` is not — a 401 or a 429 will not come out differently the second
-  // time, and a second call on a rate limit is money spent making the limit worse.
-  for (let attempt = 0; attempt < 2 && reply === null; attempt += 1) {
-    if (!dryRun && !await automationAllowed(db, input, 'reply')) {
-      return empty('skipped', AUTOMATION_DISABLED);
+  const spend = () => ({ agentId: agent.id, conversationId: conversation.id,
+    model: agent.model, ...core.usage });
+  if (core.kind !== 'ready') {
+    if (!dryRun && core.kind === 'failed') {
+      await db.insert(aiReplies).values({ ...spend(), outcome: 'failed', detail: core.detail });
     }
-    const messagesToSend = attempt === 0 ? prompt : [...prompt, retryMessage(broken.kind)];
-
-    let completion;
-    try {
-      completion = await deps.model.complete({
-        key,
-        model: agent.model,
-        temperature: agent.temperature,
-        messages: messagesToSend,
-      });
-    } catch (error) {
-      const said =
-        error instanceof ModelError
-          ? `${error.message}${error.detail === undefined ? '' : ` ${error.detail}`}`
-          : String((error as { message?: string } | null)?.message ?? error);
-      // OpenRouter echoes a rejected credential back inside its own error, and this string
-      // lands in a column an owner reads on a screen.
-      const detail = safe(said, key);
-      if (!dryRun && !await automationAllowed(db, input, 'reply')) {
-        return empty('skipped', AUTOMATION_DISABLED);
-      }
-      if (!dryRun) {
-        await db.insert(aiReplies).values({ ...spend(), outcome: 'failed', detail });
-      }
-      // The customer is told nothing and the agent stays on, so the next message tries
-      // again: a key the owner has since fixed must not need a switch flipped back by hand.
-      return empty('failed', detail);
-    }
-
-    promptTokens += completion.promptTokens;
-    completionTokens += completion.completionTokens;
-    cost = addCost(cost, completion.cost);
-
-    const answer = read(completion.text);
-    if (answer.ok) reply = answer.value;
-    else broken = answer;
+    return empty(core.kind, core.detail);
   }
 
   // The thread may have moved while the model was thinking. Checked before anything is
@@ -731,13 +751,13 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
     return empty('skipped', AUTOMATION_DISABLED);
   }
 
-  const details: string[] = [];
-
+  const { key, reply, usedItemIds, invented, handoffReason, targetStage,
+    stageRows, details } = core;
   if (reply === null) {
     // Twice unreadable. A handoff rather than a failure: something is wrong with this
     // conversation that a person has to look at, and the customer is left to that person
     // rather than to a third attempt.
-    const detail = safe(`модель дважды вернула негодный ответ (${broken.detail})`, key);
+    const detail = core.unreadableDetail!;
     const ownsHandoff = await handOff(db, { conversation, reason: detail, dryRun });
     if (!ownsHandoff) return empty('skipped', 'Оператор взял диалог на себя.');
     if (!dryRun) {
@@ -746,37 +766,7 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
     return empty('handoff', detail, detail);
   }
 
-  // A citation of a record the model was never given is a citation of nothing: stored, it
-  // would send an owner reading a bad answer to a record they cannot see, or to another
-  // agent's.
-  const given = new Set(context.knowledge.map((item) => item.id));
-  const usedItemIds = reply.usedItemIds.filter((id) => given.has(id));
-
-  // The rule the whole stage rests on, enforced here rather than only asked for in the
-  // prompt. Every number in the reply has to appear in the text the agent was actually
-  // given: the records it cited, the message it is answering, and the owner's instructions.
-  //
-  // All three, not the records alone. The customer's own «нужны 2 двери» comes back in the
-  // agent's clarifying question, and the owner's «работаем с 2015 года» is a line rule 9
-  // tells the agent to repeat — a check that saw only the records would silence both and
-  // hand the thread to a person over a greeting.
-  //
-  // See `unsourcedNumber` for what this still cannot catch.
-  const cited = new Set(usedItemIds);
-  const sources = [
-    ...context.knowledge
-      .filter((item) => cited.has(item.id))
-      .flatMap((item) => [item.title, item.content]),
-    last.body ?? '',
-    instructions,
-  ];
-  const invented = unsourcedNumber(reply.reply, sources);
   const unsourced = invented !== null;
-
-  const reasons: string[] = [];
-  if (reply.handoff !== null) reasons.push(safe(reply.handoff.reason, key));
-  if (invented !== null) reasons.push(UNSOURCED(invented));
-  const handoffReason = reasons.length === 0 ? null : reasons.join('; ');
 
   // Fields first, then the stage, then the send. A customer who receives an answer must
   // find the lead in the state that answer implies, so nothing is sent until everything
@@ -786,12 +776,7 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
   let ownsHandoff = false;
 
   try {
-    const known = new Set(fieldRows.map((field) => field.id));
-    // An id the model invented, or one of a field the owner has since deleted, is dropped
-    // in silence: it must not cost the customer their answer.
-    applied = Object.fromEntries(
-      Object.entries(reply.fields).filter(([fieldId]) => (!deps.crm || dryRun) && known.has(fieldId)),
-    );
+    applied = core.fields;
     if (!dryRun && Object.keys(applied).length > 0) {
       const result = await withAutomationEffect(db, input, 'crm', async (tx) => {
         for (const [fieldId, value] of Object.entries(applied)) {
@@ -807,21 +792,9 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
       if (!result.allowed) return empty('skipped', AUTOMATION_DISABLED);
     }
 
-    if (reply.stageId !== null && (!deps.crm || dryRun)) {
-      // Matched against the stages already loaded rather than queried: an id that is not a
-      // uuid — the prompt's own example is prose a weak model copies — would reach a uuid
-      // column and turn a good answer into a raised error.
-      const target = stageRows.find((stage) => stage.id === reply.stageId);
-      if (!target) {
-        details.push(
-          `Модель назвала этап, которого у агента нет: ${reply.stageId.slice(0, 80)}.`,
-        );
-      } else if (target.kind === 'success' && !(await hasConfirmedKaspiPayment(db, agent.id, conversation.id))) {
-        details.push('Оплата ещё не подтверждена Kaspi. Стадия оплаты не изменена.');
-      } else if (target.id === conversation.stageId) {
-        // Already there. Writing it again would restamp `stageSetBy` and, worse, fire the
-        // stage's auto-message at a customer who is standing still.
-      } else if (dryRun) {
+    if (targetStage !== null) {
+      const target = targetStage;
+      if (dryRun) {
         movedTo = target.id;
       } else {
         /**

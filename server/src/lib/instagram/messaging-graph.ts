@@ -104,14 +104,20 @@ export function createInstagramMessagingClient(): InstagramMessagingClient {
       });
       return [...standard, ...fallback];
     },
+    /**
+     * Installs the app on the Page. Instagram messages are delivered by the app-level
+     * `instagram` webhook, which Meta only routes for Pages the app is installed on; any Page
+     * field installs it. `feed` is used because `messages` is a Messenger field that demands
+     * pages_messaging, which Meta refuses with (#200) for a Direct-only login.
+     */
     async subscribe(pageId, pageToken, appId) {
       const endpoint = `${GRAPH_ROOT}/${encodeURIComponent(pageId)}/subscribed_apps`;
       const response = await call<{ success?: boolean }>(
-        `${endpoint}?subscribed_fields=messages`, pageToken, { method: 'POST' },
+        `${endpoint}?subscribed_fields=feed`, pageToken, { method: 'POST' },
       );
       if (!response.success) throw new InstagramMessagingError('Meta не подтвердила подписку Instagram.');
       const verified = await call<{ data?: Array<{ id?: string; subscribed_fields?: string[] }> }>(`${endpoint}?fields=id,subscribed_fields`, pageToken);
-      if (!(verified.data ?? []).some((entry) => entry.id === appId && entry.subscribed_fields?.includes('messages'))) {
+      if (!(verified.data ?? []).some((entry) => entry.id === appId && entry.subscribed_fields?.includes('feed'))) {
         throw new InstagramMessagingError('Meta не показала активную подписку на сообщения Instagram.');
       }
     },

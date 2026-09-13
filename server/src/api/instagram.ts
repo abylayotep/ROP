@@ -52,7 +52,15 @@ export function registerInstagramRoutes(
 
   app.post('/api/agents/:agentId/instagram/connect', { preHandler: [guard, owner] }, async (req): Promise<InstagramDirectConnectResult> => {
     const parsed = connectBody.safeParse(req.body);
-    if (!parsed.success) throw new ApiError(400, 'Не удалось получить токен Instagram. Обновите страницу и повторите вход через Meta.');
+    if (!parsed.success) {
+      // Field names, issue codes and value types only: the body carries a user token.
+      const body = req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : null;
+      req.log.warn({ stage: 'request_body', bodyType: typeof req.body, contentType: req.headers['content-type'] ?? null,
+        fieldTypes: body ? Object.fromEntries(Object.entries(body).map(([key, value]) => [key, typeof value])) : null,
+        issues: parsed.error.issues.map((issue) => ({ path: issue.path.join('.'), code: issue.code })) },
+      'Instagram connection failed');
+      throw new ApiError(400, 'Не удалось получить токен Instagram. Обновите страницу и повторите вход через Meta.');
+    }
     let issued;
     try {
       issued = await graph.exchangeUserToken(parsed.data.accessToken, env.META_APP_ID, env.META_APP_SECRET);

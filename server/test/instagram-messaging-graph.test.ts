@@ -76,10 +76,22 @@ describe('Instagram messaging Graph protocol', () => {
     });
   });
 
-  it('verifies that this application owns the messages subscription', async () => {
+  // The Page `messages` field needs pages_messaging, which the Direct login never asks for;
+  // Instagram messages arrive through the app-level `instagram` subscription once the app is
+  // installed on the Page through any field pages_manage_metadata allows.
+  it('installs the app on the Page through the feed field', async () => {
+    const fetch = vi.fn(async (url: string | URL | Request) => String(url).includes('fields=id')
+      ? new Response(JSON.stringify({ data: [{ id: 'our-app', subscribed_fields: ['feed'] }] }), { status: 200 })
+      : new Response(JSON.stringify({ success: true }), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    await createInstagramMessagingClient().subscribe('page-1', 'secret', 'our-app');
+    expect(String(fetch.mock.calls[0]![0])).toContain('/page-1/subscribed_apps?subscribed_fields=feed');
+  });
+
+  it('verifies that this application is installed on the Page', async () => {
     const responses = [
       new Response(JSON.stringify({ success: true }), { status: 200 }),
-      new Response(JSON.stringify({ data: [{ id: 'another-app', subscribed_fields: ['messages'] }] }), { status: 200 }),
+      new Response(JSON.stringify({ data: [{ id: 'another-app', subscribed_fields: ['feed'] }] }), { status: 200 }),
     ];
     vi.stubGlobal('fetch', vi.fn(async () => responses.shift()!));
     await expect(createInstagramMessagingClient().subscribe('page-1', 'secret', 'our-app'))

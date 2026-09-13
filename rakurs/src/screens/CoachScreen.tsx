@@ -9,7 +9,8 @@ import { useToast } from '@/components/ui/Toast';
 import { useApi } from '@/hooks/useApi';
 import { useAgent } from '@/store/agent';
 import type { AgentRule, CoachMessage, ConversationThread, KbDraft } from '@/types';
-import { correctionSource, correctionText, findCompletedFeedback, type CorrectionTarget } from './response-feedback';
+import { clearPendingCorrection, correctionSource, correctionText, readPendingCorrection,
+  savePendingCorrection, type CorrectionTarget, type PendingCorrection } from './response-feedback';
 
 /**
  * Обучение: a chat where the owner teaches the agent, and the rules that chat has already
@@ -85,8 +86,12 @@ function Coach({ agentId, loaded }: { agentId: string; loaded: Loaded }) {
   const [text, setText] = useState('');
   const [correctionType, setCorrectionType] = useState<'fact' | 'behavior'>('fact');
   const [sending, setSending] = useState(false);
-  const [uncertain, setUncertain] = useState(false);
-  const pendingFeedback = useRef<{ existing: Set<string>; note: string } | null>(null);
+  const [pendingCorrection, setPendingCorrection] = useState<PendingCorrection | null>(() => {
+    try { return typeof window === 'undefined' ? null : readPendingCorrection(window.localStorage, agentId); }
+    catch { return null; }
+  });
+  const pendingRef = useRef(pendingCorrection);
+  const [pendingStatus, setPendingStatus] = useState<'pending' | 'failed' | 'unknown'>('unknown');
   const bottomRef = useRef<HTMLDivElement>(null);
   const textRef = useRef<HTMLTextAreaElement>(null);
 
@@ -102,11 +107,17 @@ function Coach({ agentId, loaded }: { agentId: string; loaded: Loaded }) {
   const aiReplyId = params.get('reply');
   const sandboxSessionId = params.get('session');
   const sandboxTurnId = params.get('turn');
-  const correctionTarget: CorrectionTarget | null = sandboxSessionId && sandboxTurnId
+  const selectedTarget: CorrectionTarget | null = sandboxSessionId && sandboxTurnId
     ? { kind: 'sandbox', sessionId: sandboxSessionId, turnId: sandboxTurnId }
     : conversationId && aiReplyId
       ? { kind: 'live', conversationId, replyId: aiReplyId }
       : null;
+  const correctionTarget = pendingCorrection?.target ?? selectedTarget;
+  const previewKey = correctionTarget ? JSON.stringify(correctionSource(correctionTarget)) : '';
+  const preview = useApi(async (signal) => correctionTarget
+    ? { key: previewKey, snapshot: await api.previewResponseFeedback(agentId, correctionSource(correctionTarget), signal) }
+    : null, [agentId, previewKey]);
+  const previewReady = !correctionTarget || (preview.data?.key === previewKey && !preview.error);
   const detach = () => setParams({}, { replace: true });
 
   useEffect(() => {
@@ -120,42 +131,48 @@ function Coach({ agentId, loaded }: { agentId: string; loaded: Loaded }) {
   }, [conversationId]);
 
   async function checkFeedbackStatus() {
-    const pending = pendingFeedback.current;
+    const pending = pendingRef.current;
     if (!pending) return;
     try {
-      const fresh = await api.listCoachMessages(agentId);
-      const related = fresh.filter((item) => item.feedbackId && !pending.existing.has(item.feedbackId));
-      const completed = findCompletedFeedback(fresh, pending.existing, pending.note);
-      if (completed) {
-        setMessages(fresh);
-        pendingFeedback.current = null;
-        setUncertain(false);
+      const status = await api.getCoachFeedbackRequest(agentId, pending.requestKey);
+      if (status.status === 'completed' && status.message) {
+        try { setMessages(await api.listCoachMessages(agentId)); }
+        catch { setMessages((prev) => [...prev, status.message!]); }
+        clearPendingCorrection(window.localStorage, agentId);
+        pendingRef.current = null;
+        setPendingCorrection(null);
         setParams({}, { replace: true });
-      } else if (related.some((item) => item.role === 'owner' && item.text === pending.note)) {
-        setMessages(fresh);
-      }
+      } else setPendingStatus(status.status === 'failed' ? 'failed' : 'pending');
     } catch {
-      // The status remains unknown. Keep the composer blocked rather than resending.
+      setPendingStatus('unknown');
     }
   }
 
   useEffect(() => {
-    if (!uncertain) return;
+    if (!pendingCorrection) return;
+    void checkFeedbackStatus();
     const timer = setInterval(() => void checkFeedbackStatus(), 5_000);
     return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [uncertain, agentId]);
+  }, [pendingCorrection?.requestKey, agentId]);
 
   async function send(event: FormEvent) {
     event.preventDefault();
     const value = text.trim();
-    if (value === '' || sending || uncertain) return;
+    if (value === '' || sending || pendingCorrection || !previewReady) return;
 
     setSending(true);
-    if (correctionTarget) pendingFeedback.current = {
-      existing: new Set(messages.map((item) => item.feedbackId).filter((id): id is string => !!id)),
-      note: value,
-    };
+    let requestKey: string | undefined;
+    if (correctionTarget) {
+      const pending: PendingCorrection = { requestKey: crypto.randomUUID(), target: correctionTarget,
+        note: value, correctionType };
+      try { savePendingCorrection(window.localStorage, agentId, pending); }
+      catch { setSending(false); toast.fail(new Error('Не удалось сохранить ключ запроса в браузере')); return; }
+      requestKey = pending.requestKey;
+      pendingRef.current = pending;
+      setPendingCorrection(pending);
+      setPendingStatus('unknown');
+    }
     // Shown right away — the owner's own line does not need the model's turn to finish to
     // appear, and it costs nothing to write locally.
     const ownerLine: CoachMessage = {
@@ -177,10 +194,15 @@ function Coach({ agentId, loaded }: { agentId: string; loaded: Loaded }) {
         text: value,
         conversationId: conversationId ?? undefined,
         aiReplyId: aiReplyId ?? undefined,
+        requestKey,
         feedback: correctionTarget ? {
           source: correctionSource(correctionTarget), correctionType, note: correctionText(value)!,
         } : undefined,
       });
+      if (!('id' in reply)) {
+        setPendingStatus('pending');
+        return;
+      }
       let savedReply: CoachMessage | undefined;
       try {
         savedReply = (await api.listCoachMessages(agentId)).find((item) => item.id === reply.id);
@@ -202,15 +224,18 @@ function Coach({ agentId, loaded }: { agentId: string; loaded: Loaded }) {
           createdAt: new Date().toISOString(),
         },
       ]);
-      if (correctionTarget) setParams({}, { replace: true });
-      pendingFeedback.current = null;
+      if (correctionTarget) {
+        clearPendingCorrection(window.localStorage, agentId);
+        pendingRef.current = null;
+        setPendingCorrection(null);
+        setParams({}, { replace: true });
+      }
     } catch (error) {
-      if (correctionTarget && !(error instanceof api.ApiError && error.status >= 400 && error.status < 500)) {
-        setUncertain(true);
+      if (correctionTarget) {
+        setPendingStatus('unknown');
         void checkFeedbackStatus();
         return;
       }
-      pendingFeedback.current = null;
       // The turn never happened — its line does not stay, and the text goes back into the
       // box so retyping a paragraph is not the price of a failed send.
       setMessages((prev) => prev.filter((m) => m.id !== ownerLine.id));
@@ -231,7 +256,7 @@ function Coach({ agentId, loaded }: { agentId: string; loaded: Loaded }) {
         {conversationId !== null && (
           <AttachedDialog agentId={agentId} conversationId={conversationId} onDetach={detach} />
         )}
-        {correctionTarget && <CorrectionContext agentId={agentId} target={correctionTarget} messageId={params.get('message')} />}
+        {correctionTarget && <CorrectionContext agentId={agentId} target={correctionTarget} messageId={params.get('message')} preview={preview} previewKey={previewKey} />}
         <Card pad={false}>
           <div
             style={{
@@ -296,9 +321,22 @@ function Coach({ agentId, loaded }: { agentId: string; loaded: Loaded }) {
         </Card>
 
         <form onSubmit={send} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {uncertain && <div role="alert">Статус исправления неизвестен: коуч мог сохранить предложение. Повторная отправка заблокирована.
+          {pendingCorrection && <div role="alert">{pendingStatus === 'failed'
+            ? 'Исправление завершилось с ошибкой. Этот запрос не будет повторно запускать модель.'
+            : pendingStatus === 'pending' ? 'Коуч ещё обрабатывает исправление. Повторная отправка заблокирована.'
+              : 'Статус исправления неизвестен: коуч мог сохранить предложение. Повторная отправка заблокирована.'}
             <button type="button" className="btn btn-sm" onClick={() => void checkFeedbackStatus()}>Проверить статус</button>
+            <button type="button" className="btn btn-sm" onClick={() => {
+              clearPendingCorrection(window.localStorage, agentId);
+              pendingRef.current = null;
+              setPendingCorrection(null);
+              setText(pendingCorrection.note);
+              setMessages((prev) => prev.filter((item) => !item.id.startsWith('local-')));
+            }}>Я понимаю риск и начну новое исправление</button>
           </div>}
+          {correctionTarget && !previewReady && <p role="status">{preview.error
+            ? 'Не удалось проверить источники. Повторите загрузку страницы перед отправкой.'
+            : 'Проверяем источники перед отправкой…'}</p>}
           {correctionTarget && <>
             <label htmlFor="correction-type">Тип исправления</label>
             <select id="correction-type" value={correctionType} onChange={(event) => setCorrectionType(event.target.value as 'fact' | 'behavior')}>
@@ -312,12 +350,12 @@ function Coach({ agentId, loaded }: { agentId: string; loaded: Loaded }) {
             ref={textRef}
             style={{ ...control, minHeight: 72 }}
             value={text}
-            disabled={sending || uncertain}
+            disabled={sending || !!pendingCorrection}
             placeholder="Например: мы продаём мебель на заказ, всегда спрашиваем город и срок"
             onChange={(e) => setText(e.target.value)}
           />
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <button type="submit" className="btn" disabled={sending || uncertain || correctionText(text) === null}>
+            <button type="submit" className="btn" disabled={sending || !!pendingCorrection || !previewReady || correctionText(text) === null}>
               {sending ? 'Коуч отвечает…' : correctionTarget ? 'Создать предложение' : 'Отправить'}
             </button>
             {/* Every turn is a real OpenRouter call, the same money a sandbox run spends —
@@ -394,10 +432,11 @@ function OpenDrafts({ agentId }: { agentId: string }) {
   );
 }
 
-function CorrectionContext({ agentId, target, messageId }: { agentId: string; target: CorrectionTarget; messageId: string | null }) {
-  const preview = useApi((signal) => api.previewResponseFeedback(agentId, correctionSource(target), signal),
-    [agentId, target.kind, target.kind === 'sandbox' ? target.sessionId : target.conversationId,
-      target.kind === 'sandbox' ? target.turnId : target.replyId]);
+function CorrectionContext({ agentId, target, messageId, preview, previewKey }: {
+  agentId: string; target: CorrectionTarget; messageId: string | null;
+  preview: ReturnType<typeof useApi<{ key: string; snapshot: import('@rakurs/contract').CoachSourceSnapshot } | null>>;
+  previewKey: string;
+}) {
   const context = useApi(async (signal) => target.kind === 'sandbox'
     ? api.getAiSandboxSession(agentId, target.sessionId, signal)
     : api.getConversation(agentId, target.conversationId, signal,
@@ -415,7 +454,7 @@ function CorrectionContext({ agentId, target, messageId }: { agentId: string; ta
       {session.turns.slice(Math.max(0, index - 2), index + 1).map((item) =>
         <p key={item.id}>Клиент: {item.userText}<br />Агент: {item.reply ?? 'Без ответа'}</p>)}
       <strong>Проверенные источники ответа</strong>
-      <VerifiedSources preview={preview} />
+      <VerifiedSources preview={preview} previewKey={previewKey} />
     </Card>;
   }
   const thread = context.data as ConversationThread;
@@ -426,15 +465,18 @@ function CorrectionContext({ agentId, target, messageId }: { agentId: string; ta
     {thread.messages.slice(Math.max(0, index - 5), index + 1).map((message) =>
       <p key={message.id}>{message.author === 'ai' ? 'Агент' : message.author === 'client' ? 'Клиент' : 'Оператор'}: {message.body}</p>)}
     <strong>Проверенные источники выбранного ответа</strong>
-    <VerifiedSources preview={preview} />
+    <VerifiedSources preview={preview} previewKey={previewKey} />
   </Card>;
 }
 
-function VerifiedSources({ preview }: { preview: ReturnType<typeof useApi<import('@rakurs/contract').CoachSourceSnapshot>> }) {
+function VerifiedSources({ preview, previewKey }: {
+  preview: ReturnType<typeof useApi<{ key: string; snapshot: import('@rakurs/contract').CoachSourceSnapshot } | null>>;
+  previewKey: string;
+}) {
   if (preview.error) return <p role="alert">Не удалось проверить источники. Обновите страницу перед отправкой исправления.</p>;
-  if (!preview.data) return <p>Проверяем источники ответа…</p>;
-  return preview.data.sourceRecords.length
-    ? <ul>{preview.data.sourceRecords.map((source) => <li key={source.id}>{source.title}: {source.content}</li>)}</ul>
+  if (!preview.data || preview.data.key !== previewKey) return <p>Проверяем источники ответа…</p>;
+  return preview.data.snapshot.sourceRecords.length
+    ? <ul>{preview.data.snapshot.sourceRecords.map((source) => <li key={source.id}>{source.title}: {source.content}</li>)}</ul>
     : <p>Источники не использовались.</p>;
 }
 

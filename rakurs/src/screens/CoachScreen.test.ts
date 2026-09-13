@@ -14,7 +14,7 @@ vi.mock('@/hooks/useApi', () => ({ useApi: (fetcher: Function, deps: unknown[]) 
     status: 'pending', draftId: null, conversationId: null, revision: 1, warning: null,
     sourceSnapshot: { responseText: 'Доставка завтра.', sourceRecords: [{ id: 'source-1', title: 'Проверенная доставка', content: 'Три дня.' }] },
     createdAt: '2026-09-12T10:00:00.000Z' }], rules: [] }
-    : call.includes('previewResponseFeedback') ? fixture.preview ? { responseText: 'Доставка завтра.', sourceRecords: [{ id: 'source-1', title: 'Проверенная доставка', content: 'Три дня.' }] } : undefined
+    : call.includes('previewResponseFeedback') ? fixture.preview ? { key: deps[1], snapshot: { responseText: 'Доставка завтра.', sourceRecords: [{ id: 'source-1', title: 'Проверенная доставка', content: 'Три дня.' }] } } : undefined
     : call.includes('getAiSandboxSession') && deps[1] === 'sandbox' ? { turns: [{ id: 'turn-1', revision: 1, userText: 'Когда доставка?', reply: 'Доставка завтра.' }] }
     : call.includes('getConversation') ? { messages: [{ id: 'message-1', aiReplyId: null, author: 'client', body: 'Когда доставка?' },
       { id: 'message-2', aiReplyId: 'reply-1', author: 'ai', body: 'Доставка завтра.' }] }

@@ -240,6 +240,44 @@ afterEach(async () => {
 });
 
 describe('the coaching conversation', () => {
+  it('refuses unkeyed correction feedback before calling the model', async () => {
+    const target = await agentAnswered('Wrong answer');
+    const res = await app.inject({ method: 'POST', url: coach(), cookies: jar, payload: {
+      text: 'Correct it', feedback: { source: { kind: 'conversation_reply', ...target }, correctionType: 'fact', note: 'Correct it' },
+    } });
+    expect(res.statusCode).toBe(400);
+    expect(model.calls).toHaveLength(0);
+  });
+  it('reserves a correction key once across concurrent in-flight posts and replays its completed proposal', async () => {
+    const target = await agentAnswered('Wrong answer');
+    const requestKey = randomUUID();
+    const payload = { text: 'Use the correct answer', requestKey, feedback: {
+      source: { kind: 'conversation_reply', conversationId: target.conversationId, aiReplyId: target.aiReplyId },
+      correctionType: 'fact', note: 'Use the correct answer',
+    } };
+    model.hang();
+    const first = app.inject({ method: 'POST', url: coach(), cookies: jar, payload });
+    while (model.calls.length === 0) await new Promise((resolve) => setImmediate(resolve));
+    const duplicate = await app.inject({ method: 'POST', url: coach(), cookies: jar, payload });
+    expect(duplicate.statusCode).toBe(202);
+    const statusUrl = `/api/agents/${agentId}/coach/feedback-requests/${requestKey}`;
+    expect((await app.inject({ method: 'GET', url: statusUrl, cookies: jar })).json().status).toBe('pending');
+    expect(model.calls).toHaveLength(1);
+    model.release();
+    const completed = await first;
+    expect(completed.statusCode).toBe(200);
+    const replay = await app.inject({ method: 'POST', url: coach(), cookies: jar, payload });
+    expect(replay.statusCode).toBe(200);
+    expect(replay.json().id).toBe(completed.json().id);
+    expect((await app.inject({ method: 'GET', url: statusUrl, cookies: jar })).json()).toMatchObject({
+      status: 'completed', message: { id: completed.json().id },
+    });
+    expect(model.calls).toHaveLength(1);
+    const changed = await app.inject({ method: 'POST', url: coach(), cookies: jar,
+      payload: { ...payload, text: 'Different correction' } });
+    expect(changed.statusCode).toBe(409);
+    expect(model.calls).toHaveLength(1);
+  });
   it('previews verified sources of the exact owned live reply before writing feedback', async () => {
     const target = await agentAnswered('Доставка за 2 дня');
     const url = `/api/agents/${agentId}/coach/feedback-preview?kind=conversation_reply&conversationId=${target.conversationId}&aiReplyId=${target.aiReplyId}`;
@@ -254,7 +292,7 @@ describe('the coaching conversation', () => {
     const [note] = await db.select().from(kbNotes);
     model.reply({ message: 'Corrected.', proposal: { kind: 'note_edit', noteId: note!.id, body: 'Delivery costs 1000 KZT.' } });
     const res = await app.inject({ method: 'POST', url: coach(), cookies: jar, payload: {
-      text: 'Use 1000 KZT.', feedback: { source: { kind: 'conversation_reply', conversationId, aiReplyId }, correctionType: 'fact', note: 'Correct delivery price.' },
+      text: 'Use 1000 KZT.', requestKey: randomUUID(), feedback: { source: { kind: 'conversation_reply', conversationId, aiReplyId }, correctionType: 'fact', note: 'Correct delivery price.' },
     } });
     expect(res.statusCode).toBe(200);
     const [feedback] = await db.select().from(responseFeedback);
@@ -273,7 +311,7 @@ describe('the coaching conversation', () => {
       kind: 'text', body: 'Future private message', sentAt: new Date(Date.now() + 60_000) });
     model.reply({ message: 'Noted.', proposal: null });
     const res = await app.inject({ method: 'POST', url: coach(), cookies: jar, payload: {
-      text: 'Correct it.', feedback: { source: { kind: 'conversation_reply', conversationId, aiReplyId }, correctionType: 'fact', note: 'Correct it.' },
+      text: 'Correct it.', requestKey: randomUUID(), feedback: { source: { kind: 'conversation_reply', conversationId, aiReplyId }, correctionType: 'fact', note: 'Correct it.' },
     } });
     expect(res.statusCode).toBe(200);
     expect((await db.select().from(responseFeedback))[0]!.snapshot.configVersion).toBe(2);
@@ -285,7 +323,7 @@ describe('the coaching conversation', () => {
     const { conversationId, aiReplyId } = await agentAnswered('Legacy answer');
     model.reply({ message: 'Noted.', proposal: null });
     const res = await app.inject({ method: 'POST', url: coach(), cookies: jar, payload: {
-      text: 'Correct it.', feedback: { source: { kind: 'conversation_reply', conversationId, aiReplyId }, correctionType: 'fact', note: 'Correct it.' },
+      text: 'Correct it.', requestKey: randomUUID(), feedback: { source: { kind: 'conversation_reply', conversationId, aiReplyId }, correctionType: 'fact', note: 'Correct it.' },
     } });
     expect(res.statusCode).toBe(200);
     expect((await db.select().from(responseFeedback))[0]!.snapshot.configVersion).toBeNull();
@@ -293,7 +331,7 @@ describe('the coaching conversation', () => {
 
   it('returns 404 for a foreign sandbox correction source', async () => {
     const res = await app.inject({ method: 'POST', url: coach(), cookies: jar, payload: {
-      text: 'Fix it', feedback: { source: { kind: 'sandbox_turn', sessionId: randomUUID(), turnId: randomUUID() }, correctionType: 'behavior', note: 'Use formal tone.' },
+      text: 'Fix it', requestKey: randomUUID(), feedback: { source: { kind: 'sandbox_turn', sessionId: randomUUID(), turnId: randomUUID() }, correctionType: 'behavior', note: 'Use formal tone.' },
     } });
     expect(res.statusCode).toBe(404);
     expect(await db.select().from(responseFeedback)).toEqual([]);
@@ -308,7 +346,7 @@ describe('the coaching conversation', () => {
     }).returning();
     model.reply({ message: 'Use formal tone.', proposal: { kind: 'rule', category: 'tone', text: 'Address customers formally.' } });
     const res = await app.inject({ method: 'POST', url: coach(), cookies: jar, payload: {
-      text: 'Use formal tone.', feedback: { source: { kind: 'sandbox_turn', sessionId: session!.id, turnId: turn!.id }, correctionType: 'behavior', note: 'Use formal tone.' },
+      text: 'Use formal tone.', requestKey: randomUUID(), feedback: { source: { kind: 'sandbox_turn', sessionId: session!.id, turnId: turn!.id }, correctionType: 'behavior', note: 'Use formal tone.' },
     } });
     expect(res.statusCode).toBe(200);
     expect(res.json().proposal.kind).toBe('rule');
@@ -326,7 +364,7 @@ describe('the coaching conversation', () => {
       revision: 2, userText: 'Future secret', reply: 'Later answer', configVersion: 1, model: 'test', outcome: 'replied' });
     model.reply({ message: 'Noted.', proposal: null });
     const res = await app.inject({ method: 'POST', url: coach(), cookies: jar, payload: {
-      text: 'Correct it.', feedback: { source: { kind: 'sandbox_turn', sessionId: session!.id, turnId: selected!.id }, correctionType: 'behavior', note: 'Correct it.' },
+      text: 'Correct it.', requestKey: randomUUID(), feedback: { source: { kind: 'sandbox_turn', sessionId: session!.id, turnId: selected!.id }, correctionType: 'behavior', note: 'Correct it.' },
     } });
     expect(res.statusCode).toBe(200);
     expect((await db.select().from(responseFeedback))[0]!.snapshot.transcript).not.toContain('Future secret');
@@ -336,7 +374,7 @@ describe('the coaching conversation', () => {
     const { conversationId, aiReplyId } = await agentAnswered('Wrong fact');
     model.reply({ message: 'Changed.', proposal: { kind: 'rule', category: 'business', text: 'Invent a price.' } });
     const res = await app.inject({ method: 'POST', url: coach(), cookies: jar, payload: {
-      text: 'Correct the fact.', feedback: { source: { kind: 'conversation_reply', conversationId, aiReplyId }, correctionType: 'fact', note: 'Correct the fact.' },
+      text: 'Correct the fact.', requestKey: randomUUID(), feedback: { source: { kind: 'conversation_reply', conversationId, aiReplyId }, correctionType: 'fact', note: 'Correct the fact.' },
     } });
     expect(res.statusCode).toBe(200);
     expect(res.json().proposal).toBeNull();
@@ -348,7 +386,7 @@ describe('the coaching conversation', () => {
     const [other] = await db.insert(kbNotes).values({ agentId, path: 'Other.md', title: 'Other' }).returning();
     model.reply({ message: 'Corrected.', proposal: { kind: 'note_edit', noteId: other!.id, body: 'New body' } });
     const res = await app.inject({ method: 'POST', url: coach(), cookies: jar, payload: {
-      text: 'Correct it.', feedback: { source: { kind: 'conversation_reply', conversationId, aiReplyId }, correctionType: 'fact', note: 'Correct it.' },
+      text: 'Correct it.', requestKey: randomUUID(), feedback: { source: { kind: 'conversation_reply', conversationId, aiReplyId }, correctionType: 'fact', note: 'Correct it.' },
     } });
     expect(res.statusCode).toBe(200);
     expect(res.json().proposal).toBeNull();

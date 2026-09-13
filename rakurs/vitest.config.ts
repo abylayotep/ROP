@@ -11,5 +11,5 @@ import { defineConfig } from 'vitest/config';
  */
 export default defineConfig({
   resolve: { alias: { '@': path.resolve(import.meta.dirname, 'src') } },
-  test: { include: ['src/**/*.test.ts'] },
+  test: { include: ['src/**/*.test.ts', 'src/**/*.test.tsx'], environmentOptions: { jsdom: { url: 'http://localhost/' } } },
 });

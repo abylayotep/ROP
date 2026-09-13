@@ -281,6 +281,13 @@
       "when": 1789294200000,
       "tag": "0039_required_correction_case",
       "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1789294800000,
+      "tag": "0040_coach_feedback_request_key",
+      "breakpoints": true
     }
   ]
 }

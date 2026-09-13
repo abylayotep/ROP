@@ -897,9 +897,13 @@ export const responseFeedback = pgTable('response_feedback', {
   sandboxTurnId: uuid('sandbox_turn_id'),
   correctionType: text('correction_type').$type<CorrectionType>().notNull(),
   note: text('note').notNull(),
+  requestKey: uuid('request_key'),
+  requestedByUserId: uuid('requested_by_user_id'),
+  requestHash: text('request_hash'),
+  failureReason: text('failure_reason'),
   snapshot: jsonb('snapshot').$type<CoachSourceSnapshot>().notNull(),
   revision: integer('revision').notNull().default(1),
-  status: text('status').$type<'pending' | 'proposed' | 'drafted'>().notNull().default('pending'),
+  status: text('status').$type<'pending' | 'proposed' | 'drafted' | 'failed'>().notNull().default('pending'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [
   foreignKey({ columns: [t.accountId, t.agentId], foreignColumns: [agents.accountId, agents.id], name: 'response_feedback_agent_scope_fk' }).onDelete('cascade'),
@@ -910,6 +914,7 @@ export const responseFeedback = pgTable('response_feedback', {
   check('response_feedback_revision_check', sql`${t.revision} > 0`),
   check('response_feedback_snapshot_bounds_check', sql`jsonb_typeof(${t.snapshot}) = 'object' and (${t.snapshot} - 'transcript' - 'responseText' - 'configVersion' - 'sourceIds' - 'sourceRecords') = '{}'::jsonb and jsonb_typeof(${t.snapshot}->'transcript') = 'string' and length(${t.snapshot}->>'transcript') <= 12000 and jsonb_typeof(${t.snapshot}->'responseText') = 'string' and length(${t.snapshot}->>'responseText') <= 4000 and jsonb_typeof(${t.snapshot}->'configVersion') in ('number', 'null') and jsonb_typeof(${t.snapshot}->'sourceIds') = 'array' and jsonb_array_length(${t.snapshot}->'sourceIds') <= 30 and jsonb_typeof(${t.snapshot}->'sourceRecords') = 'array' and jsonb_array_length(${t.snapshot}->'sourceRecords') <= 30 and pg_column_size(${t.snapshot}) <= 32768`),
   index('response_feedback_agent_created_idx').on(t.agentId, t.createdAt),
+  unique('response_feedback_request_key').on(t.agentId, t.requestedByUserId, t.requestKey),
 ]);
 
 /**

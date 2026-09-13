@@ -692,19 +692,25 @@ export interface CoachReply {
   warning: string | null;
 }
 
+export type CoachSendResult = CoachReply | { status: 'pending' };
+
+export const getCoachFeedbackRequest = (agentId: string, requestKey: string, signal?: AbortSignal) =>
+  request<{ status: 'pending' | 'completed' | 'failed'; message: CoachMessage | null; failureReason: string | null }>(
+    `/agents/${agentId}/coach/feedback-requests/${requestKey}`, { signal });
+
 /**
  * One turn of the coaching chat. Costs money — an OpenRouter call runs on the other end —
  * and can hold a turn slot as long as a sandbox call, hence the same long deadline.
  */
 export const sendCoachMessage = (
   agentId: string,
-  body: { text: string; conversationId?: string; aiReplyId?: string; feedback?: {
+  body: { text: string; conversationId?: string; aiReplyId?: string; requestKey?: string; feedback?: {
     source: { kind: 'conversation_reply'; conversationId: string; aiReplyId: string }
       | { kind: 'sandbox_turn'; sessionId: string; turnId: string };
     correctionType: 'fact' | 'behavior'; note: string;
   } },
 ) =>
-  request<CoachReply>(`/agents/${agentId}/coach/messages`, {
+  request<CoachSendResult>(`/agents/${agentId}/coach/messages`, {
     method: 'POST',
     body,
     timeoutMs: LONG_TIMEOUT_MS,

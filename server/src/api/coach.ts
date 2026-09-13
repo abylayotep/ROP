@@ -64,6 +64,7 @@
  * which section produced a *correct* answer is not this feature's job.
  */
 import { and, asc, desc, eq, inArray, lte, sql } from 'drizzle-orm';
+import { createHash } from 'node:crypto';
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
@@ -122,6 +123,7 @@ const EVIDENCE_CONTENT_LIMIT = 400;
 
 const postBody = z.object({
   text: z.string().trim().min(1).max(COACH_LIMIT),
+  requestKey: z.string().uuid().optional(),
   // A UUID we look up, not one we trust: an unknown or foreign id answers 404 below, the same
   // way a mistyped conversation id already does on `PATCH …/conversations/:conversationId/ai`.
   conversationId: z.string().trim().min(1).optional(),
@@ -391,6 +393,20 @@ export function registerCoachRoutes(
       return correction!.snapshot;
     });
 
+  app.get('/api/agents/:agentId/coach/feedback-requests/:requestKey',
+    { preHandler: [guard, ownerOnly] }, async (req) => {
+      const { requestKey } = req.params as { requestKey: string };
+      if (!z.string().uuid().safeParse(requestKey).success) throw new ApiError(404, 'Исправление не найдено');
+      const [feedback] = await db.select().from(responseFeedback).where(and(
+        eq(responseFeedback.agentId, req.agent!.id), eq(responseFeedback.requestedByUserId, req.user!.id),
+        eq(responseFeedback.requestKey, requestKey)));
+      if (!feedback) throw new ApiError(404, 'Исправление не найдено');
+      const [model] = await db.select().from(coachMessages).where(and(eq(coachMessages.agentId, req.agent!.id),
+        eq(coachMessages.feedbackId, feedback.id), eq(coachMessages.role, 'model')));
+      return { status: model ? 'completed' : feedback.status === 'failed' ? 'failed' : 'pending',
+        message: model ? toMessage(model) : null, failureReason: feedback.failureReason };
+    });
+
   app.post(
     '/api/agents/:agentId/coach/messages',
     {
@@ -398,10 +414,29 @@ export function registerCoachRoutes(
       // The same balance the sandbox spends, under the same bound `api/ai.ts` gives it.
       config: { rateLimit: { max: 20, timeWindow: '1 minute' } },
     },
-    async (req) => {
+    async (req, reply) => {
       const agentId = req.agent!.id;
       const parsed = postBody.safeParse(req.body);
       if (!parsed.success) throw new ApiError(400, 'Напишите сообщение агенту-коучу');
+      if (parsed.data.feedback && !parsed.data.requestKey) throw new ApiError(400, 'Для исправления нужен ключ запроса');
+      if (parsed.data.requestKey && !parsed.data.feedback) throw new ApiError(400, 'Ключ запроса допустим только для исправления');
+      const requestHash = parsed.data.requestKey
+        ? createHash('sha256').update(JSON.stringify({ ...parsed.data, requestKey: undefined })).digest('hex') : null;
+      async function replayFeedback(feedback: typeof responseFeedback.$inferSelect) {
+        if (feedback.requestHash !== requestHash) throw new ApiError(409, 'Ключ уже использован для другого исправления');
+        const [model] = await db.select().from(coachMessages).where(and(eq(coachMessages.agentId, agentId),
+          eq(coachMessages.feedbackId, feedback.id), eq(coachMessages.role, 'model')));
+        if (model) return { id: model.id, message: model.text, proposal: model.proposal, warning: model.warning };
+        if (feedback.status === 'failed') throw new ApiError(409, feedback.failureReason ?? 'Исправление завершилось с ошибкой. Создайте новый запрос.');
+        reply.code(202);
+        return { status: 'pending' as const };
+      }
+      if (parsed.data.requestKey) {
+        const [existing] = await db.select().from(responseFeedback).where(and(
+          eq(responseFeedback.agentId, agentId), eq(responseFeedback.requestedByUserId, req.user!.id),
+          eq(responseFeedback.requestKey, parsed.data.requestKey)));
+        if (existing) return replayFeedback(existing);
+      }
 
       // Refused before anything else runs — see the file comment for why this is not left
       // to `runCoach`'s own readable-sentence answer.
@@ -421,8 +456,31 @@ export function registerCoachRoutes(
         throw new ApiError(429, 'Коуч занят. Попробуйте через несколько секунд.');
       }
 
+      let feedbackId: string | null = null;
+      let claimed = false;
       try {
         const correction = await resolveFeedback(db, agentId, req.agent!.accountId, parsed.data.feedback);
+        if (correction) {
+          const [stored] = await db.insert(responseFeedback).values({
+            accountId: req.agent!.accountId, agentId,
+            conversationId: correction.conversationId, aiReplyId: correction.aiReplyId,
+            sessionId: correction.sessionId, sandboxTurnId: correction.sandboxTurnId,
+            correctionType: correction.correctionType, note: correction.note,
+            snapshot: correction.snapshot,
+            requestKey: parsed.data.requestKey ?? null,
+            requestedByUserId: parsed.data.requestKey ? req.user!.id : null,
+            requestHash,
+          }).onConflictDoNothing().returning({ id: responseFeedback.id });
+          if (!stored && parsed.data.requestKey) {
+            const [existing] = await db.select().from(responseFeedback).where(and(
+              eq(responseFeedback.agentId, agentId), eq(responseFeedback.requestedByUserId, req.user!.id),
+              eq(responseFeedback.requestKey, parsed.data.requestKey)));
+            if (!existing) throw new ApiError(409, 'Исправление изменилось');
+            return replayFeedback(existing);
+          }
+          feedbackId = stored!.id;
+          claimed = !!parsed.data.requestKey;
+        }
         const storedConversationId = correction?.conversationId ?? conversationId;
         // The reply this turn is about, and — only when the request named one specifically
         // rather than just the conversation — the sections it cited. Resolved ahead of the
@@ -450,18 +508,6 @@ export function registerCoachRoutes(
           correction ? Promise.resolve(correction.transcript) :
             conversationId === null ? Promise.resolve(null) : transcriptFor(db, conversationId),
         ]);
-
-        let feedbackId: string | null = null;
-        if (correction) {
-          const [stored] = await db.insert(responseFeedback).values({
-            accountId: req.agent!.accountId, agentId,
-            conversationId: correction.conversationId, aiReplyId: correction.aiReplyId,
-            sessionId: correction.sessionId, sandboxTurnId: correction.sandboxTurnId,
-            correctionType: correction.correctionType, note: correction.note,
-            snapshot: correction.snapshot,
-          }).returning({ id: responseFeedback.id });
-          feedbackId = stored!.id;
-        }
 
         // Returns its own `createdAt` — Postgres's clock, stamped right after the store above
         // was read — so the model row below can carry it as `contextAt`: the instant the
@@ -513,12 +559,20 @@ export function registerCoachRoutes(
           })
           .returning();
 
+        if (claimed && feedbackId) await db.update(responseFeedback).set({ status: 'proposed' })
+          .where(eq(responseFeedback.id, feedbackId));
+
         return {
           id: modelRow!.id,
           message: result.text,
           proposal: result.proposal,
           warning: result.warning,
         };
+      } catch (error) {
+        if (claimed && feedbackId) await db.update(responseFeedback)
+          .set({ status: 'failed', failureReason: 'Исправление завершилось с ошибкой. Создайте новый запрос.' })
+          .where(eq(responseFeedback.id, feedbackId));
+        throw error;
       } finally {
         releaseTurnSlot();
       }

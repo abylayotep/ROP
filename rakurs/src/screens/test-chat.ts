@@ -32,7 +32,7 @@ export function openSession(state: TestChatState, session: AiSandboxSessionDetai
 
 export function beginSend(state: TestChatState): TestChatState {
   const text = state.composer.trim();
-  if (!state.session || state.pending || text === '') return state;
+  if (!state.session || state.pending || terminalSessionReason(state.session) || text === '') return state;
   return {
     ...state,
     composer: '',
@@ -48,6 +48,8 @@ export function acceptTurn(state: TestChatState, turn: AiSandboxTurn): TestChatS
     session: {
       ...state.session,
       revision: turn.revision,
+      handoff: turn.handoff ?? state.session.handoff,
+      outcome: turn.outcome,
       turns: [...state.session.turns.filter((item) => item.id !== turn.id), turn]
         .sort((a, b) => a.revision - b.revision),
     },
@@ -98,4 +100,27 @@ export function startNewSession(
     selectedTurnId: null,
     error: null,
   };
+}
+
+export function terminalSessionReason(session: AiSandboxSessionSummary | null): string | null {
+  if (session?.archivedAt) return 'Этот тест завершён. Создайте новый тест, чтобы продолжить.';
+  if (session?.handoff) return 'Диалог был бы передан человеку. Создайте новый тест для другого сценария.';
+  return null;
+}
+
+export function visibleSessions(
+  serverSessions: AiSandboxSessionSummary[],
+  createdSessions: AiSandboxSessionSummary[],
+): AiSandboxSessionSummary[] {
+  const serverIds = new Set(serverSessions.map((session) => session.id));
+  return [...createdSessions.filter((session) => !serverIds.has(session.id)), ...serverSessions];
+}
+
+export function turnCountLabel(count: number): string {
+  const lastTwo = count % 100;
+  const last = count % 10;
+  const noun = lastTwo >= 11 && lastTwo <= 14
+    ? 'ходов'
+    : last === 1 ? 'ход' : last >= 2 && last <= 4 ? 'хода' : 'ходов';
+  return `${count} ${noun}`;
 }

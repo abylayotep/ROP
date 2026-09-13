@@ -11,6 +11,9 @@ import {
   selectTurn,
   selectedTurn,
   startNewSession,
+  terminalSessionReason,
+  turnCountLabel,
+  visibleSessions,
 } from './test-chat';
 
 const summary: AiSandboxSessionSummary = {
@@ -75,6 +78,16 @@ describe('test chat state', () => {
     expect(reconciled.error).toContain('отправьте');
   });
 
+  it('restores the draft after send and 409 and waits for explicit retry', () => {
+    const started = beginSend({ ...openSession(initialChatState(), detail), composer: '  Вопрос клиента  ' });
+    const fresh: AiSandboxSessionDetail = { ...detail, revision: 3, turns: [turn(1), turn(2), turn(3)] };
+    const recovered = reconcileConflict(started, fresh, 'Сессия изменилась.');
+    expect(recovered.pending).toBeNull();
+    expect(recovered.composer).toBe('Вопрос клиента');
+    expect(recovered.session?.turns.map((item) => item.id)).toEqual(['turn-1', 'turn-2', 'turn-3']);
+    expect(beginSend(recovered).pending).toEqual({ text: 'Вопрос клиента', revision: 3, sessionId: 'session-1' });
+  });
+
   it('preserves a non-revision 409 reason instead of claiming a version conflict', () => {
     const pending = beginSend({ ...openSession(initialChatState(), detail), composer: 'Hello' });
     const recovered = reconcileConflict(pending, detail, 'Ключ OpenRouter не задан.');
@@ -94,6 +107,39 @@ describe('test chat state', () => {
     expect(created.session?.id).toBe('session-2');
     expect(created.session?.turns).toEqual([]);
     expect(selectedTurn(created)).toBeNull();
+  });
+
+  it('keeps a newly created session visible when the server list is still stale', () => {
+    const created = { ...summary, id: 'session-2', revision: 0 };
+    expect(visibleSessions([summary], [created]).map((item) => item.id)).toEqual(['session-2', 'session-1']);
+    expect(visibleSessions([created, summary], [created]).map((item) => item.id)).toEqual(['session-2', 'session-1']);
+  });
+
+  it('retains multiple locally created sessions across repeated list failures', () => {
+    const first = { ...summary, id: 'session-2', revision: 0 };
+    const second = { ...summary, id: 'session-3', revision: 0 };
+    expect(visibleSessions([summary], [second, first]).map((item) => item.id))
+      .toEqual(['session-3', 'session-2', 'session-1']);
+  });
+
+  it('uses Russian turn plurals for 1, 2, 5 and 11', () => {
+    expect([1, 2, 5, 11, 21].map(turnCountLabel)).toEqual([
+      '1 ход', '2 хода', '5 ходов', '11 ходов', '21 ход',
+    ]);
+  });
+
+  it('does not send from an archived session', () => {
+    const state = { ...openSession(initialChatState(), { ...detail, archivedAt: '2026-09-12T11:00:00.000Z' }), composer: 'Another' };
+    expect(beginSend(state).pending).toBeNull();
+    expect(terminalSessionReason(state.session)).toContain('завершён');
+  });
+
+  it('stops after an AI handoff and directs the owner to a new test', () => {
+    const pending = beginSend({ ...openSession(initialChatState(), detail), composer: 'Need help' });
+    const handedOff = acceptTurn(pending, { ...turn(3), handoff: 'Нужен оператор', outcome: 'handoff' });
+    expect(handedOff.session?.handoff).toBe('Нужен оператор');
+    expect(beginSend({ ...handedOff, composer: 'Another' }).pending).toBeNull();
+    expect(terminalSessionReason(handedOff.session)).toContain('новый тест');
   });
 
   it('does not carry a draft into a different existing session', () => {

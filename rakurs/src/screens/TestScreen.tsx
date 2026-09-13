@@ -7,7 +7,8 @@ import { useApi } from '@/hooks/useApi';
 import { useAgent } from '@/store/agent';
 import {
   TEST_WARNING, acceptTurn, beginSend, failSend, initialChatState, openSession,
-  reconcileConflict, selectTurn, selectedTurn, startNewSession,
+  reconcileConflict, selectTurn, selectedTurn, startNewSession, terminalSessionReason,
+  turnCountLabel, visibleSessions, type TestChatState,
 } from './test-chat';
 import './test-screen.css';
 
@@ -16,7 +17,7 @@ const outcomeLabels: Record<string, string> = {
   unrecorded: 'Ответ отправился бы, но не записался бы',
   applied: 'Карточка лида обновилась бы без ответа',
   handoff: 'Диалог перешёл бы человеку',
-  failed: 'Ответ не дошёл бы',
+  failed: 'Агент не смог подготовить ответ',
   skipped: 'Агент не стал бы отвечать',
 };
 
@@ -40,6 +41,7 @@ function TestWorkspace({ agentId }: { agentId: string }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loadingSession, setLoadingSession] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [createdSessions, setCreatedSessions] = useState<AiSandboxSessionSummary[]>([]);
   const [loadError, setLoadError] = useState<unknown>(null);
   const requestSequence = useRef(0);
   const sending = useRef(false);
@@ -73,6 +75,7 @@ function TestWorkspace({ agentId }: { agentId: string }) {
     setLoadError(null);
     try {
       const created = await api.createAiSandboxSession(agentId);
+      setCreatedSessions((current) => [created, ...current]);
       setSelectedId(created.id);
       setChat((current) => startNewSession(current, created));
       sessions.reload();
@@ -117,7 +120,7 @@ function TestWorkspace({ agentId }: { agentId: string }) {
 
   const currentSession = chat.session?.id === selectedId ? chat.session : null;
   const activeTurn = currentSession && !loadingSession ? selectedTurn(chat) : null;
-  const list = sessions.data ?? [];
+  const list = visibleSessions(sessions.data ?? [], createdSessions);
 
   return (
     <div className="test-workspace">
@@ -132,9 +135,15 @@ function TestWorkspace({ agentId }: { agentId: string }) {
             {creating ? 'Создаём…' : 'Новый тест'}
           </button>
         </div>
-        {sessions.error !== undefined && sessions.data === undefined ? (
+        {sessions.error !== undefined && (sessions.data !== undefined || list.length > 0) && (
+          <div className="test-list-error" role="alert">
+            <span>Не удалось обновить список тестов. Показаны последние известные данные.</span>
+            <button type="button" className="btn btn-sm" onClick={sessions.reload}>Повторить</button>
+          </div>
+        )}
+        {sessions.error !== undefined && sessions.data === undefined && list.length === 0 ? (
           <ErrorState error={sessions.error} onRetry={sessions.reload} compact />
-        ) : sessions.data === undefined ? (
+        ) : sessions.data === undefined && list.length === 0 ? (
           <div className="test-list-loading"><Skeleton height={38} /><Skeleton height={38} /></div>
         ) : list.length === 0 ? (
           <p className="test-list-empty">Пока нет тестов. Создайте первый, чтобы проверить ответы агента.</p>
@@ -146,7 +155,7 @@ function TestWorkspace({ agentId }: { agentId: string }) {
                 onClick={() => void loadSession(session.id)} disabled={!!chat.pending || creating}
                 aria-current={selectedId === session.id ? 'true' : undefined}>
                 <span className="test-session-title">{session.title || `Тест от ${new Date(session.createdAt).toLocaleDateString('ru-RU')}`}</span>
-                <span className="test-session-meta">{session.revision} {session.revision === 1 ? 'ход' : 'ходов'}</span>
+                <span className="test-session-meta">{turnCountLabel(session.revision)}</span>
               </button>
             ))}
           </div>
@@ -193,21 +202,39 @@ function TestWorkspace({ agentId }: { agentId: string }) {
               )}
             </div>
             {chat.error && <div className="test-send-error" role="alert">{chat.error}</div>}
-            <form className="test-composer" onSubmit={send}>
-              <label className="sr-only" htmlFor="test-message">Сообщение клиента</label>
-              <textarea id="test-message" value={chat.composer}
-                onChange={(event) => setChat((state) => ({ ...state, composer: event.target.value }))}
-                disabled={!!chat.pending} maxLength={4000} rows={2}
-                placeholder="Сообщение клиента…" />
-              <button type="submit" className="btn btn-accent" disabled={!!chat.pending || !chat.composer.trim()}>
-                {chat.pending ? 'Ждём ответа…' : 'Отправить'}
-              </button>
-            </form>
+            <TestComposer chat={chat} onSend={send}
+              onChangeText={(text) => setChat((state) => ({ ...state, composer: text }))} />
           </>
         )}
       </Card>
 
       <TestTurnInspector turn={activeTurn} />
+    </div>
+  );
+}
+
+export function TestComposer({
+  chat, onSend, onChangeText,
+}: {
+  chat: TestChatState;
+  onSend: (event: FormEvent<HTMLFormElement>) => void;
+  onChangeText: (text: string) => void;
+}) {
+  const terminal = terminalSessionReason(chat.session);
+  const disabled = !!chat.pending || terminal !== null;
+  return (
+    <div>
+      {terminal && <div className="test-terminal" role="status">{terminal}</div>}
+      <form className="test-composer" onSubmit={onSend}>
+        <label className="sr-only" htmlFor="test-message">Сообщение клиента</label>
+        <textarea id="test-message" value={chat.composer}
+          onChange={(event) => onChangeText(event.target.value)}
+          disabled={disabled} maxLength={4000} rows={2}
+          placeholder="Сообщение клиента…" />
+        <button type="submit" className="btn btn-accent" disabled={disabled || !chat.composer.trim()}>
+          {chat.pending ? 'Ждём ответа…' : 'Отправить'}
+        </button>
+      </form>
     </div>
   );
 }
@@ -227,10 +254,10 @@ export function TestTurnInspector({ turn }: { turn: AiSandboxTurn | null }) {
         <div className="test-inspector-body">
           <div className="test-inspector-group">
             <h3>Источники</h3>
-            {turn.usedItems.length ? (
-              <ul>{turn.usedItems.map((item) => <li key={item.id}>{item.title}</li>)}</ul>
-            ) : turn.sourceIds.length ? (
-              <ul>{turn.sourceIds.map((id) => <li key={id}>Источник {id}</li>)}</ul>
+            {turn.sourceIds.length ? (
+              <ul>{turn.sourceIds.map((id) => (
+                <li key={id}>{turn.usedItems.find((item) => item.id === id)?.title ?? `Источник ${id}`}</li>
+              ))}</ul>
             ) : <p>Источники не использовались.</p>}
           </div>
           <div className="test-inspector-group">

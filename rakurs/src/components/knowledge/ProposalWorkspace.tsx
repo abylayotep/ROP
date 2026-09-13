@@ -306,16 +306,16 @@ export function ProposalWorkspace({
   }
 
   return (
-    <section className="proposal-workspace" aria-label="Предложения запуска">
+    <section className="proposal-workspace" aria-label="Найденные факты разбора">
       <header className="proposal-workspace__header">
         <div>
-          <p className="knowledge-kicker">Проверка предложений</p>
+          <p className="knowledge-kicker">Найденные факты</p>
           <h2>{kind === 'knowledge' ? 'База знаний' : 'Скрипт продаж'}</h2>
         </div>
         <span className="proposal-workspace__selection">Выбрано <b>{selectedCount}</b></span>
       </header>
 
-      <nav className="proposal-kind-tabs" role="tablist" aria-label="Тип предложений">
+      <nav className="proposal-kind-tabs" role="tablist" aria-label="Тип найденных фактов">
         {([
           ['knowledge', 'База знаний'],
           ['script', 'Скрипт продаж'],
@@ -354,7 +354,7 @@ export function ProposalWorkspace({
               Выбрать видимые
             </button>
             <button type="button" className="btn-link" disabled={selectionBusy || updating.length > 0 || selectedCount === 0} onClick={() => void setVisibleSelection(false)}>
-              Очистить выбор во всём запуске
+              Очистить выбор во всём разборе
             </button>
             <span>{selectionBusy ? 'Сохраняем выбор…' : `Выбор сохраняется сразу · максимум ${MAX_SELECTED_PROPOSALS}`}</span>
           </div>
@@ -393,7 +393,7 @@ export function ProposalWorkspace({
         )}
         {detail.proposals.nextCursor && onLoadMoreProposals && (
           <button type="button" className="knowledge-load-more" disabled={collectionState.proposals?.loading} onClick={onLoadMoreProposals}>
-            {collectionState.proposals?.loading ? 'Загружаем предложения…' : 'Показать ещё предложения'}
+            {collectionState.proposals?.loading ? 'Загружаем найденные факты…' : 'Показать ещё найденные факты'}
           </button>
         )}
       </div>
@@ -415,13 +415,17 @@ export function ProposalWorkspace({
         </footer>
       )}
 
-      <AuditSection
-        detail={detail}
-        onLoadMoreExclusions={onLoadMoreExclusions}
-        onLoadRawFindings={onLoadRawFindings}
-        onLoadMoreRawFindings={onLoadMoreRawFindings}
-        collectionState={collectionState}
-      />
+      {/* Excluded batches and raw findings are an audit trail, not the owner's main decision. */}
+      <details className="generation-details">
+        <summary>Подробности разбора</summary>
+        <AuditSection
+          detail={detail}
+          onLoadMoreExclusions={onLoadMoreExclusions}
+          onLoadRawFindings={onLoadRawFindings}
+          onLoadMoreRawFindings={onLoadMoreRawFindings}
+          collectionState={collectionState}
+        />
+      </details>
     </section>
   );
 }

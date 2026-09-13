@@ -57,9 +57,9 @@ describe('generation UI state', () => {
   });
 
   it.each([
-    ['missing_ai_configuration', null, 'Не сохранён API-ключ OpenRouter.', 'Откройте настройки ИИ, сохраните ключ и повторите запуск.'],
-    ['provider_error', 2, 'Пакет 3: AI-провайдер не ответил.', 'Проверьте ключ и баланс у провайдера, затем повторите запуск.'],
-    ['consolidation_failed', null, 'Не удалось собрать итоговые предложения.', 'Повторите запуск: сохранённые находки будут использованы без повторной обработки чатов.'],
+    ['missing_ai_configuration', null, 'Не сохранён API-ключ OpenRouter.', 'Откройте настройки ИИ, сохраните ключ и повторите разбор.'],
+    ['provider_error', 2, 'Часть 3: AI-провайдер не ответил.', 'Проверьте ключ и баланс у провайдера, затем повторите разбор.'],
+    ['consolidation_failed', null, 'Не удалось собрать итоговые предложения.', 'Повторите разбор: сохранённые находки будут использованы без повторной обработки чатов.'],
   ])('shows an actionable reason and recovery for %s', (code, ordinal, reason, recovery) => {
     expect(generationRunErrorPresentation({ batchId: ordinal === null ? null : 'batch-id', ordinal, code }))
       .toEqual({ reason, recovery });

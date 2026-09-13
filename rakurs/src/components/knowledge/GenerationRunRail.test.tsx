@@ -38,8 +38,9 @@ describe('GenerationRunRail', () => {
     }));
 
     expect(html).toContain('aria-pressed="true"');
-    expect(html).toContain('Показать ещё запусков');
-    expect(html).toContain('8');
+    expect(html).toContain('Показать ещё');
+    expect(html).not.toContain('Показать ещё запусков');
+    expect(html).toContain('найдено фактов: 8');
   });
 
   it('refreshes the active run summary without losing the rest of the rail', () => {

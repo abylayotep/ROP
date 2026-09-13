@@ -2,8 +2,8 @@ import { useState, type KeyboardEvent, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import * as api from '@/api';
 import { CoachChat } from '@/components/coach/CoachChat';
-import { ChatGenerationPanel } from '@/components/knowledge/ChatGenerationPanel';
 import { KnowledgeSourceCards, recentHistorySearch } from '@/components/knowledge/KnowledgeSourceCards';
+import { GenerationWizard } from '@/components/training/GenerationWizard';
 import { KnowledgeTab } from '@/components/training/KnowledgeTab';
 import { RepliesTab } from '@/components/training/RepliesTab';
 import { Card } from '@/components/ui/primitives';
@@ -155,6 +155,7 @@ export function TrainingScreen() {
           onOpenRecentHistory={() => setParams(recentHistorySearch(params), { replace: true })}
           onKnowledgeChanged={notes.reload}
           onOpenRules={() => go('replies')}
+          onOpenReplies={() => go('replies')}
         />
       )}
 
@@ -166,8 +167,8 @@ export function TrainingScreen() {
 }
 
 /**
- * Temporary «Научить» body: the existing generation panel, coach chat and source cards
- * behind a plain mode switch. The chooser and wizard replace it.
+ * Temporary «Научить» body: the generation wizard, coach chat and source cards
+ * behind a plain mode switch. The chooser replaces it.
  */
 function TeachPlaceholder({
   agentId,
@@ -178,6 +179,7 @@ function TeachPlaceholder({
   onOpenRecentHistory,
   onKnowledgeChanged,
   onOpenRules,
+  onOpenReplies,
 }: {
   agentId: string;
   mode: TeachMode | null;
@@ -187,6 +189,7 @@ function TeachPlaceholder({
   onOpenRecentHistory: () => void;
   onKnowledgeChanged: () => void;
   onOpenRules: () => void;
+  onOpenReplies: () => void;
 }) {
   return (
     <>
@@ -205,13 +208,12 @@ function TeachPlaceholder({
       </div>
       {mode === null && <Card><EmptyState>Выберите способ обучения агента.</EmptyState></Card>}
       {mode === 'chats' && (
-        <ChatGenerationPanel
+        <GenerationWizard
           key={`${agentId}:chats`}
           agentId={agentId}
           initialRunId={params.get('generation')}
-          mode="drafts"
           onRunId={onRunId}
-          readOnly={false}
+          onOpenReplies={onOpenReplies}
         />
       )}
       {mode === 'coach' && <CoachChat key={`${agentId}:coach`} agentId={agentId} onOpenRules={onOpenRules} />}

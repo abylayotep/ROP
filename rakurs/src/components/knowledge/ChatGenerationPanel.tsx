@@ -1,11 +1,7 @@
 import { useEffect, useReducer, useRef, useState, type SetStateAction } from 'react';
-import { Link } from 'react-router-dom';
 import * as api from '@/api';
-import { CommunicationStyleCard } from '@/components/knowledge/CommunicationStyleCard';
-import { GenerationRunRail, mergeDelayedRunFirstPage, mergeRunPages } from '@/components/knowledge/GenerationRunRail';
-import { ProposalWorkspace } from '@/components/knowledge/ProposalWorkspace';
+import { mergeDelayedRunFirstPage, mergeRunPages } from '@/components/knowledge/GenerationRunRail';
 import { useApi } from '@/hooks/useApi';
-import { RecentHistoryPreparation } from './RecentHistoryPreparation';
 import type { KbGenerationPreview, KbGenerationProposal, KbGenerationRunDetail, KbGenerationRunSummary } from '@/types';
 import {
   appendGenerationDetailPage,
@@ -15,6 +11,8 @@ import {
   mergeRefreshedGenerationDetail,
   reduceGenerationState,
   type GenerationDetailCollection,
+  type GenerationUiState,
+  type GenerationView,
 } from './generation-state';
 
 export const localMidnight = (value: string): string | null => {
@@ -87,55 +85,55 @@ export const generationDetailErrorPresentation = (
 export const generationRunErrorPresentation = (
   error: KbGenerationRunSummary['errors'][number],
 ): { reason: string; recovery: string } => {
-  const prefix = error.ordinal === null ? '' : `Пакет ${error.ordinal + 1}: `;
+  const prefix = error.ordinal === null ? '' : `Часть ${error.ordinal + 1}: `;
   switch (error.code) {
     case 'missing_ai_configuration':
       return {
         reason: 'Не сохранён API-ключ OpenRouter.',
-        recovery: 'Откройте настройки ИИ, сохраните ключ и повторите запуск.',
+        recovery: 'Откройте настройки ИИ, сохраните ключ и повторите разбор.',
       };
     case 'invalid_ai_configuration':
       return {
         reason: 'Сохранённый API-ключ OpenRouter не удалось прочитать.',
-        recovery: 'Сохраните ключ заново в настройках ИИ и повторите запуск.',
+        recovery: 'Сохраните ключ заново в настройках ИИ и повторите разбор.',
       };
     case 'provider_error':
     case 'batch_failed':
       return {
         reason: `${prefix}AI-провайдер не ответил.`,
-        recovery: 'Проверьте ключ и баланс у провайдера, затем повторите запуск.',
+        recovery: 'Проверьте ключ и баланс у провайдера, затем повторите разбор.',
       };
     case 'consolidation_failed':
       return {
         reason: 'Не удалось собрать итоговые предложения.',
-        recovery: 'Повторите запуск: сохранённые находки будут использованы без повторной обработки чатов.',
+        recovery: 'Повторите разбор: сохранённые находки будут использованы без повторной обработки чатов.',
       };
     case 'slot_timeout':
       return {
         reason: 'Сервис ИИ был занят слишком долго.',
-        recovery: 'Подождите немного и повторите запуск.',
+        recovery: 'Подождите немного и повторите разбор.',
       };
     case 'attempts_exhausted':
       return {
         reason: `${prefix}повторные попытки исчерпаны.`,
-        recovery: 'Подготовьте новый запуск для выбранных чатов.',
+        recovery: 'Начните новый разбор для выбранных чатов.',
       };
     case 'interrupted':
       return {
         reason: `${prefix}обработка прервалась при перезапуске сервера.`,
-        recovery: 'Повторите запуск: готовые пакеты не будут обрабатываться заново.',
+        recovery: 'Повторите разбор: готовые части не будут обрабатываться заново.',
       };
     case 'malformed_output':
     case 'invalid_output':
     case 'unsafe_output':
       return {
         reason: `${prefix}AI-провайдер вернул непригодный ответ.`,
-        recovery: 'Повторите запуск; небезопасный текст не был добавлен.',
+        recovery: 'Повторите разбор; небезопасный текст не был добавлен.',
       };
     default:
       return {
         reason: `${prefix}обработка завершилась с ошибкой (${error.code}).`,
-        recovery: 'Повторите запуск. Если ошибка повторится, сообщите код поддержке.',
+        recovery: 'Повторите разбор. Если ошибка повторится, сообщите код поддержке.',
       };
   }
 };
@@ -155,19 +153,52 @@ function useRunScopedState<T>(scope: object, initialValue: T) {
   return [current ? stored.value : initialValue, setValue] as const;
 }
 
-export function ChatGenerationPanel({
+export interface GenerationRunController {
+  state: GenerationUiState;
+  view: GenerationView;
+  detail: KbGenerationRunDetail | null;
+  busy: boolean;
+  detailLoading: boolean;
+  detailError: string | null;
+  actionError: string | null;
+  runs: {
+    items: KbGenerationRunSummary[];
+    loading: boolean;
+    error: unknown;
+    hasMore: boolean;
+    loadingMore: boolean;
+    pageError: string | null;
+    reload: () => void;
+    loadMore: () => Promise<void>;
+  };
+  start: (preview: KbGenerationPreview) => Promise<void>;
+  selectRun: (runId: string) => void;
+  reloadSelectedRun: () => Promise<void>;
+  action: (kind: 'cancel' | 'retry') => Promise<void>;
+  loadCollection: (collection: GenerationDetailCollection) => Promise<KbGenerationRunDetail | null>;
+  loadAllProposals: () => Promise<KbGenerationProposal[]>;
+  reset: () => void;
+  onProposalChanged: (proposal: KbGenerationProposal) => void;
+  collectionLoading: GenerationDetailCollection[];
+  collectionErrors: Partial<Record<GenerationDetailCollection, string>>;
+}
+
+/**
+ * Everything a chat-generation run needs on screen: the selected run's detail and polling,
+ * the run history pages, start/cancel/retry, and paged collections. Every piece of state is
+ * scoped to the (agent, run) pair so nothing from run A survives a switch to run B.
+ */
+export function useGenerationRun({
   agentId,
   initialRunId,
   onRunId,
-  readOnly = false,
-  mode = 'drafts',
+  readOnly,
 }: {
   agentId: string;
   initialRunId: string | null;
   onRunId: (runId: string | null) => void;
-  readOnly?: boolean;
-  mode?: 'drafts' | 'runs';
-}) {
+  readOnly: boolean;
+}): GenerationRunController {
   const [storedState, dispatch] = useReducer(reduceGenerationState, initialGenerationState({ conversationIds: [], from: '', to: '' }));
   // Route changes must hide stale detail before the passive run_requested effect.
   const state = storedState.detail && storedState.detail.run.id !== initialRunId
@@ -404,144 +435,35 @@ export function ChatGenerationPanel({
     onRunId(null);
   };
 
-  return (
-    <div className="knowledge-review-grid">
-      <GenerationRunRail
-        runs={visibleRuns}
-        activeRunId={initialRunId}
-        loading={runs.loading}
-        error={runs.error}
-        hasMore={nextRunsCursor !== null}
-        loadingMore={loadingRuns}
-        onSelect={selectRun}
-        onRetry={runs.reload}
-        onLoadMore={() => void loadMoreRuns()}
-        loadMoreError={runPageError}
-        onRetryLoadMore={() => void loadMoreRuns()}
-      />
-
-      <section className="generation-review" aria-label={mode === 'runs' ? 'Сведения о запуске' : 'Проверка черновика'}>
-        <header className="generation-review__head">
-          <div>
-            <p className="knowledge-kicker">{mode === 'runs' ? 'Сведения и аудит' : 'Новая версия'}</p>
-            <h2>{mode === 'runs' ? 'Выбранный запуск' : 'Черновики из переписки'}</h2>
-          </div>
-          {state.detail && <div><span className="mono">{new Date(state.detail.run.createdAt).toLocaleString('ru-RU')}</span><small>{statusLabel(state.detail.run.status)}</small></div>}
-        </header>
-
-        {detailLoading && !state.detail && <div className="generation-review__skeleton" role="status" aria-label="Загружаем запуск"><span /><span /><span /></div>}
-        {!detailLoading && !state.detail && detailError && (
-          <div className="knowledge-inline-state knowledge-inline-state--error" role="alert">
-            <p>Не удалось загрузить запуск.</p>
-            <span>{detailError}</span>
-            <button type="button" className="btn-sm" disabled={detailLoading} onClick={() => void reloadSelectedRun()}>{detailLoading ? 'Обновляем…' : 'Повторить загрузку'}</button>
-          </div>
-        )}
-        {!detailLoading && !state.detail && !detailError && (
-          <div className="generation-review__prepare">
-            {!readOnly ? <RecentHistoryPreparation agentId={agentId} busy={busy} onStart={(preview) => void start(preview)} />
-              : <div className="knowledge-inline-state"><p>Выберите запуск слева.</p><span>Участники могут просматривать предложения, источники и черновики.</span></div>}
-          </div>
-        )}
-
-        {state.detail && (
-          <>
-            <RunStatus detail={state.detail} />
-            <div className="generation-review__actions">
-              {view === 'active' && !readOnly && <button type="button" className="btn-sm" disabled={busy || state.detail.run.cancelRequestedAt !== null} onClick={() => void action('cancel')}>Отменить после текущего запроса</button>}
-              {state.detail.run.status === 'failed' && !readOnly && <button type="button" className="btn-sm" disabled={busy} onClick={() => void action('retry')}>Повторить запуск</button>}
-              <button type="button" className="btn-quiet" onClick={reset}>Подготовить заново</button>
-            </div>
-            {(view === 'review' || view === 'empty' || view === 'partial_failure' || (view === 'cancelled' && state.detail.run.proposalCount > 0)) && (
-              <ProposalWorkspace
-                agentId={agentId}
-                detail={state.detail}
-                readOnly={readOnly}
-                onChanged={(proposal) => dispatch({ type: 'proposal_updated', proposal })}
-                onLoadAllProposals={loadAllProposals}
-                onLoadMoreProposals={() => void loadCollection('proposals')}
-                onLoadMoreExclusions={() => void loadCollection('exclusions')}
-                onLoadRawFindings={() => void loadCollection('rawFindings')}
-                onLoadMoreRawFindings={() => void loadCollection('rawFindings')}
-                collectionState={{
-                  proposals: { loading: collectionLoading.includes('proposals'), error: collectionErrors.proposals, onRetry: () => void loadCollection('proposals') },
-                  exclusions: { loading: collectionLoading.includes('exclusions'), error: collectionErrors.exclusions, onRetry: () => void loadCollection('exclusions') },
-                  rawFindings: { loading: collectionLoading.includes('rawFindings'), error: collectionErrors.rawFindings, onRetry: () => void loadCollection('rawFindings') },
-                }}
-              />
-            )}
-            {view === 'active' && <div className="knowledge-inline-state"><p>Обработка продолжается.</p><span>Новые пакеты и стоимость обновляются автоматически.</span></div>}
-            {view === 'cancelled' && state.detail.run.proposalCount === 0 && <div className="knowledge-inline-state"><p>Обработка отменена.</p><span>Ничего не опубликовано.</span></div>}
-          </>
-        )}
-        {state.detail && detailError && (
-          <div role="alert" className="generation-review__error">
-            <span>{detailError}</span>
-            {generationDetailErrorPresentation(state.detail.run.status).automatic ? (
-              <span>Повторяем автоматически, пока запуск активен.</span>
-            ) : (
-              <button type="button" className="btn-sm" disabled={detailLoading} onClick={() => void reloadSelectedRun()}>
-                {detailLoading ? 'Обновляем…' : generationDetailErrorPresentation(state.detail.run.status).retryLabel}
-              </button>
-            )}
-          </div>
-        )}
-        {actionError && <div role="alert" className="generation-review__error">{actionError}</div>}
-      </section>
-
-      <aside className="knowledge-review-aside" aria-label="Настройки и черновики">
-        <CommunicationStyleCard agentId={agentId} readOnly={readOnly} />
-        <RunDraftShortcuts
-          drafts={state.detail?.drafts ?? []}
-          hasMore={state.detail?.draftsNextCursor !== null && state.detail?.draftsNextCursor !== undefined}
-          loading={collectionLoading.includes('drafts')}
-          error={collectionErrors.drafts}
-          onLoadMore={() => void loadCollection('drafts')}
-        />
-      </aside>
-    </div>
-  );
-}
-
-function RunStatus({ detail }: { detail: KbGenerationRunDetail }) {
-  const { run } = detail;
-  const skipped = run.counts.skippedAiOrSystem + run.counts.skippedUnsupported + run.counts.skippedEmpty
-    + run.counts.skippedSensitive + run.counts.skippedOversize + run.counts.skippedNoSeller;
-  return (
-    <section className="generation-review__status" aria-label="Статус запуска">
-      <dl className="generation-review__metrics">
-        <div><dt>Пакеты</dt><dd>{run.completedBatchCount}/{run.batchCount}</dd></div>
-        <div><dt>Предложения</dt><dd>{run.proposalCount}</dd></div>
-        <div><dt>Пропущено</dt><dd>{skipped + run.excludedBatchCount}</dd></div>
-        <div><dt>Токены / стоимость</dt><dd>{run.usage.promptTokens + run.usage.completionTokens} / ${run.usage.cost}</dd></div>
-      </dl>
-      <p className="generation-review__notice">Стоимость отдельных запросов может отсутствовать; точный счёт хранит AI-провайдер.</p>
-      {run.errors.length > 0 && (
-        <div className="generation-review__notice generation-review__notice--error" role="alert">
-          {run.errors.map((error, index) => {
-            const presentation = generationRunErrorPresentation(error);
-            return <p key={`${error.batchId ?? 'run'}:${error.code}:${index}`}><strong>{presentation.reason}</strong> {presentation.recovery}</p>;
-          })}
-        </div>
-      )}
-    </section>
-  );
-}
-
-function RunDraftShortcuts({ drafts, hasMore, loading, error, onLoadMore }: { drafts: KbGenerationRunDetail['drafts']; hasMore: boolean; loading: boolean; error?: string; onLoadMore: () => void }) {
-  return (
-    <section className="generation-drafts" aria-labelledby="generation-drafts-title">
-      <p className="knowledge-kicker">Результаты запуска</p>
-      <h2 id="generation-drafts-title">Все черновики</h2>
-      {drafts.length === 0 ? <p className="generation-drafts__empty">У этого запуска пока нет черновиков. Ничего не опубликовано.</p> : (
-        <ol className="generation-drafts__list">
-          {drafts.map((draft) => <li key={draft.id}><Link to={`../drafts/${draft.id}`}><b>{draft.title}</b><span>{new Date(draft.createdAt).toLocaleDateString('ru-RU')} · {draftStatus(draft.status)}</span></Link></li>)}
-        </ol>
-      )}
-      {error && <div className="knowledge-collection-error" role="alert"><span>{error}</span><button type="button" className="btn-sm" onClick={onLoadMore}>Повторить</button></div>}
-      {hasMore && <button type="button" className="knowledge-load-more" disabled={loading} onClick={onLoadMore}>{loading ? 'Загружаем черновики…' : 'Показать ещё черновики'}</button>}
-    </section>
-  );
+  return {
+    state,
+    view,
+    detail: state.detail,
+    busy,
+    detailLoading,
+    detailError,
+    actionError,
+    runs: {
+      items: visibleRuns,
+      loading: runs.loading,
+      error: runs.error,
+      hasMore: nextRunsCursor !== null,
+      loadingMore: loadingRuns,
+      pageError: runPageError,
+      reload: runs.reload,
+      loadMore: loadMoreRuns,
+    },
+    start,
+    selectRun,
+    reloadSelectedRun,
+    action,
+    loadCollection,
+    loadAllProposals,
+    reset,
+    onProposalChanged: (proposal) => dispatch({ type: 'proposal_updated', proposal }),
+    collectionLoading,
+    collectionErrors,
+  };
 }
 
 function collectionCursor(detail: KbGenerationRunDetail, collection: GenerationDetailCollection): string | null | undefined {
@@ -558,5 +480,5 @@ function collectionOptions(collection: GenerationDetailCollection, cursor?: stri
   return { rawFindingCursor: cursor, includeRawFindings: true };
 }
 
-const draftStatus = (status: KbGenerationRunDetail['drafts'][number]['status']) => ({ open: 'на проверке', applied: 'применён', discarded: 'отклонён' })[status];
-const statusLabel = (status: KbGenerationRunDetail['run']['status']): string => ({ queued: 'В очереди', running: 'Обработка', completed: 'Завершён', failed: 'Ошибка', cancelled: 'Отменён' })[status];
+export const generationDraftStatusLabel = (status: KbGenerationRunDetail['drafts'][number]['status']) => ({ open: 'на проверке', applied: 'применён', discarded: 'отклонён' })[status];
+export const generationStatusLabel = (status: KbGenerationRunDetail['run']['status']): string => ({ queued: 'В очереди', running: 'Обработка', completed: 'Завершён', failed: 'Ошибка', cancelled: 'Отменён' })[status];

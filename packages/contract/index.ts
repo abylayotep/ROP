@@ -683,6 +683,16 @@ export interface CommunicationStyleSettings {
   preview: string;
 }
 
+/** Who hears about a handoff on WhatsApp. `phone` is digits in international form, or null. */
+export interface OperatorNotifySettings {
+  phone: string | null;
+}
+
+/** An empty string clears the number. */
+export interface OperatorNotifyPatch {
+  phone: string;
+}
+
 /* ── Агент ──────────────────────────────────────────────────────────────────
  * What the owner may set about the model, what they may pick, and what one
  * sandbox turn answers back. The key is not here: it goes in and never out. */

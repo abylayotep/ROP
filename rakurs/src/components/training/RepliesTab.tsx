@@ -2,6 +2,7 @@ import { useState } from 'react';
 import * as api from '@/api';
 import { RuleList } from '@/components/coach/RuleList';
 import { CommunicationStyleCard } from '@/components/knowledge/CommunicationStyleCard';
+import { OperatorNotifyCard } from '@/components/training/OperatorNotifyCard';
 import { ErrorState, Skeleton } from '@/components/ui/states';
 import { useApi } from '@/hooks/useApi';
 import type { AgentRule } from '@/types';
@@ -24,6 +25,7 @@ export function RepliesTab({ agentId, owner, onOpenCoach }: {
           : 'Стиль — манера речи агента в ответах клиентам.'}
       </p>
       <CommunicationStyleCard agentId={agentId} readOnly={!owner} />
+      <OperatorNotifyCard agentId={agentId} readOnly={!owner} />
       {owner && <OwnerRules agentId={agentId} />}
       <p className="training-replies__note">Изменения действуют только на будущие ответы.</p>
       {owner && (

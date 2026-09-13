@@ -330,6 +330,13 @@
       "when": 1789337820759,
       "tag": "0046_stage_agent_goal",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1789340608723,
+      "tag": "0047_operator_notify_phone",
+      "breakpoints": true
     }
   ]
 }

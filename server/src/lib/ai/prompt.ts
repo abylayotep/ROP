@@ -358,7 +358,7 @@ function rulesSection(agent: PromptAgent, guard: string): string {
     '   - reply — текст для клиента. Обязательное поле.',
     '   - stageId — id этапа, на который перевести сделку, или null.',
     '   - fields — что удалось узнать: ключ это id поля, значение — текст.',
-    '   - handoff — { "reason": "..." }, если нужен человек, иначе null. reason читает сотрудник, не клиент.',
+    '   - handoff — { "reason": "...", "urgent": false, "summary": "..." }, если нужен человек, иначе null. Всё в handoff читает сотрудник, не клиент. reason — почему нужен человек. urgent — true, если клиенту нужно сегодня, прямо сейчас или как можно скорее, или если инструкции владельца называют такой случай срочным; иначе false. summary — одно короткое предложение о том, чего хочет клиент, без id записей, этапов и полей.',
     '   - usedItemIds — id записей базы знаний, на которых основан ответ. Если в reply есть хоть один факт, список не может быть пустым: назови записи, из которых этот факт взят. Пустым он бывает только тогда, когда фактов в ответе нет вовсе — приветствие, уточняющий вопрос или передача человеку.',
     '6. Переводи сделку только на этап из списка ниже и только тогда, когда описание этапа подходит к тому, что клиент уже сказал. Если ни одно описание не подходит — null. Не переводи «на всякий случай» и не перескакивай через этапы.',
     '7. В fields пиши только то, что клиент действительно сказал. Никогда не заполняй поле догадкой, выводом или тем, что кажется вероятным. Не уверен — не заполняй.',
@@ -574,7 +574,11 @@ const ANSWER_SHAPE = [
   "reply": "Уточню у коллеги и вернусь с ответом.",
   "stageId": null,
   "fields": {},
-  "handoff": { "reason": "Спрашивает про монтаж, в базе знаний этого нет" },
+  "handoff": {
+    "reason": "Спрашивает про монтаж, в базе знаний этого нет",
+    "urgent": false,
+    "summary": "Хочет узнать, можно ли заказать монтаж двери"
+  },
   "usedItemIds": []
 }`,
   '',
@@ -704,19 +708,34 @@ const fieldValues = z
  * do, and invisible, because the reply that goes with it says a colleague will be in touch. So
  * `true` becomes a handoff with a stated reason, and only `false` collapses to null alongside
  * it. `reason` is optional for the same reason: a handoff without a note is still a handoff.
+ *
+ * `urgent` and `summary` only feed the operator's WhatsApp alert, so they are read as
+ * `unknown` and can never reject an answer: a model that wrote `"urgent": "yes"` gave the
+ * customer a correct reply, and a retry spent over a flag on a staff notification would cost
+ * more than the flag is worth. Only `true` and `"true"` are urgent — a guessed «срочно»
+ * wakes somebody up, a missed one reads as an ordinary handoff.
  */
 const handoff = z
   .union([
-    z.object({ reason: z.union([z.string(), z.null()]).optional() }),
+    z.object({
+      reason: z.union([z.string(), z.null()]).optional(),
+      urgent: z.unknown().optional(),
+      summary: z.unknown().optional(),
+    }),
     z.null(),
     z.boolean(),
   ])
   .default(null)
   .transform((value) => {
     if (value === null || value === false) return null;
-    if (value === true) return { reason: HANDOFF_REQUESTED };
+    if (value === true) return { reason: HANDOFF_REQUESTED, urgent: false, summary: '' };
     const reason = (value.reason ?? '').trim();
-    return { reason: reason === '' ? HANDOFF_REQUESTED : reason };
+    return {
+      reason: reason === '' ? HANDOFF_REQUESTED : reason,
+      urgent: value.urgent === true
+        || (typeof value.urgent === 'string' && value.urgent.trim().toLowerCase() === 'true'),
+      summary: typeof value.summary === 'string' ? value.summary.trim() : '',
+    };
   });
 
 /**

@@ -7,6 +7,8 @@ import { storeInboundMedia } from '../media.js';
 import { transcribeInboundAudio } from '../../ai/transcription.js';
 import {
   advanceConversation,
+  isOperatorAlertEcho,
+  operatorPhoneOf,
   runTurns,
   silenceAgent,
   storeLine,
@@ -69,6 +71,10 @@ export async function applyMessage(
         `Message ${raw.key?.id ?? '?'} from chat ${lid}@lid was not stored: the contact phone number is unknown`,
       );
     }
+    return;
+  }
+  // Checked before the contact is written, so the operator does not appear even as a contact.
+  if (line.fromMe && await isOperatorAlertEcho(db, number, await operatorPhoneOf(db, number.agentId), line)) {
     return;
   }
 

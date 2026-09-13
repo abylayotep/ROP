@@ -27,6 +27,7 @@ import {
   type Completion,
   type CompletionInput,
 } from '../src/lib/ai/openrouter.js';
+import { notifyOperator } from '../src/lib/ai/operator-alert.js';
 import {
   extractJson,
   runTurn,
@@ -1575,5 +1576,152 @@ describe('the sandbox reports what a real turn would hit', () => {
     expect(result.outcome).toBe('failed');
     expect(result.detail).toContain('токен');
     expect(graph.calls).toHaveLength(0);
+  });
+});
+
+describe('the operator alert on a handoff', () => {
+  const OPERATOR = '77716944499';
+  const alerts = () =>
+    graph.calls.filter((call) => call.method === 'sendText' && call.args[2] === OPERATOR);
+
+  beforeEach(async () => {
+    await db.update(agents).set({ operatorNotifyPhone: OPERATOR }).where(eq(agents.id, agentId));
+    await db.insert(leadValues).values({ conversationId, fieldId: cityFieldId, value: 'Алматы' });
+  });
+
+  it('sends the operator who the client is, what they want and how urgent it is', async () => {
+    const model = fakeModel(answer({
+      reply: 'Уточню у коллеги и вернусь с ответом.',
+      fields: { [budgetFieldId]: '90000' },
+      handoff: { reason: 'Спрашивает про монтаж', urgent: 'true', summary: 'Хочет монтаж сегодня' },
+    }));
+
+    const result = await turn(model);
+
+    expect(result.outcome).toBe('handoff');
+    expect(result.handoff).toBe('Спрашивает про монтаж');
+    const sent = graph.calls.filter((call) => call.method === 'sendText');
+    // The customer's answer first, the alert after it, both from the conversation's number.
+    expect(sent.map((call) => call.args[2])).toEqual(['77085807932', OPERATOR]);
+    expect(sent[1]?.args[0]).toBe('136');
+    expect(sent[1]?.args[1]).toBe(WHATSAPP_TOKEN);
+    expect(sent[1]?.args[3]).toBe([
+      'СРОЧНО — нужен оператор',
+      'Клиент: Айгуль',
+      'Телефон: +77085807932',
+      'Город: Алматы',
+      // Filled by this very turn: the alert reads the lead after the fields landed.
+      'Бюджет: 90000',
+      'Что хочет: Хочет монтаж сегодня',
+      'Причина: Спрашивает про монтаж',
+      'Канал: WhatsApp',
+    ].join('\n'));
+    // Quiet on success: the handoff note is the only one.
+    expect(await noteRows()).toHaveLength(1);
+    // Not a message in the client's thread.
+    expect((await thread()).filter((message) => message.direction === 'out')).toHaveLength(1);
+  });
+
+  it('alerts on the twice-unreadable handoff without a summary', async () => {
+    const result = await turn(fakeModel('не json', 'снова не json'));
+
+    expect(result.outcome).toBe('handoff');
+    expect(alerts()).toHaveLength(1);
+    const text = String(alerts()[0]?.args[3]);
+    expect(text.startsWith('Нужен оператор\n')).toBe(true);
+    expect(text).not.toContain('Что хочет');
+    expect(text).toContain('Причина: модель дважды вернула негодный ответ');
+  });
+
+  it('sends nothing in a dry run', async () => {
+    const result = await turn(fakeModel(answer({ handoff: { reason: 'нужен человек', urgent: true } })), { dryRun: true });
+
+    expect(result.outcome).toBe('handoff');
+    expect(alerts()).toHaveLength(0);
+  });
+
+  it('sends nothing when no operator number is set', async () => {
+    await db.update(agents).set({ operatorNotifyPhone: null }).where(eq(agents.id, agentId));
+
+    const result = await turn(fakeModel(answer({ handoff: { reason: 'нужен человек' } })));
+
+    expect(result.outcome).toBe('handoff');
+    expect(graph.calls.filter((call) => call.method === 'sendText')).toHaveLength(1);
+  });
+
+  it('sends nothing when there is no handoff', async () => {
+    await turn(fakeModel(answer()));
+
+    expect(alerts()).toHaveLength(0);
+  });
+
+  it('does not tell the operator about themselves', async () => {
+    await db.update(agents).set({ operatorNotifyPhone: '77085807932' }).where(eq(agents.id, agentId));
+
+    await turn(fakeModel(answer({ handoff: { reason: 'нужен человек' } })));
+
+    expect(graph.calls.filter((call) => call.method === 'sendText')).toHaveLength(1);
+  });
+
+  it('writes down a failed alert and keeps the handoff outcome', async () => {
+    graph = fakeGraph({
+      sendText: async (_id: string, _token: string, to: string) => {
+        if (to === OPERATOR) {
+          throw new GraphError(`Re-engagement message: more than 24 hours ${WHATSAPP_TOKEN}`, 400, 131047);
+        }
+        return { messageId: 'wamid.reply' };
+      },
+    });
+
+    const result = await turn(fakeModel(answer({ handoff: { reason: 'нужен человек' } })));
+
+    expect(result.outcome).toBe('handoff');
+    expect(result.reply).toBe('Здравствуйте! Чем помочь?');
+    const bodies = (await noteRows()).map((note) => note.body);
+    expect(bodies).toHaveLength(2);
+    const failed = bodies.find((body) => body.startsWith('Уведомление оператору не отправлено: '));
+    expect(failed).toContain('Meta не отправила сообщение');
+    expect(failed).not.toContain(WHATSAPP_TOKEN);
+    expect(failed?.endsWith('.')).toBe(true);
+    const [log] = await replyLog();
+    expect(log?.outcome).toBe('handoff');
+  });
+
+  const notifyDirectly = async (over: { whatsappNumberId?: string | null } = {}) => {
+    const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
+    const conversation = { ...(await conversationRow()), ...over };
+    const [contact] = await db.select().from(contacts).where(eq(contacts.id, conversation.contactId));
+    await notifyOperator(db, deps(fakeModel()), {
+      agent: agent!, conversation, contact: contact!, reason: 'нужен человек',
+      urgent: false, summary: '', sanitize: (text) => text,
+    });
+  };
+
+  it('skips a switched-off number without a note', async () => {
+    // A turn refuses a disabled number before it gets this far, so the rule is asserted on
+    // the alert itself.
+    await db.update(whatsappNumbers).set({ enabled: false }).where(eq(whatsappNumbers.id, numberId));
+
+    await notifyDirectly();
+
+    expect(alerts()).toHaveLength(0);
+    expect(await noteRows()).toHaveLength(0);
+  });
+
+  it("borrows the agent's oldest enabled number for an Instagram thread", async () => {
+    await notifyDirectly({ whatsappNumberId: null });
+
+    expect(alerts()).toHaveLength(1);
+    expect(alerts()[0]?.args[0]).toBe('136');
+    expect(String(alerts()[0]?.args[3])).toContain('Канал: Instagram');
+  });
+
+  it('stays quiet for an Instagram thread when the agent has no enabled WhatsApp number', async () => {
+    await db.update(whatsappNumbers).set({ enabled: false }).where(eq(whatsappNumbers.id, numberId));
+
+    await notifyDirectly({ whatsappNumberId: null });
+
+    expect(alerts()).toHaveLength(0);
+    expect(await noteRows()).toHaveLength(0);
   });
 });

@@ -1,6 +1,6 @@
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
-import { contacts, conversations, messages } from '../../db/schema.js';
+import { agents, contacts, conversations, messages } from '../../db/schema.js';
 import { runTurn, type TurnDeps } from '../ai/turn.js';
 import { decideAutomation, loadAutomationSnapshot } from '../automation/policy.js';
 
@@ -66,6 +66,49 @@ export async function upsertContact(
     })
     .returning({ id: contacts.id });
   return created!.id;
+}
+
+/** The agent's operator alert number, for the echo check below. One read per delivery. */
+export async function operatorPhoneOf(db: Db, agentId: string): Promise<string | null> {
+  const [row] = await db
+    .select({ phone: agents.operatorNotifyPhone })
+    .from(agents)
+    .where(eq(agents.id, agentId));
+  return row?.phone ?? null;
+}
+
+/**
+ * True for our own outgoing line to the operator's phone when no thread with that phone exists.
+ *
+ * A linked device hears its own sends back: Baileys appends every message the socket sent,
+ * and a later history sync carries them again. For a reply to a client that is harmless — the
+ * thread exists and the row deduplicates on its id — but the handoff alert goes to a phone
+ * that is usually not a client, and mirroring it would create a contact and a conversation
+ * for the operator: a lead card nobody asked for, holding a message about someone else.
+ *
+ * Narrow on purpose. Only an outgoing line, only to the configured number, and only when it
+ * would *create* the thread: an operator who is also a real conversation on this number keeps
+ * every line of it, alerts included, and anything the operator writes back is an ordinary
+ * inbound message.
+ */
+export async function isOperatorAlertEcho(
+  db: Db,
+  number: { id: string; agentId: string },
+  operatorPhone: string | null,
+  line: { fromMe: boolean; from: string },
+): Promise<boolean> {
+  if (!line.fromMe || operatorPhone === null || line.from !== operatorPhone) return false;
+  const [existing] = await db
+    .select({ id: conversations.id })
+    .from(conversations)
+    .innerJoin(contacts, eq(contacts.id, conversations.contactId))
+    .where(and(
+      eq(conversations.whatsappNumberId, number.id),
+      eq(contacts.agentId, number.agentId),
+      eq(contacts.phone, operatorPhone),
+    ))
+    .limit(1);
+  return existing === undefined;
 }
 
 export async function upsertConversation(

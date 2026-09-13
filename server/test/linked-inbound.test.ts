@@ -481,3 +481,37 @@ describe('linked inbound', () => {
     expect(normalize(raw({ key: { id: 'wa.out', remoteJid: LID, fromMe: true } }), numberId)).toBeNull();
   });
 });
+
+describe('the operator alert echo', () => {
+  const OPERATOR_JID = '77716944499@s.whatsapp.net';
+
+  beforeEach(async () => {
+    await db.update(agents).set({ operatorNotifyPhone: '77716944499' }).where(eq(agents.id, agentId));
+  });
+
+  it('does not turn our own alert to the operator into a contact or a conversation', async () => {
+    await applyMessage(db, deps, fakeLinked(), numberId, raw({
+      key: { id: 'wa.alert', remoteJid: OPERATOR_JID, fromMe: true },
+      message: { conversation: 'Нужен оператор\nКлиент: Айгерим' },
+    }));
+
+    expect(await db.select().from(contacts)).toHaveLength(0);
+    expect(await db.select().from(conversations)).toHaveLength(0);
+    expect(await db.select().from(messages)).toHaveLength(0);
+  });
+
+  it('keeps mirroring lines to the operator when they are already a conversation', async () => {
+    const client = fakeLinked();
+    await applyMessage(db, deps, client, numberId, raw({
+      key: { id: 'wa.from-operator', remoteJid: OPERATOR_JID, fromMe: false },
+    }));
+
+    await applyMessage(db, deps, client, numberId, raw({
+      key: { id: 'wa.alert', remoteJid: OPERATOR_JID, fromMe: true },
+      message: { conversation: 'Нужен оператор' },
+    }));
+
+    expect(await db.select().from(conversations)).toHaveLength(1);
+    expect(await db.select().from(messages)).toHaveLength(2);
+  });
+});

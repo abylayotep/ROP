@@ -193,7 +193,7 @@ describe('buildMessages: the rules the agent answers under', () => {
     expect(text).toContain('- reply — текст для клиента. Обязательное поле.');
     expect(text).toContain('- stageId — id этапа, на который перевести сделку, или null.');
     expect(text).toContain('- fields — что удалось узнать: ключ это id поля, значение — текст.');
-    expect(text).toContain('- handoff — { "reason": "..." }, если нужен человек, иначе null.');
+    expect(text).toContain('- handoff — { "reason": "...", "urgent": false, "summary": "..." }, если нужен человек, иначе null.');
     expect(text).toContain('- usedItemIds — id записей базы знаний, на которых основан ответ.');
   });
 
@@ -602,14 +602,14 @@ describe('REPLY_SCHEMA', () => {
       reply: 'Доставка по Алматы 1500 ₸.',
       stageId: 'stage-qualified',
       fields: { 'field-city': 'Алматы' },
-      handoff: { reason: 'Спрашивает про монтаж' },
+      handoff: { reason: 'Спрашивает про монтаж', urgent: true, summary: 'Хочет монтаж сегодня' },
       usedItemIds: ['kb-delivery'],
     });
     expect(parsed).toEqual({
       reply: 'Доставка по Алматы 1500 ₸.',
       stageId: 'stage-qualified',
       fields: { 'field-city': 'Алматы' },
-      handoff: { reason: 'Спрашивает про монтаж' },
+      handoff: { reason: 'Спрашивает про монтаж', urgent: true, summary: 'Хочет монтаж сегодня' },
       usedItemIds: ['kb-delivery'],
     });
   });
@@ -637,6 +637,8 @@ describe('REPLY_SCHEMA', () => {
     // promises a colleague will be in touch. There is no louder failure in this stage.
     expect(REPLY_SCHEMA.parse({ reply: 'Позову коллегу.', handoff: true }).handoff).toEqual({
       reason: HANDOFF_REQUESTED,
+      urgent: false,
+      summary: '',
     });
   });
 
@@ -647,7 +649,46 @@ describe('REPLY_SCHEMA', () => {
   it('keeps a handoff whose reason the model left out', () => {
     expect(REPLY_SCHEMA.parse({ reply: 'ок', handoff: {} }).handoff).toEqual({
       reason: HANDOFF_REQUESTED,
+      urgent: false,
+      summary: '',
     });
+  });
+
+  it('reads handoff: null as no handoff', () => {
+    expect(REPLY_SCHEMA.parse({ reply: 'ок', handoff: null }).handoff).toBeNull();
+  });
+
+  it('reads urgent leniently and never rejects an answer over it', () => {
+    const urgentOf = (urgent: unknown) =>
+      REPLY_SCHEMA.parse({ reply: 'ок', handoff: { reason: 'нужен человек', urgent } }).handoff?.urgent;
+    expect(urgentOf(true)).toBe(true);
+    expect(urgentOf('true')).toBe(true);
+    expect(urgentOf(' TRUE ')).toBe(true);
+    expect(urgentOf(false)).toBe(false);
+    expect(urgentOf('false')).toBe(false);
+    expect(urgentOf(null)).toBe(false);
+    expect(urgentOf(undefined)).toBe(false);
+    // Neither a guess nor a refusal: an unexpected spelling is an ordinary handoff.
+    expect(urgentOf('срочно')).toBe(false);
+    expect(urgentOf(1)).toBe(false);
+  });
+
+  it('trims the summary and defaults it to empty', () => {
+    const summaryOf = (summary: unknown) =>
+      REPLY_SCHEMA.parse({ reply: 'ок', handoff: { reason: 'нужен человек', summary } }).handoff?.summary;
+    expect(summaryOf('  Хочет двери сегодня  ')).toBe('Хочет двери сегодня');
+    expect(summaryOf(undefined)).toBe('');
+    expect(summaryOf(null)).toBe('');
+    expect(summaryOf(42)).toBe('');
+  });
+
+  it('tells the model when a handoff is urgent and what the summary is for', () => {
+    const text = system();
+    expect(text).toContain('urgent — true, если клиенту нужно сегодня, прямо сейчас или как можно скорее');
+    expect(text).toContain('инструкции владельца называют такой случай срочным');
+    expect(text).toContain('summary — одно короткое предложение о том, чего хочет клиент, без id');
+    expect(text).toContain('"urgent": false');
+    expect(text).toContain('"summary": "Хочет узнать, можно ли заказать монтаж двери"');
   });
 
   it('takes a number for a field value, because a value is stored as text anyway', () => {

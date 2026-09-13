@@ -183,6 +183,10 @@ export const agents = pgTable(
     // at. That is what lets «было» be reused across runs and what makes a draft tested against
     // a store that has since moved refuse to apply.
     configVersion: integer('config_version').notNull().default(1),
+    // Where the handoff alert goes: digits only, international form, null when nobody is
+    // told. Deliberately outside `configVersion` — it never reaches the prompt, so changing
+    // it changes no answer.
+    operatorNotifyPhone: text('operator_notify_phone'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [

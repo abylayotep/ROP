@@ -59,6 +59,7 @@ import type { LinkedClient } from '../whatsapp/linked/client.js';
 import { markTokenRejected } from '../whatsapp/token-expiry.js';
 import { transportFor, type MessageTransport } from '../whatsapp/transport.js';
 import { ModelError, type ChatMessage, type ModelClient } from './openrouter.js';
+import { notifyOperator } from './operator-alert.js';
 import {
   buildMessages,
   HISTORY_LIMIT,
@@ -815,6 +816,9 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
     if (!ownsHandoff) return empty('skipped', 'Оператор взял диалог на себя.');
     if (!dryRun) {
       await db.insert(aiReplies).values({ ...spend(), outcome: 'handoff', detail });
+      // Nothing the model said is worth passing on, so there is no summary and no urgency.
+      await notifyOperator(db, deps, { agent, conversation, contact, reason: detail,
+        urgent: false, summary: '', sanitize: (text) => safe(text, key) });
     }
     return empty('handoff', detail, detail);
   }
@@ -967,6 +971,29 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
   /** Null while nothing has been attempted: an empty reply, or one that was withheld. */
   let delivery: Delivery | null = null;
 
+  /**
+   * The operator's WhatsApp alert, for a handoff this turn owns.
+   *
+   * Called only once the customer's reply has been dealt with and outside every lock and
+   * transaction: a phone that takes its full send deadline to answer must hold up neither the
+   * customer's answer nor another turn waiting for the agent's automation lock. Awaited rather
+   * than fired off, so the turn still ends with everything it started — `notifyOperator` never
+   * throws, so waiting on it cannot change the outcome.
+   */
+  const alertOperator = async (): Promise<void> => {
+    if (dryRun || !ownsHandoff || handoffReason === null) return;
+    await notifyOperator(db, deps, {
+      agent,
+      conversation,
+      contact,
+      reason: handoffReason,
+      // The unsourced-number handoff has no model handoff behind it, hence the defaults.
+      urgent: reply.handoff?.urgent ?? false,
+      summary: safe(reply.handoff?.summary ?? '', key),
+      sanitize: (text) => safe(text, key),
+    });
+  };
+
   if (body === '') {
     details.push('Модель не написала ответа клиенту.');
   } else if (invented !== null) {
@@ -1005,6 +1032,9 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
             return send(tx);
           });
       if (sent === null) {
+        // The handoff above still happened — the switch is off and the note is written —
+        // so the person it was handed to is still told.
+        await alertOperator();
         return empty('skipped', AUTOMATION_DISABLED);
       }
       delivery = sent;
@@ -1036,6 +1066,7 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
       usedItemIds,
     });
   }
+  await alertOperator();
 
   return {
     outcome,

@@ -48,6 +48,7 @@ import type {
   Me,
   Member,
   Message,
+  OperatorNotifySettings,
   Period,
   RuleCategory,
   Stage,
@@ -118,6 +119,15 @@ export const updateCommunicationStyle = (agentId: string, preset: CommunicationS
   request<CommunicationStyleSettings>(`/agents/${agentId}/communication-style`, {
     method: 'PATCH',
     body: { preset },
+  });
+
+export const getOperatorNotify = (agentId: string, signal?: AbortSignal) =>
+  request<OperatorNotifySettings>(`/agents/${agentId}/operator-notify`, { signal });
+
+export const updateOperatorNotify = (agentId: string, phone: string) =>
+  request<OperatorNotifySettings>(`/agents/${agentId}/operator-notify`, {
+    method: 'PATCH',
+    body: { phone },
   });
 
 // ── WhatsApp ─────────────────────────────────────────────────────────────────

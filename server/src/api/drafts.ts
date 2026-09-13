@@ -254,6 +254,7 @@ import { replayCase, type AiDeps, type ReplayResult } from '../lib/drafts/replay
 import { bumpConfigVersion } from '../lib/drafts/version.js';
 import { ApiError, isDuplicate } from '../lib/errors.js';
 import { LEGACY_RAW_FINGERPRINT_PATTERN } from '../lib/knowledge/generation-types.js';
+import { BODY_MAX } from '../lib/knowledge/note.js';
 import { clampTitle } from '../lib/knowledge/split.js';
 import { credentialsKey, decryptSecret } from '../lib/secret-box.js';
 import { isUuid } from '../lib/uuid.js';
@@ -349,6 +350,32 @@ function titleFor(op: DraftOp, base: DraftBase): string {
       throw new Error(`unknown draft op: ${JSON.stringify(exhaustive)}`);
     }
   }
+}
+
+/** JSON with object keys sorted: `jsonb` does not keep key order, so two equal ops can
+ * stringify differently. */
+const canonicalJson = (value: unknown): string => JSON.stringify(value, (_key, inner: unknown) =>
+  inner !== null && typeof inner === 'object' && !Array.isArray(inner)
+    ? Object.fromEntries(Object.entries(inner).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+    : inner);
+
+/** `staleOps` checks every row named in `base`, so a row no remaining op touches must leave it:
+ * otherwise an edit to a note the owner already removed from the draft would still block apply. */
+function pruneBase(base: DraftBase, ops: DraftOp[]): DraftBase {
+  const noteIds = new Set(ops.flatMap((op) => (op.op === 'note_update' ? [op.noteId] : [])));
+  const ruleIds = new Set(ops.flatMap((op) => (op.op === 'rule_update' ? [op.ruleId] : [])));
+  const keep = (record: Record<string, string> | undefined, ids: Set<string>) =>
+    record === undefined ? undefined : Object.fromEntries(Object.entries(record).filter(([id]) => ids.has(id)));
+  const pruned: DraftBase = {
+    notes: keep(base.notes, noteIds),
+    noteNames: keep(base.noteNames, noteIds),
+    rules: keep(base.rules, ruleIds),
+    ruleNames: keep(base.ruleNames, ruleIds),
+  };
+  for (const key of Object.keys(pruned) as (keyof DraftBase)[]) {
+    if (pruned[key] === undefined || Object.keys(pruned[key]!).length === 0) delete pruned[key];
+  }
+  return pruned;
 }
 
 const toDraft = (row: typeof kbDrafts.$inferSelect) => ({
@@ -1245,6 +1272,102 @@ export function registerDraftRoutes(
         ));
         const [discarded] = await tx.update(kbDrafts).set({ status: 'discarded' }).where(eq(kbDrafts.id, draft.id)).returning();
         return discarded!;
+      });
+
+      return toDraft(row);
+    },
+  );
+
+  /**
+   * Editing one op of an open draft: rewriting a note op's body, or removing the op outright.
+   * Built for the chat-generation draft, where the owner reads dozens of topics and keeps only
+   * some of them, but it works on any open draft.
+   *
+   * The caller names the op by index *and* sends the op as it last saw it; a draft rebuilt or
+   * edited in another tab since then answers 409 instead of editing a different topic that has
+   * since slid into the same index.
+   *
+   * Every edit deletes the draft's own runs. A run proves one exact set of ops (see the file
+   * comment), so a run of the set before the edit proves nothing about the set after it; the
+   * draft goes back to «not run», and «Применить» waits for a fresh run. Baseline runs carry no
+   * `draft_id` and are untouched, so the rerun still reuses their «было».
+   *
+   * Removing an op rejects the generation proposals that fed it — the owner said no to that
+   * topic, so the next generation must not bring it back as «pending» — and shifts the op index
+   * of every later proposal down by one. The last op cannot be removed: an empty draft is
+   * «Отбросить».
+   */
+  const editOpBody = z.discriminatedUnion('action', [
+    z.object({ action: z.literal('remove'), index: z.number().int().min(0), current: z.unknown() }),
+    z.object({
+      action: z.literal('update'),
+      index: z.number().int().min(0),
+      current: z.unknown(),
+      body: z.string().max(BODY_MAX),
+    }),
+  ]);
+
+  app.post(
+    '/api/agents/:agentId/drafts/:draftId/ops',
+    { preHandler: [guard, ownerOnly] },
+    async (req) => {
+      const agentId = req.agent!.id;
+      const { draftId } = req.params as { draftId: string };
+      await loadDraft(agentId, draftId);
+      const parsed = editOpBody.safeParse(req.body);
+      if (!parsed.success) throw new ApiError(400, 'Не удалось разобрать правку черновика');
+      const edit = parsed.data;
+      if (runningDrafts.has(draftId)) {
+        throw new ApiError(409, 'Черновик сейчас проверяется — дождитесь окончания прогона');
+      }
+
+      const row = await db.transaction(async (tx) => {
+        const [draft] = await tx.select().from(kbDrafts).where(and(
+          eq(kbDrafts.id, draftId), eq(kbDrafts.agentId, agentId),
+        )).for('update');
+        if (!draft) throw new ApiError(404, 'Черновик не найден');
+        if (draft.status !== 'open') throw new ApiError(409, 'Черновик уже применён или отклонён');
+        const target = draft.ops[edit.index];
+        if (!target || canonicalJson(target) !== canonicalJson(edit.current)) {
+          throw new ApiError(409, 'Черновик изменился — обновите страницу');
+        }
+
+        let ops: DraftOp[];
+        let base = draft.base;
+        if (edit.action === 'remove') {
+          if (draft.ops.length === 1) {
+            throw new ApiError(409, 'Это последняя тема черновика — отбросьте черновик целиком');
+          }
+          ops = draft.ops.filter((_, index) => index !== edit.index);
+          base = pruneBase(draft.base, ops);
+          await tx.update(kbGenerationProposals).set({
+            status: 'rejected',
+            selected: false,
+            draftId: null,
+            draftOpIndex: null,
+            revision: sql`${kbGenerationProposals.revision} + 1`,
+            updatedAt: new Date(),
+          }).where(and(
+            eq(kbGenerationProposals.draftId, draft.id),
+            eq(kbGenerationProposals.draftOpIndex, edit.index),
+            notLike(kbGenerationProposals.fingerprint, LEGACY_RAW_FINGERPRINT_PATTERN),
+          ));
+          await tx.update(kbGenerationProposals).set({
+            draftOpIndex: sql`${kbGenerationProposals.draftOpIndex} - 1`,
+          }).where(and(
+            eq(kbGenerationProposals.draftId, draft.id),
+            gte(kbGenerationProposals.draftOpIndex, edit.index + 1),
+          ));
+        } else {
+          if (target.op !== 'note_create' && target.op !== 'note_update') {
+            throw new ApiError(400, 'Изменить можно только текст темы или заметки');
+          }
+          ops = draft.ops.map((op, index) => (index === edit.index ? { ...target, body: edit.body } : op));
+        }
+
+        await tx.delete(testRuns).where(eq(testRuns.draftId, draft.id));
+        const [updated] = await tx.update(kbDrafts).set({ ops, base }).where(eq(kbDrafts.id, draft.id)).returning();
+        return updated!;
       });
 
       return toDraft(row);

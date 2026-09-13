@@ -391,8 +391,20 @@
 .draft-ops__list { display: flex; flex-direction: column; gap: 10px; }
 .draft-topic { min-width: 0; overflow: hidden; border: 1px solid var(--line-soft); border-radius: 11px; background: var(--sunken); }
 .draft-topic--expanded { border-color: var(--line); background: var(--card); }
-.draft-topic__header { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 14px; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
-.draft-topic__header:hover { background: var(--raise); }
+.draft-ops__more { align-self: flex-start; }
+.draft-topic__head { display: flex; align-items: center; }
+.draft-topic__head:hover { background: var(--raise); }
+.draft-topic__actions { display: flex; flex: 0 0 auto; gap: 4px; padding-right: 10px; }
+.draft-topic__editor { display: flex; flex-direction: column; gap: 8px; }
+.draft-topic__editor textarea { width: 100%; min-height: 220px; padding: 8px 10px; resize: vertical; border: 1px solid var(--line); border-radius: 8px; background: var(--sunken); color: var(--text); font: inherit; font-size: 12.5px; line-height: 1.5; outline: none; }
+.draft-topic__editor-actions { display: flex; gap: 8px; }
+.draft-banner { display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; line-height: 1.5; }
+.draft-banner__title { font-weight: 650; color: var(--text-2); }
+.draft-banner ol { margin: 0; padding-left: 18px; color: var(--text-3); }
+.draft-actionbar { position: sticky; bottom: 0; z-index: 5; box-shadow: 0 -8px 20px rgba(0, 0, 0, 0.18); }
+.draft-actionbar__row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.draft-actionbar__hint { flex: 1 1 240px; color: var(--text-dim); font-size: 11.5px; }
+.draft-topic__header { display: flex; flex: 1 1 auto; min-width: 0; align-items: center; gap: 10px; width: 100%; padding: 10px 14px; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
 .draft-topic__titles { display: flex; flex: 1 1 auto; flex-direction: column; gap: 2px; min-width: 0; }
 .draft-topic__title { overflow-wrap: anywhere; color: var(--text-2); font-size: 13px; font-weight: 650; line-height: 1.35; }
 .draft-topic__folder { overflow-wrap: anywhere; color: var(--text-dim); font-size: 11px; }
@@ -476,6 +488,8 @@
   .training-wizard__step { padding: 14px; }
   .training-review__row { align-items: stretch; flex-direction: column; gap: 10px; }
   .training-review__open { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; }
+  .draft-topic__head { flex-wrap: wrap; }
+  .draft-topic__actions { padding: 0 10px 8px 14px; }
   .draft-topic__header { min-height: 44px; flex-wrap: wrap; }
   .draft-topic__titles { flex-basis: 100%; }
   .training-history > summary,

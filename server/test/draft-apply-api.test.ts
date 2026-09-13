@@ -543,3 +543,96 @@ describe('reporting whether a draft is applicable', () => {
     expect(res.statusCode).toBe(403);
   });
 });
+
+/** Editing one op of an open draft — see `api/drafts.ts`'s own comment on the `ops` route. */
+describe('editing a draft op', () => {
+  const topicA: DraftOp = { op: 'note_create', path: 'База знаний/Доставка', body: 'Курьером, 1500 ₸.' };
+  const topicB: DraftOp = { op: 'note_create', path: 'База знаний/Оплата', body: 'Kaspi.' };
+  const topicC: DraftOp = { op: 'note_create', path: 'База знаний/Печать', body: '40 мм — 6 990 ₸.' };
+
+  function editOp(draftId: string, payload: Record<string, unknown>, cookies = jar) {
+    return app.inject({ method: 'POST', cookies, url: `${drafts()}/${draftId}/ops`, payload });
+  }
+
+  async function generationProposals(count: number) {
+    const [owner] = await db.select().from(users).where(eq(users.email, 'owner@example.com'));
+    const selection = { conversationIds: [], from: '2026-09-01T00:00:00Z', to: '2026-09-02T00:00:00Z' };
+    const counts = { selectedConversations: 0, selectedMessages: 0, eligibleMessages: 0, eligibleCharacters: 0, skippedAiOrSystem: 0, skippedUnsupported: 0, skippedEmpty: 0, skippedSensitive: 0, skippedOversize: 0, skippedNoSeller: 0 };
+    const [run] = await db.insert(kbGenerationRuns).values({ agentId, userId: owner!.id, requestedPreviewId: randomUUID(), requestKey: 'edit-op', selection, manifest: { messages: [], batches: [] }, counts, modelId: 'model', temperature: '0.30', status: 'completed' }).returning();
+    const [batch] = await db.insert(kbGenerationBatches).values({ runId: run!.id, ordinal: 0, manifest: { ordinal: 0, conversationId: randomUUID(), messages: [], characterCount: 0 }, status: 'done' }).returning();
+    return db.insert(kbGenerationProposals).values(Array.from({ length: count }, (_, index) => ({
+      runId: run!.id, batchId: batch!.id, fingerprint: `edit-op-${index}`, path: `Topic ${index}`, body: 'x', sources: [],
+    }))).returning();
+  }
+
+  it('removes a topic, rejects its proposals, shifts later ones and forgets the runs', async () => {
+    const draft = await openDraft([topicA, topicB, topicC]);
+    const proposals = await generationProposals(3);
+    for (const [index, proposal] of proposals.entries()) {
+      await db.update(kbGenerationProposals).set({ status: 'drafted', draftId: draft.id, draftOpIndex: index })
+        .where(eq(kbGenerationProposals.id, proposal.id));
+    }
+    await runOver(draft, [await addCase('сколько стоит доставка')]);
+    expect((await getDraft(draft.id)).json().applicable).toBe(true);
+
+    const res = await editOp(draft.id, { action: 'remove', index: 1, current: { body: 'Kaspi.', path: 'База знаний/Оплата', op: 'note_create' } });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().ops).toEqual([topicA, topicC]);
+    const detail = (await getDraft(draft.id)).json();
+    expect(detail).toMatchObject({ applicable: false, runs: [] });
+    expect((await apply(draft.id)).json().message).toBe('Черновик не прогнан — сначала проверьте его');
+    const rows = await db.select().from(kbGenerationProposals).where(eq(kbGenerationProposals.runId, proposals[0]!.runId));
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    expect(byId.get(proposals[0]!.id)).toMatchObject({ status: 'drafted', draftOpIndex: 0 });
+    expect(byId.get(proposals[1]!.id)).toMatchObject({ status: 'rejected', draftId: null, draftOpIndex: null });
+    expect(byId.get(proposals[2]!.id)).toMatchObject({ status: 'drafted', draftOpIndex: 1 });
+  });
+
+  it('rewrites a topic body and the rerun applies the new text', async () => {
+    const draft = await openDraft([topicA, topicB]);
+    const res = await editOp(draft.id, { action: 'update', index: 0, current: topicA, body: 'Курьером, 2000 ₸.' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().ops[0]).toEqual({ ...topicA, body: 'Курьером, 2000 ₸.' });
+
+    await runOver(draft, [await addCase('сколько стоит доставка')]);
+    expect((await apply(draft.id)).statusCode).toBe(200);
+    const [note] = await db.select({ body: kbNotes.body }).from(kbNotes).where(eq(kbNotes.path, topicA.path));
+    expect(note!.body).toContain('2000 ₸');
+  });
+
+  it('forgets a removed update, so a later edit of that note does not block apply', async () => {
+    const note = await addNote('Доставка', '1500 ₸.');
+    const update: DraftOp = { op: 'note_update', noteId: note.id, body: '1600 ₸.' };
+    const draft = await openDraft([update, topicB]);
+    expect((await editOp(draft.id, { action: 'remove', index: 0, current: update })).statusCode).toBe(200);
+    await editNote(note.id, '1700 ₸.');
+    await runOver(draft, [await addCase('как оплатить')]);
+    expect((await apply(draft.id)).statusCode).toBe(200);
+  });
+
+  it('refuses an op that no longer sits at that index', async () => {
+    const draft = await openDraft([topicA, topicB]);
+    const res = await editOp(draft.id, { action: 'remove', index: 0, current: topicB });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().message).toBe('Черновик изменился — обновите страницу');
+  });
+
+  it('refuses to remove the last op', async () => {
+    const draft = await openDraft([topicA]);
+    expect((await editOp(draft.id, { action: 'remove', index: 0, current: topicA })).statusCode).toBe(409);
+  });
+
+  it('refuses to rewrite a rule op as a note body', async () => {
+    const rule: DraftOp = { op: 'rule_create', category: 'tone', text: 'На «вы».' };
+    const draft = await openDraft([rule, topicA]);
+    expect((await editOp(draft.id, { action: 'update', index: 0, current: rule, body: 'x' })).statusCode).toBe(400);
+  });
+
+  it('refuses a decided draft and a member', async () => {
+    const draft = await openDraft([topicA, topicB]);
+    expect((await editOp(draft.id, { action: 'remove', index: 0, current: topicA }, memberJar)).statusCode).toBe(403);
+    await app.inject({ method: 'POST', url: `${drafts()}/${draft.id}/discard`, cookies: jar });
+    expect((await editOp(draft.id, { action: 'remove', index: 0, current: topicA })).statusCode).toBe(409);
+  });
+});

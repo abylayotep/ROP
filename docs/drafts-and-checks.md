@@ -21,6 +21,18 @@ WhatsApp wizard, or from «Открыть» on the «На проверке» tab
 newest first with its origin. There is still no way to create a draft by hand. After
 «Применить» or «Отбросить» the screen returns to «На проверке».
 
+The top of the screen says in words whether the draft is still only a draft, applied, or
+discarded, and lists the three steps to apply it. «Запустить прогон», «Применить» and
+«Отбросить» sit in a bar pinned to the bottom of the window, so a draft of eighty topics does
+not hide them behind a long scroll; the topic list itself shows ten cards and a «Показать ещё»
+button.
+
+While a draft is open and no run is in flight, every topic card offers «Изменить» (edit the
+topic's text) and «Убрать» (drop the topic from the draft). Either one deletes the draft's
+earlier runs: they proved a different set of topics, so «Применить» waits for a new run. A
+removed topic's generation proposals are marked rejected, so the next chat generation does not
+bring them back. The last topic cannot be removed; discard the draft instead.
+
 Наверху экрана — само изменение, «было» против «стало»: для заметки — старый текст против
 нового, построчно; для правила — категория и текст, которые оно будет читать. Это не то же
 «было — стало», что ниже, в таблице прогона (раздел 4), — там сравниваются ответы агента, а

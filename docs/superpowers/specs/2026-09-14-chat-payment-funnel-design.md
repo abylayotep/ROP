@@ -40,8 +40,8 @@ A receipt photo or document alone is not payment: the model cannot read attachme
 the second rule.
 
 The state `confirmed` (Kaspi) keeps priority over `paid`. `paid` is sticky: a later analysis
-that returns `unknown` or `awaiting_payment` does not erase it. Only an operator moves a lead
-out of the sale stage.
+that returns `unknown` or `awaiting_payment` does not erase it. AI (worker and live agent)
+never moves a lead out of the sale stage.
 
 The CRM `paymentEvidence` state named `awaiting_payment` (card label «Ожидается») is a
 different concept from the removed stage kind and stays.
@@ -58,7 +58,8 @@ different concept from the removed stage kind and stays.
 - otherwise the requested stage.
 
 The live reply agent (`lib/ai/turn.ts`) may move into the sale stage when Kaspi confirmed or
-the stored CRM profile says `paymentEvidence` is `paid` or `confirmed`.
+the stored CRM profile says `paymentEvidence` is `paid` or `confirmed` and no order is paid
+yet (see «Operator override and repeat purchases»).
 
 An operator may move a lead into the sale stage by hand with no payment check. The 409
 «Сначала дождитесь подтверждения оплаты Kaspi…» is removed.
@@ -78,11 +79,12 @@ automation lock transaction as the stage move:
 
 - the conversation's stage (after this run's move) has kind `success`;
 - `paidAmount` was accepted;
-- the conversation has no order with `status = 'paid'` and no Kaspi payment in `pending`,
-  `creating`, `unknown` or `paid`.
+- no order is paid in the current sale episode and no Kaspi payment is `pending`, `creating`
+  or `unknown` (or `paid` with `confirmed_at` in the episode);
+- the evidence postdates the latest paid order (see below).
 
 The order: `amount = value`, `currency = agent.currency`, `status = 'paid'`,
-`paidAt = conversations.stage_set_at`, `comment = 'Оплата по переписке'`. After the
+`paidAt = conversations.stage_set_at` (the move time when this run moved the lead), `comment = 'Оплата по переписке'`. After the
 transaction commits, `queuePurchase(db, { agentId, orderId })` runs, as the Kaspi path does.
 `queuePurchase` is idempotent per order, so a retry cannot double-report.
 
@@ -108,7 +110,33 @@ No amount → no order, no `Purchase`; the stage move still stands.
   fall through to the neutral color).
 - `LeadPanel`: `paymentEvidence === 'paid'` shows «Оплачено по переписке» with the reason.
 
-## Migration `0046_merge_awaiting_payment.sql`
+## Operator override and repeat purchases
+
+Added after the final review, with the owner.
+
+- **Operator undo.** When the latest move into or out of the sale stage is an operator taking
+  the lead out (`operatorLeftSale`), chat evidence no longer moves it back and no chat order
+  is recorded; a Kaspi payment confirmed after that still moves it. Anyone putting the lead
+  back into the sale stage clears this.
+- **Deleting a chat order.** A paid order with no Kaspi row may be deleted, but only while the
+  lead is outside the sale stage (409 «Сначала выведите сделку из стадии «Оплачено», затем
+  удалите заказ»). Kaspi-paid orders stay immutable.
+- **One order per sale episode.** An episode starts when the lead last entered the sale stage
+  (`stage_set_at`); only a paid order with `paid_at` at or after it blocks a new chat order
+  (`hasPaidOrderInSaleEpisode`). Kaspi sets `stage_set_at = confirmed_at` when it moves a lead.
+- **Fresh evidence.** The paid claim's message and the price message must both be sent after
+  `greatest(paid_at, created_at)` of the conversation's latest paid order (Kaspi or chat); a
+  chat order is backdated to the stage entry, which can precede its own messages. A Kaspi
+  payment counts for the worker only while the lead is in the sale stage or was paid after
+  its current stage was set.
+- **Kaspi invoices.** `createKaspiCheckout` (operator route and AI checkout) refuses with 409
+  «У сделки уже есть оплаченный заказ» only while the lead is in the sale stage with a paid
+  order in the current episode. A 409 from the AI checkout becomes a note and the ordinary
+  reply, not a failed analysis.
+- **Purchase recovery.** `queueMissingPurchases` runs every 60 s on its own timer and logs the
+  ids of orders it still could not queue.
+
+## Migration `0050_merge_awaiting_payment.sql`
 
 For every stage with `kind = 'awaiting_payment'` whose agent has a `success` stage:
 
@@ -116,10 +144,16 @@ For every stage with `kind = 'awaiting_payment'` whose agent has a `success` sta
    stage, snapshots of name/kind/position, `moved_by = 'system'`, `occurred_at = now()`.
 2. Update those conversations: `stage_id` = sale stage, `stage_set_at = now()`,
    `stage_set_by = 'system'`.
-3. Reset their `crm_analyses` so the worker rereads them: `analyzed_message_id = null`,
-   `status = 'pending'`, lease cleared.
-4. Delete the `awaiting_payment` stage.
-5. Renumber the agent's remaining stages `position` 0..n-1 in current order.
+3. Delete the `awaiting_payment` stage.
+4. Renumber the agent's remaining stages `position` 0..n-1 in current order.
+5. Update the default texts `0046_stage_agent_goal` wrote for «Готов к покупке» (helping the
+   customer pay moves here) and «Оплачено» (description no longer Kaspi-only), only where they
+   are still the defaults.
+
+The analyses of merged leads are **not** reset in the migration: releases migrate while the
+old API still runs and roll back to it on a failed health check, and the old worker would
+demote the merged leads. The reset is a post-release SQL step in `docs/crm-kaspi.md`
+(«Releasing migration 0050»), run once the new API is healthy.
 
 An `awaiting_payment` stage whose agent has no `success` stage (not expected; the API keeps
 exactly one) is converted to `kind = 'active'` instead, with its leads left in place.
@@ -130,7 +164,7 @@ Migration 0005 (the historic seed) is not edited.
 
 - Operators recording a paid order by hand (`POST …/orders` still refuses `status: 'paid'`).
 - Reading receipt images.
-- Refunds or cancellation of a chat order.
+- Refunds of a chat order (an operator can only undo a false one, see above).
 
 ## Acceptance
 
@@ -146,5 +180,6 @@ Migration 0005 (the historic seed) is not edited.
 - Operator drags a lead into «Оплачено» without Kaspi → 200.
 - Kaspi invoice pending for the conversation → no chat order.
 - Migration on a DB with leads in an `awaiting_payment` stage → leads in the sale stage, one
-  transition each, stage gone, positions contiguous, analyses pending.
+  transition each, stage gone, positions contiguous, analyses untouched until the
+  post-release step.
 - `npm test` in `server` and the cabinet type check pass.

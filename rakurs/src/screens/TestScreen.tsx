@@ -338,6 +338,15 @@ export function TestTurnInspector({ turn, onCorrect, onSaveCase }: {
             {turn.checkout && <p>Следующие ходы не включают платёжные инструкции Kaspi, потому что внешний сервис не вызывался.</p>}
             {turn.handoff && <p>Передача человеку: {turn.handoff}</p>}
           </div>
+          {turn.photos.length > 0 && (
+            <div className="test-inspector-group">
+              <h3>Фото товаров</h3>
+              <p>В живом диалоге отправились бы после ответа; здесь ничего не отправлено.</p>
+              <ul>{turn.photos.map((photo, index) => (
+                <li key={`${photo.id}-${index}`}>{photo.productName || 'Фото удалено из каталога'}</li>
+              ))}</ul>
+            </div>
+          )}
           <div className="test-inspector-group test-inspector-meta">
             <h3>Версия ответа</h3>
             <p>Настройки: {turn.configVersion} · модель: {turn.model}</p>

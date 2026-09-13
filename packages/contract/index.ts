@@ -693,6 +693,76 @@ export interface OperatorNotifyPatch {
   phone: string;
 }
 
+/* ── Товары ─────────────────────────────────────────────────────────────────
+ * The agent's catalog: what it sells, at which prices, with which photos. Every id is
+ * stable, so a later promotion can name a product and one of its variants. */
+
+/** One price of a product. A product with a single price has one variant with an empty label. */
+export interface ProductVariant {
+  id: string;
+  label: string;
+  /** Whole units of the agent's currency. */
+  price: number;
+  position: number;
+}
+
+export interface ProductPhoto {
+  id: string;
+  mime: string;
+  sizeBytes: number;
+  filename: string;
+  /** For the agent to pick the right photo. Never sent to the customer. */
+  caption: string | null;
+  position: number;
+  createdAt: string;
+}
+
+export interface Product {
+  id: string;
+  name: string;
+  description: string;
+  position: number;
+  /** Off hides the product from the agent. */
+  active: boolean;
+  variants: ProductVariant[];
+  photos: ProductPhoto[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProductVariantInput {
+  label: string;
+  price: number;
+}
+
+export interface ProductCreateRequest {
+  name: string;
+  description?: string;
+  active?: boolean;
+  variants?: ProductVariantInput[];
+}
+
+export interface ProductUpdateRequest {
+  name?: string;
+  description?: string;
+  active?: boolean;
+}
+
+/** Replaces every variant: the editor saves the table as a whole. */
+export interface ProductVariantsRequest {
+  variants: ProductVariantInput[];
+}
+
+/** Every photo of the product, in the new order. */
+export interface ProductPhotoOrderRequest {
+  photoIds: string[];
+}
+
+export interface ProductPhotoUpdateRequest {
+  /** Empty clears it. */
+  caption: string;
+}
+
 /* ── Агент ──────────────────────────────────────────────────────────────────
  * What the owner may set about the model, what they may pick, and what one
  * sandbox turn answers back. The key is not here: it goes in and never out. */
@@ -888,7 +958,16 @@ export interface AiSandboxTurn extends AiTurn {
   effectSource: 'ai' | 'crm';
   /** A grounded checkout intent only; no payment or order has been created. */
   checkout: AiSandboxCheckout | null;
+  /** Catalog photos a live reply would have sent after the text. Nothing was sent. */
+  photos: AiTurnPhoto[];
   createdAt: string;
+}
+
+/** A catalog photo a turn picked. `productName` is empty when the photo has since been deleted. */
+export interface AiTurnPhoto {
+  id: string;
+  productId: string | null;
+  productName: string;
 }
 
 /** Browser-only state carried into the next simulated exchange. */

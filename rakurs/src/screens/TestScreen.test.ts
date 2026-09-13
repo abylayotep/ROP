@@ -26,7 +26,7 @@ const turn: AiSandboxTurn = {
   usedItems: [{ id: 'source-1', title: 'Доставка' }], stageId: 'stage-1',
   stageName: 'Готов к покупке', fields: [{ id: 'field-1', name: 'Город', value: 'Алматы' }],
   handoff: null, outcome: 'sent', detail: 'Draft checkout only',
-  effectSource: 'ai', checkout: null,
+  effectSource: 'ai', checkout: null, photos: [],
   createdAt: '2026-09-12T10:00:00.000Z',
 };
 
@@ -53,6 +53,19 @@ describe('testing screen', () => {
     expect(html).toMatch(/>Исправить ответ<\/button>/);
     expect(html).toMatch(/>Сохранить как тест-кейс<\/button>/);
     expect(html).not.toContain('пока недоступны');
+  });
+
+  it('names the catalog photos a live reply would send, without claiming they were sent', () => {
+    const html = renderToStaticMarkup(createElement(TestTurnInspector, {
+      turn: { ...turn, photos: [
+        { id: 'photo-1', productId: 'product-1', productName: 'Дверь «Гранит»' },
+        { id: 'photo-2', productId: null, productName: '' },
+      ] },
+    }));
+    expect(html).toContain('Фото товаров');
+    expect(html).toContain('Дверь «Гранит»');
+    expect(html).toContain('Фото удалено из каталога');
+    expect(html).toContain('ничего не отправлено');
   });
 
   it('labels separate CRM effects and a checkout as simulated without claiming payment creation', () => {

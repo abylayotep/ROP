@@ -1078,6 +1078,7 @@ describe('a dry run', () => {
       outcome: 'handoff',
       reply: 'Доставка 1500 ₸.',
       usedItemIds: [itemId],
+      photoIds: [],
       stageId: second.id,
       fields: { [cityFieldId]: 'Алматы' },
       // The reason travels with the result: it is what the sandbox shows an owner, and the

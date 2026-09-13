@@ -251,6 +251,9 @@ export const aiSandboxTurns = pgTable(
     fields: jsonb('fields').$type<AiTurnField[]>().notNull().default([]),
     effectSource: text('effect_source').$type<'ai' | 'crm'>().notNull().default('ai'),
     checkout: jsonb('checkout').$type<AiSandboxCheckout | null>(),
+    // Catalog photos the reply would have sent. Ids, not foreign keys, for the same reason
+    // `sourceIds` is: a rehearsal stays readable after the owner deletes the photo.
+    photoIds: jsonb('photo_ids').$type<string[]>().notNull().default([]),
     handoff: text('handoff'),
     outcome: text('outcome').notNull(),
     detail: text('detail'),
@@ -553,6 +556,12 @@ export const messages = pgTable(
     // fetched the first time someone opens it, and that fetch needs the message's own keys.
     // Null once the file is on disk, and for every message that never had one.
     mediaRef: jsonb('media_ref'),
+    // Set on a catalog photo the agent sent, so the next turn knows not to send it again.
+    // Set null when the photo is deleted: the message keeps its own copy of the file, and a
+    // photo that no longer exists cannot be offered twice anyway.
+    productPhotoId: uuid('product_photo_id').references((): AnyPgColumn => productPhotos.id, {
+      onDelete: 'set null',
+    }),
     // Outbound only: sent, delivered, read, failed.
     status: text('status'),
     sentAt: timestamp('sent_at', { withTimezone: true }).notNull(),
@@ -857,6 +866,71 @@ export const kbLinks = pgTable(
   },
   (t) => [index('kb_links_agent_target_idx').on(t.agentId, t.toNoteId),
           index('kb_links_from_idx').on(t.fromNoteId)],
+);
+
+/**
+ * One thing the business sells, as the agent quotes it.
+ *
+ * Separate from the knowledge base on purpose: a price is structured data an owner edits in
+ * a table, not a sentence retrieval may or may not surface. The whole active catalog travels
+ * with every turn, so the agent never answers «уточню» about something the shop lists.
+ */
+export const products = pgTable(
+  'products',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    agentId: uuid('agent_id').notNull().references(() => agents.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    description: text('description').notNull().default(''),
+    position: integer('position').notNull().default(0),
+    // Off hides the product from the agent without losing its prices and photos.
+    active: boolean('active').notNull().default(true),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('products_agent_position_idx').on(t.agentId, t.position)],
+);
+
+/**
+ * One price of a product: a size, a thickness, a colour. A product sold at a single price has
+ * one variant with an empty label. A row with its own id, not a jsonb list, so a later
+ * promotion can point at «this product, 40 мм» and survive the owner renaming the label.
+ */
+export const productVariants = pgTable(
+  'product_variants',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    productId: uuid('product_id').notNull().references(() => products.id, { onDelete: 'cascade' }),
+    label: text('label').notNull().default(''),
+    // Whole units of the agent's currency — tenge have no minor unit anyone quotes.
+    price: integer('price').notNull(),
+    position: integer('position').notNull().default(0),
+  },
+  (t) => [
+    index('product_variants_product_position_idx').on(t.productId, t.position),
+    check('product_variants_price_check', sql`${t.price} >= 0`),
+  ],
+);
+
+/**
+ * One product photo, stored under `MEDIA_DIR` exactly like a message's file: `mediaPath` is
+ * relative to it and is the only path ever read.
+ */
+export const productPhotos = pgTable(
+  'product_photos',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    productId: uuid('product_id').notNull().references(() => products.id, { onDelete: 'cascade' }),
+    mediaPath: text('media_path').notNull(),
+    mediaMime: text('media_mime').notNull(),
+    sizeBytes: integer('size_bytes').notNull(),
+    filename: text('filename').notNull().default(''),
+    // Read by the agent to pick the right photo; never sent to the customer.
+    caption: text('caption'),
+    position: integer('position').notNull().default(0),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('product_photos_product_position_idx').on(t.productId, t.position)],
 );
 
 /**

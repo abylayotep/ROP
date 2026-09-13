@@ -20,7 +20,10 @@
  * would be unusable on exactly the agent that needs it. Every other refusal stands in both
  * modes, including the closed window and the last word not being the customer's.
  */
-import { and, asc, desc, eq, isNull, ne } from 'drizzle-orm';
+import { randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { and, asc, desc, eq, inArray, isNotNull, isNull, ne } from 'drizzle-orm';
 import { windowOpen } from '../../api/conversations.js';
 import type { Db } from '../../db/client.js';
 import {
@@ -32,6 +35,8 @@ import {
   leadValues,
   messages,
   notes,
+  productPhotos,
+  products,
   stages,
   whatsappNumbers,
 } from '../../db/schema.js';
@@ -52,18 +57,23 @@ import {
 import { queueLead } from '../capi/enqueue.js';
 import { recordStageMove } from '../funnel-history.js';
 import { sendStageMessage } from '../funnel-message.js';
+import { loadProducts, removeStoredFiles } from '../catalog/products.js';
 import { knowledgeForTurn } from '../knowledge/for-turn.js';
 import { decryptSecret } from '../secret-box.js';
 import { GraphError, withoutSecret, type GraphClient } from '../whatsapp/graph.js';
 import type { LinkedClient } from '../whatsapp/linked/client.js';
+import { storeInboundMedia } from '../whatsapp/media.js';
 import { markTokenRejected } from '../whatsapp/token-expiry.js';
 import { transportFor, type MessageTransport } from '../whatsapp/transport.js';
 import { ModelError, type ChatMessage, type ModelClient } from './openrouter.js';
 import { notifyOperator } from './operator-alert.js';
 import {
   buildMessages,
+  formatPrice,
   HISTORY_LIMIT,
   KNOWLEDGE_LIMIT,
+  PHOTO_SEND_LIMIT,
+  PRODUCT_LIMIT,
   REPLY_SCHEMA,
   type AgentReply,
   type PromptMessage,
@@ -120,6 +130,11 @@ export interface TurnResult {
   reply: string | null;
   /** The knowledge records the answer was built from, minus any the model was not given. */
   usedItemIds: string[];
+  /**
+   * Catalog photos that went out after the reply — or, in a dry run, would have. Only ever
+   * photos of this agent's active products not already sent in this conversation.
+   */
+  photoIds: string[];
   /** The stage the lead was moved to, or would have been. Null when it did not move. */
   stageId: string | null;
   /** The fields that were filled, or would have been. Unknown ids are already gone. */
@@ -296,6 +311,7 @@ const empty = (
   outcome,
   reply: null,
   usedItemIds: [],
+  photoIds: [],
   stageId: null,
   fields: {},
   handoff,
@@ -458,7 +474,7 @@ function retryMessage(kind: string): ChatMessage {
     role: 'user',
     content:
       `Твой прошлый ответ не подошёл: ${kind}. Верни ровно один JSON-объект с ключами ` +
-      'reply, stageId, fields, handoff, usedItemIds — без текста вокруг и без markdown.',
+      'reply, stageId, fields, handoff, photoIds, usedItemIds — без текста вокруг и без markdown.',
   };
 }
 
@@ -569,11 +585,14 @@ export interface AiCoreInput {
   stageName?: string | null;
   values: readonly PromptLeadValue[];
   allowProposedCrm: boolean;
+  /** Catalog photos this conversation has already received. */
+  sentPhotoIds?: readonly string[];
   canContinue?: () => Promise<boolean>;
   canMoveToSuccess: () => Promise<boolean>;
 }
 
 type AiCoreUsage = { promptTokens: number; completionTokens: number; cost: string };
+export type CorePhoto = { id: string; productId: string; productName: string };
 export type AiCoreExecution =
   | { kind: 'skipped' | 'failed'; detail: string; usage: AiCoreUsage }
   | {
@@ -583,6 +602,8 @@ export type AiCoreExecution =
       reply: AgentReply | null;
       usedItemIds: string[];
       usedItems: { id: string; title: string }[];
+      /** The photos to send after the reply: known, unsent, capped. */
+      photos: CorePhoto[];
       invented: string | null;
       handoffReason: string | null;
       unreadableDetail: string | null;
@@ -619,6 +640,7 @@ export async function executeAiCore(db: Db, deps: TurnDeps, input: AiCoreInput):
     .map((message) => message.body ?? '').filter((body) => body.trim() !== '');
   const hits = await knowledgeForTurn(db, agent.id, customerSaid, KNOWLEDGE_LIMIT);
   const instructions = assembleRules(await loadRules(db, agent.id));
+  const catalog = await loadProducts(db, agent.id, { activeOnly: true });
   const context: TurnContext = {
     agent: { name: agent.name, timezone: agent.timezone, instructions,
       replyLanguage: agent.replyLanguage, communicationStyle: agent.communicationStyle },
@@ -632,6 +654,10 @@ export async function executeAiCore(db: Db, deps: TurnDeps, input: AiCoreInput):
       stageName: input.stageName === undefined
         ? stageRows.find((stage) => stage.id === input.stageId)?.name ?? null : input.stageName,
       values: input.values },
+    products: catalog.map(({ id, name, description, variants, photos }) => ({
+      id, name, description, variants, photos })),
+    currency: agent.currency,
+    sentPhotoIds: input.sentPhotoIds,
   };
   const prompt = buildMessages(context);
   let reply: AgentReply | null = null;
@@ -670,6 +696,8 @@ export async function executeAiCore(db: Db, deps: TurnDeps, input: AiCoreInput):
   const unreadableDetail = reply === null
     ? safe(`модель дважды вернула негодный ответ (${broken.detail})`, key) : null;
   const given = new Set(context.knowledge.map((item) => item.id));
+  // Exactly the products `productsSection` rendered, so no photo the model never saw is sent.
+  const shownProducts = catalog.slice(0, PRODUCT_LIMIT);
   const usedItemIds = reply?.usedItemIds.filter((id) => given.has(id)) ?? [];
   const cited = new Set(usedItemIds);
   // Every record the agent read, not only the ones it cited: a small store now travels whole,
@@ -680,6 +708,10 @@ export async function executeAiCore(db: Db, deps: TurnDeps, input: AiCoreInput):
     ...context.knowledge.slice(0, context.knowledgeLimit)
       .flatMap((item) => [item.title, item.content]),
     ...history.map((message) => message.body ?? ''), instructions,
+    // The whole catalog the model was shown, not only what it cited: products carry no
+    // citation, and a price read from ТОВАРЫ is sourced whichever product it came from.
+    ...shownProducts.flatMap((product) => [product.name, product.description,
+      ...product.variants.flatMap((variant) => [variant.label, formatPrice(variant.price, agent.currency)])]),
   ];
   const invented = reply === null ? null : unsourcedNumber(reply.reply, sources);
   const reasons: string[] = [];
@@ -693,6 +725,7 @@ export async function executeAiCore(db: Db, deps: TurnDeps, input: AiCoreInput):
   const fields = input.allowProposedCrm && reply !== null
     ? Object.fromEntries(Object.entries(reply.fields).filter(([id]) => known.has(id))) : {};
   const details: string[] = [];
+  const photos = reply === null ? [] : pickPhotos(reply.photoIds, shownProducts, input.sentPhotoIds ?? [], details);
   let targetStage: typeof stages.$inferSelect | null = null;
   if (input.allowProposedCrm && reply?.stageId) {
     const target = stageRows.find((stage) => stage.id === reply.stageId);
@@ -705,8 +738,38 @@ export async function executeAiCore(db: Db, deps: TurnDeps, input: AiCoreInput):
   return { kind: 'ready', key, usage, reply, usedItemIds,
     usedItems: context.knowledge.filter((item) => cited.has(item.id))
       .map(({ id, title }) => ({ id, title })),
-    invented, handoffReason, unreadableDetail, fields,
+    photos, invented, handoffReason, unreadableDetail, fields,
     targetStage, stageRows, fieldRows, details };
+}
+
+/**
+ * The photos a reply asked for that may actually go out.
+ *
+ * Unknown ids — invented, copied from an example, another agent's — and ids already sent are
+ * dropped rather than refused: a photo is an extra, and the reply they came with is still
+ * right. What was dropped is said in `details`, bounded, because an owner debugging «почему
+ * фото не пришло» reads it there.
+ */
+function pickPhotos(
+  requested: readonly string[],
+  shown: readonly { id: string; name: string; photos: readonly { id: string }[] }[],
+  sent: readonly string[],
+  details: string[],
+): CorePhoto[] {
+  const known = new Map(shown.flatMap((product) =>
+    product.photos.map((photo) => [photo.id, { id: photo.id, productId: product.id, productName: product.name }] as const)));
+  const already = new Set(sent);
+  const unknown = requested.filter((id) => !known.has(id));
+  const repeated = requested.filter((id) => known.has(id) && already.has(id));
+  const fresh = requested.filter((id) => known.has(id) && !already.has(id));
+  if (unknown.length > 0) {
+    details.push(`Модель назвала фото, которых нет в каталоге: ${unknown.map((id) => id.slice(0, 40)).join(', ').slice(0, 200)}.`);
+  }
+  if (repeated.length > 0) details.push(`Фото уже отправлялись в этом диалоге: ${repeated.length}.`);
+  if (fresh.length > PHOTO_SEND_LIMIT) {
+    details.push(`Модель выбрала ${fresh.length} фото, отправляются первые ${PHOTO_SEND_LIMIT}.`);
+  }
+  return fresh.slice(0, PHOTO_SEND_LIMIT).map((id) => known.get(id)!);
 }
 
 export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise<TurnResult> {
@@ -773,11 +836,20 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
     .where(eq(leadValues.conversationId, conversation.id))
     .orderBy(asc(leadFields.position));
 
+  // Read from the thread itself rather than from a list kept anywhere else: the message row
+  // is written only once WhatsApp accepted the photo, so this is exactly what the customer has.
+  const sentPhotoIds = (await db
+    .selectDistinct({ id: messages.productPhotoId })
+    .from(messages)
+    .where(and(eq(messages.conversationId, conversation.id), isNotNull(messages.productPhotoId))))
+    .map((row) => row.id!);
+
   const core = await executeAiCore(db, deps, {
     agent,
     history: history.map(({ author, body, kind }) => ({ author, body, kind })),
     stageId: conversation.stageId,
     values,
+    sentPhotoIds,
     allowProposedCrm: !deps.crm || dryRun,
     canContinue: dryRun ? undefined : () => automationAllowed(db, input, 'reply'),
     canMoveToSuccess: () => hasConfirmedKaspiPayment(db, agent.id, conversation.id),
@@ -958,6 +1030,7 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
       outcome: 'failed',
       reply: null,
       usedItemIds,
+      photoIds: [],
       stageId: movedTo,
       fields: applied,
       // The handoff, if there was to be one, is applied after the stage move and so has not
@@ -970,6 +1043,8 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
   const body = reply.reply.trim();
   /** Null while nothing has been attempted: an empty reply, or one that was withheld. */
   let delivery: Delivery | null = null;
+  /** Photos that went out after the reply, or would have in a dry run. */
+  let photoIds: string[] = [];
 
   /**
    * The operator's WhatsApp alert, for a handoff this turn owns.
@@ -1009,15 +1084,39 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
       details.push(ready.detail);
     } else if (dryRun) {
       delivery = { state: 'sent', messageId: null };
+      photoIds = core.photos.map((photo) => photo.id);
     } else {
-      const send = (tx: AutomationTransaction) =>
-        deliver(tx, deps, {
+      /**
+       * The reply, then its photos, inside the one gated effect.
+       *
+       * Photos ride the reply's own authorization rather than asking again: a handoff reply
+       * is allowed by a check that a second, ordinary one would refuse, and a photo sent
+       * without the sentence it illustrates is worse than none. The price is holding the
+       * automation lock across up to three more sends, each bounded by the transport's own
+       * deadline. A photo that fails never touches the reply's delivery.
+       */
+      const send = async (tx: AutomationTransaction): Promise<Delivery> => {
+        const delivered = await deliver(tx, deps, {
           conversation,
           channel: ready.delivery.channel,
           address: ready.delivery.address,
           transport: ready.transport,
           body,
         });
+        if (delivered.state !== 'sent' || core.photos.length === 0) return delivered;
+        const outcome = await sendPhotos(tx, {
+          agentId: agent.id,
+          conversation,
+          channel: ready.delivery.channel,
+          address: ready.delivery.address,
+          transport: ready.transport,
+          mediaDir: deps.env?.MEDIA_DIR,
+          photoIds: core.photos.map((photo) => photo.id),
+        });
+        photoIds = outcome.sent;
+        if (outcome.detail !== null) details.push(outcome.detail);
+        return delivered;
+      };
       const sent = handoffReason === null
         ? await withAutomationEffect(db, input, 'reply', (tx, snapshot) =>
             input.crmOrigin && snapshot.crmAnalysisMode !== 'follow_ai' ? Promise.resolve(null) : send(tx)).then((result) =>
@@ -1075,6 +1174,7 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
     // the sandbox has to show the owner what the agent wanted to say.
     reply: body === '' || unsourced ? null : body,
     usedItemIds,
+    photoIds,
     stageId: movedTo,
     fields: applied,
     handoff: handoffReason,
@@ -1257,4 +1357,93 @@ async function deliver(
         }
       : { state: 'failed', detail: `Ответ не отправлен: ${reason}` };
   }
+}
+
+/**
+ * Catalog photos, sent one by one after the reply the way an operator's file is.
+ *
+ * Each goes through the operator's own road: the bytes are copied under a message-owned name
+ * first, so the conversation keeps showing the photo after the owner deletes it from the
+ * catalog; then the transport sends; then the row is written, carrying `productPhotoId` so the
+ * next turn knows. The first failure stops the rest — a phone that did not take one photo is
+ * unlikely to take the next, and each attempt can hold the lock for its full deadline.
+ *
+ * Re-read against the catalog here rather than trusted from the prompt: a photo deleted or a
+ * product switched off while the model was thinking is not sent.
+ */
+async function sendPhotos(
+  db: AutomationTransaction,
+  input: {
+    agentId: string;
+    conversation: typeof conversations.$inferSelect;
+    channel: 'whatsapp' | 'instagram';
+    address: string;
+    transport: MessageTransport;
+    mediaDir: string | undefined;
+    photoIds: readonly string[];
+  },
+): Promise<{ sent: string[]; detail: string | null }> {
+  const { conversation, channel, address, transport, mediaDir } = input;
+  if (mediaDir === undefined) return { sent: [], detail: 'Фото не отправлены: хранилище файлов не настроено.' };
+
+  const rows = await db
+    .select({ photo: productPhotos })
+    .from(productPhotos)
+    .innerJoin(products, eq(products.id, productPhotos.productId))
+    .where(and(inArray(productPhotos.id, [...input.photoIds]), eq(products.agentId, input.agentId),
+      eq(products.active, true)));
+  const byId = new Map(rows.map(({ photo }) => [photo.id, photo]));
+  const photos = input.photoIds.flatMap((id) => byId.get(id) ?? []);
+  const sent: string[] = [];
+  const gone = input.photoIds.length - photos.length;
+  const notes = gone > 0 ? [`Фото удалили из каталога до отправки: ${gone}.`] : [];
+
+  for (const photo of photos) {
+    let copy: string | null = null;
+    let accepted = false;
+    try {
+      const bytes = await readFile(join(mediaDir, photo.mediaPath));
+      copy = (await storeInboundMedia({ mediaDir }, {
+        bytes, mime: photo.mediaMime, agentId: input.agentId, waMessageId: `out.${randomUUID()}`,
+      })).path;
+      const { messageId } = await transport.sendMedia(address, {
+        path: join(mediaDir, copy),
+        mime: photo.mediaMime,
+        filename: photo.filename || undefined,
+      });
+      accepted = true;
+      const storedPath = copy;
+      await db.transaction(async (savepoint) => {
+        const sentAt = new Date();
+        await savepoint.insert(messages).values({
+          conversationId: conversation.id,
+          waMessageId: channel === 'whatsapp' ? messageId : null,
+          instagramMessageId: channel === 'instagram' ? messageId : null,
+          direction: 'out',
+          author: 'ai',
+          kind: 'image',
+          body: null,
+          status: 'sent',
+          sentAt,
+          mediaPath: storedPath,
+          mediaMime: photo.mediaMime,
+          productPhotoId: photo.id,
+        });
+        await savepoint.update(conversations).set({ lastMessageAt: sentAt })
+          .where(eq(conversations.id, conversation.id));
+      });
+      sent.push(photo.id);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      if (accepted) {
+        notes.push(`Фото доставлено клиенту, но не сохранено в переписке: ${reason}`);
+        sent.push(photo.id);
+      } else {
+        if (copy !== null) await removeStoredFiles(mediaDir, [copy]);
+        notes.push(`Фото не отправлено: ${reason}`);
+      }
+      break;
+    }
+  }
+  return { sent, detail: notes.length === 0 ? null : notes.join(' ') };
 }

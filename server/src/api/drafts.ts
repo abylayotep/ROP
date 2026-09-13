@@ -734,7 +734,8 @@ export function registerDraftRoutes(
           beforeReply = baseline.reply;
         }
 
-        // The annotation — one model call, advice in a column, never a gate. Only the draft's
+        // The annotation — one model call, advice in a column for ordinary drafts, but a
+        // required response-correction case needs `better` before apply. Only the draft's
         // own «стало» row carries a verdict: the baseline row is what «было» *is*, not a
         // comparison of anything, so there is nothing for it to be annotated against. A call
         // that never got an answer at all (`annotate` never throws — see its own file comment)

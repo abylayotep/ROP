@@ -1177,7 +1177,8 @@ export interface DraftRunSummary {
  * `GET .../drafts/:draftId`'s own answer — `KbDraft` plus what a reload needs and cannot
  * otherwise know: the draft's run history, and whether it is provably safe to apply *right
  * now*. `applicable` is exactly the predicate the apply route itself checks (a `done` run at
- * the agent's current `config_version`), computed by the one function both share — so a
+ * the current config version, plus a successful `better` originating case for corrections),
+ * computed by the one function both share — so a
  * screen's «Применить» can never disagree with what the apply route would actually do.
  */
 export interface KbDraftDetail extends KbDraft {

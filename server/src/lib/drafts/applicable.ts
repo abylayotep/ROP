@@ -3,8 +3,10 @@ import type { Db } from '../../db/client.js';
 import { testCases, testResults, testRuns } from '../../db/schema.js';
 
 /**
- * Whether a draft is provably safe to apply *right now* — some run of it finished `done` at
- * the agent's *current* `config_version`. This is only one of the apply route's four checks
+ * Whether a draft is provably safe to apply *right now*. Ordinary drafts need a `done` run at
+ * the current config version. Response-correction drafts additionally need their latest
+ * current-version run to contain a successful originating case with a `better` verdict.
+ * This is only one of the apply route's four checks
  * (`api/drafts.ts`'s own comment on that route names the rest: draft status, `staleOps`, and
  * this one), but it is the one a screen needs in order to answer "would «Применить» work"
  * without guessing — which used to mean tracking a run session-locally and losing the answer
@@ -23,9 +25,10 @@ export async function isDraftApplicable(db: Db, draftId: string, currentConfigVe
       .from(testRuns).where(and(eq(testRuns.draftId, draftId), eq(testRuns.configVersion, currentConfigVersion)))
       .orderBy(desc(testRuns.startedAt), desc(testRuns.id)).limit(1);
     if (!latest || latest.status !== 'done') return false;
-    const [result] = await db.select({ outcome: testResults.outcome }).from(testResults)
+    const [result] = await db.select({ outcome: testResults.outcome, verdict: testResults.verdict }).from(testResults)
       .where(and(eq(testResults.runId, latest.id), eq(testResults.caseId, required.id))).limit(1);
-    return result !== undefined && ['sent', 'applied', 'handoff'].includes(result.outcome);
+    return result !== undefined && ['sent', 'applied', 'handoff'].includes(result.outcome)
+      && result.verdict === 'better';
   }
   const [row] = await db
     .select({ id: testRuns.id })

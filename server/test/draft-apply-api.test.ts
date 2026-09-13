@@ -47,16 +47,20 @@ const OPENROUTER_KEY = 'sk-or-v1-draft-apply-api-0123456789';
  * fake carries. */
 interface FakeModel extends ModelClient {
   calls: CompletionInput[];
+  annotation: { verdict: 'better' | 'same' | 'worse'; reason: string } | null;
 }
 
 function fakeModel(): FakeModel {
   const calls: CompletionInput[] = [];
   return {
     calls,
+    annotation: null,
     async complete(input) {
       calls.push(input);
       return {
-        text: JSON.stringify({
+        text: this.annotation && input.messages.some((message) => message.content.includes('ФОРМАТ ОТВЕТА'))
+          ? JSON.stringify(this.annotation)
+          : JSON.stringify({
           reply: 'Уточню у коллеги.',
           stageId: null,
           fields: {},
@@ -261,13 +265,31 @@ describe('applying a draft', () => {
   it('refuses a failed required case and applies after a successful rerun', async () => {
     const { draft, kase } = await boundDraft();
     const failed = await runOver(draft, [kase]);
-    await db.update(testResults).set({ outcome: 'failed' }).where(eq(testResults.runId, failed.id));
+    await db.update(testResults).set({ outcome: 'failed', verdict: 'better', verdictReason: 'Improved.' })
+      .where(eq(testResults.runId, failed.id));
     expect((await apply(draft.id)).statusCode).toBe(409);
+    model.annotation = { verdict: 'better', reason: 'The corrected answer improves the delivery information.' };
     const passed = await runOver(draft, [kase]);
-    await db.update(testResults).set({ outcome: 'sent', reply: 'Доставка стоит 1500 ₸.' }).where(eq(testResults.runId, passed.id));
+    const [verified] = await db.select({ verdict: testResults.verdict }).from(testResults)
+      .where(eq(testResults.runId, passed.id));
+    expect(verified?.verdict).toBe('better');
+    await db.update(testResults).set({ outcome: 'sent', reply: 'Доставка стоит 1500 ₸.' })
+      .where(eq(testResults.runId, passed.id));
     expect((await getDraft(draft.id)).json()).toMatchObject({ applicable: true, requiredCaseId: kase.id });
     expect((await apply(draft.id)).statusCode).toBe(200);
   });
+
+  for (const verdict of [null, 'same', 'worse'] as const) {
+    it(`refuses a delivered required-case reply with ${verdict ?? 'missing'} correction verdict`, async () => {
+      const { draft, kase } = await boundDraft();
+      const run = await runOver(draft, [kase]);
+      await db.update(testResults).set({ outcome: 'sent', reply: 'Бесплатно.', verdict,
+        verdictReason: verdict ? 'The correction did not improve the answer.' : null })
+        .where(eq(testResults.runId, run.id));
+      expect((await getDraft(draft.id)).json().applicable).toBe(false);
+      expect((await apply(draft.id)).statusCode).toBe(409);
+    });
+  }
 
   it('refuses a required case passed at an older config version', async () => {
     const { draft, kase } = await boundDraft();

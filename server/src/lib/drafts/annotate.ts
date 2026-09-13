@@ -2,11 +2,9 @@
  * The annotation: one model call per case, comparing «было», «стало» and what the owner said
  * they expected, and returning a one-word verdict plus a one-sentence reason.
  *
- * It is advice in a column, not a gate — `test_results.verdict` sits beside the two replies
- * for a person to read, and nothing anywhere refuses to apply a draft because this column
- * reads `'worse'`. «Хуже» by the model's own reckoning is sometimes exactly what the owner
- * wanted (a rule that trades a fast answer for a cautious handoff, say); the button that lands
- * a draft is under a human hand, and this is only ever a hint next to it.
+ * For ordinary drafts it is advice in a column, not a gate. A response-correction draft's
+ * originating case is different: `isDraftApplicable` requires a `better` verdict as well as
+ * a successful replay outcome. The owner still explicitly applies the draft.
  *
  * That also fixes what a failure means: `annotate` never throws, and a caller that gets `null`
  * back leaves `verdict` and `verdictReason` null and moves on. The run itself is the expensive
@@ -107,9 +105,8 @@ export interface AnnotateResult {
  *
  * Exactly one model call, no retry: `runCoach` and `runTurn` retry once because a parse
  * failure is worth a second attempt when the answer is the thing the caller is waiting on.
- * Nothing is waiting on this one — it is a hint that either arrives or does not — so a second
- * attempt would only be a second charge to the owner's balance for a coin flip on the same
- * question.
+ * A missing verdict fails a response-correction draft closed; the owner can run it again.
+ * A second attempt here would charge the owner's balance for a coin flip on the same question.
  */
 export async function annotate(deps: AnnotateDeps, input: VerdictInput): Promise<AnnotateResult | null> {
   let completion: { text: string; cost: string };

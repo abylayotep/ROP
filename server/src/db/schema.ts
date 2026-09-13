@@ -1460,7 +1460,7 @@ export const testCases = pgTable(
     // What the owner expects, in words. Read by a person and by the annotating model, never
     // asserted on: turning it into an assertion is a feature with its own grammar.
     expectation: text('expectation'),
-    // 'manual' | 'dialog' | 'generated'
+    // 'manual' | 'dialog' | 'generated' | 'correction' | 'suggested' (saved by the draft autopilot)
     origin: text('origin').notNull().default('manual'),
     conversationId: uuid('conversation_id').references(() => conversations.id, { onDelete: 'set null' }),
     enabled: boolean('enabled').notNull().default(true),

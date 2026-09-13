@@ -1508,3 +1508,28 @@ export interface TestRun {
   startedAt: string;
   finishedAt: string | null;
 }
+
+export type AutopilotStatus = 'running' | 'applied' | 'stopped' | 'cancelled';
+export type AutopilotStep = 'prepare_cases' | 'clean_topics' | 'start_run' | 'await_run' | 'fix_topics' | 'apply';
+
+/**
+ * One autopilot pass over a draft: pick cases, clean topics, run, fix or remove the topics that
+ * made answers worse, and apply. `log` and `stopReason` are Russian, written for the owner.
+ */
+export interface DraftAutopilot {
+  id: string;
+  status: AutopilotStatus;
+  step: AutopilotStep;
+  runsStarted: number;
+  maxRuns: number;
+  /** The draft run in flight or last finished; null before the first run and after an edit
+   * deleted it. */
+  runId: string | null;
+  caseIds: string[];
+  log: { at: string; kind: 'info' | 'fix' | 'remove' | 'warn'; text: string }[];
+  /** Model spend so far, in US dollars. */
+  cost: string;
+  stopReason: string | null;
+  createdAt: string;
+  finishedAt: string | null;
+}

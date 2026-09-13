@@ -424,6 +424,31 @@
 .products-photos__drop .products-editor__note { flex-basis: 100%; }
 .products-photos__pick { cursor: pointer; }
 
+/* «Акции», at the top of «Товары». */
+.promotions { display: grid; gap: 10px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--card); min-width: 0; }
+.promotions__head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.promotions__head .training-tab__intro { margin: 4px 0 0; max-width: 640px; }
+.promotions__head .btn { flex: 0 0 auto; }
+.promotions__title { margin: 0; color: var(--text); font-size: 14px; font-weight: 650; }
+.promotions-list { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.promotions-row { display: flex; align-items: center; gap: 10px; padding: 7px 9px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--sunken); }
+.promotions-row[aria-current='true'] { border-color: var(--accent-a36); background: var(--accent-a08); }
+.promotions-row__open { display: grid; flex: 1; gap: 2px; min-width: 0; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.promotions-row__open:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.promotions-row__name { overflow: hidden; color: var(--text); font-size: 12.5px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.promotions-row__meta { color: var(--text-dim); font-size: 11px; }
+.promotions-badge { flex: 0 0 auto; padding: 2px 8px; border-radius: 999px; background: var(--card); color: var(--text-3); font-size: 10.5px; font-weight: 650; }
+.promotions-badge--active { background: var(--accent-a08); color: var(--accent); }
+.promotions-badge--expired { color: var(--warn); }
+.promotions-editor { border-color: var(--line-soft); }
+.promotions-editor__ends { max-width: 240px; }
+.promotions-picker { display: grid; gap: 10px; margin: 0; padding: 0; border: 0; min-width: 0; }
+.promotions-picker__product { display: grid; gap: 4px; }
+.promotions-picker__name { margin: 0; color: var(--text-2); font-size: 12px; font-weight: 650; }
+.promotions-picker__row { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(110px, 160px); align-items: center; gap: 8px; }
+.promotions-picker__row .products-editor__check { margin-top: 0; }
+.promotions-picker__regular { color: var(--text-dim); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+
 /* «На проверке». */
 .training-review { min-width: 0; }
 .training-review__list { margin: 0; padding: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background: var(--card); list-style: none; }
@@ -540,6 +565,9 @@
   .training-chooser__pick,
   .training-replies > .btn { width: 100%; }
   .training-products__head { flex-direction: column; }
+  .promotions__head { flex-direction: column; }
+  .promotions-picker__row { grid-template-columns: minmax(0, 1fr) auto; }
+  .promotions-picker__row .knowledge-control { grid-column: 1 / -1; }
   .training-products__layout--open { grid-template-columns: 1fr; }
   .training-steps { gap: 2px; padding: 4px; }
   .training-steps__item { flex-direction: column; gap: 4px; padding: 6px 2px; font-size: 11px; text-align: center; }

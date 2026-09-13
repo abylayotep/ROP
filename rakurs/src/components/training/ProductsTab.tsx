@@ -3,6 +3,7 @@ import * as api from '@/api';
 import { ErrorState, Skeleton } from '@/components/ui/states';
 import { useToast } from '@/components/ui/Toast';
 import { useApi } from '@/hooks/useApi';
+import { PromotionsSection } from './PromotionsSection';
 import type { Product, ProductVariant, ProductVariantInput } from '@/types';
 
 /** Mirrors `server/src/lib/catalog/products.ts`: checked here too, so a wrong file fails before the upload. */
@@ -28,6 +29,8 @@ export function priceRange(variants: Pick<ProductVariant, 'price'>[], currency: 
 }
 
 export interface VariantRow {
+  /** The saved variant this row edits; absent on a row the owner just added. */
+  id?: string;
   label: string;
   price: string;
 }
@@ -43,7 +46,7 @@ export function variantsFromRows(rows: VariantRow[]):
     if (!/^\d{1,10}$/.test(digits) || Number(digits) > 1_000_000_000) {
       return { ok: false, message: label ? `Укажите цену целым числом для «${label}»` : 'Укажите цену целым числом' };
     }
-    variants.push({ label, price: Number(digits) });
+    variants.push({ ...(row.id === undefined ? {} : { id: row.id }), label, price: Number(digits) });
   }
   if (variants.length > VARIANTS_PER_PRODUCT) {
     return { ok: false, message: `Не больше ${VARIANTS_PER_PRODUCT} вариантов у товара` };
@@ -61,7 +64,7 @@ export function photoProblem(file: { type: string; size: number }, existing: num
 
 const rowsOf = (product: Product | null): VariantRow[] =>
   product && product.variants.length > 0
-    ? product.variants.map((variant) => ({ label: variant.label, price: String(variant.price) }))
+    ? product.variants.map((variant) => ({ id: variant.id, label: variant.label, price: String(variant.price) }))
     : [{ label: '', price: '' }];
 
 const NEW = 'new';
@@ -71,7 +74,12 @@ const NEW = 'new';
  * knowledge base because the agent reads the whole active catalog on every reply and may send
  * its photos to the customer. Members see it; only the owner edits — the server enforces the same.
  */
-export function ProductsTab({ agentId, owner, currency }: { agentId: string; owner: boolean; currency: string }) {
+export function ProductsTab({ agentId, owner, currency, timezone }: {
+  agentId: string;
+  owner: boolean;
+  currency: string;
+  timezone: string;
+}) {
   const query = useApi<Product[]>((signal) => api.listProducts(agentId, signal), [agentId]);
   const [changed, setChanged] = useState<Product[] | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -94,6 +102,8 @@ export function ProductsTab({ agentId, owner, currency }: { agentId: string; own
 
   return (
     <div className="training-products">
+      <PromotionsSection agentId={agentId} owner={owner} currency={currency} timezone={timezone} products={items} />
+
       <div className="training-products__head">
         <p className="training-tab__intro">
           Агент знает цены и описания активных товаров и может отправить клиенту их фото в WhatsApp.

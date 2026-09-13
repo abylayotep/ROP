@@ -164,7 +164,7 @@ export function TrainingScreen() {
       )}
 
       {activeTab === 'products' && (
-        <ProductsTab key={agent.id} agentId={agent.id} owner={owner} currency={agent.currency} />
+        <ProductsTab key={agent.id} agentId={agent.id} owner={owner} currency={agent.currency} timezone={agent.timezone} />
       )}
 
       {activeTab === 'replies' && (

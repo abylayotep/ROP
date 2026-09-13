@@ -8,7 +8,12 @@ const fixture = vi.hoisted(() => ({
   error: undefined as unknown,
   reload: vi.fn(),
 }));
-vi.mock('@/hooks/useApi', () => ({ useApi: () => ({ ...fixture, loading: false }) }));
+// The promotions section above the catalog asks for its own list; it gets none here.
+vi.mock('@/hooks/useApi', () => ({
+  useApi: (fetcher: unknown) => (String(fetcher).includes('listPromotions')
+    ? { data: [], error: undefined, reload: vi.fn(), loading: false }
+    : { ...fixture, loading: false }),
+}));
 vi.mock('@/components/ui/Toast', () => ({ useToast: () => ({ ok: vi.fn(), fail: vi.fn() }) }));
 import {
   PHOTO_MAX_BYTES,
@@ -30,7 +35,7 @@ const door: Product = {
   createdAt: '2026-09-14T00:00:00.000Z', updatedAt: '2026-09-14T00:00:00.000Z',
 };
 
-const tab = (owner: boolean) => renderToStaticMarkup(createElement(ProductsTab, { agentId: 'agent-1', owner, currency: 'KZT' }));
+const tab = (owner: boolean) => renderToStaticMarkup(createElement(ProductsTab, { agentId: 'agent-1', owner, currency: 'KZT', timezone: 'Asia/Almaty' }));
 const editor = (owner: boolean, product: Product | null = door) => renderToStaticMarkup(createElement(ProductEditor, {
   agentId: 'agent-1', product, owner, onSaved: () => undefined, onClose: () => undefined, onDeleted: () => undefined,
 }));
@@ -50,6 +55,8 @@ describe('ProductsTab', () => {
     expect(html).toContain('Цена не указана');
     expect(html).toContain('Скрыт от агента');
     expect(html).toContain('Добавить товар');
+    // «Акции» sit above the catalog.
+    expect(html.indexOf('Акции')).toBeLessThan(html.indexOf('Дверь «Гранит»'));
   });
 
   it('shows members the catalog without the add button', () => {
@@ -96,6 +103,8 @@ describe('product helpers', () => {
   });
 
   it('reads the variants table, dropping empty rows and naming a bad price', () => {
+    expect(variantsFromRows([{ id: 'v1', label: '40 мм', price: '1' }]))
+      .toEqual({ ok: true, variants: [{ id: 'v1', label: '40 мм', price: 1 }] });
     expect(variantsFromRows([{ label: '40 мм', price: '85 000' }, { label: '', price: '' }]))
       .toEqual({ ok: true, variants: [{ label: '40 мм', price: 85000 }] });
     expect(variantsFromRows([{ label: '', price: '1500' }])).toEqual({ ok: true, variants: [{ label: '', price: 1500 }] });

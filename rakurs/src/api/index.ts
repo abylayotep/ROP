@@ -54,6 +54,8 @@ import type {
   ProductCreateRequest,
   ProductUpdateRequest,
   ProductVariantInput,
+  Promotion,
+  PromotionSaveRequest,
   RuleCategory,
   Stage,
   StatsCurrent,
@@ -169,6 +171,26 @@ export const reorderProductPhotos = (agentId: string, productId: string, photoId
 /** Served with the session cookie, like a message's file, so it works as an `<img src>`. */
 export const productPhotoUrl = (agentId: string, productId: string, photoId: string) =>
   `${API_URL}/agents/${agentId}/products/${productId}/photos/${photoId}/file`;
+
+// ── Акции ────────────────────────────────────────────────────────────────────
+
+export const listPromotions = (agentId: string, signal?: AbortSignal) =>
+  request<Promotion[]>(`/agents/${agentId}/promotions`, { signal });
+
+export const createPromotion = (agentId: string, body: PromotionSaveRequest) =>
+  request<Promotion>(`/agents/${agentId}/promotions`, { method: 'POST', body });
+
+export const updatePromotion = (agentId: string, promotionId: string, body: PromotionSaveRequest) =>
+  request<Promotion>(`/agents/${agentId}/promotions/${promotionId}`, { method: 'PUT', body });
+
+export const deletePromotion = (agentId: string, promotionId: string) =>
+  request<{ ok: true }>(`/agents/${agentId}/promotions/${promotionId}`, { method: 'DELETE' });
+
+export const activatePromotion = (agentId: string, promotionId: string) =>
+  request<Promotion>(`/agents/${agentId}/promotions/${promotionId}/activate`, { method: 'POST' });
+
+export const deactivatePromotion = (agentId: string, promotionId: string) =>
+  request<Promotion>(`/agents/${agentId}/promotions/${promotionId}/deactivate`, { method: 'POST' });
 
 // ── WhatsApp ─────────────────────────────────────────────────────────────────
 

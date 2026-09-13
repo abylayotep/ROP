@@ -15,7 +15,7 @@ import {
   type PhoneNumber,
 } from '../lib/whatsapp/graph.js';
 import { requireAgent } from './require-agent.js';
-import { duplicateNumberError, isDuplicate, toApi } from './whatsapp-numbers.js';
+import { duplicateNumberError, isDuplicate, toApi, webhookCallback } from './whatsapp-numbers.js';
 
 const connection = z.object({
   code: z.string().trim().min(1),
@@ -106,6 +106,16 @@ export function registerWhatsappCoexistenceRoutes(
       } catch (error) {
         if (error instanceof GraphError) {
           throw new ApiError(400, `Номер проверен, но не удалось подписать приложение на WABA: ${withoutSecret(error.message, token)}`);
+        }
+        throw error;
+      }
+
+      // See the manual connection in `whatsapp-numbers.ts`: the app's callback URL is not ours.
+      try {
+        await graph.setWebhookOverride(number.id, token, webhookCallback(env));
+      } catch (error) {
+        if (error instanceof GraphError) {
+          throw new ApiError(400, `Номер проверен, но Meta не приняла адрес для входящих сообщений: ${withoutSecret(error.message, token)}`);
         }
         throw error;
       }

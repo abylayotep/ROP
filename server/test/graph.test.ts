@@ -61,6 +61,22 @@ describe('graph client', () => {
     expect(calls[0]!.init.method).toBe('POST');
   });
 
+  it('overrides one number’s webhook address, and drops the override with an empty URI', async () => {
+    answerWith({ success: true });
+    await client.setWebhookOverride('136', TOKEN, { url: 'https://rakurs.test/api/whatsapp/webhook', verifyToken: 'vt' });
+    answerWith({ success: true });
+    await client.setWebhookOverride('136', TOKEN, null);
+
+    expect(calls[0]!.url).toBe('https://graph.facebook.com/v26.0/136');
+    expect(calls[0]!.init.method).toBe('POST');
+    expect(JSON.parse(String(calls[0]!.init.body))).toEqual({
+      webhook_configuration: { override_callback_uri: 'https://rakurs.test/api/whatsapp/webhook', verify_token: 'vt' },
+    });
+    expect(JSON.parse(String(calls[1]!.init.body))).toEqual({
+      webhook_configuration: { override_callback_uri: '' },
+    });
+  });
+
   it('sends text and returns the id WhatsApp assigned', async () => {
     answerWith({ messages: [{ id: 'wamid.OUT' }] });
 

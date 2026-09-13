@@ -62,6 +62,11 @@ export interface IssuedToken {
   grantedPageIds?: string[];
 }
 
+export interface WebhookCallback {
+  url: string;
+  verifyToken: string;
+}
+
 export interface MediaDescriptor {
   url: string;
   mimeType: string;
@@ -73,6 +78,19 @@ export interface GraphClient {
   getPhoneNumber(phoneNumberId: string, token: string): Promise<PhoneNumber>;
   /** Without this, Meta accepts the connection and delivers nothing. */
   subscribeApp(wabaId: string, token: string): Promise<void>;
+  /**
+   * Points this one number's webhooks at `callback`, or back at the app's own callback URL
+   * when `callback` is null.
+   *
+   * The Meta app is shared with another product whose callback URL is the app default, so
+   * a number connected here would otherwise deliver its messages there. A number-level
+   * override leaves every other number on the same WABA where it was.
+   */
+  setWebhookOverride(
+    phoneNumberId: string,
+    token: string,
+    callback: WebhookCallback | null,
+  ): Promise<void>;
   sendText(
     phoneNumberId: string,
     token: string,
@@ -326,6 +344,17 @@ export function createGraphClient(): GraphClient {
 
     async subscribeApp(wabaId, token) {
       await call(`${GRAPH_ROOT}/${wabaId}/subscribed_apps`, token, { method: 'POST' });
+    },
+
+    async setWebhookOverride(phoneNumberId, token, callback) {
+      // An empty URI is how Meta is told to drop the override.
+      const webhook_configuration = callback
+        ? { override_callback_uri: callback.url, verify_token: callback.verifyToken }
+        : { override_callback_uri: '' };
+      await call(`${GRAPH_ROOT}/${phoneNumberId}`, token, {
+        method: 'POST',
+        body: JSON.stringify({ webhook_configuration }),
+      });
     },
 
     async sendText(phoneNumberId, token, to, body) {

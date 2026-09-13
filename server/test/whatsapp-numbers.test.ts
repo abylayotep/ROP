@@ -85,7 +85,40 @@ describe('connecting a number', () => {
       subscribed: true,
     });
     expect(res.json().accessToken).toBeUndefined();
-    expect(graph.calls.map((c) => c.method)).toEqual(['getPhoneNumber', 'subscribeApp']);
+    expect(graph.calls.map((c) => c.method)).toEqual([
+      'getPhoneNumber',
+      'subscribeApp',
+      'setWebhookOverride',
+    ]);
+  });
+
+  it('points the number’s webhooks at this cabinet, not at the shared app default', async () => {
+    await connect(valid);
+
+    const override = graph.calls.find((c) => c.method === 'setWebhookOverride')!;
+    expect(override.args).toEqual([
+      '136',
+      'EAAG-token',
+      { url: 'https://rakurs.test/api/whatsapp/webhook', verifyToken: env.META_WEBHOOK_VERIFY_TOKEN },
+    ]);
+  });
+
+  it('stores nothing when Meta refuses the webhook address', async () => {
+    app = buildServer(env, db, {
+      graph: fakeGraph({
+        setWebhookOverride: async () => {
+          throw new GraphError('Callback verification failed', 400, 2200);
+        },
+      }),
+    });
+    await app.ready();
+    jar = await login('owner@example.com');
+
+    const res = await connect(valid);
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().message).toContain('входящих сообщений');
+    expect(await db.select().from(whatsappNumbers)).toEqual([]);
   });
 
   it('stores the token encrypted', async () => {
@@ -364,6 +397,31 @@ describe('listing and changing a number', () => {
   });
 
   it('disconnects a number', async () => {
+    const { id } = (await connect(valid)).json();
+
+    const res = await app.inject({
+      method: 'DELETE',
+      url: `/api/agents/${agentId}/whatsapp/numbers/${id}`,
+      cookies: jar,
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(await db.select().from(whatsappNumbers)).toEqual([]);
+    // The number's webhooks go back to the app default on the way out.
+    const reset = graph.calls.filter((c) => c.method === 'setWebhookOverride').at(-1)!;
+    expect(reset.args).toEqual(['136', 'EAAG-token', null]);
+  });
+
+  it('disconnects a number even when Meta refuses to drop the webhook override', async () => {
+    app = buildServer(env, db, {
+      graph: fakeGraph({
+        setWebhookOverride: async (_id: string, _token: string, callback: unknown) => {
+          if (callback === null) throw new GraphError('Session has expired', 401, 190);
+        },
+      }),
+    });
+    await app.ready();
+    jar = await login('owner@example.com');
     const { id } = (await connect(valid)).json();
 
     const res = await app.inject({

@@ -140,7 +140,7 @@ describe('catalog photos in a live turn', () => {
     expect(existsSync(join(mediaDir, image.mediaPath!))).toBe(true);
   });
 
-  it('drops unknown, foreign, inactive and already-sent photos and caps the rest at three', async () => {
+  it('drops unknown, foreign, inactive and already-sent photos and caps the rest at four', async () => {
     const [foreignAgent] = await db.insert(agents).values({ accountId, name: 'Чужой' }).returning();
     const [foreignProduct] = await db.insert(products).values({ agentId: foreignAgent!.id, name: 'Чужая' }).returning();
     const foreign = await addPhoto(foreignProduct!.id, foreignAgent!.id);
@@ -154,17 +154,18 @@ describe('catalog photos in a live turn', () => {
     await db.update(conversations).set({ lastInboundAt: new Date() }).where(eq(conversations.id, conversationId));
 
     const extra = await addPhoto(productId);
+    const extra2 = await addPhoto(productId);
     const model = fakeModel(answer({
-      photoIds: ['made-up', foreign, inactive, photoIds[0], photoIds[1], photoIds[2], photoIds[3], extra],
+      photoIds: ['made-up', foreign, inactive, photoIds[0], photoIds[1], photoIds[2], photoIds[3], extra, extra2],
     }));
     const result = await runTurn(db, deps(model), { agentId, conversationId });
 
     expect(result.outcome).toBe('sent');
-    expect(result.photoIds).toEqual([photoIds[1], photoIds[2], photoIds[3]]);
-    expect(media.slice(1)).toHaveLength(3);
+    expect(result.photoIds).toEqual([photoIds[1], photoIds[2], photoIds[3], extra]);
+    expect(media.slice(1)).toHaveLength(4);
     expect(result.detail).toContain('Модель назвала фото, которых нет в каталоге: made-up');
     expect(result.detail).toContain('Фото уже отправлялись в этом диалоге: 1.');
-    expect(result.detail).toContain('отправляются первые 3');
+    expect(result.detail).toContain('отправляются первые 4');
     // The second prompt knew which photo the customer already had.
     expect(model.calls[0]!.messages[0]!.content).toContain(`- [${photoIds[0]}] Вид спереди (уже отправлено)`);
   });

@@ -89,7 +89,10 @@ export class SuggestParseError extends Error {}
 /** One call, no retry — the same reasoning `annotate`'s own comment gives for itself: a second
  * attempt would only be a second charge to the owner's balance on the same question, and this
  * one is a suggestion, not an answer anything downstream is blocked on. */
-export async function suggestCases(deps: SuggestDeps, ops: readonly DraftOp[]): Promise<SuggestedCase[]> {
+export async function suggestCases(
+  deps: SuggestDeps,
+  ops: readonly DraftOp[],
+): Promise<{ cases: SuggestedCase[]; cost: string }> {
   const completion = await deps.model.complete({
     key: deps.key,
     model: deps.modelId,
@@ -110,5 +113,5 @@ export async function suggestCases(deps: SuggestDeps, ops: readonly DraftOp[]): 
   const parsed = SUGGEST_SCHEMA.safeParse(value);
   if (!parsed.success) throw new SuggestParseError('reply did not match the schema');
 
-  return parsed.data.cases;
+  return { cases: parsed.data.cases, cost: completion.cost };
 }

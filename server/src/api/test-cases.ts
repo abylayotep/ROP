@@ -82,7 +82,7 @@ const toCase = (row: typeof testCases.$inferSelect) => ({
   title: row.title,
   messages: row.messages,
   expectation: row.expectation,
-  origin: row.origin as 'manual' | 'dialog' | 'generated' | 'correction',
+  origin: row.origin as 'manual' | 'dialog' | 'generated' | 'correction' | 'suggested',
   conversationId: row.conversationId,
   requiredDraftId: row.requiredDraftId,
   enabled: row.enabled,
@@ -308,7 +308,7 @@ export function registerTestCaseRoutes(
 
       try {
         const key = decryptSecret(req.agent!.openrouterKey, credentialsKey(env), keyAad(agentId));
-        const cases = await suggestCases(
+        const { cases } = await suggestCases(
           { model: deps.model, key, modelId: req.agent!.model, temperature: req.agent!.temperature },
           draft.ops,
         );

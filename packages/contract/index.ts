@@ -1383,6 +1383,15 @@ export type DraftOp =
   | { op: 'rule_create'; category: RuleCategory; text: string; warning?: string | null }
   | { op: 'rule_update'; ruleId: string; text?: string; enabled?: boolean };
 
+/** What a draft's ops touched when it was made: `updatedAt` per row, and the display name of a
+ * note or rule an op names by id only. */
+export interface DraftBase {
+  notes?: Record<string, string>;
+  rules?: Record<string, string>;
+  noteNames?: Record<string, string>;
+  ruleNames?: Record<string, string>;
+}
+
 /** A change waiting to be proven. It is applied only after a run at the current version. */
 export interface KbDraft {
   id: string;
@@ -1390,6 +1399,7 @@ export interface KbDraft {
   origin: 'coach' | 'manual';
   status: 'open' | 'applied' | 'discarded';
   ops: DraftOp[];
+  base: DraftBase;
   createdAt: string;
   appliedAt: string | null;
 }
@@ -1427,7 +1437,7 @@ export interface TestCase {
   /** The customer's side only. The agent's replies are what is being tested. */
   messages: string[];
   expectation: string | null;
-  origin: 'manual' | 'dialog' | 'generated' | 'correction';
+  origin: 'manual' | 'dialog' | 'generated' | 'correction' | 'suggested';
   conversationId: string | null;
   requiredDraftId: string | null;
   enabled: boolean;
@@ -1450,6 +1460,9 @@ export interface SuggestedCase {
 export interface TestCaseSide {
   reply: string | null;
   usedChunkIds: string[];
+  /** Indexes into the draft's ops (as they were when the run started) whose notes the reply
+   * used. Always empty on a baseline side. */
+  usedOpIndexes: number[];
   stageId: string | null;
   handoff: boolean;
   handoffReason: string | null;
@@ -1493,5 +1506,30 @@ export interface TestRun {
   baselineCost: string;
   results: TestComparison[];
   startedAt: string;
+  finishedAt: string | null;
+}
+
+export type AutopilotStatus = 'running' | 'applied' | 'stopped' | 'cancelled';
+export type AutopilotStep = 'prepare_cases' | 'clean_topics' | 'start_run' | 'await_run' | 'fix_topics' | 'apply';
+
+/**
+ * One autopilot pass over a draft: pick cases, clean topics, run, fix or remove the topics that
+ * made answers worse, and apply. `log` and `stopReason` are Russian, written for the owner.
+ */
+export interface DraftAutopilot {
+  id: string;
+  status: AutopilotStatus;
+  step: AutopilotStep;
+  runsStarted: number;
+  maxRuns: number;
+  /** The draft run in flight or last finished; null before the first run and after an edit
+   * deleted it. */
+  runId: string | null;
+  caseIds: string[];
+  log: { at: string; kind: 'info' | 'fix' | 'remove' | 'warn'; text: string }[];
+  /** Model spend so far, in US dollars. */
+  cost: string;
+  stopReason: string | null;
+  createdAt: string;
   finishedAt: string | null;
 }

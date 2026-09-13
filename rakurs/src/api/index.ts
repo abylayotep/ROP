@@ -37,6 +37,7 @@ import type {
   KbGenerationStartRequest,
   KbNote,
   KbNoteDetail,
+  DraftAutopilot,
   DraftOp,
   KbDraft,
   KbDraftDetail,
@@ -857,6 +858,18 @@ export const getDraft = (agentId: string, draftId: string, signal?: AbortSignal)
  */
 export const runDraft = (agentId: string, draftId: string, caseIds: string[]) =>
   request<TestRun>(`/agents/${agentId}/drafts/${draftId}/runs`, { method: 'POST', body: { caseIds } });
+
+/** Starts the draft autopilot with the ticked case ids (possibly none: the server tops them up).
+ * While it runs, manual run, apply, discard and op edits answer 409. */
+export const startAutopilot = (agentId: string, draftId: string, caseIds: string[]) =>
+  request<DraftAutopilot>(`/agents/${agentId}/drafts/${draftId}/autopilot`, { method: 'POST', body: { caseIds } });
+
+/** The draft's latest autopilot, or null when none was ever started. */
+export const getAutopilot = (agentId: string, draftId: string, signal?: AbortSignal) =>
+  request<DraftAutopilot | null>(`/agents/${agentId}/drafts/${draftId}/autopilot`, { signal });
+
+export const cancelAutopilot = (agentId: string, draftId: string) =>
+  request<DraftAutopilot>(`/agents/${agentId}/drafts/${draftId}/autopilot/cancel`, { method: 'POST' });
 
 export const getDraftRun = (agentId: string, draftId: string, runId: string, signal?: AbortSignal) =>
   request<TestRun>(`/agents/${agentId}/drafts/${draftId}/runs/${runId}`, { signal });

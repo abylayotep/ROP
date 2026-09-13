@@ -15,6 +15,7 @@ import {
   messages,
   whatsappNumbers,
 } from '../src/db/schema.js';
+import { saveNote } from '../src/lib/knowledge/notes.js';
 import { replayCase, type AiDeps, type ReplayInput, type ReplayResult } from '../src/lib/drafts/replay.js';
 import type { ChatMessage, CompletionInput, ModelClient } from '../src/lib/ai/openrouter.js';
 import { encryptSecret } from '../src/lib/secret-box.js';
@@ -42,6 +43,8 @@ interface ScriptedModel extends ModelClient {
     stageId?: string | null;
     fields?: Record<string, string>;
     handoff?: { reason: string } | null;
+    /** Cite only the records whose text contains this; every record shown when omitted. */
+    cites?: string;
   }): void;
   /** The `CompletionInput` of the call at this position, or undefined if it never happened. */
   callsAt(index: number): CompletionInput | undefined;
@@ -64,15 +67,17 @@ function scriptedModel(): ScriptedModel {
 
   return {
     calls,
-    reply({ text, stageId = null, fields = {}, handoff = null }) {
-      answers.push(JSON.stringify({ reply: text, stageId, fields, handoff, usedItemIds: [] }));
+    reply({ text, stageId = null, fields = {}, handoff = null, cites }) {
+      answers.push(JSON.stringify({ reply: text, stageId, fields, handoff, usedItemIds: [], cites }));
     },
     async complete(input) {
       calls.push(input);
       const scripted = answers[Math.min(calls.length - 1, answers.length - 1)] ?? '{}';
-      const parsed = JSON.parse(scripted) as Record<string, unknown>;
+      const { cites, ...parsed } = JSON.parse(scripted) as Record<string, unknown>;
       const prompt = input.messages.map((message) => message.content).join('\n');
-      const usedItemIds = [...prompt.matchAll(/<запись id="([^"]+)"/g)].map((match) => match[1]);
+      const usedItemIds = [...prompt.matchAll(/<запись id="([^"]+)"[^>]*>([\s\S]*?)<\/запись>/g)]
+        .filter((match) => typeof cites !== 'string' || (match[2] ?? '').includes(cites))
+        .map((match) => match[1]);
       return {
         text: JSON.stringify({ ...parsed, usedItemIds }),
         promptTokens: 100,
@@ -264,6 +269,49 @@ describe('replaying a case', () => {
     });
 
     expect(result.usedChunkIds).toHaveLength(1);
+  });
+
+  it('names the draft ops whose notes the reply was built from', async () => {
+    const existing = await db.transaction((tx) =>
+      saveNote(tx as unknown as Db, { agentId, path: 'Оплата', body: 'Оплата картой.' }),
+    );
+    model.reply({ text: 'Доставка 1000 тенге, оплата картой.' });
+
+    const result = await runCase({
+      agentId,
+      numberId,
+      key,
+      messages: ['сколько стоит доставка и как оплатить'],
+      ops: [
+        { op: 'note_update', noteId: existing.id, body: 'Оплата картой, доставка тоже картой.' },
+        { op: 'note_create', path: 'Доставка', body: 'Доставка 1000 тенге' },
+      ],
+    });
+
+    // Chunk ids of both notes exist only inside the rolled-back transaction (every save
+    // rewrites a note's chunks), so the op indexes are the only attribution that survives.
+    expect(result.usedChunkIds).toHaveLength(2);
+    expect(result.usedOpIndexes).toEqual([0, 1]);
+  });
+
+  it('names no op when the reply used only notes the draft did not touch', async () => {
+    await db.transaction((tx) =>
+      saveNote(tx as unknown as Db, { agentId, path: 'Доставка', body: 'Доставка 1000 тенге' }),
+    );
+    // A small store travels whole, so the draft's own note is shown too; the reply cites
+    // only the untouched one.
+    model.reply({ text: 'Доставка 1000 тенге.', cites: 'Доставка 1000 тенге' });
+
+    const result = await runCase({
+      agentId,
+      numberId,
+      key,
+      messages: ['сколько стоит доставка'],
+      ops: [{ op: 'note_create', path: 'Гарантия', body: 'Гарантия два года' }],
+    });
+
+    expect(result.usedChunkIds).toHaveLength(1);
+    expect(result.usedOpIndexes).toEqual([]);
   });
 
   it('reports a handoff and its reason instead of a reply', async () => {

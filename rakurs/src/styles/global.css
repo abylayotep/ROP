@@ -196,6 +196,27 @@ a:hover {
   padding: 0;
 }
 
+/* A disabled button must look disabled: without this it is indistinguishable from an active
+   one, and a click on it silently does nothing. Hover styles are reset for the same reason. */
+.btn:disabled,
+.btn-sm:disabled,
+.btn-accent:disabled,
+.btn-link:disabled,
+.btn-quiet:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn:disabled:hover,
+.btn-sm:disabled:hover {
+  border-color: var(--line-strong);
+  color: var(--text-3);
+}
+
+.btn-link:disabled:hover {
+  color: var(--accent);
+}
+
 /* ── Сегмент-контрол ─────────────────────────────────────────────────────── */
 
 .seg {

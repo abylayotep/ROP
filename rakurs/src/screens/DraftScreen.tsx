@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import * as api from '@/api';
+import { AutopilotPanel } from '@/components/drafts/AutopilotPanel';
 import { CaseList } from '@/components/drafts/CaseList';
 import { describeRun } from '@/components/drafts/cost';
 import { OpDiff, type OpEdit } from '@/components/drafts/OpDiff';
@@ -11,7 +12,7 @@ import { useToast } from '@/components/ui/Toast';
 import { useApi } from '@/hooks/useApi';
 import { draftOrigin } from '@/lib/training-state';
 import { useAgent } from '@/store/agent';
-import type { DraftOp, KbDraft, KbDraftDetail, TestCase, TestRun } from '@/types';
+import type { DraftAutopilot, DraftOp, KbDraft, KbDraftDetail, TestCase, TestRun } from '@/types';
 import './training-workspace.css';
 
 /**
@@ -28,6 +29,7 @@ import './training-workspace.css';
  * `'running'`, never a fixed number of attempts.
  */
 const POLL_MS = 1800;
+const AUTOPILOT_POLL_MS = 3000;
 
 const STATUS_LABEL: Record<KbDraft['status'], string> = {
   open: 'Открыт',
@@ -174,6 +176,11 @@ function Draft({ agentId, draftId, initial }: { agentId: string; draftId: string
           }
         } catch (error) {
           if (!alive) return;
+          // The autopilot deletes runs when it edits a topic; a vanished run is not an error.
+          if (error instanceof api.ApiError && error.status === 404) {
+            setRun(null);
+            return;
+          }
           toast.fail(error);
         }
       }, POLL_MS);
@@ -186,6 +193,106 @@ function Draft({ agentId, draftId, initial }: { agentId: string; draftId: string
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [run?.id, run?.status]);
+
+  const [autopilot, setAutopilot] = useState<DraftAutopilot | null>(null);
+  const [startingAuto, setStartingAuto] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    api.getAutopilot(agentId, draftId).then(
+      (loaded) => {
+        if (alive) setAutopilot(loaded);
+      },
+      (error) => {
+        if (alive) toast.fail(error);
+      },
+    );
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // The engine edits topics, adds cases and replaces runs under the owner, so every poll also
+  // refetches the draft and follows the autopilot's own run. All reads land before any state is
+  // set: the status change that ends this effect must not throw away the fetches that came with it.
+  useEffect(() => {
+    if (!autopilot || autopilot.status !== 'running') return;
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout>;
+    // `undefined` until the first poll, so a reopened screen syncs to the autopilot's run at once.
+    let followedRunId: string | null | undefined;
+    const caseKey = (ids: string[]) => [...ids].sort().join(',');
+    let casesSeen = caseKey(autopilot.caseIds);
+    // The server keeps going through a network blip or a deploy restart; so does the poll, and
+    // the owner hears about an outage once rather than every three seconds.
+    let failing = false;
+
+    const poll = () => {
+      timer = setTimeout(async () => {
+        let fresh: DraftAutopilot | null;
+        try {
+          fresh = await api.getAutopilot(agentId, draftId);
+        } catch (error) {
+          if (!alive) return;
+          if (!failing) toast.fail(error);
+          failing = true;
+          poll();
+          return;
+        }
+        if (!alive) return;
+        failing = false;
+        if (!fresh) {
+          setAutopilot(null);
+          return;
+        }
+
+        let nextRun: TestRun | null | undefined;
+        if (fresh.runId !== followedRunId) {
+          try {
+            nextRun = fresh.runId ? await api.getDraftRun(agentId, draftId, fresh.runId) : null;
+            followedRunId = fresh.runId;
+          } catch (error) {
+            // Deleted by a topic edit between the two reads: show no run. Any other failure leaves
+            // the run unfollowed so the next poll retries it.
+            if (error instanceof api.ApiError && error.status === 404) {
+              nextRun = null;
+              followedRunId = fresh.runId;
+            }
+          }
+        }
+        const freshDraft = await api.getDraft(agentId, draftId).catch(() => null);
+        if (!alive) return;
+
+        if (nextRun !== undefined) {
+          setRun(nextRun);
+          setRequestedCount(nextRun?.status === 'running' ? fresh.caseIds.length : nextRun?.results.length ?? 0);
+        }
+        if (freshDraft) setDraft(freshDraft);
+        if (caseKey(fresh.caseIds) !== casesSeen) {
+          casesSeen = caseKey(fresh.caseIds);
+          setSelected(new Set(fresh.caseIds));
+          cases.reload();
+        }
+        setAutopilot(fresh);
+
+        if (fresh.status === 'applied') {
+          toast.ok('Черновик проверен и применён');
+          navigate('../training?tab=review');
+          return;
+        }
+        if (fresh.status === 'running') poll();
+      }, AUTOPILOT_POLL_MS);
+    };
+    poll();
+
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autopilot?.id, autopilot?.status]);
 
   // Which cases would reuse a baseline — the ones that already carried one in `run`, which is
   // now always the draft's own most recent run (reopened on load above, or the one just
@@ -210,12 +317,42 @@ function Draft({ agentId, draftId, initial }: { agentId: string; draftId: string
 
   const isOpen = draft.status === 'open';
   const running = run?.status === 'running';
-  const canRun = isOpen && !running && selectedCases.length > 0;
+  const autoRunning = autopilot?.status === 'running';
+  const canRun = isOpen && !running && !autoRunning && selectedCases.length > 0;
   // The server's own answer to "is this draft provably safe to apply right now" — the exact
   // predicate the apply route itself checks (`server/src/api/drafts.ts`'s `isDraftApplicable`),
   // not a local guess from `run.status` that a reload used to lose and that never accounted
   // for the store having moved since the run finished.
-  const canApply = isOpen && draft.applicable;
+  const canApply = isOpen && !autoRunning && draft.applicable;
+
+  async function startAutopilot() {
+    if (!isOpen || running || autoRunning || startingAuto) return;
+    setStartingAuto(true);
+    try {
+      setAutopilot(await api.startAutopilot(agentId, draftId, selectedCases.map((c) => c.id)));
+    } catch (error) {
+      toast.fail(error);
+    } finally {
+      setStartingAuto(false);
+    }
+  }
+
+  async function cancelAutopilot() {
+    if (cancelling) return;
+    setCancelling(true);
+    try {
+      const cancelled = await api.cancelAutopilot(agentId, draftId);
+      // The engine may have edited topics before it saw the cancel.
+      const freshDraft = await api.getDraft(agentId, draftId).catch(() => null);
+      if (!mounted.current) return;
+      setAutopilot(cancelled);
+      if (freshDraft) setDraft(freshDraft);
+    } catch (error) {
+      if (mounted.current) toast.fail(error);
+    } finally {
+      if (mounted.current) setCancelling(false);
+    }
+  }
 
   async function startRun() {
     if (!canRun || starting) return;
@@ -272,7 +409,7 @@ function Draft({ agentId, draftId, initial }: { agentId: string; draftId: string
   }
 
   async function discard() {
-    if (!isOpen || discarding) return;
+    if (!isOpen || autoRunning || discarding) return;
     if (!window.confirm('Отбросить черновик? Это нельзя отменить.')) return;
     setDiscarding(true);
     try {
@@ -312,7 +449,7 @@ function Draft({ agentId, draftId, initial }: { agentId: string; draftId: string
       {tab === 'run' ? (
         <>
           <OpDiff agentId={agentId} ops={draft.ops} topics={topics}
-            onEdit={isOpen && !running ? editOp : undefined} />
+            onEdit={isOpen && !running && !autoRunning ? editOp : undefined} />
 
           <Card>
             <CardHead title="Случаи для прогона" />
@@ -328,6 +465,7 @@ function Draft({ agentId, draftId, initial }: { agentId: string; draftId: string
                   onChanged={cases.reload}
                   selected={selected}
                   onSelectedChange={setSelected}
+                  selectionDisabled={autoRunning}
                 />
               )}
             </Async>
@@ -335,28 +473,43 @@ function Draft({ agentId, draftId, initial }: { agentId: string; draftId: string
 
           <Card>
             <CardHead title="Прогон" />
-            <RunTable agentId={agentId} cases={cases.data ?? []} run={run} requestedCount={requestedCount} />
+            <RunTable
+              agentId={agentId}
+              cases={cases.data ?? []}
+              run={run}
+              requestedCount={requestedCount}
+              ops={draft.ops}
+              base={draft.base}
+            />
           </Card>
+
+          {autopilot && (
+            <AutopilotPanel autopilot={autopilot} onCancel={() => void cancelAutopilot()} cancelling={cancelling} />
+          )}
 
           <Card className="draft-actionbar">
             <div className="draft-actionbar__row">
+              <button type="button" className="btn-accent" disabled={!isOpen || running || autoRunning || startingAuto}
+                onClick={startAutopilot}>
+                {autoRunning || startingAuto ? 'Проверяем…' : 'Проверить и применить'}
+              </button>
               <button type="button" className="btn" disabled={!canRun || starting} onClick={startRun}>
                 {running ? 'Прогон идёт…' : starting ? 'Запускаем…' : 'Запустить прогон'}
               </button>
-              <button type="button" className="btn-accent" disabled={!canApply || applying} onClick={apply}>
+              <button type="button" className="btn" disabled={!canApply || applying} onClick={apply}>
                 {applying ? 'Применяем…' : 'Применить'}
               </button>
-              <button type="button" className="btn" disabled={!isOpen || discarding} onClick={discard}>
+              <button type="button" className="btn" disabled={!isOpen || autoRunning || discarding} onClick={discard}>
                 {discarding ? 'Отбрасываем…' : 'Отбросить'}
               </button>
-              {isOpen && (
+              {isOpen && !autoRunning && (
                 <span className="draft-actionbar__hint">
                   {canApply
                     ? `Прогон пройден — нажмите «Применить», и ${topics ? 'темы попадут в базу знаний' : 'изменение попадёт в базу'}.`
                     : running
                     ? 'Прогон идёт — дождитесь «готово».'
                     : selectedCases.length === 0
-                    ? 'Отметьте хотя бы один случай выше, затем запустите прогон.'
+                    ? 'Нажмите «Проверить и применить» — проверки подберутся сами, или отметьте случаи и запустите прогон вручную.'
                     : draft.requiredCaseId && !requiredCase
                     ? 'Обязательный случай исправления не найден. Обновите список; если он удалён, создайте предложение заново.'
                     : draft.requiredCaseId && run?.status === 'done' && run.results.find((result) => result.caseId === draft.requiredCaseId)?.verdict !== 'better'
@@ -381,6 +534,7 @@ function Draft({ agentId, draftId, initial }: { agentId: string; draftId: string
                 onChanged={cases.reload}
                 selected={selected}
                 onSelectedChange={setSelected}
+                selectionDisabled={autoRunning}
               />
             )}
           </Async>

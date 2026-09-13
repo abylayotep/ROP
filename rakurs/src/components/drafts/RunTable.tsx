@@ -3,7 +3,7 @@ import * as api from '@/api';
 import { Badge } from '@/components/ui/primitives';
 import { EmptyState } from '@/components/ui/states';
 import { useApi } from '@/hooks/useApi';
-import type { TestCase, TestCaseSide, TestComparison, TestRun } from '@/types';
+import type { DraftBase, DraftOp, TestCase, TestCaseSide, TestComparison, TestRun } from '@/types';
 
 /**
  * «Было — стало», one row per case. While `run.status === 'running'` this is watching
@@ -28,6 +28,38 @@ const outcomeColor = (outcome: string) =>
       ? 'var(--warn)'
       : 'var(--text-dim)';
 
+/** A draft op's own name: the topic's file name for a new note, the name `base` photographed
+ * for an edited one. Null for rule ops, which a reply never cites. */
+export function opTitle(op: DraftOp, base: DraftBase): string | null {
+  if (op.op === 'note_create') return op.path.slice(op.path.lastIndexOf('/') + 1) || op.path;
+  if (op.op === 'note_update') return base.noteNames?.[op.noteId] ?? 'Заметка';
+  return null;
+}
+
+/**
+ * The chip labels for one «стало» side. Draft notes are named through `usedOpIndexes`: their
+ * chunk ids died with the replay's rollback and can never resolve. Other ids keep resolving
+ * through the vault; the generic fallback is left only for rows without any op attribution.
+ */
+export function sectionLabels(
+  side: TestCaseSide,
+  ops: DraftOp[],
+  base: DraftBase,
+  titleOf: (id: string) => string | undefined,
+): string[] {
+  const fromOps = (side.usedOpIndexes ?? []).flatMap((index) => {
+    const op = ops[index];
+    const title = op ? opTitle(op, base) : null;
+    return title === null ? [] : [title];
+  });
+  const fromIds = side.usedChunkIds.flatMap((id) => {
+    const title = titleOf(id);
+    if (title !== undefined) return [title];
+    return fromOps.length === 0 ? ['новая заметка черновика'] : [];
+  });
+  return [...new Set([...fromOps, ...fromIds])];
+}
+
 const VERDICT: Record<'better' | 'worse' | 'same', { label: string; bg: string; fg: string }> = {
   better: { label: 'лучше', bg: 'var(--accent-a14)', fg: 'var(--accent)' },
   worse: { label: 'хуже', bg: 'var(--danger-a14)', fg: 'var(--danger)' },
@@ -39,6 +71,8 @@ export function RunTable({
   cases,
   run,
   requestedCount,
+  ops,
+  base,
 }: {
   agentId: string;
   /** For a title beside each row — a run answers by case id, never by name. */
@@ -47,15 +81,17 @@ export function RunTable({
   /** How many cases this run was asked to cover — known from the moment it started, before
    * `results` holds a single row, so «идёт: 3 из 12» can be said from the very first poll. */
   requestedCount: number;
+  /** The draft's ops and base, to name the topics `usedOpIndexes` points at. */
+  ops: DraftOp[];
+  base: DraftBase;
 }) {
   const [expanded, setExpanded] = useState<string | null>(null);
 
-  // Every knowledge chunk this run's replies cite is a note id — the same ids `AgentScreen`'s
-  // own sandbox resolves server-side into a title. Nothing here resolves them for a run
-  // (`TestCaseSide.usedChunkIds` carries bare ids — see `server/src/api/drafts.ts`'s
-  // `CaseSide`), so this fetches the vault once and matches locally; an id from a note a
-  // draft's own `note_create` would have made cannot resolve here, because that note never
-  // outlives the rolled-back transaction it was created in — those fall back to a plain label.
+  // `TestCaseSide.usedChunkIds` carries knowledge chunk ids, not note ids (see
+  // `server/src/api/drafts.ts`'s `CaseSide`), while this map is keyed by note id — so a cited
+  // chunk only gets a title here if the two ids happen to coincide. Chunks of a draft's own
+  // `note_create` never outlive the rolled-back replay either; `usedOpIndexes` names those
+  // instead (see `sectionLabels`).
   const notes = useApi<Map<string, string>>(
     async (signal) => new Map((await api.listKbNotes(agentId, {}, signal)).map((n) => [n.id, n.title])),
     [agentId],
@@ -106,7 +142,7 @@ export function RunTable({
               key={row.caseId}
               row={row}
               title={cases.find((c) => c.id === row.caseId)?.title ?? row.caseId}
-              titleFor={(id) => notes.data?.get(id) ?? 'новая заметка черновика'}
+              sections={sectionLabels(row.after, ops, base, (id) => notes.data?.get(id))}
               expanded={expanded === row.caseId}
               onToggle={() => setExpanded((cur) => (cur === row.caseId ? null : row.caseId))}
             />
@@ -136,13 +172,13 @@ function SidePreview({ side }: { side: TestCaseSide | null }) {
 function ResultRow({
   row,
   title,
-  titleFor,
+  sections,
   expanded,
   onToggle,
 }: {
   row: TestComparison;
   title: string;
-  titleFor: (id: string) => string;
+  sections: string[];
   expanded: boolean;
   onToggle: () => void;
 }) {
@@ -172,12 +208,12 @@ function ResultRow({
         <SidePreview side={row.before} />
         <SidePreview side={row.after} />
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-          {row.after.usedChunkIds.length === 0 ? (
+          {sections.length === 0 ? (
             <span style={{ color: 'var(--text-dim)' }}>—</span>
           ) : (
-            row.after.usedChunkIds.slice(0, 3).map((id) => (
+            sections.slice(0, 3).map((label) => (
               <span
-                key={id}
+                key={label}
                 className="ellipsis"
                 style={{
                   maxWidth: 110,
@@ -189,7 +225,7 @@ function ResultRow({
                   color: 'var(--text-3)',
                 }}
               >
-                {titleFor(id)}
+                {label}
               </span>
             ))
           )}

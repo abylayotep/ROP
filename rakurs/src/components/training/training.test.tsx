@@ -31,7 +31,7 @@ const teach = (mode: 'chats' | 'coach' | 'import' | null) => createElement(Teach
 });
 
 const draft = (id: string, origin: KbDraft['origin'], title: string, createdAt: string, ops: number | KbDraft['ops']): KbDraft => ({
-  id, origin, title, createdAt, status: 'open', appliedAt: null,
+  id, origin, title, createdAt, status: 'open', appliedAt: null, base: {},
   ops: typeof ops === 'number' ? Array.from({ length: ops }, (_, index) => ({ op: 'note_create', path: `n${index}`, body: 'b' })) : ops,
 });
 const topic = (name: string) => ({ op: 'note_create' as const, path: `База знаний/${name}`, body: '## Факты\n- …' });

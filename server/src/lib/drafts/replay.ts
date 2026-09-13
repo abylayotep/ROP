@@ -14,8 +14,9 @@
  * customer's second message always is.
  */
 import { randomUUID } from 'node:crypto';
+import { inArray } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
-import { contacts, conversations, messages } from '../../db/schema.js';
+import { contacts, conversations, kbChunks, messages } from '../../db/schema.js';
 import { turnSlotHeld } from '../../db/turn-cap.js';
 import type { ModelClient } from '../ai/openrouter.js';
 import { addCost, runTurn, type TurnOutcome, type TurnResult } from '../ai/turn.js';
@@ -78,6 +79,10 @@ export interface ReplayResult {
   reply: string | null;
   /** The knowledge chunks the last turn's reply was built from. */
   usedChunkIds: string[];
+  /** Indexes into `input.ops` of the draft notes those chunks belong to, deduplicated and
+   * ascending. The chunk ids alone cannot say this later: every note an op saves gets fresh
+   * chunks that vanish with the rollback. */
+  usedOpIndexes: number[];
   /** The stage the last turn moved the lead to, or would have. Null when it did not move. */
   stageId: string | null;
   /** Whether the last turn left the conversation to a person. */
@@ -115,6 +120,7 @@ class ReplayDone extends Error {
   constructor(
     readonly turn: TurnResult,
     readonly cost: string,
+    readonly usedOpIndexes: number[],
   ) {
     super('replay finished');
     this.name = 'ReplayDone';
@@ -154,6 +160,7 @@ function meteredModel(model: ModelClient): { model: ModelClient; total: () => st
 const toResult = (done: ReplayDone): ReplayResult => ({
   reply: done.turn.reply,
   usedChunkIds: done.turn.usedItemIds,
+  usedOpIndexes: done.usedOpIndexes,
   stageId: done.turn.stageId,
   handoff: done.turn.handoff !== null,
   handoffReason: done.turn.handoff,
@@ -258,7 +265,10 @@ export async function replayCase(db: Db, deps: AiDeps, input: ReplayInput): Prom
 
   try {
     await db.transaction(async (tx) => {
-      await applyOps(tx as unknown as Db, input.agentId, input.ops);
+      const noteOpIndex = new Map<string, number>();
+      await applyOps(tx as unknown as Db, input.agentId, input.ops, (opIndex, noteId) => {
+        noteOpIndex.set(noteId, opIndex);
+      });
 
       const [contact] = await tx
         .insert(contacts)
@@ -333,7 +343,20 @@ export async function replayCase(db: Db, deps: AiDeps, input: ReplayInput): Prom
         }
       }
 
-      throw new ReplayDone(turn!, metered.total());
+      // Resolved here, while the draft's chunks still exist, before the rollback drops them.
+      const usedChunkIds = turn!.usedItemIds;
+      const cited = usedChunkIds.length === 0 || noteOpIndex.size === 0
+        ? []
+        : await tx
+          .select({ noteId: kbChunks.noteId })
+          .from(kbChunks)
+          .where(inArray(kbChunks.id, usedChunkIds));
+      const usedOpIndexes = [...new Set(cited.flatMap(({ noteId }) => {
+        const index = noteOpIndex.get(noteId);
+        return index === undefined ? [] : [index];
+      }))].sort((a, b) => a - b);
+
+      throw new ReplayDone(turn!, metered.total(), usedOpIndexes);
     });
   } catch (error) {
     if (error instanceof ReplayDone) return toResult(error);

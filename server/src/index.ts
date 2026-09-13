@@ -3,6 +3,7 @@ import { createLiveCrmHandler, createCrmDeps } from './lib/crm/live.js';
 import { reconcileKaspiPayments } from './lib/kaspi/service.js';
 import { queueMissingPurchases } from './lib/capi/enqueue.js';
 import { reconcileOrphanedRuns } from './api/drafts.js';
+import { defaultAutopilotOps, drainAutopilots, type AutopilotDeps } from './lib/drafts/autopilot.js';
 import { buildServer } from './api/server.js';
 import { createDb } from './db/client.js';
 import { loadEnv } from './env.js';
@@ -172,6 +173,26 @@ const drainCrm = async () => {
 void drainCrm();
 const crmTimer = setInterval(() => void drainCrm(),5_000);
 crmTimer.unref();
+// Draft autopilots advance one step per pass; the row is the whole state, so a pass that dies
+// with the process resumes on the next boot. Started after `reconcileOrphanedRuns`, which turns
+// the runs a dead process left `running` into `failed` rows the engine restarts.
+let autopilotRunning = false;
+const autopilotDeps: AutopilotDeps = {
+  db,
+  deps: liveDeps,
+  key: credentialsKey(env),
+  log: (obj, msg) => app.log.error(obj, msg),
+  ops: defaultAutopilotOps,
+};
+const drainAutopilot = async () => {
+  if (autopilotRunning) return;
+  autopilotRunning = true;
+  try { await drainAutopilots(autopilotDeps); }
+  catch (error) { app.log.error({ error }, 'draft autopilot: drain failed'); }
+  finally { autopilotRunning = false; }
+};
+const autopilotTimer = setInterval(() => void drainAutopilot(), 5_000);
+autopilotTimer.unref();
 let kaspiRunning = false;
 const reconcilePayments = async () => {
   if (kaspiRunning) return;

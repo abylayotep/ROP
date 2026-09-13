@@ -31,6 +31,7 @@ export function fakeGraph(overrides: Partial<GraphClient> = {}): FakeGraph {
       isOnBizApp: true,
     })),
     subscribeApp: record('subscribeApp', async () => undefined),
+    setWebhookOverride: record('setWebhookOverride', async () => undefined),
     sendText: record('sendText', async () => ({ messageId: `wamid.${calls.length}` })),
     getMediaUrl: record('getMediaUrl', async () => ({
       url: 'https://lookaside.fb/media',

@@ -76,12 +76,14 @@ describe('connecting the phone number', () => {
       'listPhoneNumbers',
       'getPhoneNumber',
       'subscribeApp',
+      'setWebhookOverride',
       'requestSmbAppData',
       'requestSmbAppData',
     ]);
     expect(graph.calls[0]!.args).toEqual(['AQD-code', '1585667806534384', env.META_APP_SECRET]);
-    expect(graph.calls[4]!.args[2]).toBe('smb_app_state_sync');
-    expect(graph.calls[5]!.args[2]).toBe('history');
+    expect(graph.calls[4]!.args[2]).toMatchObject({ url: expect.stringContaining('/api/whatsapp/webhook') });
+    expect(graph.calls[5]!.args[2]).toBe('smb_app_state_sync');
+    expect(graph.calls[6]!.args[2]).toBe('history');
 
     const [row] = await db.select().from(whatsappNumbers);
     expect(row!.businessId).toBe('877');

@@ -298,6 +298,38 @@ describe('AI sandbox session routes', () => {
     expect(model.calls).toHaveLength(0);
   });
 
+  it.each([
+    { length: 1, status: 200, revision: 1, turns: 1 },
+    { length: 4_000, status: 200, revision: 1, turns: 1 },
+    { length: 4_001, status: 400, revision: 0, turns: 0 },
+  ])('answers $status for a customer message of $length characters', async ({
+    length, status, revision, turns,
+  }) => {
+    const created = (await create()).json();
+    const sent = await request('POST', `${base()}/${created.id}/turns`,
+      { text: 'x'.repeat(length), revision: 0 });
+    expect(sent.statusCode).toBe(status);
+    const detail = (await request('GET', `${base()}/${created.id}`)).json();
+    expect(detail.revision).toBe(revision);
+    expect(detail.turns).toHaveLength(turns);
+  });
+
+  it('accepts twenty turns within a minute and rejects the twenty-first with 429', async () => {
+    const created = (await create()).json();
+    for (let revision = 0; revision < 20; revision += 1) {
+      const sent = await request('POST', `${base()}/${created.id}/turns`,
+        { text: 'Hi', revision });
+      expect(sent.statusCode).toBe(200);
+      expect(sent.json().revision).toBe(revision + 1);
+    }
+    const refused = await request('POST', `${base()}/${created.id}/turns`,
+      { text: 'Hi', revision: 20 });
+    expect(refused.statusCode).toBe(429);
+    const detail = (await request('GET', `${base()}/${created.id}`)).json();
+    expect(detail.revision).toBe(20);
+    expect(detail.turns).toHaveLength(20);
+  }, 20_000);
+
   it('returns 409 for a stale turn without changing stored revision', async () => {
     const created = (await create()).json();
     expect((await request('POST', `${base()}/${created.id}/turns`,

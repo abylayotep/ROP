@@ -61,7 +61,7 @@ export function CustomersScreen() {
           title="Клиенты"
           gap={0}
           right={
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
               <input
                 value={query}
                 type="search"
@@ -69,6 +69,7 @@ export function CustomersScreen() {
                 placeholder="Имя, телефон или Instagram"
                 onChange={(e) => setQuery(e.target.value)}
                 style={{
+                  minWidth: 0,
                   padding: '7px 10px',
                   background: 'var(--sunken)',
                   color: 'var(--text)',
@@ -116,7 +117,10 @@ export function CustomersScreen() {
           ) : rows.length === 0 ? (
             <EmptyState>Никто не подошёл под «{query.trim()}».</EmptyState>
           ) : (
-            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            // Seven columns do not fit a phone: the table scrolls inside the card instead of
+            // pushing the whole page sideways.
+            <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', minWidth: 720, borderCollapse: 'collapse' }}>
               <thead>
                 <tr>
                   {['Клиент', 'Стадия', 'Оплачено', 'Заказов', 'Ответственный', 'Первое обращение', 'Активность'].map(
@@ -156,7 +160,9 @@ export function CustomersScreen() {
                   >
                     <td style={cell}>
                       <div style={{ fontWeight: 600 }}>
-                        {address(customer)}
+                        {customer.channel !== 'instagram' && customer.contactName
+                          ? customer.contactName
+                          : address(customer)}
                       </div>
                       {customer.channel === 'instagram' ? (
                         <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>
@@ -192,6 +198,7 @@ export function CustomersScreen() {
                 ))}
               </tbody>
             </table>
+            </div>
           )
         }
       </Async>

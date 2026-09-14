@@ -110,7 +110,7 @@ const STEPS: StepDef[] = [
     id: 'inbox',
     title: 'Принять первое сообщение и ответить',
     why: 'Единственная проверка, что настройка в Meta доведена до конца, а не выглядит доведённой.',
-    section: { to: '../dialogs', label: 'Диалоги' },
+    section: { to: '../funnel', label: 'Воронка' },
   },
   {
     id: 'funnel',

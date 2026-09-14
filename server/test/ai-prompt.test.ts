@@ -22,6 +22,7 @@ import {
   type PromptProduct,
   type PromptPromotion,
   HISTORY_LIMIT,
+  historyWindow,
   KNOWLEDGE_LIMIT,
   REPLY_SCHEMA,
   buildMessages,
@@ -552,9 +553,75 @@ describe('buildMessages: the conversation', () => {
 
   it('names an attachment that carries no text, so a turn is never an empty message', () => {
     const messages = buildMessages(
-      context({ history: [{ author: 'client', body: null, kind: 'image' }] }),
+      context({ history: [{ author: 'client', body: null, kind: 'location' }] }),
     );
-    expect(messages.at(-1)?.content).toBe('Клиент: [вложение: image]');
+    expect(messages.at(-1)?.content).toBe('Клиент: [вложение: location]');
+  });
+
+  it('tells the agent a customer’s photo, video, file, sticker and voice note are not visible to it', () => {
+    const kinds = ['image', 'video', 'document', 'sticker', 'audio'];
+    const messages = buildMessages(context({
+      // An operator's line between each, so no two of them collapse into one.
+      history: kinds.flatMap((kind) => [{ author: 'client', body: null, kind }, { author: 'operator', body: 'Ок' }]),
+    }));
+    expect(messages.filter((message) => message.role === 'user').map((message) => message.content)).toEqual([
+      'Клиент: [клиент прислал фото — содержимое тебе не видно]',
+      'Клиент: [клиент прислал видео — содержимое тебе не видно]',
+      'Клиент: [клиент прислал файл — содержимое тебе не видно]',
+      'Клиент: [клиент прислал стикер — содержимое тебе не видно]',
+      'Клиент: [клиент прислал голосовое сообщение — тебе не слышно]',
+    ]);
+  });
+
+  it('keeps a caption and a transcript next to the mark', () => {
+    const messages = buildMessages(context({
+      history: [
+        { author: 'client', body: 'Вот такой дизайн', kind: 'image' },
+        { author: 'operator', body: 'Ок' },
+        { author: 'client', body: 'Нужна печать для ТОО', kind: 'audio' },
+      ],
+    }));
+    expect(messages[1]?.content).toBe('Клиент: [клиент прислал фото — содержимое тебе не видно] Вот такой дизайн');
+    expect(messages.at(-1)?.content).toBe('Клиент: [голосовое сообщение клиента, расшифровка:] Нужна печать для ТОО');
+  });
+
+  it('collapses a run of bare attachments from one author into one counted line', () => {
+    const messages = buildMessages(context({
+      history: [
+        ...Array.from({ length: 6 }, () => ({ author: 'operator', body: null, kind: 'image' })),
+        { author: 'client', body: null, kind: 'image' },
+        { author: 'client', body: null, kind: 'audio' },
+        { author: 'client', body: null, kind: 'image' },
+        { author: 'client', body: 'Этот?', kind: 'image' },
+      ],
+    }));
+    expect(messages.slice(1).map((message) => message.content)).toEqual([
+      'Оператор: [отправлено: фото (6 шт.)]',
+      'Клиент: [клиент прислал фото (2 шт.), голосовое сообщение — содержимое тебе не видно и не слышно]',
+      // A captioned photo is its own line: its words must not be folded into a count.
+      'Клиент: [клиент прислал фото — содержимое тебе не видно] Этот?',
+    ]);
+  });
+
+  it('applies the history cap to lines, after runs of attachments have collapsed', () => {
+    const long: PromptMessage[] = [
+      { author: 'client', body: 'Договорились на 45000' },
+      ...Array.from({ length: 40 }, () => ({ author: 'operator', body: null, kind: 'image' })),
+      ...Array.from({ length: HISTORY_LIMIT - 2 }, (_, index) => ({ author: 'client', body: `сообщение ${index}` })),
+    ];
+    const messages = buildMessages(context({ history: long }));
+    expect(messages).toHaveLength(HISTORY_LIMIT + 1);
+    expect(messages[1]?.content).toBe('Клиент: Договорились на 45000');
+    // The window the turn trims its sources to is exactly those lines' messages.
+    expect(historyWindow(long)).toHaveLength(long.length);
+    expect(historyWindow(long, 3)).toEqual(long.slice(-3));
+    expect(historyWindow([{ author: 'client', body: 'x' }, ...long.slice(1, 41)], 1)).toHaveLength(40);
+  });
+
+  it('tells the agent not to guess what an attachment it cannot see holds', () => {
+    const prompt = system();
+    expect(prompt).toContain('13. Вложения клиента');
+    expect(prompt).toContain('не угадывай: попроси клиента написать это текстом');
   });
 
   it('names a message quoting emptied, rather than leaving a bare label', () => {
@@ -866,7 +933,7 @@ describe('the АКЦИЯ section', () => {
 
   it('states the rules: only the promotional price, no stacking with other discounts, no invented end date', () => {
     const prompt = system({ products: [r42], promotion: { ...promotion, endsAt: null } });
-    expect(prompt).toContain('13. Акция.');
+    expect(prompt).toContain('14. Акция.');
     expect(prompt).toContain('называй только цену по акции; обычную цену можно упомянуть как старую');
     expect(prompt).toContain('Акция не суммируется с другими скидками');
     expect(prompt).toContain('Варианты без пометки «по акции» продаются по обычной цене и по обычным правилам скидок');

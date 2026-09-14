@@ -306,7 +306,7 @@ function MovementCard({
           return (
             <>
               <div style={subtitle}>
-                Переходы записываются с {historyStart(report.stageHistorySince)}.
+                Переходы записываются с {historyStart(report.stageHistorySince)}
               </div>
               <div style={{ ...subtitle, marginTop: 4 }}>
                 {chosen.plainly}, с {windowStart(report.since)}.

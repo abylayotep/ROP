@@ -5,6 +5,7 @@ import { agents, aiSandboxSessions, aiSandboxTurns } from '../../db/schema.js';
 import { releaseTurnSlot, tryTakeTurnSlot } from '../../db/turn-cap.js';
 import { ApiError } from '../errors.js';
 import { simulateCrmAnalysis } from '../crm/simulate.js';
+import { holdingReply } from './holding.js';
 import { HISTORY_LIMIT } from './prompt.js';
 import { executeAiCore, type TurnDeps } from './turn.js';
 
@@ -80,9 +81,14 @@ export async function runSimulatorTurn(
 
     const body = core?.kind === 'ready' ? core.reply?.reply.trim() ?? '' : '';
     const withheld = core?.kind === 'ready' && core.invented !== null;
-    const reply = body === '' || withheld ? null : body;
+    // What a live turn sends when it has no reply it may send: a withheld number or a twice
+    // unreadable answer puts the holding line in front of the customer, so the rehearsal shows
+    // it as the agent's message. A failed call stays `failed` here, as in a draft check — the
+    // owner is debugging the agent, not waiting on it.
+    const held = core?.kind === 'ready' && (withheld || core.reply === null);
+    const reply = held ? holdingReply(agent.replyLanguage, history) : body === '' ? null : body;
     // Photos go out only after a reply that goes out, so a withheld reply shows none.
-    const photos = core?.kind === 'ready' && reply !== null ? core.photos : [];
+    const photos = core?.kind === 'ready' && reply !== null && !held ? core.photos : [];
     const handoff = core?.kind === 'ready' ? core.handoffReason : null;
     const stage = crm?.stage ?? (core?.kind === 'ready' ? core.targetStage : null);
     const fields: AiTurnField[] = crm?.fields ?? (core?.kind === 'ready'
@@ -120,7 +126,7 @@ export async function runSimulatorTurn(
         stageId: stage?.id ?? session.stageId,
         stageName: stage?.name ?? session.stageName,
         // Moved only by a reply the customer would have received, as `runTurn` does.
-        scriptStepId: core?.kind === 'ready' && reply !== null && core.scriptStep !== null
+        scriptStepId: core?.kind === 'ready' && reply !== null && !held && core.scriptStep !== null
           ? core.scriptStep.id : session.scriptStepId,
         fields: merged,
         ...(crm && !crm.error ? { crmSummary: crm.summary, crmProfile: crm.profile } : {}),

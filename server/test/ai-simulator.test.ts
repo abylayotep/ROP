@@ -185,7 +185,8 @@ describe('persistent browser simulator', () => {
 
     model = fakeModel(answer('Delivery costs 9999 tenge.'));
     const invented = await run('What about tomorrow?', 1);
-    expect(invented).toMatchObject({ reply: null, outcome: 'handoff' });
+    // The withheld reply is replaced by the holding line a live customer would get.
+    expect(invented).toMatchObject({ reply: 'Секунду, уточню у коллеги и сразу вернусь с ответом.', outcome: 'handoff' });
     expect(invented.handoff).toContain('9999');
   });
 
@@ -258,7 +259,7 @@ describe('persistent browser simulator', () => {
   it('retains the reason after two invalid model answers force a handoff', async () => {
     model = fakeModel('not JSON', 'still not JSON');
     const turn = await run('Please help.', 0);
-    expect(turn).toMatchObject({ outcome: 'handoff', reply: null });
+    expect(turn).toMatchObject({ outcome: 'handoff', reply: 'Секунду, уточню у коллеги и сразу вернусь с ответом.' });
     expect(turn.handoff).toContain('дважды');
     expect(turn.detail).toContain('дважды');
     expect(model.calls).toHaveLength(2);

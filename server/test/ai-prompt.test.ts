@@ -121,6 +121,13 @@ describe('buildMessages: the rules the agent answers under', () => {
     expect(text).toContain('«около»');
   });
 
+  it('keeps the customer\'s language over a ready phrase written in another one', () => {
+    // A Kazakh ready phrase in the knowledge base was copied verbatim into a Russian thread.
+    const text = system();
+    expect(text).toContain('Язык определяет последнее сообщение клиента');
+    expect(text.split('ФОРМАТ ОТВЕТА').at(-1)).toContain('готовые фразы на другом языке переводи');
+  });
+
   it("answers in the customer's language when the owner has not chosen one", () => {
     expect(system()).toContain('на языке клиента');
   });

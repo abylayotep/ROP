@@ -1,5 +1,6 @@
 import { drainCrmAnalyses } from './lib/crm/worker.js';
 import { createLiveCrmHandler, createCrmDeps } from './lib/crm/live.js';
+import { runScriptPaymentTurns } from './lib/ai/script-payment.js';
 import { reconcileKaspiPayments } from './lib/kaspi/service.js';
 import { queueMissingPurchases } from './lib/capi/enqueue.js';
 import { reconcileOrphanedRuns } from './api/drafts.js';
@@ -193,6 +194,21 @@ const drainAutopilot = async () => {
 };
 const autopilotTimer = setInterval(() => void drainAutopilot(), 5_000);
 autopilotTimer.unref();
+
+// The reply a confirmed payment starts when the sales script waits for it. On its own clock
+// rather than inside the two paths that mark an order paid — see `lib/ai/script-payment.ts`.
+// `crm` is set as the live CRM reply sets it, so in production a payment turn leaves the stage
+// and fields to the CRM worker exactly as a customer's turn does.
+let paymentTurnsRunning = false;
+const runPaymentTurns = async () => {
+  if (paymentTurnsRunning) return;
+  paymentTurnsRunning = true;
+  try { await runScriptPaymentTurns(db, { ...liveDeps, crm: async () => true }); }
+  catch { app.log.error('script: payment turns failed'); }
+  finally { paymentTurnsRunning = false; }
+};
+const paymentTurnsTimer = setInterval(() => void runPaymentTurns(), 5_000);
+paymentTurnsTimer.unref();
 let kaspiRunning = false;
 const reconcilePayments = async () => {
   if (kaspiRunning) return;

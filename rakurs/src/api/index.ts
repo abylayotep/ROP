@@ -58,6 +58,8 @@ import type {
   Promotion,
   PromotionSaveRequest,
   RuleCategory,
+  SalesScript,
+  SalesScriptSaveRequest,
   Stage,
   StatsCurrent,
   StatsPeriodReport,
@@ -760,6 +762,15 @@ export const getStatsPeriod = (agentId: string, period: Period, signal?: AbortSi
  * In the order the model reads them — categories in the prompt's own sequence, then
  * position inside each. Owner only on the server; every route below is.
  */
+// ── Скрипт продаж ─────────────────────────────────────────────────────────────
+
+export const getSalesScript = (agentId: string, signal?: AbortSignal) =>
+  request<SalesScript>(`/agents/${agentId}/script`, { signal });
+
+/** Replaces the whole script: steps absent from the list are deleted, kept ids stay. */
+export const saveSalesScript = (agentId: string, body: SalesScriptSaveRequest) =>
+  request<SalesScript>(`/agents/${agentId}/script`, { method: 'PUT', body });
+
 export const listRules = (agentId: string, signal?: AbortSignal) =>
   request<AgentRule[]>(`/agents/${agentId}/rules`, { signal });
 

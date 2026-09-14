@@ -885,6 +885,51 @@ export interface AgentRule {
   updatedAt: string;
 }
 
+/* ── Скрипт продаж ───────────────────────────────────────────────────────────
+ * The order a sale is talked through, written by the owner step by step. Separate from the
+ * funnel: a step may name a stage, but a script has as many steps as the owner needs. */
+
+/** One step. `parentId` is null on the main chain; a branch hangs under a main-chain step. */
+export interface ScriptStep {
+  id: string;
+  parentId: string | null;
+  /** Order among siblings. */
+  position: number;
+  title: string;
+  /** Branches only: when the branch applies. Always empty on a main-chain step. */
+  condition: string;
+  /** What the agent says and does on this step, in the owner's words. */
+  instructions: string;
+  /** The stage the lead moves to when the step starts, or null. */
+  stageId: string | null;
+  /** Catalog photos the agent sends on the step's first reply. */
+  photoIds: string[];
+  /** Lead fields the agent asks for on this step, one at a time. */
+  fieldIds: string[];
+  handoff: boolean;
+  /** What the colleague should do. */
+  handoffNote: string;
+  /** The chain does not pass this step until the system confirms payment. */
+  waitPayment: boolean;
+}
+
+/**
+ * One step as the editor saves it. `id` is an existing step's uuid — kept, so conversations
+ * standing on the step stay on it — or a client id starting with `tmp-` for a new one;
+ * `parentId` names another input's `id`. Order among siblings is the order of the list.
+ */
+export type ScriptStepInput = Omit<ScriptStep, 'position'>;
+
+/** The whole script, flat: each main-chain step followed by its branches. */
+export interface SalesScript {
+  steps: ScriptStep[];
+}
+
+/** Replaces the whole script in one transaction. */
+export interface SalesScriptSaveRequest {
+  steps: ScriptStepInput[];
+}
+
 /** What the coach suggests. It writes nothing: a proposal becomes a draft or it is rejected. */
 export type CoachProposal =
   | { kind: 'rule'; category: RuleCategory; text: string }

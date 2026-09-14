@@ -365,6 +365,13 @@
       "when": 1789342453622,
       "tag": "0051_draft_autopilot",
       "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1789344292886,
+      "tag": "0052_sales_script",
+      "breakpoints": true
     }
   ]
 }

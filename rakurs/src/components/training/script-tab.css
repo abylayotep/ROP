@@ -1,0 +1,68 @@
+/* «Скрипт продаж»: a chain of step cards on the left, the selected step on the right. */
+
+.script-tab { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.script-tab__head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.script-tab__head .training-tab__intro { margin: 0; max-width: 640px; }
+.script-tab__actions { display: flex; flex: 0 0 auto; align-items: center; gap: 10px; }
+.script-tab__dirty { color: var(--warn); font-size: 11px; }
+.script-tab__problem { margin: 0; color: var(--danger); font-size: 11.5px; }
+.script-tab__layout { display: grid; gap: 14px; min-width: 0; }
+.script-tab__layout--open { grid-template-columns: minmax(0, 1fr) minmax(300px, 420px); align-items: start; }
+
+.script-empty { border: 1px solid var(--line); border-radius: 14px; background: var(--card); }
+.script-empty__actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 10px; }
+
+.script-chain { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; min-width: 0; }
+.script-block { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; min-width: 0; }
+.script-block:has(.script-branches) { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; }
+
+/* The arrow between two main-chain steps: a line, a head, and room for «+ Шаг» beside it. */
+.script-chain__arrow { position: relative; display: flex; align-items: center; min-height: 38px; padding-left: 40px; }
+.script-chain__arrow::before { content: ''; position: absolute; top: 4px; bottom: 10px; left: 22px; width: 2px; border-radius: 1px; background: var(--line-strong); }
+.script-chain__arrow::after { content: ''; position: absolute; bottom: 4px; left: 18px; border-top: 7px solid var(--line-strong); border-right: 5px solid transparent; border-left: 5px solid transparent; }
+.script-chain__insert { display: flex; padding: 4px 0 4px 40px; }
+.script-chain__arrow .btn-link, .script-chain__insert .btn-link { font-size: 11px; }
+
+.script-card { display: flex; align-items: flex-start; gap: 6px; padding: 6px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); transition: border-color 160ms ease, background 160ms ease; min-width: 0; }
+.script-card:hover { border-color: var(--accent-a45); }
+.script-card--selected { border-color: var(--accent-a36); background: var(--accent-a08); }
+.script-card--branch { border-style: dashed; }
+.script-card__open { display: flex; flex: 1 1 auto; align-items: flex-start; gap: 10px; min-width: 0; padding: 4px; border: 0; background: none; color: var(--text-3); font: inherit; text-align: left; cursor: pointer; }
+.script-card__open:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 8px; }
+.script-card__number { display: grid; flex: 0 0 auto; place-items: center; min-width: 28px; height: 28px; padding: 0 6px; border-radius: 14px; background: var(--seg-on); color: var(--text); font-size: 11.5px; font-weight: 700; }
+.script-card--selected .script-card__number { background: var(--accent); color: var(--on-accent); }
+.script-card__body { display: grid; gap: 4px; min-width: 0; }
+.script-card__title { overflow: hidden; color: var(--text); font-size: 12.5px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.script-card__preview { overflow: hidden; color: var(--text-dim); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.script-card__chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.script-card__chips:empty { display: none; }
+.script-card__tools { display: flex; flex: 0 0 auto; flex-wrap: wrap; justify-content: flex-end; gap: 4px; max-width: 150px; }
+
+.script-chip { display: inline-flex; align-items: center; gap: 5px; padding: 2px 7px; border: 1px solid var(--line-2); border-radius: 10px; background: var(--sunken); color: var(--text-4); font-size: 10px; white-space: nowrap; }
+.script-chip--pay { border-color: var(--accent-a36); color: var(--accent-hover); }
+.script-chip__dot { width: 7px; height: 7px; border-radius: 50%; }
+
+.script-branches { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; list-style: none; min-width: 0; }
+.script-branch { display: grid; gap: 4px; min-width: 0; }
+.script-branch__arrow { overflow: hidden; color: var(--text-muted); font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }
+
+.script-panel { position: sticky; top: 12px; display: grid; gap: 12px; padding: 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--card); min-width: 0; }
+.script-panel__form { display: grid; gap: 7px; margin: 0; padding: 0; border: 0; min-width: 0; }
+.script-photos { display: grid; gap: 10px; }
+.script-photos__product { display: grid; gap: 5px; }
+.script-photos__name { color: var(--text-3); font-size: 11px; }
+.script-photos__grid { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.script-photo { display: block; width: 56px; height: 56px; padding: 0; overflow: hidden; border: 2px solid transparent; border-radius: 8px; background: var(--sunken); cursor: pointer; }
+.script-photo img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.script-photo--on { border-color: var(--accent); }
+.script-photo:disabled { cursor: default; opacity: .45; }
+.script-photo--on:disabled { opacity: 1; }
+.script-fields { display: grid; gap: 2px; }
+
+@media (max-width: 900px) {
+  .script-tab__head { flex-direction: column; }
+  .script-tab__layout--open { grid-template-columns: 1fr; }
+  .script-block:has(.script-branches) { grid-template-columns: minmax(0, 1fr); }
+  .script-branches { padding-left: 24px; }
+  .script-panel { position: static; }
+}

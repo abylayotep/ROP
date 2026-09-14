@@ -212,6 +212,8 @@ export const aiSandboxSessions = pgTable(
     // item is later removed, and no sandbox operation may mutate that production row.
     stageId: uuid('stage_id'),
     stageName: text('stage_name'),
+    // The sales-script step the rehearsal stands on, kept the way `stageId` is: no foreign key.
+    scriptStepId: uuid('script_step_id'),
     fields: jsonb('fields').$type<AiTurnField[]>().notNull().default([]),
     crmSummary: text('crm_summary'),
     crmProfile: jsonb('crm_profile').$type<Record<string, string>>().notNull().default({}),
@@ -504,6 +506,17 @@ export const conversations = pgTable(
     stageSetAt: timestamp('stage_set_at', { withTimezone: true }),
     // 'operator' | 'ai' | 'scenario' | 'system'. Stage 5 adds a value, not a column.
     stageSetBy: text('stage_set_by'),
+    // Where this conversation stands in the owner's sales script (`sales_script_steps`). Set by
+    // the reply turn after a reply reached the customer; `set null` when the owner deletes the
+    // step, and the next reply picks a step again.
+    scriptStepId: uuid('script_step_id').references((): AnyPgColumn => salesScriptSteps.id, {
+      onDelete: 'set null',
+    }),
+    // When the current sale entered the script: set with the first step, and again whenever the
+    // conversation goes back to the first step for a new purchase. A paid order counts toward a
+    // «ждать оплату» step only when it is newer than this, so last month's order does not pay
+    // for today's.
+    scriptStartedAt: timestamp('script_started_at', { withTimezone: true }),
     assignedTo: uuid('assigned_to').references(() => users.id, { onDelete: 'set null' }),
     // The agent answers on this thread. An operator who steps in turns it off here rather
     // than for the whole agent — the rest of the funnel keeps working.
@@ -678,6 +691,10 @@ export const orders = pgTable(
     comment: text('comment').notNull().default(''),
     // Filled only by 'paid'. Stage 6 sends this as the event time.
     paidAt: timestamp('paid_at', { withTimezone: true }),
+    // Set the first time a reply turn acted on this payment for the sales script — the turn the
+    // payment itself starts, or a customer's turn that already saw it. The claim is the whole
+    // defence against sending the after-payment step twice, so it is written before the send.
+    scriptPaymentTurnAt: timestamp('script_payment_turn_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
@@ -1184,6 +1201,41 @@ export const capiEvents = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index('capi_events_status_created_idx').on(t.status, t.createdAt)],
+);
+
+/**
+ * One step of the owner's sales script: the order a sale is talked through.
+ *
+ * Separate from the funnel on purpose. A stage is a CRM column and a script has as many steps
+ * as the owner needs; a step may name a stage the lead moves to when the step starts, but does
+ * not have to. A step with `parentId` is a branch under a main-chain step («если клиент
+ * сомневается»), and a branch has no branches of its own — the API keeps the depth at two.
+ *
+ * `photoIds` and `fieldIds` are lists of ids rather than join tables because they are only
+ * ever read whole, with the step, and the API checks each id against the agent's own catalog
+ * and fields on every save. An id whose photo or field is later deleted is dropped where it is
+ * read, never sent.
+ */
+export const salesScriptSteps = pgTable(
+  'sales_script_steps',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    agentId: uuid('agent_id').notNull().references(() => agents.id, { onDelete: 'cascade' }),
+    parentId: uuid('parent_id').references((): AnyPgColumn => salesScriptSteps.id, { onDelete: 'cascade' }),
+    position: integer('position').notNull(),
+    title: text('title').notNull(),
+    condition: text('condition').notNull().default(''),
+    instructions: text('instructions').notNull().default(''),
+    stageId: uuid('stage_id').references(() => stages.id, { onDelete: 'set null' }),
+    photoIds: jsonb('photo_ids').$type<string[]>().notNull().default([]),
+    fieldIds: jsonb('field_ids').$type<string[]>().notNull().default([]),
+    handoff: boolean('handoff').notNull().default(false),
+    handoffNote: text('handoff_note').notNull().default(''),
+    waitPayment: boolean('wait_payment').notNull().default(false),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('sales_script_steps_agent_parent_position_idx').on(t.agentId, t.parentId, t.position)],
 );
 
 /**

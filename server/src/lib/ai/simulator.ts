@@ -70,6 +70,10 @@ export async function runSimulatorTurn(
       // A rehearsal remembers its own photos, so it answers «уже отправлял» the way a live
       // conversation would.
       sentPhotoIds: previous.flatMap((turn) => turn.photoIds),
+      // The script step is remembered the same way, so a rehearsal walks the script as a live
+      // conversation does. Never paid: nothing in a rehearsal can be.
+      scriptStepId: session.scriptStepId,
+      paid: false,
       // A browser rehearsal has no paid order or live conversation to confirm.
       canMoveToSuccess: async () => false,
     });
@@ -115,6 +119,9 @@ export async function runSimulatorTurn(
         revision: input.revision + 1,
         stageId: stage?.id ?? session.stageId,
         stageName: stage?.name ?? session.stageName,
+        // Moved only by a reply the customer would have received, as `runTurn` does.
+        scriptStepId: core?.kind === 'ready' && reply !== null && core.scriptStep !== null
+          ? core.scriptStep.id : session.scriptStepId,
         fields: merged,
         ...(crm && !crm.error ? { crmSummary: crm.summary, crmProfile: crm.profile } : {}),
         outcome,

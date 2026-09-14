@@ -35,15 +35,17 @@ import {
   leadValues,
   messages,
   notes,
+  orders,
   productPhotos,
   products,
+  salesScriptSteps,
   stages,
   whatsappNumbers,
 } from '../../db/schema.js';
 import type { Env } from '../../env.js';
 import type { InstagramMessagingClient } from '../instagram/messaging-graph.js';
 import { deliveryForConversation, type ConversationDelivery } from '../messaging/transport.js';
-import { hasVisiblePayment } from '../crm/payment.js';
+import { hasVisiblePayment, scriptPayment } from '../crm/payment.js';
 import {
   decideAutomation,
   loadAutomationSnapshot,
@@ -77,12 +79,19 @@ import {
   PHOTO_SEND_LIMIT,
   PRODUCT_LIMIT,
   REPLY_SCHEMA,
+  scriptSources,
   type AgentReply,
   type PromptMessage,
   type PromptLeadValue,
   type TurnContext,
 } from './prompt.js';
 import { assembleRules, loadRules } from './rules.js';
+import {
+  afterPaymentPhotoIds,
+  loadScript,
+  passesUnpaidPayment,
+  type ScriptStepRow,
+} from './sales-script.js';
 
 export interface TurnDeps {
   /** Independent CRM processing; true means payment instructions already answered the client. */
@@ -104,6 +113,12 @@ export interface TurnInput {
   dryRun?: boolean;
   /** A reply launched by the CRM worker may finish only while CRM follows AI scope. */
   crmOrigin?: boolean;
+  /**
+   * The turn is started by this confirmed payment rather than by a customer's message — see
+   * `lib/ai/script-payment.ts`. The last word may then be ours, the payment counts as confirmed,
+   * and the turn refuses unless the conversation still stands on a «ждать оплату» step.
+   */
+  paidOrderId?: string;
 }
 
 /**
@@ -476,7 +491,7 @@ function retryMessage(kind: string): ChatMessage {
     role: 'user',
     content:
       `Твой прошлый ответ не подошёл: ${kind}. Верни ровно один JSON-объект с ключами ` +
-      'reply, stageId, fields, handoff, photoIds, usedItemIds — без текста вокруг и без markdown.',
+      'reply, stageId, fields, handoff, photoIds, scriptStepId, usedItemIds — без текста вокруг и без markdown.',
   };
 }
 
@@ -589,6 +604,12 @@ export interface AiCoreInput {
   allowProposedCrm: boolean;
   /** Catalog photos this conversation has already received. */
   sentPhotoIds?: readonly string[];
+  /** The sales-script step the conversation stands on, or null. */
+  scriptStepId?: string | null;
+  /** Whether the system has confirmed payment for the current sale. */
+  paid?: boolean;
+  /** The turn was started by a confirmed payment, not by the customer. */
+  paymentTrigger?: boolean;
   canContinue?: () => Promise<boolean>;
   canMoveToSuccess: () => Promise<boolean>;
 }
@@ -611,6 +632,14 @@ export type AiCoreExecution =
       unreadableDetail: string | null;
       fields: Record<string, string>;
       targetStage: typeof stages.$inferSelect | null;
+      /**
+       * The script step the conversation stands on after this reply: the one the model named,
+       * when it is a step of this agent and the payment gate lets it through. Null when the
+       * model named none, or none that may be taken.
+       */
+      scriptStep: ScriptStepRow | null;
+      /** The agent's whole script, in order. */
+      script: ScriptStepRow[];
       stageRows: (typeof stages.$inferSelect)[];
       fieldRows: (typeof leadFields.$inferSelect)[];
       details: string[];
@@ -647,6 +676,8 @@ export async function executeAiCore(db: Db, deps: TurnDeps, input: AiCoreInput):
   // before anything has switched it off.
   const promotion = await loadEffectivePromotion(db, agent.id);
   const promoPrice = (variantId: string) => promotion?.prices.get(variantId) ?? null;
+  const script = await loadScript(db, agent.id);
+  const paid = input.paid === true;
   const context: TurnContext = {
     agent: { name: agent.name, timezone: agent.timezone, instructions,
       replyLanguage: agent.replyLanguage, communicationStyle: agent.communicationStyle },
@@ -668,6 +699,10 @@ export async function executeAiCore(db: Db, deps: TurnDeps, input: AiCoreInput):
       promotion: { name: promotion.name, description: promotion.description, endsAt: promotion.endsAt },
     }),
     sentPhotoIds: input.sentPhotoIds,
+    script,
+    scriptStepId: input.scriptStepId ?? null,
+    paid,
+    paymentTrigger: input.paymentTrigger === true,
   };
   const prompt = buildMessages(context);
   let reply: AgentReply | null = null;
@@ -730,6 +765,9 @@ export async function executeAiCore(db: Db, deps: TurnDeps, input: AiCoreInput):
     // end date are sourced too, since the agent is told it may repeat them.
     ...(promotion === null ? [] : [promotion.name, promotion.description,
       ...(promotion.endsAt === null ? [] : [formatPromotionEnd(promotion.endsAt, agent.timezone)])]),
+    // The script is the owner's words exactly as the instructions are: a price the owner wrote
+    // into a step («стандартный размер 9990 ₸») is a number the agent was given.
+    ...scriptSources(script),
   ];
   const invented = reply === null ? null : unsourcedNumber(reply.reply, sources);
   const reasons: string[] = [];
@@ -743,13 +781,38 @@ export async function executeAiCore(db: Db, deps: TurnDeps, input: AiCoreInput):
   const fields = input.allowProposedCrm && reply !== null
     ? Object.fromEntries(Object.entries(reply.fields).filter(([id]) => known.has(id))) : {};
   const details: string[] = [];
-  const photos = reply === null ? [] : pickPhotos(reply.photoIds, shownProducts, input.sentPhotoIds ?? [], details);
+
+  // The script step, checked in code rather than trusted to the prompt: an unknown id is
+  // dropped, and a step past an unconfirmed «ждать оплату» is refused — the conversation stays
+  // where it was, so the next turn is still told to wait.
+  const currentStep = script.find((step) => step.id === input.scriptStepId) ?? null;
+  let scriptStep: ScriptStepRow | null = null;
+  if (reply?.scriptStepId) {
+    const named = script.find((step) => step.id === reply.scriptStepId);
+    if (!named) details.push(`Модель назвала шаг скрипта, которого нет: ${reply.scriptStepId.slice(0, 80)}.`);
+    else if (!paid && passesUnpaidPayment(script, currentStep?.id ?? null, named.id)) {
+      details.push('Оплата не подтверждена системой. Шаг скрипта не изменён.');
+    } else scriptStep = named;
+  }
+  // Photos of the part of the sale after payment do not go out before it, whatever the model
+  // chose: the finished product sent to a customer who has not paid cannot be taken back.
+  const locked = paid ? new Set<string>() : afterPaymentPhotoIds(script);
+  const requested = reply?.photoIds.filter((id) => !locked.has(id)) ?? [];
+  if (reply !== null && requested.length < reply.photoIds.length) {
+    details.push('Фото шагов после оплаты не отправлены: оплата не подтверждена системой.');
+  }
+  const photos = reply === null ? [] : pickPhotos(requested, shownProducts, input.sentPhotoIds ?? [], details);
+
   let targetStage: typeof stages.$inferSelect | null = null;
-  if (input.allowProposedCrm && reply?.stageId) {
-    const target = stageRows.find((stage) => stage.id === reply.stageId);
+  // A step that names a stage moves the lead there when the step starts — unless the model chose
+  // a stage itself. Either way through the same gates below.
+  const stepStageId = scriptStep !== null && scriptStep.id !== currentStep?.id ? scriptStep.stageId : null;
+  const proposedStageId = reply?.stageId ?? stepStageId;
+  if (input.allowProposedCrm && reply !== null && proposedStageId) {
+    const target = stageRows.find((stage) => stage.id === proposedStageId);
     // Like `resolveCrmStage`: a sale is undone by an operator, never by the agent.
     const current = stageRows.find((stage) => stage.id === input.stageId);
-    if (!target) details.push(`Модель назвала этап, которого у агента нет: ${reply.stageId.slice(0, 80)}.`);
+    if (!target) details.push(`Модель назвала этап, которого у агента нет: ${proposedStageId.slice(0, 80)}.`);
     else if (current?.kind === 'success' && target.id !== current.id) {
       details.push('Сделка уже на стадии продажи. Этап не изменён.');
     } else if (target.kind === 'success' && !await input.canMoveToSuccess()) {
@@ -761,7 +824,7 @@ export async function executeAiCore(db: Db, deps: TurnDeps, input: AiCoreInput):
     usedItems: context.knowledge.filter((item) => cited.has(item.id))
       .map(({ id, title }) => ({ id, title })),
     photos, invented, handoffReason, unreadableDetail, fields,
-    targetStage, stageRows, fieldRows, details };
+    targetStage, scriptStep, script, stageRows, fieldRows, details };
 }
 
 /**
@@ -843,9 +906,19 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
 
   const last = history.at(-1);
   if (!last) return empty('skipped', 'В диалоге нет сообщений.');
+  // A payment-started turn answers the payment, so the last word may be the agent's own — the
+  // invoice it sent — or a system note. Never an operator's: a person who has just written owns
+  // the thread whatever the payment did.
+  const triggered = input.paidOrderId !== undefined;
+  if (triggered) {
+    const refusal = await paymentTurnRefusal(db, conversation, input.paidOrderId!);
+    if (refusal !== null) return empty('skipped', refusal);
+  }
   // The agent answers customers: not itself, and not an operator who has just written and
   // owns the thread until they step out.
-  if (last.author !== 'client') return empty('skipped', 'Последнее слово не за клиентом.');
+  if (last.author !== 'client' && !(triggered && (last.author === 'ai' || last.author === 'system'))) {
+    return empty('skipped', 'Последнее слово не за клиентом.');
+  }
 
   const before: Snapshot = {
     agentEnabled: agent.aiEnabled,
@@ -869,12 +942,20 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
     .where(and(eq(messages.conversationId, conversation.id), isNotNull(messages.productPhotoId))))
     .map((row) => row.id!);
 
+  // Read before the model is called and claimed after it answers: the orders this turn treats
+  // as the payment are exactly the ones it saw.
+  const payment = await scriptPayment(db, conversation);
+  const paid = triggered || payment.paid;
+
   const core = await executeAiCore(db, deps, {
     agent,
     history: history.map(({ author, body, kind }) => ({ author, body, kind })),
     stageId: conversation.stageId,
     values,
     sentPhotoIds,
+    scriptStepId: conversation.scriptStepId,
+    paid,
+    paymentTrigger: triggered,
     allowProposedCrm: !deps.crm || dryRun,
     canContinue: dryRun ? undefined : () => automationAllowed(db, input, 'reply'),
     canMoveToSuccess: () => hasVisiblePayment(db, agent.id, conversation.id),
@@ -900,6 +981,15 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
 
   if (!dryRun && !await automationAllowed(db, input, 'reply')) {
     return empty('skipped', AUTOMATION_DISABLED);
+  }
+
+  // The payments this reply acts on are claimed before anything is sent, so the payment turn
+  // (`script-payment.ts`) never answers the same payment a second time. Claimed even if the send
+  // below fails: a customer who wrote is answered by their next message, and a claim released
+  // on failure is the window in which both turns could speak.
+  if (!dryRun && payment.orderIds.length > 0) {
+    await db.update(orders).set({ scriptPaymentTurnAt: new Date() })
+      .where(and(inArray(orders.id, payment.orderIds), isNull(orders.scriptPaymentTurnAt)));
   }
 
   const { key, reply, usedItemIds, invented, handoffReason, targetStage,
@@ -1180,6 +1270,12 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
   // A handoff first: a person has to take this thread whether or not the last sentence
   // arrived, and the conversation's switch being off is what stops a retried event from
   // running the turn a second time — so `handoff` is retry-safe in the way `failed` is not.
+  // Only a reply the customer has moves the conversation along the script: a withheld or failed
+  // reply said nothing of the step, and the next turn has to say it.
+  if (!dryRun && core.scriptStep !== null && (delivery?.state === 'sent' || delivery?.state === 'unrecorded')) {
+    await storeScriptStep(db, conversation, core.scriptStep, core.script, details);
+  }
+
   const outcome: TurnOutcome =
     handoffReason !== null
       ? 'handoff'
@@ -1216,6 +1312,55 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
     handoff: handoffReason,
     detail,
   };
+}
+
+/**
+ * Why a payment-started turn must not run, or null when it may.
+ *
+ * Re-read here rather than trusted from the sweep that queued it: the order has to be paid and
+ * this conversation's, and the conversation still on a «ждать оплату» step — a customer who
+ * wrote in the meantime has had the payment answered by their own turn, which moved the step.
+ */
+async function paymentTurnRefusal(
+  db: Db,
+  conversation: typeof conversations.$inferSelect,
+  orderId: string,
+): Promise<string | null> {
+  const [order] = await db.select({ id: orders.id }).from(orders)
+    .where(and(eq(orders.id, orderId), eq(orders.conversationId, conversation.id), eq(orders.status, 'paid')));
+  if (!order) return 'Оплаченный заказ не найден.';
+  if (conversation.scriptStepId === null) return 'Диалог не стоит на шаге скрипта.';
+  const [step] = await db.select({ waitPayment: salesScriptSteps.waitPayment }).from(salesScriptSteps)
+    .where(and(eq(salesScriptSteps.id, conversation.scriptStepId), eq(salesScriptSteps.agentId, conversation.agentId)));
+  if (!step?.waitPayment) return 'Диалог уже не на шаге оплаты.';
+  return null;
+}
+
+/**
+ * Moves the conversation to the step its reply took, and starts a new sale when the reply went
+ * back to the first step from another one — the repeat customer — so an order of the previous
+ * sale no longer counts as this one's payment. Never throws: the customer already has the
+ * reply, and a step deleted by the owner a moment ago is a note, not a failed turn.
+ */
+async function storeScriptStep(
+  db: Db,
+  conversation: typeof conversations.$inferSelect,
+  step: ScriptStepRow,
+  script: readonly ScriptStepRow[],
+  details: string[],
+): Promise<void> {
+  const first = script.find((row) => row.parentId === null);
+  const restart = first?.id === step.id && conversation.scriptStepId !== null && conversation.scriptStepId !== step.id;
+  try {
+    await db.update(conversations)
+      .set({
+        scriptStepId: step.id,
+        ...(conversation.scriptStartedAt === null || restart ? { scriptStartedAt: new Date() } : {}),
+      })
+      .where(and(eq(conversations.id, conversation.id), eq(conversations.agentId, conversation.agentId)));
+  } catch {
+    details.push('Шаг скрипта не сохранён: его удалили, пока агент отвечал.');
+  }
 }
 
 /**

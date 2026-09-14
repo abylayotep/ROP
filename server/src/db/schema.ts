@@ -340,7 +340,7 @@ export const whatsappNumbers = pgTable(
     offboardedAt: timestamp('offboarded_at', { withTimezone: true }),
     // Linked only: the number's own id inside WhatsApp, and how the pairing stands.
     // `linkedJid` is what routes an incoming socket event to this row, the way
-    // `phoneNumberId` routes a webhook delivery. 'pairing' | 'open' | 'logged_out'.
+    // `phoneNumberId` routes a webhook delivery. 'pairing' | 'open' | 'logged_out' | 'banned'.
     linkedJid: text('linked_jid'),
     linkedState: text('linked_state'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),

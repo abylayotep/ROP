@@ -188,6 +188,13 @@ describe('whatsappStatus: номер по QR', () => {
 
     expect(whatsappStatus([qr]).note).toContain('QR');
   });
+
+  it('говорит про блокировку номера, а не просит отсканировать код', () => {
+    const qr = number({ connectionKind: 'linked', subscribed: false, linkedState: 'banned' });
+
+    expect(whatsappStatus([qr])).toMatchObject({ state: 'partial' });
+    expect(whatsappStatus([qr]).note).toContain('заблокировал');
+  });
 });
 
 describe('whatsappGuideDone', () => {

@@ -24,6 +24,13 @@ const MAX_BACKOFF_MS = 60_000;
  */
 const MAX_ATTEMPTS = 12;
 
+/**
+ * What WhatsApp answers a connect with once it has blocked the account (Baileys'
+ * `DisconnectReason.forbidden`). Seen in production on 2026-09-14: one 503, then 403 on
+ * every retry. Retrying a blocked account only adds more suspicious logins to its record.
+ */
+const FORBIDDEN = 403;
+
 export interface LifecycleOptions {
   /** Injected by tests. Production waits with `setTimeout`. */
   schedule?: (run: () => void, ms: number) => void;
@@ -63,6 +70,19 @@ export function registerLinkedLifecycle(
       // WhatsApp discarded the pairing. Nothing here can bring it back, and keeping the
       // session would fail to authenticate on every attempt for as long as the row lives.
       void forget(event.numberId).catch((error: unknown) => report(error));
+      return;
+    }
+
+    if (event.statusCode === FORBIDDEN) {
+      // The session is kept: if the owner's appeal succeeds, reconnecting from the cabinet
+      // starts a clean pairing anyway, and until then nothing should touch WhatsApp.
+      attempts.delete(event.numberId);
+      options.onError?.(`WhatsApp заблокировал номер ${event.numberId} (403), переподключение остановлено`);
+      void db
+        .update(whatsappNumbers)
+        .set({ linkedState: 'banned' })
+        .where(eq(whatsappNumbers.id, event.numberId))
+        .catch((error: unknown) => report(error));
       return;
     }
 

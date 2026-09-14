@@ -31,9 +31,11 @@ export function createHistoryRequestManager(client: LinkedClient, deps: HistoryR
   const earlyResponses = new Map<string, { messages: number; expiresAt: number }>();
   const timers = new Map<string, Set<NodeJS.Timeout>>();
   const timeoutMs = deps.timeoutMs ?? 90_000;
-  const paceMs = deps.paceMs ?? 250;
+  // Hundreds of history requests fired seconds apart are a script's signature, not a
+  // person's. 200 chats at this pace take ten minutes, which the job limit allows.
+  const paceMs = deps.paceMs ?? 3_000;
   const sendTimeoutMs = deps.sendTimeoutMs ?? 10_000;
-  const jobTimeoutMs = deps.jobTimeoutMs ?? 300_000;
+  const jobTimeoutMs = deps.jobTimeoutMs ?? 900_000;
   let closed = false;
 
   // Only bounded counters and enums cross the logging boundary, never WhatsApp payloads.

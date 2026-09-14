@@ -188,6 +188,11 @@ export const agents = pgTable(
     // told. Deliberately outside `configVersion` — it never reaches the prompt, so changing
     // it changes no answer.
     operatorNotifyPhone: text('operator_notify_phone'),
+    // When the operator was last told the OpenRouter balance is running out. Kept in the row
+    // rather than in memory, because a release restarts the process several times a day and
+    // each restart would otherwise send the same warning again. Cleared once the balance is
+    // back above the threshold, so the next drop warns again.
+    lowBalanceAlertedAt: timestamp('low_balance_alerted_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [

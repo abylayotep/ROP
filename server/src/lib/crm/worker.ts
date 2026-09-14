@@ -36,7 +36,7 @@ async function lockAutomationPolicy(
   tx: Parameters<Parameters<Db['transaction']>[0]>[0],
   input: AnalyzeInput,
 ) {
-  const [locked] = await tx.select({stageId:conversations.stageId,stageSetAt:conversations.stageSetAt}).from(conversations)
+  const [locked] = await tx.select({stageId:conversations.stageId,stageSetAt:conversations.stageSetAt,stageSetBy:conversations.stageSetBy}).from(conversations)
     .innerJoin(agents,and(eq(agents.id,conversations.agentId),eq(agents.id,input.agentId)))
     .innerJoin(contacts,and(eq(contacts.id,conversations.contactId),eq(contacts.agentId,agents.id)))
     .where(eq(conversations.id,input.conversationId)).for('update');
@@ -118,8 +118,8 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
     const payment = analysis.payment?.state === 'paid' && analysis.confidence < 65 ? null : analysis.payment;
     // Chat evidence of money counts only when written after the last paid order, Kaspi or chat:
     // after a sale the old transfer and price stay in the thread and must not sell again. The later
-    // of paid_at and created_at, because a chat order is backdated to when the lead entered the sale
-    // stage, which can precede the very messages it was recorded from.
+    // of paid_at and created_at, because a chat order is dated by its payment message (or by an
+    // operator's earlier move into the sale stage), which the price message it quotes can follow.
     const recordedAt = sql<Date>`greatest(${orders.paidAt}, ${orders.createdAt})`.mapWith(orders.createdAt);
     const [lastPaid] = await db.select({at:recordedAt}).from(orders)
       .where(and(eq(orders.conversationId,conversation.id),eq(orders.status,'paid'),isNotNull(orders.paidAt)))
@@ -128,9 +128,14 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
       || (history.find((m) => m.id === messageId)?.sentAt.getTime() ?? -Infinity) > lastPaid.at.getTime();
     const chatPaid = payment?.state === 'paid' && fresh(payment.messageId) && (!analysis.paidAmount || fresh(analysis.paidAmountMessageId));
     const chatAmount = analysis.paidAmount && (!lastPaid || (chatPaid && fresh(analysis.paidAmountMessageId))) ? analysis.paidAmount : null;
-    // An operator who took the lead out of the sale stage has overruled the chat; only Kaspi money moves it back.
+    // When the money changed hands: the message the paid claim quotes. Absent only when this run saw no claim.
+    const paymentSentAt = chatPaid ? history.find((m) => m.id === payment!.messageId)?.sentAt ?? null : null;
+    // A chat payment moves the lead into the sale stage only together with the order it records, so
+    // the sale stage and the orders list cannot drift apart: a claim with no quoted price stays on the
+    // lead card as paid evidence and leaves the stage to an operator. An operator who took the lead
+    // out of the sale stage has overruled the chat; only Kaspi money moves it back.
     const target = resolveCrmStage(funnel, analysis.confidence >= 65 ? analysis.stageId : null,
-      { paid: paid || (!undone && chatPaid), currentStageId: conversation.stageId });
+      { paid: paid || (!undone && chatPaid && chatAmount !== null), currentStageId: conversation.stageId });
     if (!await automationAllowed(db,input,'crm')) {
       await db.update(crmAnalyses).set({status:'pending',leaseToken:null,leaseUntil:null,updatedAt:new Date()}).where(ownLease);
       return 'skipped';
@@ -201,16 +206,24 @@ export async function analyzeConversation(db: Db, deps: CrmDeps, input: AnalyzeI
       // One paid order per sale episode — since the lead last entered the sale stage, whoever moved
       // it there — so a customer buying again after being moved out and back gets a new order.
       // A Kaspi invoice in flight owns the money whenever it was issued.
-      if (stageNow?.kind === 'success' && chatAmount && analysis.confidence >= 65 && !undone) {
+      // The money itself must be in the chat — a paid claim in this run — unless an operator put the
+      // lead into the sale stage: that move is the operator saying it is paid. Standing in the sale
+      // stage is not enough on its own: migration 0050 moved every awaiting-payment lead there, and
+      // a quoted price in those chats recorded sales nobody had paid for.
+      const saleAsserted = chatPaid || (!moved && locked.stageSetBy === 'operator');
+      if (stageNow?.kind === 'success' && chatAmount && saleAsserted && analysis.confidence >= 65 && !undone) {
         const episode = moved ? movedAt : locked.stageSetAt;
         const paidOrder = await hasPaidOrderInSaleEpisode(tx, conversation.id);
         const [invoice] = await tx.select({id:kaspiPayments.id}).from(kaspiPayments)
           .where(and(eq(kaspiPayments.conversationId,conversation.id),or(inArray(kaspiPayments.status,['creating','pending','unknown']),
             and(eq(kaspiPayments.status,'paid'),episode ? gte(kaspiPayments.confirmedAt,episode) : undefined)))).limit(1);
         if (!paidOrder && !invoice) {
+          // Paid when the payment message was sent; for an operator's sale with no such message, when
+          // the operator declared it; the analysis time only when neither is known. `createdAt` is the
+          // move time rather than the transaction start, so the order falls inside the episode it opens.
           const [order] = await tx.insert(orders).values({agentId:agent.id,conversationId:conversation.id,amount:chatAmount,
             currency:agent.currency,status:'paid',comment:'Оплата по переписке',
-            paidAt:moved ? movedAt : locked.stageSetAt ?? movedAt}).returning({id:orders.id});
+            paidAt:paymentSentAt ?? (moved ? movedAt : locked.stageSetAt ?? movedAt),createdAt:movedAt}).returning({id:orders.id});
           chatOrderId = order!.id;
         }
       }

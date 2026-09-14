@@ -47,8 +47,8 @@ export async function chatPaymentSeen(db: Db, conversationId: string): Promise<b
  * Whether the sales script may treat the current sale as paid, and the paid orders that say so.
  *
  * «The current sale» is everything since the conversation entered the script for this purchase
- * (`conversations.script_started_at`): an order paid — or recorded, for a chat order backdated to
- * when the lead entered the sale stage — no earlier than that. Kaspi money is always an order, so
+ * (`conversations.script_started_at`): an order paid — or recorded, for a chat order dated by its
+ * payment message or an operator's move — no earlier than that. Kaspi money is always an order, so
  * it is covered by the same read. Without an order the chat half of `hasVisiblePayment` still
  * counts, since it only ever covers a first sale.
  *

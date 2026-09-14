@@ -23,6 +23,7 @@ import { createLinkedSocket } from './lib/whatsapp/linked/socket.js';
 import { createHistoryArchive } from './lib/whatsapp/linked/history-archive.js';
 import { decodeHistoryPayload, downloadHistoryPayload } from './lib/whatsapp/linked/history-codec.js';
 import { createModelClient } from './lib/ai/openrouter.js';
+import { checkOpenRouterBalances, createCreditsReader } from './lib/ai/balance.js';
 import { createGraphClient } from './lib/whatsapp/graph.js';
 import { createInstagramMessagingClient } from './lib/instagram/messaging-graph.js';
 import { processPendingInstagramEvents } from './lib/instagram/inbound.js';
@@ -236,3 +237,22 @@ const recoverPurchases = async () => {
 void recoverPurchases();
 const purchaseRecoveryTimer = setInterval(() => void recoverPurchases(),60_000);
 purchaseRecoveryTimer.unref();
+// The OpenRouter balance, read every half hour: an empty one silences every reply at once,
+// so the operator hears about it while there is still money left. The last warning is kept
+// on the agent row, which is what stops each restart from repeating it.
+const BALANCE_CHECK_MS = 30 * 60_000;
+const balanceDeps = { graph, linked, key: credentialsKey(env), readCredits: createCreditsReader() };
+let balanceRunning = false;
+const checkBalances = async () => {
+  if (balanceRunning) return;
+  balanceRunning = true;
+  try {
+    const errors = await checkOpenRouterBalances(db, balanceDeps);
+    for (const message of errors) app.log.error({ message }, 'openrouter: balance alert');
+  }
+  catch { app.log.error('openrouter: balance check failed'); }
+  finally { balanceRunning = false; }
+};
+void checkBalances();
+const balanceTimer = setInterval(() => void checkBalances(), BALANCE_CHECK_MS);
+balanceTimer.unref();

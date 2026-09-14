@@ -8,6 +8,7 @@ import { seedFunnel } from '../src/lib/funnel.js';
 import { encryptSecret } from '../src/lib/secret-box.js';
 import { analyzeConversation, drainCrmAnalyses } from '../src/lib/crm/worker.js';
 import { hasVisiblePayment, operatorLeftSale } from '../src/lib/crm/payment.js';
+import { hasPaidOrderInSaleEpisode } from '../src/lib/kaspi/service.js';
 import { recordStageMove } from '../src/lib/funnel-history.js';
 import * as automationPolicy from '../src/lib/automation/policy.js';
 import { ApiError } from '../src/lib/errors.js';
@@ -426,10 +427,48 @@ describe('chat payment', () => {
     const rows = await db.select().from(orders).where(eq(orders.conversationId, conversationId));
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ amount: '6990.00', status: 'paid', comment: 'Оплата по переписке' });
-    expect(rows[0]!.paidAt?.getTime()).toBe(conversation!.stageSetAt!.getTime());
+    // Paid when the customer wrote that she transferred the money, not when the analysis ran.
+    expect(rows[0]!.paidAt?.toISOString()).toBe('2026-01-01T00:02:00.000Z');
+    expect(conversation!.stageSetAt!.getTime()).toBeGreaterThan(rows[0]!.paidAt!.getTime());
+    // Dated before the move it caused, the order still belongs to this sale episode: no new invoice.
+    expect(await hasPaidOrderInSaleEpisode(db, conversationId)).toBe(true);
     expect((await db.select().from(capiEvents)).filter((e) => e.kind === 'purchase')).toHaveLength(1);
     const [analysis] = await db.select().from(crmAnalyses).where(eq(crmAnalyses.conversationId, conversationId));
     expect(analysis?.profile.paymentEvidence).toBe('paid');
+  });
+
+  it('does not move a paid claim with no quoted price into the sale stage, and keeps the evidence on the card', async () => {
+    await paidChat();
+    const text = JSON.parse((await model.complete.getMockImplementation()!()).text);
+    model.complete.mockResolvedValue({ text: JSON.stringify({ ...text, paidAmount: null }), promptTokens: 1, completionTokens: 1, cost: '0' });
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+    expect((await db.select().from(conversations))[0]?.stageId).not.toBe((await sale()).id);
+    expect(await db.select().from(orders)).toHaveLength(0);
+    const [analysis] = await db.select().from(crmAnalyses).where(eq(crmAnalyses.conversationId, conversationId));
+    expect(analysis?.profile.paymentEvidence).toBe('paid');
+  });
+
+  it.each(['system', 'ai', 'scenario', null])('records no order for a lead put into the sale stage by %s when the chat shows only a price', async (movedBy) => {
+    // Migration 0050 moved every awaiting-payment lead into the sale stage as `system`.
+    await db.update(conversations).set({ stageId: (await sale()).id, stageSetAt: new Date('2026-01-02T00:00:00Z'), stageSetBy: movedBy })
+      .where(eq(conversations.id, conversationId));
+    await paidChat();
+    const text = JSON.parse((await model.complete.getMockImplementation()!()).text);
+    model.complete.mockResolvedValue({ text: JSON.stringify({ ...text, payment: { state: 'awaiting_payment', messageId, quote: 'Алматы', reason: 'Ждём оплату' } }),
+      promptTokens: 1, completionTokens: 1, cost: '0' });
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+    expect((await db.select().from(conversations))[0]?.stageId).toBe((await sale()).id);
+    expect(await db.select().from(orders)).toHaveLength(0);
+    expect((await db.select().from(capiEvents)).filter((e) => e.kind === 'purchase')).toHaveLength(0);
+  });
+
+  it('dates the order of a lead already in the sale stage by the payment message', async () => {
+    await db.update(conversations).set({ stageId: (await sale()).id, stageSetAt: new Date('2026-01-02T00:00:00Z'), stageSetBy: 'system' })
+      .where(eq(conversations.id, conversationId));
+    await paidChat();
+    await analyzeConversation(db, { model, key }, { agentId, conversationId });
+    const [order] = await db.select().from(orders);
+    expect(order?.paidAt?.toISOString()).toBe('2026-01-01T00:02:00.000Z');
   });
 
   it('does not record a second order when the conversation is analysed again', async () => {
@@ -442,7 +481,7 @@ describe('chat payment', () => {
   });
 
   it('gives an operator-moved sale its order once the amount is found, and never leaves the sale stage', async () => {
-    await db.update(conversations).set({ stageId: (await sale()).id, stageSetAt: new Date('2026-01-02T00:00:00Z') }).where(eq(conversations.id, conversationId));
+    await db.update(conversations).set({ stageId: (await sale()).id, stageSetAt: new Date('2026-01-02T00:00:00Z'), stageSetBy: 'operator' }).where(eq(conversations.id, conversationId));
     await paidChat();
     const text = JSON.parse((await model.complete.getMockImplementation()!()).text);
     model.complete.mockResolvedValue({ text: JSON.stringify({ ...text, stageId: targetId, payment: null }), promptTokens: 1, completionTokens: 1, cost: '0' });
@@ -621,12 +660,15 @@ describe('chat payment', () => {
       body: 'Размер 40 мм — 6.990 тенге', sentAt: new Date(Date.now() - 9_000) }).returning();
     const [transfer] = await db.insert(messages).values({ conversationId, direction: 'in', author: 'client', kind: 'text',
       body: 'Перевела 6990, спасибо', sentAt: new Date(Date.now() - 8_000) }).returning();
-    model.complete.mockResolvedValue({ text: JSON.stringify({ stageId: null, summary: 'Оплатила', confidence: 90, profile: {}, fields: {}, checkout: null,
+    const paidClaim = { stageId: null, summary: 'Оплатила', confidence: 90, profile: {}, fields: {}, checkout: null,
       payment: { state: 'paid', messageId: transfer!.id, quote: 'Перевела 6990', reason: 'Клиент перевёл оплату' },
-      paidAmount: { value: '6990', messageId: offer!.id, quote: '6.990 тенге' } }), promptTokens: 1, completionTokens: 1, cost: '0' });
+      paidAmount: { value: '6990', messageId: offer!.id, quote: '6.990 тенге' } };
+    // The first analysis sees only the price: the order is the operator's sale, dated by the operator's move.
+    model.complete.mockResolvedValueOnce({ text: JSON.stringify({ ...paidClaim, payment: null }), promptTokens: 1, completionTokens: 1, cost: '0' });
+    model.complete.mockResolvedValue({ text: JSON.stringify(paidClaim), promptTokens: 1, completionTokens: 1, cost: '0' });
     await analyzeConversation(db, { model, key }, { agentId, conversationId });
     const [first] = await db.select().from(orders);
-    expect(first!.paidAt!.getTime()).toBeLessThan(transfer!.sentAt.getTime());
+    expect(first!.paidAt!.getTime()).toBeLessThan(offer!.sentAt.getTime());
     await tick();
     await operatorMoves(targetId);
     await tick();
@@ -673,7 +715,9 @@ describe('chat payment', () => {
     const [offer] = await db.insert(messages).values({ conversationId, direction: 'out', author: 'operator', kind: 'text',
       body: 'Итого 5000 ₸', sentAt: new Date(Date.now() - 60_000) }).returning();
     await db.update(messages).set({ body: 'Отправьте счёт, пожалуйста', sentAt: new Date() }).where(eq(messages.id, messageId));
-    await db.insert(orders).values({ agentId, conversationId, amount: '5000', currency: 'KZT', status: 'paid', comment: 'Оплата по переписке', paidAt: new Date(Date.now() - 86_400_000) });
+    // Recorded as well as paid a day ago: the episode rule reads the later of the two.
+    const earlier = new Date(Date.now() - 86_400_000);
+    await db.insert(orders).values({ agentId, conversationId, amount: '5000', currency: 'KZT', status: 'paid', comment: 'Оплата по переписке', paidAt: earlier, createdAt: earlier });
     await db.update(conversations).set({ stageId: (await sale()).id, stageSetAt: new Date(Date.now() - 3_600_000) }).where(eq(conversations.id, conversationId));
     await db.insert(crmAnalyses).values({ conversationId, pendingLiveMessageId: messageId });
     model.complete.mockResolvedValueOnce({ text: JSON.stringify({ stageId: null, summary: 'Хочет купить ещё', confidence: 95, profile: {}, fields: {},

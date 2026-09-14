@@ -44,9 +44,17 @@ after restart for known IDs.
 
 An order becomes paid in two ways. Kaspi's confirmed operation status marks its invoice
 order paid. Otherwise, when the analysis quotes the customer saying they paid (or the
-seller confirming receipt) with confidence, the worker moves the lead into the sale stage
-and records one paid order «Оплата по переписке» for the amount the seller quoted, unless
-a Kaspi invoice for the conversation is in flight. One order per sale episode: an order
+seller confirming receipt) with confidence and the seller quoted a price, the worker moves
+the lead into the sale stage and records one paid order «Оплата по переписке» for that
+price, unless a Kaspi invoice for the conversation is in flight. A paid claim with no
+quoted price does not move the lead: it stays on the lead card as paid evidence, so the
+sale stage never fills with chat sales the orders list cannot show. The order's `paid_at`
+is when the quoted payment message was sent, not when the analysis ran.
+
+A lead already standing in the sale stage gets a chat order only on the same paid claim,
+or, when an operator put it there, on the quoted price alone (the operator's move is the
+payment assertion; `paid_at` is then the move time). A lead moved there by the system,
+a scenario or the AI gets no order from a price alone. One order per sale episode: an order
 paid since the lead last entered the sale stage blocks another, an older one does not. Either way a Meta Purchase is queued;
 a sweep every minute re-queues purchases lost for orders paid in the last seven days. An
 image alone, or an operator, cannot mark an order paid by hand.
@@ -79,6 +87,88 @@ QR opt-in, tenant access, historical analysis, concurrent edits, leases, referra
 capture, pagination and source links. Local fake transports do not establish that a
 production cashier session is connected. After deployment, verify a small real
 invoice and its confirmed payment before enabling unattended checkout.
+
+## Repairing orders recorded after migration 0050
+
+Migration 0050 put Sealhouse's 20 «Заказано» leads into «Оплачено», and the re-analysis
+that followed recorded 5 chat orders, all dated at the merge (2026-09-13 23:26 UTC). Two
+quote a customer's «Оплатил»; three had only a price in the chat. The worker no longer
+does either. Run this once, after the release with the fix is healthy, in one transaction:
+
+```sql
+BEGIN;
+-- 1. Date the chat orders from that re-analysis by the payment message they were recorded
+--    from: the latest client «оплатил/перевёл…» or seller «деньги получили…» text sent
+--    before the order was recorded. Orders with no such message keep their paid_at.
+WITH evidence AS (
+  SELECT o.id, (
+    SELECT max(m.sent_at) FROM messages m
+    WHERE m.conversation_id = o.conversation_id AND m.kind = 'text' AND m.sent_at <= o.created_at
+      AND ((m.author = 'client' AND m.body ~* '(оплатил|оплачено|перев[её]л|перевели|отправил[аи]? (деньги|оплату)|аудардым|төледім|төлеп (қойдым|жібердім))')
+        OR (m.author IN ('phone', 'operator', 'ai') AND m.body ~* '(оплат|деньг|перевод|төлем|ақша)'
+          AND m.body ~* '(получил|поступил|пришл[аи]|келді|түсті)'))
+  ) AS sent_at
+  FROM orders o
+  WHERE o.comment = 'Оплата по переписке' AND o.status = 'paid'
+    AND o.created_at >= '2026-09-13 23:26:38+00' AND o.created_at < '2026-09-14 01:00+00'
+    AND NOT EXISTS (SELECT 1 FROM kaspi_payments k WHERE k.order_id = o.id)
+)
+UPDATE orders o SET paid_at = e.sent_at
+FROM evidence e
+WHERE o.id = e.id AND e.sent_at IS NOT NULL AND o.paid_at IS DISTINCT FROM e.sent_at;
+-- 2. Delete the chat orders from that re-analysis that no payment message backs, on leads
+--    no operator put into the sale stage. Their Purchases were never sent (skipped).
+DELETE FROM orders o
+USING conversations c
+WHERE c.id = o.conversation_id
+  AND o.comment = 'Оплата по переписке' AND o.status = 'paid'
+  AND o.created_at >= '2026-09-13 23:26:38+00' AND o.created_at < '2026-09-14 01:00+00'
+  AND c.stage_set_by IS DISTINCT FROM 'operator'
+  AND NOT EXISTS (SELECT 1 FROM kaspi_payments k WHERE k.order_id = o.id)
+  AND NOT EXISTS (SELECT 1 FROM crm_analyses ca WHERE ca.conversation_id = c.id
+    AND ca.profile->>'paymentEvidence' IN ('paid', 'confirmed'))
+  AND NOT EXISTS (
+    SELECT 1 FROM messages m
+    WHERE m.conversation_id = o.conversation_id AND m.kind = 'text' AND m.sent_at <= o.created_at
+      AND ((m.author = 'client' AND m.body ~* '(оплатил|оплачено|перев[её]л|перевели|отправил[аи]? (деньги|оплату)|аудардым|төледім|төлеп (қойдым|жібердім))')
+        OR (m.author IN ('phone', 'operator', 'ai') AND m.body ~* '(оплат|деньг|перевод|төлем|ақша)'
+          AND m.body ~* '(получил|поступил|пришл[аи]|келді|түсті)')));
+-- 3. Return the merged leads that still have no paid order to «Готов к покупке», where the
+--    migration's own texts put «agreed and waiting for payment». Only leads whose latest move
+--    is still the merge; each move is recorded like any other system move.
+WITH merged AS (
+  SELECT c.id, c.agent_id, c.stage_id, s.name AS from_name, s.position AS from_position,
+    r.id AS to_id, r.name AS to_name, r.kind AS to_kind, r.position AS to_position
+  FROM conversations c
+  JOIN stages s ON s.id = c.stage_id AND s.kind = 'success'
+  JOIN stages r ON r.agent_id = c.agent_id AND btrim(r.name) = 'Готов к покупке' AND r.kind = 'active'
+  JOIN LATERAL (
+    SELECT t.* FROM stage_transitions t WHERE t.conversation_id = c.id
+    ORDER BY t.occurred_at DESC, t.id DESC LIMIT 1
+  ) st ON true
+  WHERE c.stage_set_by = 'system'
+    AND st.moved_by = 'system' AND st.to_kind = 'success' AND st.to_stage_id = c.stage_id
+    AND st.from_stage_id IS NULL AND st.from_name IS NOT NULL
+    AND st.occurred_at >= '2026-09-13 23:26:38+00' AND st.occurred_at < '2026-09-13 23:26:39+00'
+    AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.conversation_id = c.id AND o.status = 'paid')
+), moved AS (
+  UPDATE conversations c SET stage_id = m.to_id, stage_set_at = now(), stage_set_by = 'system'
+  FROM merged m WHERE c.id = m.id AND c.stage_id = m.stage_id
+  RETURNING c.id
+)
+INSERT INTO stage_transitions (agent_id, conversation_id, from_stage_id, to_stage_id, from_name, to_name, to_kind, from_position, to_position, moved_by, occurred_at)
+SELECT m.agent_id, m.id, m.stage_id, m.to_id, m.from_name, m.to_name, m.to_kind, m.from_position, m.to_position, 'system', now()
+FROM merged m JOIN moved USING (id);
+COMMIT;
+```
+
+On 2026-09-14 the read-only preview of these conditions matched: step 1 two orders (to
+2026-09-03 16:55 and 2026-09-09 06:33 UTC), step 2 three orders, step 3 eighteen leads
+(the fifteen without an order plus the three from step 2), leaving two leads in «Оплачено»
+with their two orders. Three of the eighteen have an unread receipt attachment
+(`paymentEvidence = needs_verification`): an operator checks them and drags the paid ones
+back into «Оплачено». Every statement is bounded to the merge and its re-analysis, so a
+second run changes nothing. No analysis is re-queued and no model is called.
 
 ## Releasing migration 0050
 

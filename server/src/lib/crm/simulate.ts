@@ -54,9 +54,11 @@ export async function simulateCrmAnalysis(
       ],
     });
     const analysis = parseCrmAnalysis(completion.text, history, fieldRows);
-    // A rehearsal has no Kaspi payment; only a confident paid claim in the chat moves it to the sale stage.
+    // A rehearsal has no Kaspi payment; as in the worker, only a confident paid claim with a quoted
+    // price — what a chat order is recorded from — moves it to the sale stage.
     const target = resolveCrmStage(funnel, analysis.confidence >= 65 ? analysis.stageId : null,
-      { paid: analysis.payment?.state === 'paid' && analysis.confidence >= 65, currentStageId: session.stageId });
+      { paid: analysis.payment?.state === 'paid' && analysis.paidAmount !== null && analysis.confidence >= 65,
+        currentStageId: session.stageId });
     const checkout = analysis.checkout?.messageId === currentId && analysis.confidence >= 85
       ? { method: analysis.checkout.method, amount: analysis.checkout.amount,
           status: session.phone ? 'would_create' as const : 'blocked_no_phone' as const }

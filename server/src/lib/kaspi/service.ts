@@ -30,7 +30,9 @@ export async function hasPaidOrderInSaleEpisode(db: Pick<Db, 'select'>, conversa
     .innerJoin(conversations, eq(conversations.id, orders.conversationId))
     .innerJoin(stages, and(eq(stages.id, conversations.stageId), eq(stages.kind, 'success')))
     .where(and(eq(orders.conversationId, conversationId), eq(orders.status, 'paid'),
-      sql`(${conversations.stageSetAt} is null or ${orders.paidAt} >= date_trunc('milliseconds', ${conversations.stageSetAt}))`)).limit(1);
+      // The later of paid_at and created_at: a chat order is dated by its payment message, which can
+      // precede the move into the sale stage that the same analysis made.
+      sql`(${conversations.stageSetAt} is null or greatest(${orders.paidAt}, ${orders.createdAt}) >= date_trunc('milliseconds', ${conversations.stageSetAt}))`)).limit(1);
   return !!paid;
 }
 async function refuseAfterPaidOrder(db: Pick<Db, 'select'>, conversationId: string) {

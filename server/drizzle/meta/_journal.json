@@ -372,6 +372,13 @@
       "when": 1789344292886,
       "tag": "0052_sales_script",
       "breakpoints": true
+    },
+    {
+      "idx": 53,
+      "version": "7",
+      "when": 1789367623059,
+      "tag": "0053_low_balance_alert",
+      "breakpoints": true
     }
   ]
 }

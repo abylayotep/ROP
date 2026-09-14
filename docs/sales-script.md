@@ -31,7 +31,7 @@ Table `sales_script_steps` (schema change → `drizzle-kit generate`, migration 
 | `condition` | text ≤ 200, default '' | branches only: when the branch applies |
 | `instructions` | text ≤ 2000, default '' | what the agent says and does, owner's words |
 | `stage_id` | uuid fk stages, set null | optional |
-| `photo_ids` | jsonb string[] ≤ 3 | catalog photo ids of this agent |
+| `photo_ids` | jsonb string[] ≤ 4 | catalog photo ids of this agent (one reply sends up to 4) |
 | `field_ids` | jsonb string[] ≤ 10 | lead field ids of this agent |
 | `handoff` | bool default false | |
 | `handoff_note` | text ≤ 200, default '' | what the colleague should do |
@@ -116,7 +116,7 @@ twice must not send twice — key it on the order id.
   its branch cards indented to the right of that card with the condition on the arrow.
   Move up/down buttons; delete with confirm.
 - Right panel for the selected step: title, condition (branches), «Что делает агент»
-  textarea, stage select, photo picker (catalog products → their photos, thumbnails, ≤ 3),
+  textarea, stage select, photo picker (catalog products → their photos, thumbnails, ≤ 4),
   fields multi-select, handoff toggle + note, «Ждать оплату» toggle.
 - Edits are local; one «Сохранить» button PUTs the whole tree; unsaved-changes guard; toast.
 - Empty state offers «Начать с шаблона»: Приветствие → Выбор товара (фото) → Размер и цена →
@@ -137,3 +137,28 @@ twice must not send twice — key it on the order id.
 ## Docs
 
 Link this file from `docs/ai-agent.md`.
+
+## As built
+
+Where the implementation differs from the text above, and why.
+
+- **Payment turn is a sweep, not a hook.** `lib/ai/script-payment.ts` runs every 5 s from
+  `index.ts` and looks for a paid order newer than the conversation's current sale on a
+  conversation standing on a `wait_payment` step. It covers the worker's chat order, Kaspi's timer
+  and the operator's «проверить статус» alike, and survives a crash between payment and turn.
+  Dedupe is `orders.script_payment_turn_at`, claimed before the turn; a customer's own turn that
+  saw the payment claims it too. A customer who wrote in the last 10 minutes is left to that
+  message's turn. Automation off or an operator on the thread: claimed and dropped. Payments older
+  than 6 hours never start a turn. `runTurn({ paidOrderId })` re-checks the order and the step and
+  may answer after our own last message, never after an operator's.
+- **«The current sale» is `conversations.script_started_at`**, set with the first step and reset
+  when the reply goes back to step 1. `paid` = a paid order with `greatest(paid_at, created_at)`
+  at or after it, or the chat half of `hasVisiblePayment`. Before the conversation enters the
+  script it is never paid: the stage-based reads cannot tell a repeat customer's old sale apart.
+- **The payment gate is also in code.** A `scriptStepId` past an unpaid `wait_payment` step is
+  refused (the step stays), and photos that appear only on steps after the first `wait_payment`
+  step are not sent while unpaid.
+- **Step and stage effects.** The step is stored only when the reply reached the customer. A
+  step's `stage_id` is proposed only where the model's own `stageId` would be applied, so with the
+  CRM worker on (production) the worker keeps owning the stage.
+- **The sandbox never counts as paid**, so a rehearsal cannot pass a `wait_payment` step.

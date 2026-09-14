@@ -69,6 +69,10 @@ export function whatsappStatus(numbers: WhatsappNumber[]): SetupStatus {
   if (waiting.length === numbers.length && waiting.length > 0) {
     return { state: 'partial', note: 'Код показан, телефон его ещё не отсканировал' };
   }
+  const banned = linked.filter((number) => number.linkedState === 'banned');
+  if (banned.length > 0) {
+    return { state: 'partial', note: 'WhatsApp заблокировал номер — запросите проверку в приложении' };
+  }
   const loggedOut = linked.filter((number) => number.linkedState === 'logged_out');
   if (loggedOut.length > 0) {
     return { state: 'partial', note: 'Телефон отвязал кабинет — подключите заново по QR' };

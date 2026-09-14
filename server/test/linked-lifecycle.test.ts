@@ -232,6 +232,23 @@ describe('lifecycle', () => {
     expect(client.calls.filter((c) => c.method === 'connect')).toHaveLength(0);
   });
 
+  it('marks a blocked number banned and stops reconnecting, keeping its session', async () => {
+    const id = await seedNumber();
+    await (await linkedAuthState(db, key, id)).saveCreds();
+    const client = fakeLinked();
+    const errors: string[] = [];
+    registerLinkedLifecycle(db, key, client, { ...immediate(), onError: (m) => errors.push(m) });
+
+    client.report({ type: 'closed', numberId: id, loggedOut: false, statusCode: 403 });
+
+    await expect.poll(async () => (await reload(id)).linkedState).toBe('banned');
+    expect(client.calls.filter((c) => c.method === 'connect')).toHaveLength(0);
+    expect(errors.join(' ')).toContain('403');
+    expect(
+      await db.select().from(linkedSessionKeys).where(eq(linkedSessionKeys.whatsappNumberId, id)),
+    ).not.toHaveLength(0);
+  });
+
   it('counts attempts again after the phone comes back', async () => {
     const id = await seedNumber();
     const client = fakeLinked();

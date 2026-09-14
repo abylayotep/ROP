@@ -118,7 +118,9 @@ function cloudTransport(number: WhatsappNumberRow, deps: TransportDeps): Message
 
 function linkedTransport(number: WhatsappNumberRow, deps: TransportDeps): MessageTransport {
   const refusal = (): TransportRefusal =>
-    number.linkedState === 'logged_out'
+    number.linkedState === 'banned'
+      ? new TransportRefusal(409, 'WhatsApp заблокировал этот номер. Отправка остановлена.')
+      : number.linkedState === 'logged_out'
       ? new TransportRefusal(409, 'Телефон отвязал кабинет. Нужно подключить заново по QR.')
       : new TransportRefusal(
           409,

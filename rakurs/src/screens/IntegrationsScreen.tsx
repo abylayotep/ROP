@@ -288,6 +288,22 @@ function ConnectedNumbers({
                   Телефон отвязал кабинет — подключите заново по QR.
                 </div>
               )}
+              {number.connectionKind === 'linked' && number.linkedState === 'banned' && (
+                <div style={{ ...hint, color: 'var(--danger)' }}>
+                  WhatsApp заблокировал этот номер, кабинет перестал к нему подключаться. Откройте
+                  WhatsApp на телефоне и запросите проверку. Для продаж из рекламы подключите
+                  номер через WhatsApp Cloud API.
+                </div>
+              )}
+              {/* Linked is the unofficial route: the owner has to know the risk before the
+                  ban, and which of their own habits make it worse. */}
+              {number.connectionKind === 'linked' && number.linkedState === 'open' && (
+                <div style={hint}>
+                  Подключение по QR — неофициальное, WhatsApp может заблокировать номер. Не
+                  отправляйте один и тот же текст с фото сразу нескольким новым клиентам и
+                  не пишите тем, кто не написал первым. Для рекламы надёжнее Cloud API.
+                </div>
+              )}
               {number.connectionKind === 'linked' && number.linkedState === 'pairing' && (
                 <div style={hint}>Ждём сканирования кода.</div>
               )}

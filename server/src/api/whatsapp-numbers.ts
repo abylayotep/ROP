@@ -54,7 +54,7 @@ const asConnectionKind = (value: string): WhatsappNumber['connectionKind'] => {
 };
 
 const asLinkedState = (value: string | null): WhatsappNumber['linkedState'] => {
-  if (value === 'pairing' || value === 'open' || value === 'logged_out') return value;
+  if (value === 'pairing' || value === 'open' || value === 'logged_out' || value === 'banned') return value;
   return null;
 };
 

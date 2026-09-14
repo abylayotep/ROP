@@ -53,7 +53,7 @@ export interface WhatsappNumber {
    */
   connectionKind: 'manual' | 'coexistence' | 'linked';
   /** Linked only: how the pairing stands. Null for the two Cloud API kinds. */
-  linkedState: 'pairing' | 'open' | 'logged_out' | null;
+  linkedState: 'pairing' | 'open' | 'logged_out' | 'banned' | null;
   /** 0..100. Meaningful for coexistence only; manual numbers stay at 0. */
   historyProgress: number;
   /** The owner turned history sharing off on the phone. */

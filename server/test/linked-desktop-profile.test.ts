@@ -79,7 +79,7 @@ describe('linked WhatsApp desktop profile', () => {
       ...options, version: [2, 3000, 1], countryCode: 'US',
     } as never);
     expect(payload.webInfo?.webSubPlatform).toBe(proto.ClientPayload.WebInfo.WebSubPlatform.WEB_BROWSER);
-    expect(options?.syncFullHistory).toBe(true);
+    expect(options?.syncFullHistory).toBe(false);
   });
 
   it('exposes only the numeric disconnect reason to the lifecycle', async () => {

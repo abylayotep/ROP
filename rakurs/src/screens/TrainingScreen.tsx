@@ -5,6 +5,7 @@ import { KnowledgeTab } from '@/components/training/KnowledgeTab';
 import { NextStepStrip } from '@/components/training/NextStepStrip';
 import { ProductsTab } from '@/components/training/ProductsTab';
 import { RepliesTab } from '@/components/training/RepliesTab';
+import { ScriptTab } from '@/components/training/ScriptTab';
 import { ReviewList } from '@/components/training/ReviewList';
 import { TeachTab } from '@/components/training/TeachTab';
 import { useApi } from '@/hooks/useApi';
@@ -115,11 +116,15 @@ export function TrainingScreen() {
 
   // Mirrors the knowledge tab's unsaved editor, so leaving the tab asks before discarding it.
   const [knowledgeDirty, setKnowledgeDirty] = useState(false);
+  // The same for the script, which is saved as a whole and so holds every edit until «Сохранить».
+  const [scriptDirty, setScriptDirty] = useState(false);
 
   const go = (tab: TrainingTab, teach?: TeachMode | null, generation?: string) => {
-    if (activeTab === 'knowledge' && tab !== 'knowledge' && knowledgeDirty
-      && !window.confirm('Уйти без сохранения? Несохранённые правки будут потеряны.')) return;
+    const leavingDirty = (activeTab === 'knowledge' && tab !== 'knowledge' && knowledgeDirty)
+      || (activeTab === 'script' && tab !== 'script' && scriptDirty);
+    if (leavingDirty && !window.confirm('Уйти без сохранения? Несохранённые правки будут потеряны.')) return;
     if (tab !== 'knowledge') setKnowledgeDirty(false);
+    if (tab !== 'script') setScriptDirty(false);
     const next = trainingSearch(params, tab, teach);
     if (generation !== undefined) next.set('generation', generation);
     setParams(next, { replace: true });
@@ -165,6 +170,10 @@ export function TrainingScreen() {
 
       {activeTab === 'products' && (
         <ProductsTab key={agent.id} agentId={agent.id} owner={owner} currency={agent.currency} timezone={agent.timezone} />
+      )}
+
+      {activeTab === 'script' && (
+        <ScriptTab key={agent.id} agentId={agent.id} owner={owner} onDirtyChange={setScriptDirty} />
       )}
 
       {activeTab === 'replies' && (

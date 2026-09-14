@@ -52,6 +52,8 @@ const DAY = 24 * 60 * 60 * 1000;
 
 /** The OpenRouter key this agent holds. No test may let it out of the process. */
 const OPENROUTER_KEY = 'sk-or-v1-0123456789abcdef';
+/** What the customer is told when the agent has no reply it may send. */
+const HOLDING_RU = 'Секунду, уточню у коллеги и сразу вернусь с ответом.';
 const WHATSAPP_TOKEN = 'EAAG-token';
 
 let db: Db;
@@ -526,8 +528,10 @@ describe('retrying once', () => {
 
     expect(result.outcome).toBe('handoff');
     expect(model.calls).toHaveLength(2);
-    // Nothing the agent did not mean to say reaches the customer.
-    expect(graph.calls.filter((call) => call.method === 'sendText')).toHaveLength(0);
+    // Nothing the agent did not mean to say reaches the customer — only the holding line.
+    const sent = graph.calls.filter((call) => call.method === 'sendText');
+    expect(sent.map((call) => call.args[3])).toEqual([HOLDING_RU]);
+    expect(result.reply).toBe(HOLDING_RU);
     expect((await conversationRow()).aiEnabled).toBe(false);
     const written = await noteRows();
     expect(written).toHaveLength(1);
@@ -554,29 +558,12 @@ describe('retrying once', () => {
 });
 
 describe('a model that refuses', () => {
-  it('does not retry a ModelError and leaves the agent on', async () => {
+  it('does not retry a ModelError', async () => {
     const model = fakeModel(new ModelError('OpenRouter не принял ключ.', 401, 'no credit'));
-
-    const result = await turn(model);
-
-    expect(result.outcome).toBe('failed');
-    expect(model.calls).toHaveLength(1);
-    expect(graph.calls.filter((call) => call.method === 'sendText')).toHaveLength(0);
-    // The next message tries again: a 401 the owner has since fixed must not need a switch
-    // flipped back on by hand.
-    expect((await conversationRow()).aiEnabled).toBe(true);
-    const [log] = await replyLog();
-    expect(log?.outcome).toBe('failed');
-    expect(log?.detail).toContain('OpenRouter');
-  });
-
-  it('tells the customer nothing when the model fails', async () => {
-    const model = fakeModel(new ModelError('OpenRouter временно недоступен.', 503));
 
     await turn(model);
 
-    expect(await thread()).toHaveLength(1);
-    expect(await noteRows()).toHaveLength(0);
+    expect(model.calls).toHaveLength(1);
   });
 
   it('never writes the OpenRouter key into a log, a note or a message', async () => {
@@ -1371,14 +1358,18 @@ describe('a number nothing the agent read contains', () => {
     const result = await turn(model);
 
     expect(result.outcome).toBe('handoff');
-    expect(result.reply).toBeNull();
-    expect(graph.calls.filter((call) => call.method === 'sendText')).toHaveLength(0);
+    // The customer gets the holding line in place of the withheld reply, never the number.
+    expect(result.reply).toBe(HOLDING_RU);
+    const sent = graph.calls.filter((call) => call.method === 'sendText');
+    expect(sent.map((call) => call.args[3])).toEqual([HOLDING_RU]);
     expect((await conversationRow()).aiEnabled).toBe(false);
     const written = await noteRows();
     expect(written[0]?.body).toContain('в ответе есть число «2200»');
     const [log] = await replyLog();
     expect(log?.outcome).toBe('handoff');
-    expect(log?.messageId).toBeNull();
+    const out = (await thread()).filter((message) => message.direction === 'out');
+    expect(out.map((message) => message.body)).toEqual([HOLDING_RU]);
+    expect(log?.messageId).toBe(out[0]?.id);
   });
 
   it('withholds a price the model invented while citing a real record', async () => {
@@ -1389,8 +1380,8 @@ describe('a number nothing the agent read contains', () => {
     const result = await turn(model);
 
     expect(result.outcome).toBe('handoff');
-    expect(result.reply).toBeNull();
-    expect(graph.calls.filter((call) => call.method === 'sendText')).toHaveLength(0);
+    expect(result.reply).toBe(HOLDING_RU);
+    expect(JSON.stringify(graph.calls)).not.toContain('2200');
     const written = await noteRows();
     expect(written[0]?.body).toContain('2200');
   });
@@ -1412,7 +1403,8 @@ describe('a number nothing the agent read contains', () => {
     const result = await turn(model);
 
     expect(result.outcome).toBe('handoff');
-    expect(graph.calls.filter((call) => call.method === 'sendText')).toHaveLength(0);
+    expect(graph.calls.filter((call) => call.method === 'sendText').map((call) => call.args[3]))
+      .toEqual([HOLDING_RU]);
   });
 
   it('sends a greeting that cites nothing, because it states nothing', async () => {

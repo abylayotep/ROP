@@ -70,11 +70,15 @@ import { markTokenRejected } from '../whatsapp/token-expiry.js';
 import { transportFor, type MessageTransport } from '../whatsapp/transport.js';
 import { ModelError, type ChatMessage, type ModelClient } from './openrouter.js';
 import { notifyOperator } from './operator-alert.js';
+import { alreadyHolding, holdingReply, unseenSinceLastReply } from './holding.js';
 import {
   buildMessages,
+  describeAttachments,
   formatPrice,
   formatPromotionEnd,
+  HISTORY_FETCH_LIMIT,
   HISTORY_LIMIT,
+  historyWindow,
   KNOWLEDGE_LIMIT,
   PHOTO_SEND_LIMIT,
   PRODUCT_LIMIT,
@@ -141,8 +145,10 @@ export type TurnOutcome = 'sent' | 'unrecorded' | 'applied' | 'handoff' | 'faile
 export interface TurnResult {
   outcome: TurnOutcome;
   /**
-   * The reply the agent produced for the customer. Null when it produced none, and when the
-   * reply was withheld — a number nothing the agent read contains is not shown to anyone.
+   * What the customer was given, or in a dry run would have been. Usually the agent's own reply;
+   * the holding line («уточню у коллеги») when the turn could not produce one it may send — a
+   * withheld number, an unreadable answer, a failed model call, attachments with no text. Null
+   * when there was nothing to send, and when that holding line was already on the thread.
    */
   reply: string | null;
   /** The knowledge records the answer was built from, minus any the model was not given. */
@@ -182,6 +188,16 @@ export const keyAad = (agentId: string): string => agentId;
 /** How much of anyone else's text a `detail` or a note will carry. */
 const DETAIL_LIMIT = 500;
 const AUTOMATION_DISABLED = 'Автоматизация для диалога выключена.';
+
+/** Why a turn answered attachments with the holding line instead of calling the model. */
+const UNSEEN = (listed: string): string =>
+  `клиент прислал без текста: ${listed} — ИИ не видит и не слышит содержимое вложений`;
+
+/** Why a failed model call handed the thread over. `detail` is already free of the key. */
+const MODEL_FAILED = (detail: string): string =>
+  `ИИ не смог ответить: ${detail.replace(/[.\s]+$/, '')}`;
+
+const HOLDING_REPEATED = 'Клиенту уже написано, что менеджер уточнит, — повторно не отправлено.';
 
 /**
  * Why a reply stating a number nobody gave the agent is not sent.
@@ -650,7 +666,10 @@ export type AiCoreExecution =
  * live conversation or the browser-only sandbox. This function has no write or send path.
  */
 export async function executeAiCore(db: Db, deps: TurnDeps, input: AiCoreInput): Promise<AiCoreExecution> {
-  const { agent, history } = input;
+  const { agent } = input;
+  // Trimmed to the lines the prompt renders, so retrieval and the number guard read exactly
+  // the conversation the model is shown and not the extra rows fetched to fill it.
+  const history = historyWindow(input.history, HISTORY_LIMIT);
   const usage: AiCoreUsage = { promptTokens: 0, completionTokens: 0, cost: '0' };
   let key: string;
   try {
@@ -666,7 +685,6 @@ export async function executeAiCore(db: Db, deps: TurnDeps, input: AiCoreInput):
     .where(eq(stages.agentId, agent.id)).orderBy(asc(stages.position));
   const fieldRows = await db.select().from(leadFields)
     .where(eq(leadFields.agentId, agent.id)).orderBy(asc(leadFields.position));
-  const last = history.at(-1)!;
   const customerSaid = history.filter((message) => message.author === 'client')
     .map((message) => message.body ?? '').filter((body) => body.trim() !== '');
   const hits = await knowledgeForTurn(db, agent.id, customerSaid, KNOWLEDGE_LIMIT);
@@ -894,14 +912,15 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
   if (agent.openrouterKey === null) return empty('skipped', 'Ключ OpenRouter не задан.');
 
   // Newest first with a limit, then reversed: the tail is what a turn needs, and ordering
-  // the whole thread ascending would read a month of messages to keep twenty.
+  // the whole thread ascending would read a month of messages to keep twenty. More rows than
+  // lines, because a run of attachments renders as one line — see `HISTORY_LIMIT`.
   const history = (
     await db
       .select()
       .from(messages)
       .where(eq(messages.conversationId, conversation.id))
       .orderBy(desc(messages.sentAt), desc(messages.createdAt))
-      .limit(HISTORY_LIMIT)
+      .limit(HISTORY_FETCH_LIMIT)
   ).reverse();
 
   const last = history.at(-1);
@@ -926,6 +945,19 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
     lastInboundAt: conversation.lastInboundAt?.getTime() ?? null,
     lastMessageId: last.id,
   };
+  const holding: HoldingTurn = { db, deps, input, agent, conversation, contact, number, before,
+    history: history.map(({ author, body, kind }) => ({ author, body, kind })) };
+
+  // Only attachments since our side last spoke — a photo, a voice note — and not a word the
+  // model could read. It would answer blind, and the owner would pay for the guess, so no model
+  // is called: the customer is told someone will look and a person does.
+  const unseen = triggered ? null : unseenSinceLastReply(holding.history);
+  if (unseen !== null) {
+    return holdAndHandOff(holding, UNSEEN(describeAttachments(unseen)), {
+      usage: { promptTokens: 0, completionTokens: 0, cost: '0' },
+      sanitize: (text) => safe(text, ''),
+    });
+  }
 
   const values = await db
     .select({ fieldId: leadValues.fieldId, name: leadFields.name, value: leadValues.value })
@@ -964,6 +996,17 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
     model: agent.model, configVersion: agent.configVersion, ...core.usage });
   if (core.kind !== 'ready') {
     if (!dryRun && core.kind === 'failed') {
+      // A model that could not answer — out of money, a rejected key, a timeout — used to leave
+      // the customer waiting on nothing. When this turn could still have spoken, they get the
+      // holding line and a person gets the thread; otherwise the failure stays retryable.
+      // Live only: a dry run's `failed` is what tells a draft check the case was never answered.
+      const superseded = await movedOn(db, { agentId: agent.id, conversationId: conversation.id }, before);
+      if (superseded === null && await (input.crmOrigin
+        ? crmOriginAllowed(db, input, 'reply') : automationAllowed(db, input, 'reply'))) {
+        return holdAndHandOff(holding, MODEL_FAILED(core.detail), {
+          usage: core.usage, sanitize: (text) => safe(text, ''),
+        });
+      }
       await db.insert(aiReplies).values({ ...spend(), outcome: 'failed', detail: core.detail });
     }
     return empty(core.kind, core.detail);
@@ -998,16 +1041,9 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
     // Twice unreadable. A handoff rather than a failure: something is wrong with this
     // conversation that a person has to look at, and the customer is left to that person
     // rather than to a third attempt.
-    const detail = core.unreadableDetail!;
-    const ownsHandoff = await handOff(db, { conversation, reason: detail, dryRun, crmOrigin: input.crmOrigin });
-    if (!ownsHandoff) return empty('skipped', 'Оператор взял диалог на себя.');
-    if (!dryRun) {
-      await db.insert(aiReplies).values({ ...spend(), outcome: 'handoff', detail });
-      // Nothing the model said is worth passing on, so there is no summary and no urgency.
-      await notifyOperator(db, deps, { agent, conversation, contact, reason: detail,
-        urgent: false, summary: '', sanitize: (text) => safe(text, key) });
-    }
-    return empty('handoff', detail, detail);
+    return holdAndHandOff(holding, core.unreadableDetail!, {
+      usage: core.usage, sanitize: (text) => safe(text, key),
+    });
   }
 
   const unsourced = invented !== null;
@@ -1155,7 +1191,13 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
     };
   }
 
-  const body = reply.reply.trim();
+  /**
+   * A withheld reply is replaced, not dropped: the customer gets the holding line in its place.
+   * Not when they already have one nobody has spoken past — see `alreadyHolding`.
+   */
+  const held = unsourced ? holdingReply(agent.replyLanguage, holding.history) : null;
+  const heldAgain = unsourced && alreadyHolding(holding.history);
+  const body = held ?? reply.reply.trim();
   /** Null while nothing has been attempted: an empty reply, or one that was withheld. */
   let delivery: Delivery | null = null;
   /** Photos that went out after the reply, or would have in a dry run. */
@@ -1186,11 +1228,14 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
 
   if (body === '') {
     details.push('Модель не написала ответа клиенту.');
-  } else if (invented !== null) {
+  } else if (invented !== null && heldAgain) {
     // The reply itself is what cannot be trusted, so it is the reply that is withheld. The
     // handoff above has already left the thread to a person.
-    details.push(`${UNSOURCED(invented)} — ответ клиенту не отправлен.`);
+    details.push(`${UNSOURCED(invented)} — ответ клиенту не отправлен.`, HOLDING_REPEATED);
   } else {
+    if (invented !== null) {
+      details.push(`${UNSOURCED(invented)} — ответ клиенту не отправлен, вместо него клиенту написано, что менеджер уточнит.`);
+    }
     // Checked in both modes: a sandbox that reported «отправлено» where a real turn would
     // fail on a disabled number or an unreadable token would be answering a different
     // question than the one the owner asked. Only the Graph call itself is skipped.
@@ -1199,7 +1244,7 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
       details.push(ready.detail);
     } else if (dryRun) {
       delivery = { state: 'sent', messageId: null };
-      photoIds = core.photos.map((photo) => photo.id);
+      photoIds = unsourced ? [] : core.photos.map((photo) => photo.id);
     } else {
       /**
        * One outbound effect under the same authorization the reply had.
@@ -1240,7 +1285,7 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
 
       // Photos only after a text that is on the thread: an unrecorded reply leaves no message
       // for the handoff check to anchor on, and a photo without its sentence explains nothing.
-      if (delivery.state === 'sent' && delivery.messageId !== null && core.photos.length > 0) {
+      if (!unsourced && delivery.state === 'sent' && delivery.messageId !== null && core.photos.length > 0) {
         let newest = delivery.messageId;
         const notes: string[] = [];
         for (const photo of core.photos) {
@@ -1272,7 +1317,8 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
   // running the turn a second time — so `handoff` is retry-safe in the way `failed` is not.
   // Only a reply the customer has moves the conversation along the script: a withheld or failed
   // reply said nothing of the step, and the next turn has to say it.
-  if (!dryRun && core.scriptStep !== null && (delivery?.state === 'sent' || delivery?.state === 'unrecorded')) {
+  if (!dryRun && !unsourced && core.scriptStep !== null
+    && (delivery?.state === 'sent' || delivery?.state === 'unrecorded')) {
     await storeScriptStep(db, conversation, core.scriptStep, core.script, details);
   }
 
@@ -1301,10 +1347,11 @@ export async function runTurn(db: Db, deps: TurnDeps, input: TurnInput): Promise
 
   return {
     outcome,
-    // What the agent produced for the customer, null when there was none or it was
-    // withheld. A send that failed keeps its text: `detail` says it did not arrive, and
-    // the sandbox has to show the owner what the agent wanted to say.
-    reply: body === '' || unsourced ? null : body,
+    // What the customer was given, or would have been: the agent's reply, or the holding line
+    // in place of a withheld one. Null when there was nothing to say or the holding line was
+    // already on the thread. A send that failed keeps its text: `detail` says it did not
+    // arrive, and the sandbox has to show the owner what the agent wanted to say.
+    reply: body === '' || heldAgain ? null : body,
     usedItemIds,
     photoIds,
     stageId: movedTo,
@@ -1406,6 +1453,86 @@ async function handOff(
     },
   );
   return result.allowed && result.value;
+}
+
+/** Everything `holdAndHandOff` needs from the turn that calls it. */
+interface HoldingTurn {
+  db: Db;
+  deps: TurnDeps;
+  input: TurnInput;
+  agent: typeof agents.$inferSelect;
+  conversation: typeof conversations.$inferSelect;
+  contact: typeof contacts.$inferSelect;
+  number: typeof whatsappNumbers.$inferSelect | null;
+  before: Snapshot;
+  /** The rows the turn read, oldest first. */
+  history: PromptMessage[];
+}
+
+/**
+ * A turn that has no reply it may send: the thread goes to a person, and the customer is told
+ * so in one line of their own language instead of being left to silence.
+ *
+ * The handoff comes first and gates everything after it, exactly as a model-requested handoff
+ * does: a turn that does not own the switch — an operator took the thread — says nothing. The
+ * line then goes out under `handoffReplyAllowed`, the same check a handoff reply passes, so an
+ * operator who writes in the meantime, a closed window or a switched-off agent still silence it.
+ *
+ * Recorded as `handoff`, which is retry-safe for the reason it always was: the conversation's
+ * switch is off, so a redelivered event does not run the turn again.
+ */
+async function holdAndHandOff(
+  turn: HoldingTurn,
+  reason: string,
+  options: { usage: AiCoreUsage; sanitize: (text: string) => string },
+): Promise<TurnResult> {
+  const { db, deps, input, agent, conversation, contact, number, before, history } = turn;
+  const dryRun = input.dryRun === true;
+  const ownsHandoff = await handOff(db, { conversation, reason, dryRun, crmOrigin: input.crmOrigin });
+  if (!ownsHandoff) return empty('skipped', 'Оператор взял диалог на себя.');
+
+  const body = holdingReply(agent.replyLanguage, history);
+  const repeated = alreadyHolding(history);
+  const details: string[] = [];
+  let delivery: Delivery | null = null;
+
+  if (repeated) {
+    details.push(HOLDING_REPEATED);
+  } else {
+    const ready = await readySend(db, deps, input.agentId, input.conversationId, number);
+    if (!ready.ok) {
+      details.push(ready.detail);
+    } else if (dryRun) {
+      delivery = { state: 'sent', messageId: null };
+    } else {
+      delivery = await withAgentAutomationLock(db, agent.id, async (tx) => {
+        const effectDb = tx as unknown as Db;
+        if (input.crmOrigin && !await crmOriginAllowed(effectDb, input, 'crm')) return null;
+        if (!await handoffReplyAllowed(effectDb, input, ownsHandoff, before.lastMessageId)) return null;
+        return deliver(tx, deps, {
+          conversation, channel: ready.delivery.channel, address: ready.delivery.address,
+          transport: ready.transport, body,
+        });
+      });
+      if (delivery === null) details.push('Сообщение клиенту не отправлено: автоматизация для диалога выключилась.');
+      else if (delivery.state !== 'sent') details.push(delivery.detail);
+    }
+  }
+
+  const detail = options.sanitize([reason, ...details].join('. '));
+  if (!dryRun) {
+    await db.insert(aiReplies).values({
+      agentId: agent.id, conversationId: conversation.id, model: agent.model,
+      configVersion: agent.configVersion, ...options.usage,
+      messageId: delivery?.state === 'sent' ? delivery.messageId : null,
+      outcome: 'handoff',
+      detail,
+    });
+    // Nothing the model said is worth passing on, so there is no summary and no urgency.
+    await notifyOperator(db, deps, { agent, conversation, contact, reason,
+      urgent: false, summary: '', sanitize: options.sanitize });
+  }
+  return { ...empty('handoff', detail, reason), reply: repeated ? null : body };
 }
 
 type Ready = { ok: true; transport: MessageTransport; delivery: ConversationDelivery } | { ok: false; detail: string };

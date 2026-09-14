@@ -327,7 +327,8 @@ describe('replaying a case', () => {
 
     expect(result.handoff).toBe(true);
     expect(result.handoffReason).toContain('90');
-    expect(result.reply).toBeNull();
+    // The withheld reply is replaced by the holding line a real customer would have received.
+    expect(result.reply).toBe('Секунду, уточню у коллеги и сразу вернусь с ответом.');
   });
 
   it('stops the case at a handoff and never asks the model about the next message', async () => {

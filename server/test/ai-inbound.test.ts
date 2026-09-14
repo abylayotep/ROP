@@ -490,7 +490,7 @@ describe('answering an inbound message', () => {
     expect(sends()).toHaveLength(1);
   });
 
-  it('leaves the event processed and the message stored when the model refuses', async () => {
+  it('leaves the event processed and hands off with a holding line when the model refuses', async () => {
     model = fakeModel(new ModelError('OpenRouter не принял ключ.', 401, 'invalid api key'));
     await store(asks());
 
@@ -498,11 +498,12 @@ describe('answering an inbound message', () => {
 
     const [event] = await db.select().from(whatsappEvents);
     expect(event!.processedAt).not.toBeNull();
-    expect(await db.select().from(messages)).toHaveLength(1);
-    expect(sends()).toHaveLength(0);
+    // The customer is not left to silence: one holding line, and a person owns the thread.
+    expect(await db.select().from(messages)).toHaveLength(2);
+    expect(sends().map((call) => call.args[3])).toEqual(['Секунду, уточню у коллеги и сразу вернусь с ответом.']);
 
     const [logged] = await db.select().from(aiReplies);
-    expect(logged).toMatchObject({ outcome: 'failed' });
+    expect(logged).toMatchObject({ outcome: 'handoff' });
     expect(logged!.detail).toContain('OpenRouter не принял ключ.');
   });
 

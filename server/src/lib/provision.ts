@@ -21,7 +21,7 @@ interface Person {
   password: string;
 }
 
-const MIN_PASSWORD = 12;
+const MIN_PASSWORD = 8;
 
 /** Everything about a person except the password, which not every path needs. */
 function normaliseIdentity(person: Omit<Person, 'password'>) {

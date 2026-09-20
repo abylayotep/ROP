@@ -15,7 +15,7 @@ const FIELDS = [
   'Email',
   'Name',
   'Initials',
-  'Password (min 12 chars)',
+  'Password (min 8 chars)',
   'Role (owner|member)',
 ] as const;
 

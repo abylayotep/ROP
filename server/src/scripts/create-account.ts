@@ -14,7 +14,7 @@ import { createAccountWithOwner, ProvisionError } from '../lib/provision.js';
  * `ps` to every user on the machine.
  */
 
-const FIELDS = ['Company', 'Email', 'Name', 'Initials', 'Password (min 12 chars)'] as const;
+const FIELDS = ['Company', 'Email', 'Name', 'Initials', 'Password (min 8 chars)'] as const;
 
 async function readAnswers(): Promise<string[]> {
   if (process.stdin.isTTY) {

@@ -33,9 +33,9 @@ describe('provisioning', () => {
     expect(membership).toMatchObject({ accountId, userId, role: 'owner' });
   });
 
-  it('refuses a password shorter than twelve characters', async () => {
+  it('refuses a password shorter than eight characters', async () => {
     await expect(createAccountWithOwner(db, { ...owner, password: 'short' })).rejects.toThrow(
-      'Пароль должен быть не короче 12 символов',
+      'Пароль должен быть не короче 8 символов',
     );
   });
 

@@ -33,6 +33,12 @@ describe('loadEnv', () => {
     expect(() => loadEnv({ ...valid, META_ES_CONFIG_ID: '' } as NodeJS.ProcessEnv)).toThrow(/META_ES_CONFIG_ID/);
   });
 
+  it('turns QR pairing on by default and off only for an explicit false', () => {
+    expect(loadEnv(valid).WHATSAPP_QR_ENABLED).toBe(true);
+    expect(loadEnv({ ...valid, WHATSAPP_QR_ENABLED: 'false' } as NodeJS.ProcessEnv).WHATSAPP_QR_ENABLED).toBe(false);
+    expect(() => loadEnv({ ...valid, WHATSAPP_QR_ENABLED: 'no' } as NodeJS.ProcessEnv)).toThrow(/WHATSAPP_QR_ENABLED/);
+  });
+
   it('refuses a credentials key that is not 32 bytes', () => {
     expect(() =>
       loadEnv({

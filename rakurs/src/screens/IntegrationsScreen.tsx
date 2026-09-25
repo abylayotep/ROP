@@ -9,7 +9,6 @@ import { Async, EmptyState, RowsSkeleton, Skeleton } from '@/components/ui/state
 import { useToast } from '@/components/ui/Toast';
 import { useApi } from '@/hooks/useApi';
 import { InstagramLoginError, runCoexistenceSignup, runInstagramMessagingLogin } from '@/lib/embedded-signup';
-import { whatsappQrPairingEnabled } from '@/lib/features';
 import { numbersToRenew, tokenDeadline } from '@/lib/whatsapp-token';
 import { useAgent } from '@/store/agent';
 import type {
@@ -56,6 +55,7 @@ interface Loaded {
   instagramAccounts: InstagramDirectAccount[];
   instagramSetup: InstagramSetup | null;
   setup: WebhookSetup | null;
+  qrPairing: boolean;
 }
 
 export function IntegrationsScreen() {
@@ -64,20 +64,21 @@ export function IntegrationsScreen() {
 
   const query = useApi<Loaded>(
     async (signal) => {
-      const [numbers, instagramAccounts, setup, instagramSetup] = await Promise.all([
+      const [numbers, instagramAccounts, setup, instagramSetup, qrPairing] = await Promise.all([
         api.listWhatsappNumbers(agent.id, signal),
         api.listInstagramAccounts(agent.id, signal),
         owner ? api.getWebhookSetup(agent.id, signal) : Promise.resolve(null),
         owner ? api.getInstagramSetup(agent.id, signal) : Promise.resolve(null),
+        owner ? api.getQrPairingAvailability(agent.id, signal) : Promise.resolve(null),
       ]);
-      return { numbers, instagramAccounts, setup, instagramSetup };
+      return { numbers, instagramAccounts, setup, instagramSetup, qrPairing: qrPairing?.enabled ?? false };
     },
     [agent.id, owner],
   );
 
   return (
     <Async state={query} skeleton={<Skeleton height={200} />}>
-      {({ numbers, instagramAccounts, setup, instagramSetup }) => (
+      {({ numbers, instagramAccounts, setup, instagramSetup, qrPairing }) => (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <KaspiIntegration agentId={agent.id} canManage={owner} />
           <InstagramDirectCard
@@ -104,12 +105,12 @@ export function IntegrationsScreen() {
           {/* Способы подключения показываются, только пока подключать нечего: кабинет
               работает с одним номером, и три карточки над уже подключённым номером
               предлагают то, что всё равно не выйдет сделать. */}
-          {/* New QR pairing is behind a build flag; already paired numbers above keep
-              their reconnect card either way. */}
+          {/* New QR pairing is behind the server's WHATSAPP_QR_ENABLED switch; already
+              paired numbers above keep their reconnect card either way. */}
           {owner && numbers.length === 0 && (
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 16 }}>
               <PhoneNumberCard agentId={agent.id} onConnected={query.reload} />
-              {whatsappQrPairingEnabled() && <LinkedPhoneCard agentId={agent.id} onConnected={query.reload} />}
+              {qrPairing && <LinkedPhoneCard agentId={agent.id} onConnected={query.reload} />}
               <ConnectForm agentId={agent.id} onConnected={query.reload} />
             </div>
           )}
@@ -874,8 +875,9 @@ function LinkedPhoneCard({ agentId, onConnected, reconnectNumberId, phone }: {
         )}
 
         <div style={{ ...hint, color: 'var(--danger)' }}>
-          Неофициальное подключение: WhatsApp может заблокировать номер. Групповые чаты и
-          звонки в кабинет не попадают, реклама без атрибуции.
+          Неофициальное подключение: WhatsApp может заблокировать номер, особенно после
+          одинаковых сообщений многим клиентам подряд. Групповые чаты и звонки в кабинет
+          не попадают, реклама без атрибуции.
         </div>
       </div>
     </Card>

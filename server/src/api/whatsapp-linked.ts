@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { WhatsappNumber } from '@rakurs/contract';
+import type { QrPairingAvailability, WhatsappNumber } from '@rakurs/contract';
 import { and, eq, like, notLike } from 'drizzle-orm';
 import type { FastifyInstance, FastifyReply, preHandlerHookHandler } from 'fastify';
 import type { Db } from '../db/client.js';
@@ -114,11 +114,19 @@ export function registerWhatsappLinkedRoutes(
     return row;
   };
 
+  app.get(
+    '/api/agents/:agentId/whatsapp/qr-pairing',
+    { preHandler: [guard, ownerOnly] },
+    async (): Promise<QrPairingAvailability> => ({ enabled: env.WHATSAPP_QR_ENABLED }),
+  );
+
   app.post(
     '/api/agents/:agentId/whatsapp/linked',
     { preHandler: [guard, ownerOnly] },
     async (req): Promise<WhatsappNumber> => {
       const agentId = req.agent!.id;
+      // Hiding the card is not enough: the switch exists for when nobody may start one.
+      if (!env.WHATSAPP_QR_ENABLED) throw new ApiError(403, 'Подключение по QR сейчас недоступно.');
 
       const [inFlight] = await db
         .select({ id: whatsappNumbers.id })

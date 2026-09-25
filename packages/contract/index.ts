@@ -119,6 +119,11 @@ export interface WebhookSetup {
   verifyToken: string;
 }
 
+/** Whether the cabinet may pair a NEW phone by QR (the unofficial linked-device path). */
+export interface QrPairingAvailability {
+  enabled: boolean;
+}
+
 /** What the browser needs to start Embedded Signup. Nothing secret. */
 export interface EmbeddedSignupSetup {
   appId: string;

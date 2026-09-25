@@ -38,6 +38,7 @@ services:
       MEDIA_DIR: /var/lib/rakurs/media
       PUBLIC_URL: ${PUBLIC_URL}
       KASPI_POS_URL: ${KASPI_POS_URL:-}
+      WHATSAPP_QR_ENABLED: ${WHATSAPP_QR_ENABLED:-true}
     # Bound to loopback: only nginx on this host can reach it, whatever the
     # firewall happens to say.
     ports: ['127.0.0.1:3000:3000']

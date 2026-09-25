@@ -17,7 +17,8 @@ Before submitting:
 
 - Every permission needs a successful API call from this app within 30 days. Connect a real
   WhatsApp number (Embedded Signup) and a real Instagram account on production first.
-- The production build hides QR pairing (`VITE_WHATSAPP_QR_ENABLED` unset).
+- QR pairing is on for every account by default. Set `WHATSAPP_QR_ENABLED=false` in
+  `deploy/.env` and restart `api` while the review is open, so the reviewer sees Cloud API only.
 - App settings point to `/privacy?lang=en`, `/terms?lang=en`, `/data-deletion?lang=en`.
 
 ## Data handling answers

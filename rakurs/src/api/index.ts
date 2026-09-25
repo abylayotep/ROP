@@ -20,6 +20,7 @@ import type {
   Customer,
   EmbeddedSignupSetup,
   InstagramSetup,
+  QrPairingAvailability,
   InstagramAccountChoice,
   InstagramDirectAccount,
   InstagramDirectConnectResult,
@@ -265,6 +266,9 @@ export const getWebhookSetup = (agentId: string, signal?: AbortSignal) =>
 
 export const getEmbeddedSignupSetup = (agentId: string, signal?: AbortSignal) =>
   request<EmbeddedSignupSetup>(`/agents/${agentId}/whatsapp/embedded-signup`, { signal });
+
+export const getQrPairingAvailability = (agentId: string, signal?: AbortSignal) =>
+  request<QrPairingAvailability>(`/agents/${agentId}/whatsapp/qr-pairing`, { signal });
 
 export const startLinkedPairing = (agentId: string) =>
   request<WhatsappNumber>(`/agents/${agentId}/whatsapp/linked`, { method: 'POST', body: {} });

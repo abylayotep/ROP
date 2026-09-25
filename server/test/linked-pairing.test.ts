@@ -550,3 +550,42 @@ describe('sending a file', () => {
     })]);
   });
 });
+
+describe('the QR pairing switch', () => {
+  const availability = () =>
+    app.inject({ method: 'GET', url: `/api/agents/${agentId}/whatsapp/qr-pairing`, cookies: jar });
+
+  async function switchedOff() {
+    await app.close();
+    app = buildServer(testEnv({ MEDIA_DIR: 'var/media-test', WHATSAPP_QR_ENABLED: 'false' }), db,
+      { linked, pairingTimeoutMs: 600 });
+    await app.ready();
+    jar = await login();
+  }
+
+  it('is on for every account unless the server turns it off', async () => {
+    expect((await availability()).json()).toEqual({ enabled: true });
+    await switchedOff();
+    expect((await availability()).json()).toEqual({ enabled: false });
+  });
+
+  it('refuses a new pairing when off, without creating a row or a socket', async () => {
+    await switchedOff();
+
+    const res = await pair();
+
+    expect(res.statusCode).toBe(403);
+    expect(await numbers()).toEqual([]);
+    expect(linked.calls.some((c) => c.method === 'connect')).toBe(false);
+  });
+
+  it('still lets an already paired phone reconnect when off', async () => {
+    const number = await existingPhone();
+    await switchedOff();
+
+    const res = await app.inject({ method: 'POST',
+      url: `/api/agents/${agentId}/whatsapp/linked/${number.id}/reconnect`, cookies: jar });
+
+    expect(res.statusCode).toBe(200);
+  });
+});

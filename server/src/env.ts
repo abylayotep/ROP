@@ -40,6 +40,12 @@ const schema = z.object({
    * localhost, which looks like a working setup while nothing is ever delivered.
    */
   PUBLIC_URL: z.string().url(),
+  /**
+   * Whether owners may pair a NEW phone by QR (Baileys). On for every account unless set to
+   * `false` — e.g. while Meta App Review looks at the cabinet. Numbers already paired keep
+   * their reconnect controls either way.
+   */
+  WHATSAPP_QR_ENABLED: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
 });
 
 export type Env = z.infer<typeof schema>;

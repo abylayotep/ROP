@@ -2,10 +2,13 @@ import makeWASocket, {
   Browsers,
   DisconnectReason,
   downloadMediaMessage,
+  makeCacheableSignalKeyStore,
   proto,
   type WASocket,
 } from '@whiskeysockets/baileys';
+import { and, eq } from 'drizzle-orm';
 import type { Db } from '../../../db/client.js';
+import { messages } from '../../../db/schema.js';
 import { linkedAuthState } from './auth-state.js';
 import type {
   LinkedEvent,
@@ -28,7 +31,10 @@ import type {
 /**
  * Baileys logs every frame it sends and receives at debug level through a pino instance it
  * creates for itself. In production that is a stream of customers' message text into the
- * server log. This is the interface it needs, doing nothing.
+ * server log. This is the interface it needs: silent, except that a warning or an error —
+ * a message that failed to decrypt, a retry it could not serve — is written as its one-line
+ * description only. The structured object that comes with it can hold message content and
+ * is dropped; without these lines a customer's «Waiting for this message» is invisible.
  */
 interface SilentLogger {
   level: string;
@@ -41,19 +47,53 @@ interface SilentLogger {
   fatal(...args: unknown[]): void;
 }
 
-const silent = (): SilentLogger => {
+const describeLog = (args: unknown[]): string => {
+  const [first, second] = args;
+  const text = typeof first === 'string' ? first : typeof second === 'string' ? second : '';
+  const err = (first as { err?: { message?: unknown } } | undefined)?.err?.message;
+  return [text, typeof err === 'string' ? err : ''].filter(Boolean).join(': ');
+};
+
+const quiet = (): SilentLogger => {
   const nothing = (): void => undefined;
+  const report = (level: 'warn' | 'error') => (...args: unknown[]): void => {
+    const line = describeLog(args);
+    if (line) console[level](`[baileys] ${line}`);
+  };
   const logger: SilentLogger = {
-    level: 'silent',
+    level: 'warn',
     child: () => logger,
     trace: nothing,
     debug: nothing,
     info: nothing,
-    warn: nothing,
-    error: nothing,
-    fatal: nothing,
+    warn: report('warn'),
+    error: report('error'),
+    fatal: report('error'),
   };
   return logger;
+};
+
+/**
+ * Recently sent messages, by id.
+ *
+ * When a customer's phone cannot decrypt a message it asks for it again, and Baileys must be
+ * handed the original to re-encrypt. Anything we cannot produce stays «Waiting for this
+ * message» on their phone for good.
+ */
+const SENT_MEMORY = 500;
+
+/** The retry-counter store Baileys expects: a Map with the cache interface's names. */
+const retryCounters = () => {
+  const map = new Map<string, number>();
+  return {
+    get: <T>(key: string) => map.get(key) as T | undefined,
+    set: <T>(key: string, value: T) => {
+      if (map.size >= 2000) map.delete(map.keys().next().value as string);
+      map.set(key, value as unknown as number);
+    },
+    del: (key: string) => { map.delete(key); },
+    flushAll: () => map.clear(),
+  };
 };
 
 // Native DARWIN/WIN32 subplatforms are rejected with 428 before authentication.
@@ -93,12 +133,35 @@ export function createLinkedSocket(db: Db, key: Buffer, archive?: {
 }): LinkedSessionFactory {
   return async (numberId: string, emit: (event: LinkedEvent) => void): Promise<LinkedSession> => {
     const auth = await linkedAuthState(db, key, numberId);
-    const logger = silent();
+    const logger = quiet();
+    const sent = new Map<string, proto.IMessage>();
+    const remember = (result: { key?: { id?: string | null }; message?: proto.IMessage | null } | undefined): void => {
+      const id = result?.key?.id;
+      if (!id || !result?.message) return;
+      if (sent.size >= SENT_MEMORY) sent.delete(sent.keys().next().value as string);
+      sent.set(id, result.message);
+    };
     let identityVerified = !auth.expectedPhone;
     let identityRejected = false;
 
     const sock: WASocket = makeWASocket({
-      auth: auth.state as never,
+      auth: { creds: auth.state.creds, keys: makeCacheableSignalKeyStore(auth.state.keys as never, logger as never) } as never,
+      msgRetryCounterCache: retryCounters() as never,
+      // Re-encrypts a message the customer's phone could not read. Text survives a restart
+      // because the row holds it; media only lives in memory, and is gone after one.
+      getMessage: async (key: { id?: string | null }) => {
+        if (!key.id) return undefined;
+        const kept = sent.get(key.id);
+        if (kept) return kept;
+        try {
+          const [row] = await db.select({ body: messages.body, kind: messages.kind })
+            .from(messages)
+            .where(and(eq(messages.waMessageId, key.id), eq(messages.direction, 'out')));
+          return row?.kind === 'text' && row.body ? { conversation: row.body } : undefined;
+        } catch {
+          return undefined;
+        }
+      },
       logger: logger as never,
       browser: BROWSER,
       // The QR belongs on the owner's screen, not in the server's stdout.
@@ -188,11 +251,15 @@ export function createLinkedSocket(db: Db, key: Buffer, archive?: {
 
     return {
       async sendText(toJid, body) {
-        return { messageId: idOf(await sock.sendMessage(toJid, { text: body })) };
+        const result = await sock.sendMessage(toJid, { text: body });
+        remember(result);
+        return { messageId: idOf(result) };
       },
 
       async sendMedia(toJid, file) {
-        return { messageId: idOf(await sock.sendMessage(toJid, mediaContent(file) as never)) };
+        const result = await sock.sendMessage(toJid, mediaContent(file) as never);
+        remember(result);
+        return { messageId: idOf(result) };
       },
 
       async downloadMedia(message) {

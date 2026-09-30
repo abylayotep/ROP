@@ -113,4 +113,12 @@ describe('linked WhatsApp desktop profile', () => {
     callback({ type: 'notify', messages: [message] });
     expect(events).toEqual([{ type: 'message', numberId: 'number', message }]);
   });
+
+  it('can re-serve a message the customer phone failed to decrypt', async () => {
+    await createLinkedSocket({} as Db, Buffer.alloc(32))('number', () => undefined);
+    const options = mocked.makeWASocket.mock.calls[0]![0];
+    expect(options.msgRetryCounterCache).toBeDefined();
+    const getMessage = options.getMessage as (key: { id?: string }) => Promise<unknown>;
+    expect(await getMessage({})).toBeUndefined();
+  });
 });
